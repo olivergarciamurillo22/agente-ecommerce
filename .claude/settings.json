@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node:*)",
+      "Bash(npm --version)",
+      "Bash(npm install)",
+      "Bash(npm rebuild better-sqlite3)",
+      "Bash(npm run:*)",
+      "Bash(npx tsx:*)",
+      "Bash(curl:*)",
+      "Bash(df:*)",
+      "Bash(git --version)",
+      "Bash(git status:*)",
+      "Bash(git init:*)",
+      "Bash(git config:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(gh auth status)",
+      "Bash(gh repo view:*)",
+      "Edit(.env.local)",
+      "Edit(prompts/**)",
+      "Edit(errores-sesion.md)"
+    ]
+  }
+}

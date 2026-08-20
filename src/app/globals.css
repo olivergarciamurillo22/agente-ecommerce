@@ -1,0 +1,82 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Identidad de marca (personalízala a tu gusto — ver docs/09-personalizar-dashboard.md)
+   Dorado sobre negro cálido, tipografías Fraunces + Archivo.
+   ============================================================ */
+@theme {
+  --color-brand-bg: #0a0a0a;
+  --color-brand-surface: #141310;
+  --color-brand-surface-2: #1c1a15;
+  --color-brand-border: #2a2a26;
+  --color-brand-text: #f4f1e9;
+  --color-brand-muted: #8f8b81;
+  --color-brand-gold: #fac51c;
+  --color-brand-gold-soft: #e0ac16;
+  --color-wa-green: #25d366;
+
+  --font-display: var(--font-fraunces), Georgia, serif;
+  --font-sans: var(--font-archivo), -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background:
+    radial-gradient(1200px 600px at 15% -10%, rgba(250, 197, 28, 0.06), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(250, 197, 28, 0.04), transparent 55%),
+    #0a0a0a;
+  background-attachment: fixed;
+}
+
+.font-display { font-family: var(--font-display); }
+
+/* Textura sutil de grano para el fondo de marca */
+.brand-grain::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* Scrollbar dorada discreta */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(250, 197, 28, 0.14); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(250, 197, 28, 0.28); }
+
+/* Latido del punto de estado */
+@keyframes brand-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+.brand-pulse { animation: brand-pulse 2s ease-in-out infinite; }
+
+/* Mecer de las palmeras (naturaleza viva). Balanceo suave desde su base
+   con la propiedad `rotate`, independiente del `transform` que las orienta. */
+.brand-sway { animation: sway-a 8s ease-in-out infinite; }
+.brand-sway-slow { animation: sway-b 11s ease-in-out infinite; }
+.brand-sway-alt { animation: sway-c 9.5s ease-in-out infinite; }
+/* Cada una oscila un poco distinto para que no vayan sincronizadas. El rotate
+   base lo pone el inline style; aquí solo añadimos el balanceo relativo. */
+@keyframes sway-a { 0%,100% { rotate: -2.5deg; } 50% { rotate: 2.5deg; } }
+@keyframes sway-b { 0%,100% { rotate: 2deg; } 50% { rotate: -2deg; } }
+@keyframes sway-c { 0%,100% { rotate: -3deg; } 50% { rotate: 1.5deg; } }
+
+/* Brasas doradas que ascienden con leve deriva y se desvanecen. */
+@keyframes brand-ember {
+  0% { transform: translateY(0) translateX(0); opacity: 0; }
+  10% { opacity: 0.9; }
+  85% { opacity: 0.7; }
+  100% { transform: translateY(-102vh) translateX(var(--drift, 0px)); opacity: 0; }
+}
+.brand-ember { bottom: -10px; animation-name: brand-ember; animation-timing-function: linear; animation-iteration-count: infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .brand-sway, .brand-sway-slow, .brand-sway-alt, .brand-ember, .brand-pulse { animation: none; }
+}
