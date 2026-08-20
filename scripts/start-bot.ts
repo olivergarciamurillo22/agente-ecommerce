@@ -26,6 +26,17 @@ process.on("uncaughtException", (err) => {
 });
 
 async function main(): Promise<void> {
+  // En producción (NAS/servidor) el panel muestra datos de clientes reales:
+  // arrancar sin contraseña sería exponerlos. Fallamos rápido y con un
+  // mensaje claro en vez de levantar algo inseguro.
+  if (process.env.NODE_ENV === "production" && !process.env.DASHBOARD_PASSWORD?.trim()) {
+    logger.error(
+      "[SEGURIDAD] DASHBOARD_PASSWORD está vacío y NODE_ENV=production. " +
+        "El panel quedaría accesible sin contraseña. Rellena DASHBOARD_PASSWORD en el .env y vuelve a arrancar."
+    );
+    process.exit(1);
+  }
+
   // Estado de seguridad SIEMPRE visible al arrancar: imposible no saber en
   // qué modo estamos antes de que ocurra nada.
   printSafetyStatus();

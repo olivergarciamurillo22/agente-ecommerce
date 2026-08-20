@@ -45,3 +45,10 @@ desktop.ini
 
 # Archivos temporales de diagnóstico
 *.tmp.ts
+
+# Backups locales de la base de datos (nunca a Git)
+backups/
+nas-data/
+
+# Config de producción del NAS
+.env.nas

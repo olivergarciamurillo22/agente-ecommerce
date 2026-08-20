@@ -11,6 +11,8 @@ import { NextResponse, type NextRequest } from "next/server";
 // Sin DASHBOARD_PASSWORD (uso local normal) no se interpone nada.
 // ============================================================
 
+// Públicos siempre: Shopify debe poder entregar webhooks (su firma HMAC ya
+// los autentica) y los healthchecks deben responder sin credenciales.
 const PUBLIC_PREFIXES = ["/api/webhooks/", "/api/health"];
 
 /** Comparación en tiempo constante (sin node:crypto: esto corre en Edge). */
