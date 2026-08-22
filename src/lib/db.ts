@@ -1541,6 +1541,15 @@ export function setOrderSupplierPlatformAndExternalId(
   return info.changes > 0;
 }
 
+/** Busca un pedido por su número de seguimiento (vía de último recurso). */
+export function getOrderByTrackingNumber(trackingNumber: string): OrderRow | null {
+  return (
+    (ctx()
+      .db.prepare("SELECT * FROM orders WHERE tracking_number = ?")
+      .get(trackingNumber) as OrderRow | undefined) ?? null
+  );
+}
+
 /** Busca un pedido por su id en el proveedor (para procesar sus webhooks). */
 export function getOrderBySupplierExternalId(externalId: string): OrderRow | null {
   return (

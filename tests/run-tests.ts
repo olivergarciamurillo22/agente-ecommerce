@@ -1833,7 +1833,7 @@ async function main(): Promise<void> {
   const tracking = await import("../src/lib/tracking/service");
   const { normalizeSupplierStatus } = await import("../src/lib/tracking/normalizer");
   const { isTerminalTracking } = await import("../src/lib/tracking/types");
-  const supplierWebhook = await import("../src/lib/suppliers/webhook");
+  const supplierWebhook = await import("../src/lib/suppliers/dropea/webhook");
   const { runTrackingPollTick } = await import("../src/lib/tracking/scheduler");
 
   /** Pedido confirmado Y ya sincronizado con un proveedor ficticio. */
@@ -1846,7 +1846,7 @@ async function main(): Promise<void> {
         `UPDATE orders SET supplier_platform='dropea', supplier_sync_status='synced',
          supplier_external_order_id=?, phone=? WHERE id=?`
       )
-      .run(`EXT-${shopifyId}`, phone, o.id);
+      .run(String(shopifyId), phone, o.id);
     raw.close();
     return db.getOrderById(o.id)!;
   };
@@ -1987,78 +1987,142 @@ async function main(): Promise<void> {
 
   console.log("· Tracking — webhooks de proveedor y polling");
 
+  /** Firma como la calcula Dropea: sha256=<base64 de HMAC-SHA256(raw_body)>. */
+  const firmaDropea = (body: string, secret = "secreto-de-prueba") =>
+    "sha256=" + crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
+
+  /** Envoltorio v2 de Dropea con un pedido dentro. */
+  const sobreDropea = (resourceId: number, order: Record<string, unknown>, topic = "order.status.changed") =>
+    JSON.stringify({
+      topic,
+      market: "ES",
+      event_id: `evt-${resourceId}-${topic}`,
+      event_at: "2026-08-22T10:00:00.000Z",
+      resource_id: resourceId,
+      resource: order,
+    });
+
   await test("webhook sin secreto configurado → 503 (fail closed)", async () => {
-    await withEnv({ DROPEA_WEBHOOK_SECRET: undefined, DROPEA_HMAC_SECRET: undefined }, () => {
-      const r = supplierWebhook.processSupplierWebhook("dropea", "{}", {});
+    await withEnv({ DROPEA_WEBHOOK_SECRET: undefined }, () => {
+      const r = supplierWebhook.processDropeaWebhook("{}", {});
       assert.equal(r.status, 503);
     });
   });
 
-  await test("webhook con firma inválida → 401 y sin efectos", async () => {
+  await test("firma inválida → 401 y sin efectos", async () => {
     const o = mkSynced("980006", "1906", "34600111777");
     await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
-      const body = JSON.stringify({ order_id: `EXT-980006`, status: "out_for_delivery" });
-      const r = supplierWebhook.processSupplierWebhook("dropea", body, {
-        "x-signature": "firma-falsa",
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING", sub_status: "OUT_FOR_DELIVERY" });
+      // Firma con otro secreto
+      const r = supplierWebhook.processDropeaWebhook(body, {
+        "x-dropea-signature": firmaDropea(body, "otro-secreto"),
       });
       assert.equal(r.status, 401);
       assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "unknown", "no se tocó");
-      assert.equal(
-        db.getPendingOutbox(999).some((x) => x.phone === "34600111777"),
-        false
-      );
+      assert.equal(db.getPendingOutbox(999).some((x) => x.phone === "34600111777"), false);
     });
   });
 
-  await test("webhook con firma VÁLIDA → procesa, avisa una vez y es idempotente", async () => {
-    const o = db.getOrderByShopifyId("980006")!;
+  await test("firma sin el prefijo sha256= o en hex → 401 (solo su formato)", async () => {
     await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
-      const body = JSON.stringify({
-        order_id: "EXT-980006",
-        status: "out_for_delivery",
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING" });
+      const base64Pelado = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
+      const hex = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": base64Pelado }).status, 401);
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": `sha256=${hex}` }).status, 401);
+    });
+  });
+
+  await test("firma VÁLIDA (X-Dropea-Signature, base64) → procesa y es idempotente", async () => {
+    const o = db.getOrderByShopifyId("980006")!;
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length;
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, {
+        id: 980006,
+        status: "SHIPPING",
+        sub_status: "OUT_FOR_DELIVERY",
         tracking_number: "TRKW1",
+        tracking_url: "https://track.example/TRKW1",
         carrier: "GLS",
       });
-      const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
+      const firma = firmaDropea(body);
 
-      const r1 = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      const antes = contar();
+      const r1 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
       assert.equal(r1.status, 200);
-      const tras1 = db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length;
-      assert.ok(tras1 >= 1, "avisó al cliente");
       assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+      assert.ok(contar() > antes, "avisó al cliente");
+      const tras1 = contar();
 
-      // EXACTAMENTE el mismo webhook otra vez (reintento del proveedor)
-      const r2 = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      // Reintento idéntico de Dropea
+      const r2 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
       assert.equal(r2.status, 200);
+      assert.equal(contar(), tras1, "ni un mensaje duplicado");
+    });
+  });
+
+  await test("topic desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING" }, "order.something.new");
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "topic desconocido");
+    });
+  });
+
+  await test("envoltorio inválido → 400", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({ topic: "order.created" }); // sin resource_id
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 400);
+      const roto = "{no-json";
       assert.equal(
-        db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length,
-        tras1,
-        "ni un mensaje duplicado"
+        supplierWebhook.processDropeaWebhook(roto, { "x-dropea-signature": firmaDropea(roto) }).status,
+        400
       );
     });
   });
 
-  await test("webhook acepta firma en base64 y con prefijo sha256=", async () => {
-    const o = mkSynced("980007", "1907", "34600111888");
-    await withEnv(
-      { DROPEA_WEBHOOK_SECRET: "secreto-de-prueba", DROPEA_WEBHOOK_SIGNATURE_ENCODING: "base64" },
-      () => {
-        const body = JSON.stringify({ order_id: "EXT-980007", status: "in_transit" });
-        const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
-        const r = supplierWebhook.processSupplierWebhook("dropea", body, {
-          "x-signature": `sha256=${firma}`,
-        });
-        assert.equal(r.status, 200);
-        assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "in_transit");
-      }
-    );
+  await test("incidencia (issue.*) → revisión manual, SIN mensaje al cliente", async () => {
+    const o = mkSynced("980010", "1910", "34600111999");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111999").length;
+    const antes = contar();
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(
+        5,
+        { id: 5, order_id: 980010, status: "PENDING", is_active: true, tracking_number: "X" },
+        "issue.created"
+      );
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.requiereAccion, true);
+      assert.equal(db.getOrderById(o.id)!.supplier_sync_status, "manual_review");
+      assert.equal(contar(), antes, "las incidencias no escriben al cliente");
+    });
+  });
+
+  await test("emparejado por external_order_id (nuestra referencia)", async () => {
+    const o = mkConfirmed("980011", "1911");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(444555, {
+        id: 444555,
+        status: "PROCESSING",
+        sub_status: "PICKING",
+        external_order_id: "980011",
+      });
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, "1911");
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.supplier_external_order_id, "444555", "adopta el id de Dropea");
+      assert.equal(fresco.supplier_status_normalized, "processing");
+    });
   });
 
   await test("webhook de un pedido desconocido → 200 sin efectos", async () => {
     await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
-      const body = JSON.stringify({ order_id: "NO-EXISTE", status: "delivered" });
-      const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
-      const r = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      const body = sobreDropea(99887766, { id: 99887766, status: "FINISH", sub_status: "DELIVERED" });
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
       assert.equal(r.status, 200);
       assert.equal(r.body.ignored, "pedido desconocido");
     });
@@ -2411,7 +2475,326 @@ async function main(): Promise<void> {
     );
   });
 
-  // ============ 23 · Reinicio del proceso (persistencia) ============
+  // ============ 23 · DROPEA: contrato oficial ============
+  console.log("· Dropea — contrato oficial (URL, auth, mapper, estados)");
+
+  const dropeaClient = await import("../src/lib/suppliers/dropea/client");
+  const dropeaMod = await import("../src/lib/suppliers/dropea");
+  const { normalizeDropeaStatus, DROPEA_SUB_STATUSES, DROPEA_STATUSES } = await import(
+    "../src/lib/suppliers/dropea/status-map"
+  );
+  const { mapToDropeaCreateOrder, splitName, toInternationalPhone } = await import(
+    "../src/lib/suppliers/dropea/mapper"
+  );
+
+  await test("URL base: se deriva del mercado (host por país)", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_BASE_URL: undefined, DROPEA_MARKET: "es" }, () => {
+      assert.equal(dropeaClient.dropeaConfig()?.baseUrl, "https://es.public-api.dropea.com");
+    });
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_BASE_URL: undefined, DROPEA_MARKET: "pt" }, () => {
+      assert.equal(dropeaClient.dropeaConfig()?.baseUrl, "https://pt.public-api.dropea.com");
+    });
+    await withEnv({ DROPEA_API_KEY: undefined }, () => {
+      assert.equal(dropeaClient.dropeaConfig(), null, "sin API key no hay configuración");
+    });
+  });
+
+  await test("auth: Authorization Bearer + Idempotency-Key, y la key no se filtra", async () => {
+    const realFetch = global.fetch;
+    let capturado: { url: string; headers: Record<string, string> } | null = null;
+    global.fetch = (async (url: unknown, init?: RequestInit) => {
+      capturado = { url: String(url), headers: (init?.headers ?? {}) as Record<string, string> };
+      return new Response(JSON.stringify({ success: true, data: { id: 1 } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        { DROPEA_API_KEY: "clave-secreta-de-prueba", DROPEA_API_ENABLED: "1", DROPEA_MARKET: "es" },
+        async () => {
+          await dropeaClient.dropeaRequest({
+            path: "/dropshipper/orders",
+            method: "POST",
+            body: { x: 1 },
+            idempotencyKey: "1057",
+          });
+          assert.equal(capturado!.url, "https://es.public-api.dropea.com/dropshipper/orders");
+          assert.equal(capturado!.headers["Authorization"], "Bearer clave-secreta-de-prueba");
+          assert.equal(capturado!.headers["Idempotency-Key"], "1057");
+        }
+      );
+
+      // Un 401 NO debe incluir la credencial en el mensaje de error.
+      global.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            success: false,
+            failure: { type: "UnauthorizedFailure", message: "API key is invalid", httpStatusCode: 401 },
+          }),
+          { status: 401 }
+        )) as typeof fetch;
+      await withEnv({ DROPEA_API_KEY: "clave-secreta-de-prueba", DROPEA_API_ENABLED: "1" }, async () => {
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/me" }),
+          (err: Error) => {
+            assert.doesNotMatch(err.message, /clave-secreta-de-prueba/, "la key no aparece en el error");
+            assert.match(err.message, /inválida o caducada/);
+            return true;
+          }
+        );
+      });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("errores: 429 con Retry-After, 422 con código de negocio, 504 en curso", async () => {
+    const realFetch = global.fetch;
+    try {
+      await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1" }, async () => {
+        global.fetch = (async () =>
+          new Response(JSON.stringify({ success: false, failure: { type: "RateLimitFailure", message: "too many", httpStatusCode: 429 } }), {
+            status: 429,
+            headers: { "retry-after": "60" },
+          })) as typeof fetch;
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/orders" }),
+          (e: InstanceType<typeof dropeaClient.DropeaApiError>) => {
+            assert.equal(e.httpStatus, 429);
+            assert.equal(e.retryAfterSeconds, 60);
+            assert.equal(e.retryable, true);
+            return true;
+          }
+        );
+
+        global.fetch = (async () =>
+          new Response(
+            JSON.stringify({
+              success: false,
+              failure: {
+                type: "BusinessFailure",
+                message: "Order total 5 is below the wholesale cost 8",
+                code: "ORDER_TOTAL_BELOW_COST",
+                httpStatusCode: 422,
+              },
+            }),
+            { status: 422 }
+          )) as typeof fetch;
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/orders", method: "POST", body: {} }),
+          (e: InstanceType<typeof dropeaClient.DropeaApiError>) => {
+            assert.equal(e.businessCode, "ORDER_TOTAL_BELOW_COST");
+            assert.equal(e.retryable, false, "un 422 no se reintenta: duplicaría el pedido");
+            return true;
+          }
+        );
+
+        global.fetch = (async () =>
+          new Response(JSON.stringify({ success: false, data: { operation_id: "op-123", status: "pending" } }), {
+            status: 504,
+          })) as typeof fetch;
+        await assert.rejects(
+          () =>
+            dropeaClient.dropeaRequest({ path: "/dropshipper/orders", method: "POST", body: {}, idempotencyKey: "op-123" }),
+          dropeaClient.DropeaOperationPendingError
+        );
+      });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("estados: los 22 sub_status y los 8 status del spec están cubiertos", () => {
+    // Se aísla el sub_status usando un status padre inexistente: así se ve
+    // qué sub-estados se resuelven por sí solos. Solo PENDING queda fuera
+    // a propósito (significa cosas distintas según su padre).
+    const sinMapear = DROPEA_SUB_STATUSES.filter(
+      (s) => normalizeDropeaStatus("__SIN_PADRE__", s) === "unknown"
+    );
+    assert.deepEqual(sinMapear, ["PENDING"], "solo PENDING depende del status padre");
+    // Y con padre, PENDING sí se resuelve:
+    assert.equal(normalizeDropeaStatus("SHIPPING", "PENDING"), "in_transit");
+    assert.equal(normalizeDropeaStatus("PENDING", "PENDING"), "created");
+
+    // Los pares clave del ciclo de vida:
+    assert.equal(normalizeDropeaStatus("SHIPPING", "OUT_FOR_DELIVERY"), "out_for_delivery");
+    assert.equal(normalizeDropeaStatus("FINISH", "DELIVERED"), "delivered");
+    assert.equal(normalizeDropeaStatus("FINISH", "PAID"), "delivered");
+    assert.equal(normalizeDropeaStatus("FINISH", "CANCELLED"), "cancelled");
+    assert.equal(normalizeDropeaStatus("PROCESSING", "PICKING"), "processing");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "SHIPPED"), "shipped");
+    assert.equal(normalizeDropeaStatus("ERROR", null), "incident");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "DELIVERY_EXCEPTION"), "incident");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "REFUSED"), "returned");
+    // El sub_status manda sobre el status padre:
+    assert.equal(normalizeDropeaStatus("PROCESSING", "OUT_FOR_DELIVERY"), "out_for_delivery");
+    // FINISH sin sub_status NO se asume entregado:
+    assert.equal(normalizeDropeaStatus("FINISH", null), "unknown");
+    // Todos los status de primer nivel dan algo (salvo FINISH, que exige sub):
+    for (const st of DROPEA_STATUSES.filter((s) => s !== "FINISH")) {
+      assert.notEqual(normalizeDropeaStatus(st, null), "unknown", `status ${st}`);
+    }
+    // Basura → unknown
+    assert.equal(normalizeDropeaStatus("INVENTADO", "TAMBIEN"), "unknown");
+  });
+
+  await test("mapper: construye el pedido con los campos reales del contrato", () => {
+    const input = {
+      shopifyOrderId: "1057",
+      orderNumber: "1057",
+      customerName: "María García López",
+      phone: "34600111222",
+      email: "maria@example.com",
+      finalAddress: {
+        line1: "Calle Ejemplo 5B",
+        line2: "3º B",
+        city: "Almería",
+        province: "Almería",
+        postalCode: "04007",
+        country: "España",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "Limpiador Ultrasónico", quantity: 2, price: null, sku: null }],
+      total: "34.98",
+      currency: "EUR",
+      codAmount: "34.98",
+      deliveryNote: "Llamar antes de subir",
+    };
+    const ctx = {
+      storeId: 7,
+      variantByTitle: new Map([["Limpiador Ultrasónico", { variantId: 42, unitPrice: 17.49 }]]),
+    };
+    const r = mapToDropeaCreateOrder(input, ctx);
+    assert.deepEqual(r.errors, []);
+    const req = r.request!;
+    assert.equal(req.store_id, 7);
+    assert.equal(req.payment_method, "COD", "contra reembolso");
+    assert.equal(req.external_order_id, "1057", "nuestra referencia viaja a Dropea");
+    assert.deepEqual(req.line_items, [{ variant_id: 42, quantity: 2, unit_price: 17.49 }]);
+    // El importe COD se DERIVA de las líneas: 2 × 17.49 = 34.98
+    const derivado = req.line_items.reduce((s, l) => s + l.unit_price * l.quantity, 0);
+    assert.equal(derivado.toFixed(2), "34.98");
+    const dir = req.customer_details.shipping_address;
+    assert.equal(dir.first_name, "María");
+    assert.equal(dir.last_name, "García López");
+    assert.equal(dir.city, "Almería");
+    assert.equal(dir.state, "Almería", "state es la PROVINCIA");
+    assert.equal(dir.postal_code, "04007");
+    assert.equal(dir.country, "ES", "país en ISO-2");
+    assert.equal(dir.address_line_2, "3º B");
+    assert.equal(req.customer_details.phone, "+34600111222", "teléfono internacional con +");
+    // La nota del repartidor NO cabe en su API: debe avisarse
+    assert.ok(
+      r.warnings.some((w) => /nota/i.test(w)),
+      "avisa de que la nota no se puede enviar"
+    );
+    assert.equal(JSON.stringify(req).includes("Llamar antes de subir"), false);
+  });
+
+  await test("mapper: bloquea si falta variante, localidad o email", () => {
+    const base = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: "x@example.com",
+      finalAddress: {
+        line1: "Calle 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "Producto A", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: null,
+    };
+    const conVariante = {
+      storeId: 1,
+      variantByTitle: new Map([["Producto A", { variantId: 9, unitPrice: 10 }]]),
+    };
+    // Sin correspondencia de producto:
+    const sinVariante = mapToDropeaCreateOrder(base, { storeId: 1, variantByTitle: new Map() });
+    assert.equal(sinVariante.request, null);
+    assert.match(sinVariante.errors.join(" "), /variant_id/);
+    // Sin email (habitual en Releasit): Dropea lo exige.
+    const sinEmail = mapToDropeaCreateOrder({ ...base, email: null }, conVariante);
+    assert.equal(sinEmail.request, null);
+    assert.match(sinEmail.errors.join(" "), /email/);
+    // La localidad "-" ya viene bloqueada antes, pero si llegara vacía:
+    const sinCiudad = mapToDropeaCreateOrder(
+      { ...base, finalAddress: { ...base.finalAddress, city: "" } },
+      conVariante
+    );
+    assert.equal(sinCiudad.request, null);
+    assert.match(sinCiudad.errors.join(" "), /localidad/);
+  });
+
+  await test("helpers del mapper: nombre y teléfono", () => {
+    assert.deepEqual(splitName("Pedro Sánchez Ejemplo"), { first: "Pedro", last: "Sánchez Ejemplo" });
+    assert.deepEqual(splitName("Trinidad"), { first: "Trinidad", last: "-" });
+    assert.deepEqual(splitName(null), { first: "Cliente", last: "-" });
+    assert.equal(toInternationalPhone("34600111222"), "+34600111222");
+    assert.equal(toInternationalPhone(""), "");
+  });
+
+  await test("lectura y escritura son llaves SEPARADAS", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1", DROPEA_WRITE_ENABLED: "0" }, () => {
+      assert.equal(dropeaClient.dropeaReadEnabled(), true, "se puede consultar");
+      assert.equal(dropeaMod.dropeaWriteEnabled(), false, "pero no escribir");
+      assert.equal(dropeaMod.dropeaProvider.isConfigured(), true);
+    });
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "0", DROPEA_WRITE_ENABLED: "1" }, () => {
+      assert.equal(dropeaClient.dropeaReadEnabled(), false);
+      assert.equal(dropeaMod.dropeaWriteEnabled(), false, "sin lectura tampoco hay escritura");
+    });
+  });
+
+  await test("createOrder y cancelOrder de Dropea siguen bloqueados", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1", DROPEA_WRITE_ENABLED: "1" }, async () => {
+      const realFetch = global.fetch;
+      let llamadas = 0;
+      global.fetch = (async () => {
+        llamadas++;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      try {
+        await assert.rejects(
+          () =>
+            dropeaMod.dropeaProvider.createOrder({
+              shopifyOrderId: "1",
+              orderNumber: "1",
+              customerName: "X",
+              phone: "34600111222",
+              email: "x@example.com",
+              finalAddress: {
+                line1: "C 1",
+                line2: null,
+                city: "Madrid",
+                province: "Madrid",
+                postalCode: "28001",
+                country: "ES",
+              },
+              addressSource: "original",
+              items: [{ title: "P", quantity: 1, price: null, sku: null }],
+              total: "10",
+              currency: "EUR",
+              codAmount: "10",
+              deliveryNote: null,
+            }),
+          ProviderNotConfiguredError
+        );
+        await assert.rejects(() => dropeaMod.dropeaProvider.cancelOrder("1"), ProviderNotConfiguredError);
+        assert.equal(llamadas, 0, "ni una petición: no se intenta crear nada");
+      } finally {
+        global.fetch = realFetch;
+      }
+    });
+  });
+
+  // ============ 24 · Reinicio del proceso (persistencia) ============
   await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
     const Database = (await import("better-sqlite3")).default;
     const raw = new Database(path.join(tmpDir, "messages.db"));

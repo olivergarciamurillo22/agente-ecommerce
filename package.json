@@ -25,7 +25,8 @@
     "test:airtable": "tsx scripts/test-airtable.mts",
     "typecheck": "tsc --noEmit",
     "clean": "rimraf .next data auth",
-    "dropi:webhook:simulate": "tsx scripts/dropi-webhook-simulate.ts"
+    "dropi:webhook:simulate": "tsx scripts/dropi-webhook-simulate.ts",
+    "dropea:doctor": "tsx scripts/dropea-doctor.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
