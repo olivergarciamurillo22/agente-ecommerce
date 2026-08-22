@@ -82,6 +82,9 @@ WhatsApp, configurar Shopify y el rollout por etapas (A → D).
 🐳 **[docs/UGREEN-DXP2800-DEPLOY.md](docs/UGREEN-DXP2800-DEPLOY.md)** —
 despliegue 24/7 en un NAS con Docker, persistencia, backups y HTTPS.
 
+🤝 **[docs/COLLABORATION.md](docs/COLLABORATION.md)** — flujo de ramas, tests
+antes de subir y zonas críticas del código.
+
 ## Comandos
 
 ```bash

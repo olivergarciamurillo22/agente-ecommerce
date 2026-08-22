@@ -58,12 +58,28 @@ Conéctate por SSH al NAS (usuario admin de UGOS):
 ```bash
 ssh TU_USUARIO@IP_DEL_NAS
 cd /volume1/docker/CasamableAgent        # ← tu ruta real
-git clone https://github.com/olivergarciamurillo22/agente-ecommerce.git repo
-cd repo
 ```
 
-Si el NAS no tiene `git`, descarga el ZIP del repositorio desde GitHub y
-descomprímelo en `CasamableAgent/repo` con File Station.
+**UGOS Pro no trae `git`.** En vez de instalar nada en el host, se clona con
+un contenedor desechable (probado en el despliegue real):
+
+```bash
+docker run --rm -v /volume1/docker/CasamableAgent:/repo \
+  alpine/git clone https://github.com/olivergarciamurillo22/agente-ecommerce.git /repo/repo
+```
+
+> ⚠️ **Permisos: este paso falla si te lo saltas.** El clonado deja los
+> ficheros como `root` con permisos `700`, y el contenedor final corre como
+> usuario `node` (no root) → `EACCES` al construir o al arrancar. Se arregla
+> solo desde el host, sin tocar el Dockerfile:
+>
+> ```bash
+> sudo chmod -R u+rwX,go+rX /volume1/docker/CasamableAgent/repo
+> ```
+
+Alternativa sin línea de comandos: descarga el ZIP del repositorio desde
+GitHub y descomprímelo en `CasamableAgent/repo` con File Station (revisando
+igualmente los permisos).
 
 ## 4 · Crear el `.env` de producción
 
@@ -164,10 +180,25 @@ Vuelve a comprobar: sesión conservada, pedidos intactos en el dashboard. Si
 tras esto pidiera QR otra vez, los volúmenes están mal montados — revisa
 `PERSIST_DIR` antes de continuar.
 
-## 9 · Acceso externo con Cloudflare Tunnel
+## 9 · Acceso externo
 
-Shopify necesita una URL HTTPS pública y **estable**. Usamos un túnel
-nombrado: sin abrir puertos del router y sin exponer el NAS.
+Shopify necesita una URL HTTPS pública y **estable**. Hay dos caminos válidos.
+Prueba la **Opción A** si tu dominio te deja delegar los DNS a Cloudflare; si
+no, la **Opción B** es la que se usó en el despliegue real de Casamable.
+
+En ambos casos el NAS **no recibe ninguna conexión entrante de internet**:
+siempre es él quien abre la conexión hacia fuera.
+
+### Opción A · Cloudflare Tunnel
+
+Sin abrir puertos del router y sin exponer el NAS.
+
+> ⚠️ **Requiere delegar el dominio (o el subdominio) a los NS de Cloudflare.**
+> Algunos registradores no lo permiten en dominios `.es` empaquetados con
+> hosting — con Strato, el NS del dominio raíz es intocable —, y el plan
+> gratuito de Cloudflare no da de alta un subdominio como zona propia
+> ("Subdomain setup" exige plan Business/Enterprise). Si te topas con eso, ve
+> directo a la Opción B.
 
 **En el panel de Cloudflare** (pasos manuales, una sola vez):
 
@@ -194,6 +225,113 @@ https://agente.casamable.es
 ```
 
 > El token del túnel **nunca** va a Git: vive solo en el `.env` del NAS.
+
+### Opción B · VPS puente (WireGuard + Caddy)
+
+**Ésta es la configuración que corre hoy en producción**, tras descartar la
+Opción A por las restricciones de DNS descritas arriba. Un VPS mínimo hace de
+proxy HTTPS público y un túnel WireGuard privado lo une con el NAS.
+
+```text
+Internet → Caddy (VPS, HTTPS) → WireGuard (túnel privado) → NAS (casamable-agent:3000)
+```
+
+**1. VPS.** Cualquier proveedor sirve; con ~5-7 €/mes sobra (en producción:
+Hetzner CX23, Ubuntu LTS). Anota su IP pública.
+
+**2. Firewall del VPS** — solo estos cuatro puertos:
+
+```bash
+apt install -y ufw
+ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw allow 51820/udp
+ufw enable
+```
+
+**3. Túnel WireGuard.** En cada máquina, genera su par de claves:
+
+```bash
+apt install -y wireguard
+wg genkey | tee privatekey | wg pubkey > publickey
+```
+
+`/etc/wireguard/wg0.conf` en el **VPS**:
+
+```ini
+[Interface]
+Address = 10.10.10.1/24
+ListenPort = 51820
+PrivateKey = <clave PRIVADA del VPS>
+
+[Peer]
+PublicKey = <clave PÚBLICA del NAS>
+AllowedIPs = 10.10.10.2/32
+```
+
+`/etc/wireguard/wg0.conf` en el **NAS**:
+
+```ini
+[Interface]
+Address = 10.10.10.2/24
+PrivateKey = <clave PRIVADA del NAS>
+
+[Peer]
+PublicKey = <clave PÚBLICA del VPS>
+Endpoint = IP_PUBLICA_DEL_VPS:51820
+AllowedIPs = 10.10.10.1/32
+PersistentKeepalive = 25
+```
+
+> 🔐 Las claves **privadas** no salen nunca de su máquina: no se copian por
+> chat, ni al repositorio, ni a un gestor de notas. Solo se intercambian las
+> **públicas**. Si una privada se expone, regenera el par en ambos extremos.
+
+En las dos máquinas:
+
+```bash
+wg-quick up wg0
+systemctl enable wg-quick@wg0      # que sobreviva a un reinicio
+wg show                            # debe aparecer "latest handshake" en ~25s
+```
+
+**4. Caddy en el VPS**, apuntando a la **IP del túnel**, no al nombre del
+servicio Docker (`casamable-agent` no se resuelve: Caddy vive en otra máquina):
+
+```bash
+apt install -y caddy
+```
+
+`/etc/caddy/Caddyfile`:
+
+```text
+agente.casamable.es {
+    reverse_proxy 10.10.10.2:3000
+}
+```
+
+```bash
+systemctl restart caddy
+```
+
+Caddy pide y renueva el certificado de Let's Encrypt solo, en cuanto resuelva
+el DNS del paso siguiente.
+
+**5. DNS.** En el panel de tu proveedor, crea un **registro A** de
+`agente.casamable.es` → IP pública del VPS. Si ese subdominio tuviera NS
+delegados a Cloudflare de un intento previo de la Opción A, revierte primero a
+los NS por defecto del proveedor: mientras estén delegados no te dejará
+gestionar el registro A.
+
+Comprueba desde fuera de tu red (con datos móviles):
+
+```text
+https://agente.casamable.es
+```
+
+**6. Prueba de resiliencia.** Reinicia el VPS y el NAS **por separado** (no a
+la vez) y confirma que WireGuard, Caddy y Docker vuelven solos y el túnel
+rehace el handshake sin tocar nada — puede tardar hasta un minuto por el
+`PersistentKeepalive`. Es la prueba de que el puente sobrevive a un corte de
+luz o a un mantenimiento.
 
 ## 10 · Apuntar el webhook de Shopify
 
@@ -233,10 +371,13 @@ Con esto, el NAS está sirviendo el sistema completo.
 Cuando termines la instalación:
 
 - **Desactiva SSH** en UGOS Pro (*Panel de control → Terminal y SNMP*).
-- **No abras puertos** en el router: con Cloudflare Tunnel no hace falta
-  ninguno. En particular, nunca expongas a internet la interfaz de UGOS, SMB,
-  SSH ni el socket de Docker.
+- **No abras puertos en el router.** Ninguna de las dos opciones lo necesita:
+  con Cloudflare Tunnel y con el puente VPS, el NAS solo abre conexiones
+  *hacia fuera*, nunca al revés. Nunca expongas a internet la interfaz de
+  UGOS, SMB, SSH ni el socket de Docker.
 - Lo único accesible desde fuera debe ser `https://agente.casamable.es`.
+- Usa una **contraseña fuerte** en `DASHBOARD_PASSWORD`: en cuanto el panel
+  es accesible desde internet, protege datos de clientes reales.
 
 ---
 
@@ -253,12 +394,17 @@ docker compose exec casamable-agent npm run backup
 
 Quedan en `CasamableAgent/backups/`, con retención de 7 días.
 
-**Para automatizarlo a diario**, en UGOS Pro: *Panel de control →
-Programador de tareas → Crear → Script programado*, a diario a las 04:00:
+**Para automatizarlo a diario** hay dos vías; en producción se usó el cron
+nativo del NAS:
 
 ```bash
-docker exec casamable-agent npm run backup
+# crontab -e  (en el NAS) → una copia cada día a las 04:00
+0 4 * * * docker exec casamable-agent npm run backup
 ```
+
+El contenedor va en `Europe/Madrid`, así que la hora del cron es la local: no
+hay que convertir nada a UTC. Alternativa por interfaz: *Panel de control →
+Programador de tareas → Crear → Script programado*, con ese mismo comando.
 
 **Restaurar** una copia: para el contenedor, sustituye
 `data/messages.db` por el fichero de backup (renombrándolo a `messages.db`) y
