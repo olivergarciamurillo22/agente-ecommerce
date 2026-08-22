@@ -15,6 +15,7 @@
     "start:bot": "tsx scripts/start-bot.ts",
     "start:all": "concurrently --kill-others --names BOT,WEB --prefix-colors yellow,cyan \"npm run start:bot\" \"npm run start\"",
     "backup": "tsx scripts/backup-db.ts",
+    "supplier:simulate": "tsx scripts/supplier-simulate.ts",
     "outbox:inspect": "tsx scripts/outbox-inspect.ts",
     "outbox:clear-safe": "tsx scripts/outbox-clear-safe.ts",
     "wizard": "tsx scripts/wizard.ts",

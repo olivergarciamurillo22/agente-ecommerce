@@ -47,7 +47,8 @@ import {
   logOnce,
   maskPhone,
 } from "../safety";
-import { deferOrderUntil } from "../db";
+import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvaluation } from "../db";
+import { evaluateOrderForSupplier } from "../suppliers/service";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -182,6 +183,24 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       summary.reminders++;
       logger.info(`[REMINDER] #${order.shopify_order_number} sent`);
     }
+  }
+
+  // 3.5) Proveedores (Dropi/Dropea): SOLO evaluación, sin ningún efecto
+  //      externo. Deja escrito en cada pedido confirmado qué proveedor le
+  //      tocaría y si algo lo bloquea (dirección inválida, falta routing),
+  //      para que Pedro lo vea en el panel. La sincronización real llegará
+  //      cuando exista el handoff de las APIs.
+  for (const order of getOrdersForSupplierEvaluation()) {
+    const evaluation = evaluateOrderForSupplier(order);
+    if (
+      order.supplier_sync_status !== evaluation.status ||
+      order.supplier_platform !== evaluation.platform
+    ) {
+      logger.info(
+        `[SUPPLIER] #${order.shopify_order_number} routing → ${evaluation.platform} | ${evaluation.status}: ${evaluation.reason}`
+      );
+    }
+    setOrderSupplierEvaluation(order.id, evaluation.platform, evaluation.status, evaluation.reason);
   }
 
   // 4) Tags pendientes en Shopify. Gate central primero: en safe/test-sin-flag

@@ -149,6 +149,28 @@ export interface OrderRow {
    * se mide la antigüedad: esperar a propósito NUNCA lo convierte en ignored_old.
    */
   deferred_until: number | null;
+
+  // --- Proveedor (Dropi / Dropea) — fase 2, hoy solo simulación ---
+  /** Dirección elegida para el proveedor: 'original' | 'proposed' | null (sin decidir). */
+  final_address_source: string | null;
+  /** Plataforma resuelta por el router: 'dropi' | 'dropea' | 'manual' | 'unknown' | null. */
+  supplier_platform: string | null;
+  /** Estado de sincronización. Ver SUPPLIER_SYNC_STATUSES en suppliers/types.ts. */
+  supplier_sync_status: string;
+  /** Id del pedido en el proveedor. Su presencia BLOQUEA recrearlo (idempotencia). */
+  supplier_external_order_id: string | null;
+  /** Referencia estable que enviamos al proveedor (nuestro shopify_order_id). */
+  supplier_reference: string | null;
+  supplier_sync_attempts: number;
+  supplier_last_error: string | null;
+  supplier_synced_at: number | null;
+  supplier_last_checked_at: number | null;
+  /** Estado del envío según el proveedor (texto suyo, sin normalizar todavía). */
+  supplier_status: string | null;
+  tracking_number: string | null;
+  tracking_url: string | null;
+  carrier: string | null;
+
   last_error: string | null;
   clarify_count: number;
   shopify_tagged: number;
@@ -211,6 +233,22 @@ const ORDERS_TABLE_BODY = `
       customer_note TEXT,
       pilot_authorized INTEGER NOT NULL DEFAULT 0,
       deferred_until INTEGER,
+      -- Qué dirección se usará con el proveedor: 'original' | 'proposed'.
+      -- NULL = sin decidir (si hay proposed_address, queda a revisión humana).
+      final_address_source TEXT,
+      -- Sincronización con el proveedor (Dropi/Dropea). Ver SupplierSyncStatus.
+      supplier_platform TEXT,
+      supplier_sync_status TEXT NOT NULL DEFAULT 'not_ready',
+      supplier_external_order_id TEXT,
+      supplier_reference TEXT,
+      supplier_sync_attempts INTEGER NOT NULL DEFAULT 0,
+      supplier_last_error TEXT,
+      supplier_synced_at INTEGER,
+      supplier_last_checked_at INTEGER,
+      supplier_status TEXT,
+      tracking_number TEXT,
+      tracking_url TEXT,
+      carrier TEXT,
       last_error TEXT,
       clarify_count INTEGER NOT NULL DEFAULT 0,
       shopify_tagged INTEGER NOT NULL DEFAULT 0,
@@ -403,6 +441,36 @@ function build() {
     // piloto. El loop del outbox la usa al revalidar los safety gates.
     db.exec("ALTER TABLE outbox ADD COLUMN authorized INTEGER NOT NULL DEFAULT 0");
   }
+
+  // Migración fase 2 (proveedores Dropi/Dropea). Columnas nuevas sin CHECK,
+  // así que basta ALTER TABLE: no destructivo y sin reconstruir la tabla.
+  // Los valores se validan en TypeScript (SUPPLIER_SYNC_STATUSES).
+  const supplierCols: Array<[string, string]> = [
+    ["final_address_source", "TEXT"],
+    ["supplier_platform", "TEXT"],
+    ["supplier_sync_status", "TEXT NOT NULL DEFAULT 'not_ready'"],
+    ["supplier_external_order_id", "TEXT"],
+    ["supplier_reference", "TEXT"],
+    ["supplier_sync_attempts", "INTEGER NOT NULL DEFAULT 0"],
+    ["supplier_last_error", "TEXT"],
+    ["supplier_synced_at", "INTEGER"],
+    ["supplier_last_checked_at", "INTEGER"],
+    ["supplier_status", "TEXT"],
+    ["tracking_number", "TEXT"],
+    ["tracking_url", "TEXT"],
+    ["carrier", "TEXT"],
+  ];
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of supplierCols) {
+    if (!currentCols.has(name)) {
+      db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+    }
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders(supplier_sync_status, status)"
+  );
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1316,6 +1384,48 @@ export function deferOrderUntil(id: number, until: number): boolean {
 
 export function setOrderShopifyTagged(id: number): void {
   ctx().db.prepare(`UPDATE orders SET shopify_tagged = 1, ${TOUCH} WHERE id = ?`).run(id);
+}
+
+// --- Proveedores (Dropi/Dropea) — fase 2, hoy solo simulación ---
+
+/** Pedidos confirmados cuya evaluación de proveedor conviene refrescar. */
+export function getOrdersForSupplierEvaluation(limit = 50): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE status = 'confirmed' AND supplier_external_order_id IS NULL
+         AND supplier_sync_status NOT IN ('synced','cancelled','syncing')
+       ORDER BY confirmed_at ASC LIMIT ?`
+    )
+    .all(limit) as OrderRow[];
+}
+
+/**
+ * Guarda el resultado de evaluar un pedido (plataforma + estado + motivo).
+ * No dispara nada externo: es solo el "qué haríamos" persistido.
+ */
+export function setOrderSupplierEvaluation(
+  id: number,
+  platform: string | null,
+  syncStatus: string,
+  reason: string | null
+): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_platform = ?, supplier_sync_status = ?,
+        supplier_last_error = ?, supplier_reference = COALESCE(supplier_reference, shopify_order_id),
+        supplier_last_checked_at = unixepoch(), ${TOUCH}
+       WHERE id = ? AND supplier_external_order_id IS NULL`
+    )
+    .run(platform, syncStatus, reason?.slice(0, 300) ?? null, id);
+}
+
+/** Decide qué dirección se usará con el proveedor ('original' | 'proposed'). */
+export function setOrderFinalAddressSource(id: number, source: "original" | "proposed"): boolean {
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET final_address_source = ?, ${TOUCH} WHERE id = ?`)
+    .run(source, id);
+  return info.changes > 0;
 }
 
 /** Marca updated_at sin cambiar nada más (backoff natural de reintentos). */

@@ -1493,7 +1493,327 @@ async function main(): Promise<void> {
     db.authorizeOrderForPilot(o.id); // restaurar para no afectar a otros tests
   });
 
-  // ============ 20 · Reinicio del proceso (persistencia) ============
+  // ============ 20 · PROVEEDORES (Dropi/Dropea) — fase 2, simulación ============
+  console.log("· Proveedores — routing, dirección y gates");
+
+  const suppliers = await import("../src/lib/suppliers/service");
+  const { validateSupplierAddress } = await import("../src/lib/suppliers/address");
+  const { resolveSupplier } = await import("../src/lib/suppliers/router");
+  const { ProviderNotConfiguredError } = await import("../src/lib/suppliers/types");
+  const { dropiProvider } = await import("../src/lib/suppliers/dropi");
+  const { dropeaProvider } = await import("../src/lib/suppliers/dropea");
+
+  /** Crea un pedido ya ENVIADO (awaiting_reply), listo para responder. */
+  const mkSent = (
+    shopifyId: string,
+    num: string,
+    extra: Partial<{ city: string | null; postal_code: string | null; address_line1: string | null }> = {}
+  ) => {
+    const o = db.insertOrderIfNew({
+      shopify_order_id: shopifyId,
+      shopify_order_number: num,
+      customer_name: "Cliente Proveedor",
+      phone: "34600111222",
+      email: null,
+      product_summary: "1x Limpiador Ultrasónico Multiusos",
+      total_price: "34.98",
+      currency: "EUR",
+      address_line1: "address_line1" in extra ? extra.address_line1! : "Calle Ejemplo 5B",
+      address_line2: null,
+      city: "city" in extra ? extra.city! : "Almería",
+      province: "Almería",
+      postal_code: "postal_code" in extra ? extra.postal_code! : "04007",
+      country: "España",
+      status: "pending_send",
+    }).order;
+    db.claimOrderInitialSend(o.id);
+    return db.getOrderById(o.id)!;
+  };
+
+  /** Pedido ya enviado Y confirmado por el cliente. */
+  const mkConfirmed = (
+    shopifyId: string,
+    num: string,
+    extra: Partial<{ city: string | null; postal_code: string | null; address_line1: string | null }> = {}
+  ) => {
+    const o = mkSent(shopifyId, num, extra);
+    db.markOrderConfirmed(o.id, true);
+    return db.getOrderById(o.id)!;
+  };
+
+  await test("validateSupplierAddress: bloquea city '-', vacía y corta", () => {
+    const ok = validateSupplierAddress({
+      address_line1: "Calle Ejemplo 5B",
+      city: "Almería",
+      postal_code: "04007",
+    });
+    assert.equal(ok.valid, true);
+
+    // El caso REAL de Casamable: Releasit manda city = "-"
+    const guion = validateSupplierAddress({
+      address_line1: "Calle Ejemplo 5B",
+      city: "-",
+      postal_code: "04007",
+    });
+    assert.equal(guion.valid, false);
+    assert.ok(guion.issues.includes("invalid_city"));
+
+    for (const c of ["", "   ", "AB", ".", "n/a"]) {
+      const r = validateSupplierAddress({ address_line1: "Calle X 1", city: c, postal_code: "04007" });
+      assert.equal(r.valid, false, `city "${c}" debe bloquear`);
+      assert.ok(r.issues.includes("invalid_city"));
+    }
+
+    const sinCp = validateSupplierAddress({ address_line1: "Calle X 1", city: "Madrid", postal_code: "" });
+    assert.ok(sinCp.issues.includes("missing_postal_code"));
+    const sinCalle = validateSupplierAddress({ address_line1: "-", city: "Madrid", postal_code: "28001" });
+    assert.ok(sinCalle.issues.includes("missing_address"));
+  });
+
+  await test("routing: sin reglas configuradas SIEMPRE unknown (nunca adivina)", () => {
+    const o = mkConfirmed("970001", "1801");
+    assert.equal(resolveSupplier(o).platform, "unknown");
+    const ev = suppliers.evaluateOrderForSupplier(o);
+    assert.equal(ev.status, "manual_review");
+    assert.match(ev.reason, /sin reglas de enrutado/);
+  });
+
+  await test("routing con reglas: enruta por producto y detecta ambigüedad", async () => {
+    const o = db.getOrderByShopifyId("970001")!;
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      assert.equal(resolveSupplier(o).platform, "dropi");
+    });
+    // Dos proveedores compiten por el mismo pedido → decisión humana
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador,dropea:ultrasónico" }, () => {
+      const r = resolveSupplier(o);
+      assert.equal(r.platform, "unknown");
+      assert.match(r.reason, /varios proveedores/);
+    });
+  });
+
+  await test("pedido con city '-' → blocked_address, nunca ready", async () => {
+    const o = mkConfirmed("970002", "1802", { city: "-" });
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(o);
+      assert.equal(ev.status, "blocked_address");
+      assert.match(ev.reason, /localidad/);
+      assert.equal(suppliers.canSyncSupplier(o, "dropi").allowed, false);
+    });
+  });
+
+  await test("dirección válida + routing → ready, con el DTO completo", async () => {
+    const o = mkConfirmed("970003", "1803");
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "ready");
+      assert.equal(ev.platform, "dropi");
+      assert.ok(ev.input, "debe construir el DTO");
+      assert.equal(ev.input!.shopifyOrderId, "970003", "la referencia es nuestro id de Shopify");
+      assert.equal(ev.input!.finalAddress.city, "Almería");
+      assert.equal(ev.input!.addressSource, "original");
+      assert.equal(ev.input!.codAmount, "34.98");
+      assert.equal(ev.input!.items[0].quantity, 1);
+      assert.match(ev.input!.items[0].title, /Limpiador/);
+    });
+  });
+
+  await test("delivery_note del cliente llega al DTO", async () => {
+    // Ruta real del cliente: recibe el mensaje → "3" → escribe la nota → "1"
+    const o = mkSent("970004", "1804");
+    assert.equal(db.markOrderAwaitingDeliveryNote(o.id), true);
+    assert.equal(db.saveOrderDeliveryNote(o.id, "Llamar antes de subir"), true);
+    db.markOrderConfirmed(o.id, true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.input?.deliveryNote, "Llamar antes de subir");
+    });
+  });
+
+  await test("dirección propuesta SIN aprobar → manual_review (no se envía sola)", async () => {
+    // Ruta real: el cliente respondió "2", mandó su dirección y luego confirmó.
+    const o = mkSent("970005", "1805");
+    assert.equal(db.markOrderNeedsCorrection(o.id), true);
+    assert.equal(db.appendOrderProposedAddress(o.id, "Calle Nueva 7, 2B, 28004 Madrid"), true);
+    db.markOrderConfirmed(o.id, true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "manual_review");
+      assert.match(ev.reason, /nadie ha decidido/);
+      assert.equal(ev.input, null, "no se construye DTO con una dirección sin decidir");
+    });
+  });
+
+  await test("propuesta aprobada → sigue exigiendo revisión (texto libre)", async () => {
+    const o = db.getOrderByShopifyId("970005")!;
+    assert.equal(db.setOrderFinalAddressSource(o.id, "proposed"), true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "manual_review");
+      assert.match(ev.reason, /texto libre/);
+    });
+    // Y si se decide usar la original, vuelve a ser enviable:
+    db.setOrderFinalAddressSource(o.id, "original");
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      assert.equal(suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!).status, "ready");
+    });
+  });
+
+  await test("pedido NO confirmado nunca sale (not_ready)", () => {
+    const o = mkOrder("970006", "1806", "34600111222"); // pending_send
+    const ev = suppliers.evaluateOrderForSupplier(o);
+    assert.equal(ev.status, "not_ready");
+    assert.equal(suppliers.canSyncSupplier(o, "dropi").allowed, false);
+  });
+
+  console.log("· Proveedores — safety gates e idempotencia");
+
+  await test("gate cerrado por defecto: SUPPLIER_SYNC_ENABLED=0 bloquea", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const g = suppliers.canSyncSupplier(o, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /SUPPLIER_SYNC_ENABLED/);
+    });
+  });
+
+  await test("matriz de llaves del proveedor: cualquiera cerrada = NO SYNC", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    const base = {
+      SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+      SUPPLIER_SYNC_ENABLED: "1",
+      SUPPLIER_TEST_MODE: "0",
+      DROPIPRO_WRITE_ENABLED: "1",
+    };
+    // Todas abiertas… pero el provider NO está implementado:
+    await withEnv(base, () => {
+      const g = suppliers.canSyncSupplier(o, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /no está configurado/);
+    });
+    // Test mode activo → solo simulación
+    await withEnv({ ...base, SUPPLIER_TEST_MODE: "1" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /SUPPLIER_TEST_MODE/);
+    });
+    // Llave de plataforma cerrada
+    await withEnv({ ...base, DROPIPRO_WRITE_ENABLED: "0" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /escritura no habilitada/);
+    });
+    // Kill switch global
+    await withEnv({ ...base, EMERGENCY_STOP: "1" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /EMERGENCY_STOP/);
+    });
+  });
+
+  await test("idempotencia: con external_order_id no se recrea jamás", async () => {
+    const o = mkConfirmed("970007", "1807");
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw
+      .prepare("UPDATE orders SET supplier_external_order_id = 'DROPI-XYZ' WHERE shopify_order_id = '970007'")
+      .run();
+    raw.close();
+    const fresco = db.getOrderById(o.id)!;
+    await withEnv(
+      {
+        SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+        SUPPLIER_SYNC_ENABLED: "1",
+        SUPPLIER_TEST_MODE: "0",
+        DROPIPRO_WRITE_ENABLED: "1",
+      },
+      () => {
+        const ev = suppliers.evaluateOrderForSupplier(fresco);
+        assert.equal(ev.status, "synced");
+        assert.match(ev.reason, /no se recrea/);
+        const g = suppliers.canSyncSupplier(fresco, "dropi");
+        assert.equal(g.allowed, false);
+        assert.match(g.reason ?? "", /idempotencia/);
+      }
+    );
+  });
+
+  await test("providers stub: createOrder LANZA, no finge éxito ni toca la red", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const input = {
+        shopifyOrderId: "1",
+        orderNumber: "1",
+        customerName: "X",
+        phone: "34600111222",
+        email: null,
+        finalAddress: {
+          line1: "Calle X 1",
+          line2: null,
+          city: "Madrid",
+          province: null,
+          postalCode: "28001",
+          country: "España",
+        },
+        addressSource: "original" as const,
+        items: [{ title: "P", quantity: 1, price: null, sku: null }],
+        total: "10",
+        currency: "EUR",
+        codAmount: "10",
+        deliveryNote: null,
+      };
+      for (const p of [dropiProvider, dropeaProvider]) {
+        assert.equal(p.isConfigured(), false, `${p.platform} no debe declararse configurado`);
+        await assert.rejects(() => p.createOrder(input), ProviderNotConfiguredError);
+        await assert.rejects(() => p.cancelOrder("x"), ProviderNotConfiguredError);
+        await assert.rejects(() => p.getStatus("x"), ProviderNotConfiguredError);
+        // La simulación sí funciona, y es evidente que es simulada:
+        const sim = p.simulateCreateOrder(input);
+        assert.equal(sim.simulated, true);
+        assert.match(sim.externalOrderId, /^SIMULATED-/);
+      }
+      assert.equal(llamadas, 0, "ningún provider hizo una sola petición de red");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("el scheduler evalúa proveedores SIN ningún efecto externo", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const o = mkConfirmed("970008", "1808", { city: "-" });
+      await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, async () => {
+        await runSchedulerTick();
+      });
+      const row = db.getOrderById(o.id)!;
+      assert.equal(row.supplier_sync_status, "blocked_address", "queda anotado en la DB");
+      assert.equal(row.supplier_platform, "dropi");
+      assert.match(row.supplier_last_error ?? "", /localidad/);
+      assert.equal(row.supplier_reference, "970008", "guarda la referencia estable");
+      assert.equal(row.supplier_external_order_id, null, "no inventa un id");
+      assert.equal(llamadas, 0, "el tick no hizo ninguna llamada de red a proveedores");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("simulateSupplierSync no toca la DB ni la red", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    const antes = JSON.stringify(db.getOrderById(o.id));
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const r = suppliers.simulateSupplierSync(db.getOrderById(o.id)!);
+      assert.equal(r.evaluation.status, "ready");
+      assert.equal(r.simulated?.simulated, true);
+      assert.match(r.simulated?.externalOrderId ?? "", /^SIMULATED-DROPI-/);
+      assert.equal(r.gate.allowed, false, "simular NUNCA implica permiso de envío");
+    });
+    assert.equal(JSON.stringify(db.getOrderById(o.id)), antes, "el pedido no se modificó");
+  });
+
+  // ============ 21 · Reinicio del proceso (persistencia) ============
   await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
     const Database = (await import("better-sqlite3")).default;
     const raw = new Database(path.join(tmpDir, "messages.db"));
