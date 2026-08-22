@@ -71,6 +71,12 @@ export type TrackingEvent =
 export interface SupplierUpdate {
   /** Estado con las palabras del proveedor, sin tocar. */
   rawStatus: string | null;
+  /**
+   * Estado YA normalizado por el provider, cuando este tiene su propio mapa
+   * (p. ej. Dropi, que traduce por `status_id`). Si viene, manda sobre el
+   * normalizador genérico: nadie conoce sus estados mejor que su provider.
+   */
+  normalizedOverride?: TrackingStatus;
   trackingNumber?: string | null;
   trackingUrl?: string | null;
   carrier?: string | null;

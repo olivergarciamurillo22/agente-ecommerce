@@ -1519,6 +1519,28 @@ export function updateOrderTracking(
     );
 }
 
+/**
+ * Liga un pedido a un proveedor y a su id externo. Se usa cuando el propio
+ * proveedor nos avisa de un pedido que ya existe en su sistema: adoptamos su
+ * id en vez de crear otro. Solo actúa si aún NO teníamos id externo, para no
+ * pisar jamás una referencia existente.
+ */
+export function setOrderSupplierPlatformAndExternalId(
+  id: number,
+  platform: string,
+  externalOrderId: string
+): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_platform = ?, supplier_external_order_id = ?,
+        supplier_sync_status = 'synced', supplier_synced_at = COALESCE(supplier_synced_at, unixepoch()),
+        supplier_reference = COALESCE(supplier_reference, shopify_order_id), ${TOUCH}
+       WHERE id = ? AND supplier_external_order_id IS NULL`
+    )
+    .run(platform, externalOrderId, id);
+  return info.changes > 0;
+}
+
 /** Busca un pedido por su id en el proveedor (para procesar sus webhooks). */
 export function getOrderBySupplierExternalId(externalId: string): OrderRow | null {
   return (

@@ -57,7 +57,9 @@ const ORDEN: Record<TrackingStatus, number> = {
  */
 export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): ProcessUpdateResult {
   const previousStatus = (order.supplier_status_normalized ?? "unknown") as TrackingStatus;
-  const normalizado = normalizeSupplierStatus(update.rawStatus);
+  // Si el provider ya lo tradujo con su propio catálogo, se respeta; si no,
+  // se usa el normalizador genérico.
+  const normalizado = update.normalizedOverride ?? normalizeSupplierStatus(update.rawStatus);
 
   // Un estado desconocido NO pisa lo que ya sabíamos: si el proveedor manda
   // una palabra que no entendemos, conservamos el estado anterior.

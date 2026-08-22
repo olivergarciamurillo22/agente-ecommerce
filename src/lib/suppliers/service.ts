@@ -48,6 +48,15 @@ export function supplierPilotMode(): boolean {
   return process.env.SUPPLIER_PILOT_MODE !== "0";
 }
 
+/**
+ * ¿Está confirmado que la integración ANTIGUA de Shopify→proveedor está
+ * apagada? Por defecto NO: se asume que sigue viva y se bloquea la creación
+ * para no duplicar envíos a clientes reales.
+ */
+export function legacyIntegrationsDisabled(): boolean {
+  return process.env.LEGACY_SUPPLIER_INTEGRATIONS_DISABLED === "1";
+}
+
 /** Interruptor por plataforma (segunda llave, como en Shopify). */
 export function platformWriteEnabled(platform: SupplierPlatform): boolean {
   if (platform === "dropi") return process.env.DROPIPRO_WRITE_ENABLED === "1";
@@ -212,6 +221,21 @@ export function canSyncSupplier(order: OrderRow, platform: SupplierPlatform): Su
   const no = (reason: string): SupplierGateResult => ({ allowed: false, reason });
 
   if (emergencyStop()) return no("EMERGENCY_STOP activo");
+
+  // CANDADO CONTRA LA DOBLE INTEGRACIÓN.
+  // Los pedidos de Shopify llegan con tags `dropea_error` y "Sync ERROR -
+  // Dropi PRO": ya hay OTRA integración creando pedidos en los proveedores.
+  // Si la nuestra también los crea, cada compra se envía DOS VECES al
+  // cliente. Este candado bloquea la creación aunque el resto de llaves
+  // estén abiertas, y solo se abre cuando se confirme que la integración
+  // antigua está desactivada.
+  if (!legacyIntegrationsDisabled()) {
+    return no(
+      "LEGACY_SUPPLIER_INTEGRATIONS_DISABLED=0: hay otra integración Shopify→proveedor activa " +
+        "(tags dropea_error / Sync ERROR - Dropi PRO). Crear el pedido ahora lo duplicaría"
+    );
+  }
+
   if (!supplierSyncEnabled()) return no("SUPPLIER_SYNC_ENABLED=0");
   if (supplierTestMode()) return no("SUPPLIER_TEST_MODE=1: solo simulación");
   if (!platformWriteEnabled(platform)) return no(`escritura no habilitada para ${platform}`);

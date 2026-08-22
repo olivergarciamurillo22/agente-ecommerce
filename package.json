@@ -24,7 +24,8 @@
     "redteam": "tsx scripts/redteam.mts",
     "test:airtable": "tsx scripts/test-airtable.mts",
     "typecheck": "tsc --noEmit",
-    "clean": "rimraf .next data auth"
+    "clean": "rimraf .next data auth",
+    "dropi:webhook:simulate": "tsx scripts/dropi-webhook-simulate.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

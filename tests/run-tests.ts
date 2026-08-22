@@ -1667,13 +1667,24 @@ async function main(): Promise<void> {
 
   console.log("· Proveedores — safety gates e idempotencia");
 
-  await test("gate cerrado por defecto: SUPPLIER_SYNC_ENABLED=0 bloquea", async () => {
+  await test("gate cerrado por defecto: nada sale sin abrir varias llaves", async () => {
     const o = db.getOrderByShopifyId("970003")!;
     await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      // Con todo por defecto, el primer freno es el candado de la
+      // integración antigua (el más peligroso: duplicaría envíos).
       const g = suppliers.canSyncSupplier(o, "dropi");
       assert.equal(g.allowed, false);
-      assert.match(g.reason ?? "", /SUPPLIER_SYNC_ENABLED/);
+      assert.match(g.reason ?? "", /LEGACY_SUPPLIER_INTEGRATIONS_DISABLED/);
     });
+    // Y quitando ese, sigue frenando el interruptor maestro.
+    await withEnv(
+      { SUPPLIER_ROUTING_RULES: "dropi:limpiador", LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1" },
+      () => {
+        const g = suppliers.canSyncSupplier(o, "dropi");
+        assert.equal(g.allowed, false);
+        assert.match(g.reason ?? "", /SUPPLIER_SYNC_ENABLED/);
+      }
+    );
   });
 
   await test("matriz de llaves del proveedor: cualquiera cerrada = NO SYNC", async () => {
@@ -1684,6 +1695,7 @@ async function main(): Promise<void> {
       SUPPLIER_TEST_MODE: "0",
       DROPIPRO_WRITE_ENABLED: "1",
       SUPPLIER_PILOT_MODE: "0", // el piloto se prueba aparte
+      LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1", // el candado se prueba aparte
     };
     // Todas abiertas… pero el provider NO está implementado:
     await withEnv(base, () => {
@@ -1720,6 +1732,7 @@ async function main(): Promise<void> {
         SUPPLIER_SYNC_ENABLED: "1",
         SUPPLIER_TEST_MODE: "0",
         DROPIPRO_WRITE_ENABLED: "1",
+        LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
       },
       () => {
         const ev = suppliers.evaluateOrderForSupplier(fresco);
@@ -2090,6 +2103,7 @@ async function main(): Promise<void> {
         SUPPLIER_TEST_MODE: "0",
         DROPIPRO_WRITE_ENABLED: "1",
         SUPPLIER_PILOT_MODE: "1",
+        LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
       },
       () => {
         const g1 = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
@@ -2122,7 +2136,282 @@ async function main(): Promise<void> {
     });
   });
 
-  // ============ 22 · Reinicio del proceso (persistencia) ============
+  // ============ 22 · DROPI: webhook de actualizaciones ============
+  console.log("· Dropi — webhook de actualizaciones (estructura confirmada)");
+
+  const dropiWebhook = await import("../src/lib/suppliers/dropi/webhook");
+  const { validateDropiPayload } = await import("../src/lib/suppliers/dropi/types");
+  const { normalizeDropiStatus } = await import("../src/lib/suppliers/dropi/status-map");
+
+  /** Payload con la estructura EXACTA que muestra el panel de Dropi. */
+  const dropiPayload = (over: Record<string, unknown> = {}) => ({
+    order_id: 555001,
+    event_date: "2026-08-22T10:15:00Z",
+    status_id: 4,
+    status_name: "EN REPARTO",
+    details: "Actualización de prueba",
+    tracking_code: "DRP-TRK-001",
+    tracking_url: "https://tracking.example/DRP-TRK-001",
+    shopify_order_id: null,
+    shipping_company: "Transportista Test",
+    total: "34.98",
+    ...over,
+  });
+
+  await test("webhook Dropi DESHABILITADO → 503 y sin efectos", () => {
+    const r = dropiWebhook.processDropiWebhook(JSON.stringify(dropiPayload()));
+    assert.equal(r.status, 503, "fail-closed mientras no sepamos cómo autentica Dropi");
+  });
+
+  await test("validación del payload: acepta el válido, rechaza lo que no encaja", () => {
+    assert.equal(validateDropiPayload(dropiPayload()).ok, true);
+
+    const casos: Array<[string, Record<string, unknown>]> = [
+      ["order_id no numérico", { order_id: "abc" }],
+      ["order_id cero", { order_id: 0 }],
+      ["fecha inválida", { event_date: "no-es-una-fecha" }],
+      ["status_id inválido", { status_id: "x" }],
+      ["status_name vacío", { status_name: "   " }],
+      ["tracking_url con tipo raro", { tracking_url: 123 }],
+      ["shopify_order_id no entero", { shopify_order_id: "abc" }],
+      ["total no numérico", { total: "muchos euros" }],
+    ];
+    for (const [desc, over] of casos) {
+      assert.equal(validateDropiPayload(dropiPayload(over)).ok, false, desc);
+    }
+    // No-objetos
+    assert.equal(validateDropiPayload("texto").ok, false);
+    assert.equal(validateDropiPayload([1, 2]).ok, false);
+    assert.equal(validateDropiPayload(null).ok, false);
+  });
+
+  await test("nulos permitidos: tracking_url y shopify_order_id", () => {
+    const v = validateDropiPayload(dropiPayload({ tracking_url: null, shopify_order_id: null }));
+    assert.equal(v.ok, true);
+    assert.equal(v.payload!.tracking_url, null);
+    assert.equal(v.payload!.shopify_order_id, null);
+    // tracking_code vacío también es válido (pedido aún sin guía)
+    assert.equal(validateDropiPayload(dropiPayload({ tracking_code: "" })).ok, true);
+  });
+
+  await test("payload inválido → 400 y sin efectos", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r1 = dropiWebhook.processDropiWebhook("{no es json");
+      assert.equal(r1.status, 400);
+      const r2 = dropiWebhook.processDropiWebhook(JSON.stringify(dropiPayload({ order_id: "x" })));
+      assert.equal(r2.status, 400);
+      assert.ok(Array.isArray(r2.body.issues));
+    });
+  });
+
+  await test("estados de Dropi SIN confirmar → unknown (no se adivina)", () => {
+    assert.equal(normalizeDropiStatus(4, "EN REPARTO"), "unknown");
+    assert.equal(normalizeDropiStatus(99, "ENTREGADO"), "unknown");
+  });
+
+  await test("DROPI_STATUS_MAP permite confirmar estados por id o por nombre", async () => {
+    await withEnv({ DROPI_STATUS_MAP: "4:out_for_delivery,ENTREGADO:delivered" }, () => {
+      assert.equal(normalizeDropiStatus(4, "EN REPARTO"), "out_for_delivery");
+      assert.equal(normalizeDropiStatus(88, "ENTREGADO"), "delivered");
+      assert.equal(normalizeDropiStatus(77, "OTRA COSA"), "unknown");
+    });
+  });
+
+  await test("emparejado por shopify_order_id (vía preferente) y adopción del id externo", async () => {
+    const o = mkConfirmed("990001", "2001");
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(dropiPayload({ order_id: 777001, shopify_order_id: 990001 }))
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, "2001");
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.supplier_platform, "dropi");
+      assert.equal(fresco.supplier_external_order_id, "777001", "adopta el id de Dropi");
+      assert.equal(fresco.tracking_number, "DRP-TRK-001");
+      assert.equal(fresco.carrier, "Transportista Test");
+      assert.equal(fresco.supplier_status_raw, "EN REPARTO", "guarda el estado tal cual");
+      assert.equal(fresco.supplier_status_normalized, "unknown", "pero sin interpretarlo");
+    });
+  });
+
+  await test("emparejado alternativo por order_id cuando no viene shopify_order_id", async () => {
+    const o = db.getOrderByShopifyId("990001")!;
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777001, shopify_order_id: null, tracking_code: "DRP-TRK-001" })
+        )
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, o.shopify_order_number);
+    });
+  });
+
+  await test("tracking nuevo → UN aviso; el mismo webhook repetido → ninguno", async () => {
+    const o = mkConfirmed("990002", "2002");
+    const tel = o.phone;
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === tel).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const body = JSON.stringify(
+        dropiPayload({ order_id: 777002, shopify_order_id: 990002, tracking_code: "DRP-XYZ" })
+      );
+      const r1 = dropiWebhook.processDropiWebhook(body);
+      assert.deepEqual(r1.body.events, ["TRACKING_AVAILABLE"]);
+      assert.equal(contar(), antes + 1, "exactamente un aviso");
+
+      const r2 = dropiWebhook.processDropiWebhook(body); // reintento idéntico
+      assert.deepEqual(r2.body.events, [], "sin cambios = sin eventos");
+      assert.equal(contar(), antes + 1, "ni un duplicado");
+    });
+  });
+
+  await test("sin tracking_code no se avisa de nada", async () => {
+    const o = mkConfirmed("990003", "2003");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777003, shopify_order_id: 990003, tracking_code: "", tracking_url: null })
+        )
+      );
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body.events, []);
+      assert.equal(contar(), antes);
+    });
+  });
+
+  await test("estado desconocido NUNCA dispara el aviso de reparto", async () => {
+    const o = mkConfirmed("990004", "2004");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1", DROPI_STATUS_MAP: "" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777004, shopify_order_id: 990004, tracking_code: "" , status_name: "EN REPARTO" })
+        )
+      );
+      assert.deepEqual(r.body.events, [], "un estado sin confirmar no genera eventos");
+      assert.equal(db.getOrderById(o.id)!.out_for_delivery_notification_sent_at, null);
+      assert.equal(contar(), antes, "ni un mensaje nuevo con un estado sin confirmar");
+    });
+  });
+
+  await test("con el estado CONFIRMADO sí avisa del reparto, una sola vez", async () => {
+    const o = mkConfirmed("990005", "2005");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv(
+      { DROPIPRO_WEBHOOK_ENABLED: "1", DROPI_STATUS_MAP: "4:out_for_delivery" },
+      () => {
+        const body = JSON.stringify(
+          dropiPayload({ order_id: 777005, shopify_order_id: 990005, tracking_code: "" })
+        );
+        const r1 = dropiWebhook.processDropiWebhook(body);
+        assert.ok((r1.body.events as string[]).includes("OUT_FOR_DELIVERY"));
+        const msgs = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+        assert.equal(msgs.length, antes + 1);
+        assert.match(msgs[msgs.length - 1].content, /en reparto/);
+        assert.match(msgs[msgs.length - 1].content, /efectivo/);
+
+        dropiWebhook.processDropiWebhook(body); // repetido
+        assert.equal(contar(), antes + 1, "sin duplicados");
+      }
+    );
+  });
+
+  await test("pedido desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(dropiPayload({ order_id: 999999999, shopify_order_id: 888888888 }))
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "pedido desconocido");
+    });
+  });
+
+  await test("no pisa datos válidos con cadenas vacías", async () => {
+    const o = db.getOrderByShopifyId("990002")!; // ya tiene tracking DRP-XYZ y carrier
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({
+            order_id: 777002,
+            shopify_order_id: 990002,
+            tracking_code: "",
+            tracking_url: null,
+            shipping_company: "",
+          })
+        )
+      );
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.tracking_number, "DRP-XYZ", "el tracking anterior se conserva");
+      assert.ok(fresco.carrier, "el transportista anterior se conserva");
+    });
+  });
+
+  await test("CANDADO doble integración: bloquea la creación aunque todo esté abierto", async () => {
+    const o = mkConfirmed("990010", "2010");
+    db.setOrderSupplierPilotApproval(o.id, true);
+    const todoAbierto = {
+      SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+      SUPPLIER_SYNC_ENABLED: "1",
+      SUPPLIER_TEST_MODE: "0",
+      DROPIPRO_WRITE_ENABLED: "1",
+      SUPPLIER_PILOT_MODE: "0",
+    };
+    // Con el candado cerrado (por defecto), NO se puede crear:
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "0" }, () => {
+      const g = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /LEGACY_SUPPLIER_INTEGRATIONS_DISABLED/);
+      assert.match(g.reason ?? "", /duplicar/i);
+    });
+    // Sin la variable puesta se asume lo peor (integración antigua viva):
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: undefined }, () => {
+      assert.equal(suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi").allowed, false);
+    });
+    // Abriéndolo, el bloqueo pasa a ser el siguiente de la cadena:
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1" }, () => {
+      const g = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /no está configurado/, "ahora frena el provider sin implementar");
+    });
+  });
+
+  await test("Dropi createOrder SIGUE bloqueado (esto solo confirmó el tracking)", async () => {
+    const { dropiProvider } = await import("../src/lib/suppliers/dropi");
+    assert.equal(dropiProvider.isConfigured(), false);
+    await assert.rejects(
+      () =>
+        dropiProvider.createOrder({
+          shopifyOrderId: "1",
+          orderNumber: "1",
+          customerName: "X",
+          phone: "34600111222",
+          email: null,
+          finalAddress: {
+            line1: "Calle X 1",
+            line2: null,
+            city: "Madrid",
+            province: null,
+            postalCode: "28001",
+            country: "España",
+          },
+          addressSource: "original",
+          items: [{ title: "P", quantity: 1, price: null, sku: null }],
+          total: "10",
+          currency: "EUR",
+          codAmount: "10",
+          deliveryNote: null,
+        }),
+      ProviderNotConfiguredError
+    );
+  });
+
+  // ============ 23 · Reinicio del proceso (persistencia) ============
   await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
     const Database = (await import("better-sqlite3")).default;
     const raw = new Database(path.join(tmpDir, "messages.db"));
