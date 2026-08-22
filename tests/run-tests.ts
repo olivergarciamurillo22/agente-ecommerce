@@ -3428,6 +3428,17 @@ async function main(): Promise<void> {
     assert.equal(h.status, "critical");
 
     db.setConnectionState({ status: "connected", phone: "34641308254" });
+    // "Conectado" sin latido del proceso del bot NO se cree: warning.
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("DELETE FROM service_health WHERE service = 'scheduler:outbox'").run();
+    raw.close();
+    h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "warning", "conectado sin bot vivo = estado obsoleto");
+    assert.ok(h.message.includes("no da señales"));
+
+    // Con latido fresco del bot: healthy de verdad.
+    sysRepo.recordServiceCheck("scheduler:outbox", { status: "healthy", ok: true });
     h = sysInteg.getWhatsAppHealth();
     assert.equal(h.status, "healthy");
     assert.ok(h.businessNumberMasked && !h.businessNumberMasked.includes("641308254"),

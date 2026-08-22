@@ -16,7 +16,7 @@ import { shopifyAdminConfigured } from "../shopify/admin";
 import { dropeaCredentialsPresent, dropeaReadEnabled } from "../suppliers/dropea/client";
 import { dropeaCreateModeSummary } from "../suppliers/dropea/create-gate";
 import { dropiWebhookEnabled } from "../suppliers/dropi/webhook";
-import { countIntegrationEvents, getServiceHealth } from "./repo";
+import { countIntegrationEvents, getServiceHealth, systemHealthEnabled } from "./repo";
 import type { HealthStatus } from "./types";
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -85,12 +85,26 @@ export function getWhatsAppHealth(): WhatsAppHealth {
   base.lastError = getServiceHealth("whatsapp")?.last_error_message ?? null;
 
   switch (base.connectionStatus) {
-    case "connected":
+    case "connected": {
       base.status = "healthy";
       base.message = base.sendEnabled
         ? `conectado como ${base.businessNumberMasked}`
         : `conectado como ${base.businessNumberMasked} · envíos DESACTIVADOS (safe mode)`;
+      // CONTRASTE: connection_state se queda en "connected" si el bot muere
+      // sin despedirse. El latido del loop del outbox (~1/min) dice si el
+      // proceso está VIVO de verdad. Sin latido reciente, ese "conectado"
+      // no es creíble.
+      if (systemHealthEnabled()) {
+        const beat = getServiceHealth("scheduler:outbox")?.last_checked_at ?? null;
+        if (!beat || now() - beat > 10 * 60) {
+          base.status = "warning";
+          base.message = `figura como conectado, pero el proceso del bot no da señales${
+            beat ? ` desde hace ${Math.round((now() - beat) / 60)} min` : ""
+          } — probablemente está parado`;
+        }
+      }
       break;
+    }
     case "qr":
       base.status = "warning";
       base.message = "esperando que se escanee el QR";

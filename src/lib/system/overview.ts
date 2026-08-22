@@ -76,9 +76,13 @@ export function getSystemOverview(): SystemOverview {
   const tracking = getTrackingOverview();
   const t = Math.floor(Date.now() / 1000);
 
-  const schedulersWorst = worst(schedulers.map((s) => s.status));
-  const schedulersMsg =
-    schedulersWorst === "healthy"
+  const todosSinSenales = schedulers.every((s) => s.status === "unknown");
+  const schedulersWorst: HealthStatus = todosSinSenales
+    ? "unknown"
+    : worst(schedulers.map((s) => s.status));
+  const schedulersMsg = todosSinSenales
+    ? "sin señales todavía (¿el bot está arrancado?)"
+    : schedulersWorst === "healthy"
       ? "todos los relojes al día"
       : (schedulers.find((s) => s.status === schedulersWorst)?.message ?? "revisar");
 
