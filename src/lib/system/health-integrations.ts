@@ -176,12 +176,10 @@ export function getShopifyHealth(): ShopifyHealth {
     return base;
   }
 
-  const errorMasReciente =
-    base.lastApiErrorAt !== null &&
-    (base.lastApiSuccessAt === null || base.lastApiErrorAt > base.lastApiSuccessAt);
-  if (errorMasReciente) {
-    const esAuth = /401|credencial|unauthorized|token/i.test(base.lastApiError ?? "");
-    base.status = esAuth ? "critical" : "warning";
+  // El estado ACTUAL es el de la fila (cada registro lo actualiza): no se
+  // reconstruye comparando timestamps, que solo tienen resolución de segundo.
+  if (health?.status === "critical" || health?.status === "warning") {
+    base.status = health.status;
     base.message = `último intento con la API falló: ${base.lastApiError ?? "error"}`;
   } else {
     base.status = "healthy";
@@ -266,26 +264,25 @@ export function getDropeaHealth(): DropeaHealth {
   } else if (!base.apiEnabled) {
     base.status = "disabled";
     base.message = "API key presente pero DROPEA_API_ENABLED=0";
+  } else if (health?.status === "critical" || health?.status === "warning") {
+    // La fila guarda el estado ACTUAL (cada llamada lo actualiza): fiarse de
+    // ella, no de comparar timestamps con resolución de segundo.
+    const esAuth = /401|credencial|unauthorized|jwt|token/i.test(base.lastApiError ?? "");
+    base.status = esAuth ? "critical" : health.status;
+    base.message = `la API falló: ${base.lastApiError ?? "error"}`;
+  } else if (!health || base.lastApiSuccessAt === null) {
+    base.status = "unknown";
+    base.message = "habilitada pero sin ninguna llamada todavía (ejecuta dropea:doctor)";
   } else {
-    const errorMasReciente =
-      base.lastApiErrorAt !== null &&
-      (base.lastApiSuccessAt === null || base.lastApiErrorAt > base.lastApiSuccessAt);
-    if (errorMasReciente) {
-      const esAuth = /401|credencial|unauthorized|jwt|token/i.test(base.lastApiError ?? "");
-      base.status = esAuth ? "critical" : "warning";
-      base.message = `la API falló: ${base.lastApiError ?? "error"}`;
-    } else if (base.lastApiSuccessAt === null) {
-      base.status = "unknown";
-      base.message = "habilitada pero sin ninguna llamada todavía (ejecuta dropea:doctor)";
-    } else {
-      base.status = "healthy";
-      base.message =
-        base.createMode === "external_app"
-          ? "lectura OK · creación de pedidos: la hace su app oficial"
-          : "lectura OK";
-    }
+    base.status = "healthy";
+    base.message =
+      base.createMode === "external_app"
+        ? "lectura OK · creación de pedidos: la hace su app oficial"
+        : "lectura OK";
   }
-  if (base.counters.webhookBadSignature > 0) {
+  // Firmas inválidas recientes: degradan solo una integración ACTIVA. Una
+  // apagada ya rechaza todo; no hay nada nuevo que vigilar ahí.
+  if (base.status !== "disabled" && base.counters.webhookBadSignature > 0) {
     base.status = base.status === "critical" ? "critical" : "warning";
     base.message += ` · ${base.counters.webhookBadSignature} webhook(s) con firma inválida en 7 días`;
   }

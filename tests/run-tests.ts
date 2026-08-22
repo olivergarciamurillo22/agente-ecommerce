@@ -3155,6 +3155,435 @@ async function main(): Promise<void> {
     }
   });
 
+
+  // ============================================================
+  // CONTROL CENTER (observabilidad): sanitizado, repo, health services
+  // ============================================================
+  console.log("\n— Control Center —");
+
+  const sanitizeMod = await import("../src/lib/system/sanitize");
+  const sysRepo = await import("../src/lib/system/repo");
+  const sysCore = await import("../src/lib/system/health-core");
+  const sysInteg = await import("../src/lib/system/health-integrations");
+  const sysTracking = await import("../src/lib/system/tracking-overview");
+  const sysOverview = await import("../src/lib/system/overview");
+
+  await test("sanitize: emails, tokens, JWT y hex largos fuera; teléfonos enmascarados", () => {
+    const sucia =
+      "cliente pedro@casamable.es tel 34644313917 token shpat_abcdef123456 " +
+      "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456 " +
+      "hmac a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    const limpia = sanitizeMod.sanitizeForEvents(sucia);
+    assert.ok(!limpia.includes("pedro@casamable.es"), "email fuera");
+    assert.ok(!limpia.includes("34644313917"), "teléfono completo fuera");
+    assert.ok(!limpia.includes("shpat_abcdef123456"), "token de Shopify fuera");
+    assert.ok(!limpia.includes("eyJhbGciOiJIUzI1NiJ9"), "JWT fuera");
+    assert.ok(!limpia.includes("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"), "hex largo fuera");
+    // Idempotente y acotado
+    assert.equal(sanitizeMod.sanitizeForEvents(limpia), limpia);
+    assert.ok(sanitizeMod.sanitizeForEvents("x".repeat(2000)).length <= 300);
+  });
+
+  await test("integration_events: se guarda sanitizado y con filtros", () => {
+    sysRepo.logIntegrationEvent(
+      "dropea",
+      "test_event",
+      "warning",
+      "fallo con email test@x.com y tel 34600111222",
+      "#9001"
+    );
+    const [ev] = sysRepo.listIntegrationEvents({ integration: "dropea", limit: 1 });
+    assert.ok(ev, "evento guardado");
+    assert.equal(ev.event_type, "test_event");
+    assert.equal(ev.order_ref, "#9001");
+    assert.ok(!ev.message.includes("test@x.com"), "email sanitizado al guardar");
+    assert.ok(!ev.message.includes("34600111222"), "teléfono sanitizado al guardar");
+    const soloCriticos = sysRepo.listIntegrationEvents({ severity: "critical" });
+    assert.ok(soloCriticos.every((e) => e.severity === "critical"));
+  });
+
+  await test("countIntegrationEvents cuenta por tipo y ventana temporal", () => {
+    const antes = sysRepo.countIntegrationEvents("dropea", "test_event", 0);
+    sysRepo.logIntegrationEvent("dropea", "test_event", "info", "otro");
+    assert.equal(sysRepo.countIntegrationEvents("dropea", "test_event", 0), antes + 1);
+    // Ventana futura: no cuenta nada
+    const futuro = Math.floor(Date.now() / 1000) + 3600;
+    assert.equal(sysRepo.countIntegrationEvents("dropea", "test_event", futuro), 0);
+  });
+
+  await test("service_health: transición a peor deja alerta en el feed, y la recuperación también", () => {
+    sysRepo.recordServiceCheck("dropi", { status: "healthy", ok: true });
+    const antesCrit = sysRepo.listIntegrationEvents({ integration: "dropi" }).length;
+    sysRepo.recordServiceCheck("dropi", { status: "critical", ok: false, error: "se rompió" });
+    const trasCrit = sysRepo.listIntegrationEvents({ integration: "dropi" });
+    assert.equal(trasCrit.length, antesCrit + 1, "el empeoramiento genera evento");
+    assert.equal(trasCrit[0].severity, "critical");
+    sysRepo.recordServiceCheck("dropi", { status: "healthy", ok: true });
+    const trasRecuperar = sysRepo.listIntegrationEvents({ integration: "dropi" });
+    assert.equal(trasRecuperar.length, antesCrit + 2, "la recuperación genera evento info");
+    assert.equal(trasRecuperar[0].severity, "info");
+    const row = sysRepo.getServiceHealth("dropi");
+    assert.ok(row && row.status === "healthy" && row.last_error_message, "el último error se conserva");
+  });
+
+  await test("service_health: metadata se sanitiza y el error nunca guarda secretos", () => {
+    sysRepo.recordServiceCheck("shopify", {
+      status: "warning",
+      ok: false,
+      error: "401 con token shpat_supersecreto999 de pedro@x.com",
+      metadata: { nota: "Bearer eyJaaa.bbb.ccc y tel 34644313917" },
+    });
+    const row = sysRepo.getServiceHealth("shopify")!;
+    assert.ok(!String(row.last_error_message).includes("shpat_supersecreto999"));
+    assert.ok(!String(row.last_error_message).includes("pedro@x.com"));
+    assert.ok(!String(row.metadata_json).includes("34644313917"));
+  });
+
+  await test("runInstrumented: con trabajo crea fila; el error se registra Y se relanza", async () => {
+    await sysRepo.runInstrumented("scheduler:orders", "orders", async () => ({
+      processed: 3,
+      errors: 0,
+    }));
+    const [run] = sysRepo.listSchedulerRuns("orders", 1);
+    assert.ok(run && run.processed_count === 3 && run.status === "ok");
+
+    let relanzado = false;
+    try {
+      await sysRepo.runInstrumented("scheduler:orders", "orders", async () => {
+        throw new Error("tick roto");
+      });
+    } catch {
+      relanzado = true;
+    }
+    assert.ok(relanzado, "el error del tick NO se traga");
+    const [runErr] = sysRepo.listSchedulerRuns("orders", 1);
+    assert.equal(runErr.status, "error");
+    assert.ok(String(runErr.last_error).includes("tick roto"));
+  });
+
+  await test("runInstrumented: un tick sin trabajo NO crea fila (solo latido)", async () => {
+    const antes = sysRepo.listSchedulerRuns("tracking").length;
+    await sysRepo.runInstrumented("scheduler:tracking", "tracking", async () => ({
+      processed: 0,
+      errors: 0,
+    }));
+    assert.equal(sysRepo.listSchedulerRuns("tracking").length, antes, "sin fila nueva");
+    assert.ok(sysRepo.getServiceHealth("scheduler:tracking"), "pero el latido existe");
+  });
+
+  await test("SYSTEM_HEALTH_ENABLED=0 apaga la instrumentación sin romper nada", async () => {
+    await withEnv({ SYSTEM_HEALTH_ENABLED: "0" }, () => {
+      const antes = sysRepo.listIntegrationEvents({ limit: 500 }).length;
+      sysRepo.logIntegrationEvent("system", "apagado", "info", "no debería guardarse");
+      assert.equal(sysRepo.listIntegrationEvents({ limit: 500 }).length, antes);
+    });
+  });
+
+  await test("getDatabaseHealth: DB sana → healthy, WAL, esquema al día, filas y última escritura", () => {
+    const h = sysCore.getDatabaseHealth();
+    assert.equal(h.status, "healthy");
+    assert.equal(h.reachable, true);
+    assert.equal(h.integrity, "ok");
+    assert.equal(h.journalMode.toLowerCase(), "wal");
+    assert.equal(h.schemaVersion, h.expectedSchemaVersion, "user_version estampada");
+    assert.ok((h.rowCounts["orders"] ?? 0) > 0, "cuenta filas de orders");
+    assert.ok(h.lastWriteAt, "última escritura detectada");
+    assert.ok(h.dbSizeBytes && h.dbSizeBytes > 0);
+    // integrity_check completo también funciona
+    assert.equal(sysCore.getDatabaseHealth({ full: true }).integrity, "ok");
+  });
+
+  await test("getBackupHealth: carpeta inexistente → unknown SIN crash (modo local)", async () => {
+    await withEnv({ BACKUP_DIR: path.join(tmpDir, "no-existe") }, () => {
+      const h = sysCore.getBackupHealth();
+      assert.equal(h.status, "unknown");
+      assert.ok(h.message.includes("inexistente"));
+    });
+  });
+
+  await test("getBackupHealth: carpeta vacía → warning (existe pero sin copias)", async () => {
+    const dirVacia = path.join(tmpDir, "backups-vacia");
+    fs.mkdirSync(dirVacia, { recursive: true });
+    await withEnv({ BACKUP_DIR: dirVacia }, () => {
+      assert.equal(sysCore.getBackupHealth().status, "warning");
+    });
+  });
+
+  await test("getBackupHealth: copia fresca e íntegra → healthy; vieja → warning; muy vieja → critical", async () => {
+    const dir = path.join(tmpDir, "backups-ok");
+    fs.mkdirSync(dir, { recursive: true });
+    // Copia REAL: un sqlite válido que pasa quick_check
+    const Database = require("better-sqlite3");
+    const fichero = path.join(dir, "messages-2026-01-01_0200.db");
+    const bdb = new Database(fichero);
+    bdb.exec("CREATE TABLE t (id INTEGER)");
+    bdb.close();
+    for (const sufijo of ["-wal", "-shm"]) fs.rmSync(fichero + sufijo, { force: true });
+
+    await withEnv({ BACKUP_DIR: dir }, () => {
+      assert.equal(sysCore.getBackupHealth().status, "healthy", "recién creada → healthy");
+      assert.equal(sysCore.getBackupHealth().integrity, "ok");
+
+      const h30 = new Date(Date.now() - 30 * 3600 * 1000);
+      fs.utimesSync(fichero, h30, h30);
+      assert.equal(sysCore.getBackupHealth().status, "warning", ">24h → warning");
+
+      const h50 = new Date(Date.now() - 50 * 3600 * 1000);
+      fs.utimesSync(fichero, h50, h50);
+      assert.equal(sysCore.getBackupHealth().status, "critical", ">48h → critical");
+    });
+  });
+
+  await test("getBackupHealth: copia corrupta → critical aunque sea reciente", async () => {
+    const dir = path.join(tmpDir, "backups-mal");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "messages-rota.db"), "esto no es un sqlite");
+    await withEnv({ BACKUP_DIR: dir }, () => {
+      const h = sysCore.getBackupHealth();
+      assert.equal(h.status, "critical");
+      assert.ok(h.message.includes("comprobación"), "explica que no pasa la comprobación");
+    });
+  });
+
+  await test("getOutboxHealth: cola vacía o al día → healthy; sent_at se estampa al enviar", () => {
+    const conv = db.getOrCreateConversation("34600999888", "Salud Outbox");
+    const encolado = db.enqueueOutbox(conv.id, conv.phone, "mensaje de prueba salud");
+    db.markOutboxSent(encolado);
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    const fila = raw.prepare("SELECT sent, sent_at FROM outbox WHERE id = ?").get(encolado);
+    raw.close();
+    assert.equal(fila.sent, 1);
+    assert.ok(fila.sent_at, "sent_at estampado al enviar");
+    const h = sysCore.getOutboxHealth();
+    assert.equal(h.status, "healthy");
+    assert.ok(h.sentLast24h >= 1);
+    assert.ok(h.lastSentAt);
+  });
+
+  await test("getOutboxHealth: pendiente atascado → warning; retenidos masivos → critical", async () => {
+    const conv = db.getOrCreateConversation("34600999888", "Salud Outbox");
+    const id = db.enqueueOutbox(conv.id, conv.phone, "atascado");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      // 20 min de antigüedad: supera OUTBOX_STALE_MINUTES (15) pero no la
+      // edad máxima (60) → warning "¿el bot corre?"
+      raw.prepare("UPDATE outbox SET created_at = created_at - 1200 WHERE id = ?").run(id);
+      assert.equal(sysCore.getOutboxHealth().status, "warning");
+
+      // 2h: retenido (no saldrá solo) → warning con aviso de outbox:inspect
+      raw.prepare("UPDATE outbox SET created_at = created_at - 6000 WHERE id = ?").run(id);
+      const h = sysCore.getOutboxHealth();
+      assert.equal(h.status, "warning");
+      assert.equal(h.retained, 1);
+      assert.ok(h.message.includes("outbox:inspect"));
+
+      // 12 retenidos → critical
+      const ids: number[] = [];
+      for (let i = 0; i < 11; i++) {
+        ids.push(db.enqueueOutbox(conv.id, conv.phone, `retenido ${i}`));
+      }
+      raw
+        .prepare(
+          `UPDATE outbox SET created_at = created_at - 7200 WHERE id IN (${ids.join(",")})`
+        )
+        .run();
+      assert.equal(sysCore.getOutboxHealth().status, "critical");
+      // Limpieza: fuera los artificiales para no ensuciar el resto
+      raw.prepare(`DELETE FROM outbox WHERE id IN (${[...ids, id].join(",")})`).run();
+    } finally {
+      raw.close();
+    }
+  });
+
+  await test("getSchedulersHealth: sin latido → unknown; latido fresco → healthy; latido viejo → critical", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      raw.prepare("DELETE FROM service_health WHERE service = 'scheduler:watchdog'").run();
+      let wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "unknown");
+
+      sysRepo.recordServiceCheck("scheduler:watchdog", { status: "healthy", ok: true });
+      wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "healthy");
+
+      raw
+        .prepare(
+          "UPDATE service_health SET last_checked_at = last_checked_at - 999999 WHERE service = 'scheduler:watchdog'"
+        )
+        .run();
+      wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "critical");
+      assert.ok(wd.message.includes("sin latido"));
+    } finally {
+      raw.close();
+    }
+  });
+
+  await test("getWhatsAppHealth: desconectado → critical; conectado → healthy con número ENMASCARADO", () => {
+    db.setConnectionState({ status: "disconnected", phone: null });
+    let h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "critical");
+
+    db.setConnectionState({ status: "connected", phone: "34641308254" });
+    h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "healthy");
+    assert.ok(h.businessNumberMasked && !h.businessNumberMasked.includes("641308254"),
+      "el número jamás sale completo");
+    assert.ok(h.lastInboundAt !== undefined && h.outboxPending >= 0);
+  });
+
+  await test("getShopifyHealth: sin credenciales → no healthy; con error 401 reciente → critical", async () => {
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: undefined, SHOPIFY_CLIENT_ID: undefined, SHOPIFY_CLIENT_SECRET: undefined, SHOPIFY_STORE_DOMAIN: undefined },
+      () => {
+        const h = sysInteg.getShopifyHealth();
+        assert.notEqual(h.status, "healthy");
+        assert.equal(h.configured, false);
+        assert.ok(h.lastWebhookAt, "el último webhook se deriva de orders");
+      }
+    );
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_token_de_prueba", SHOPIFY_STORE_DOMAIN: "x.myshopify.com" },
+      () => {
+        sysRepo.recordServiceCheck("shopify", { status: "critical", ok: false, error: "tagsAdd 401: credencial inválida" });
+        const h = sysInteg.getShopifyHealth();
+        assert.equal(h.authMode, "static");
+        assert.equal(h.status, "critical", "401 reciente → critical");
+        sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        assert.equal(sysInteg.getShopifyHealth().status, "healthy");
+      }
+    );
+  });
+
+  await test("getDropeaHealth: sin key → disabled; habilitada sin llamadas → unknown; con éxito → healthy read-only", async () => {
+    await withEnv({ DROPEA_API_KEY: undefined, DROPEA_API_ENABLED: undefined }, () => {
+      assert.equal(sysInteg.getDropeaHealth().status, "disabled");
+    });
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("DELETE FROM service_health WHERE service = 'dropea'").run();
+    // Estado virgen de verdad: sin firmas inválidas heredadas de otros tests
+    // (si las hubiera, el warning sería CORRECTO, pero aquí probamos "nunca llamada")
+    raw
+      .prepare("DELETE FROM integration_events WHERE integration = 'dropea' AND event_type = 'webhook_bad_signature'")
+      .run();
+    raw.close();
+    await withEnv({ DROPEA_API_KEY: "clave-test", DROPEA_API_ENABLED: "1" }, () => {
+      let h = sysInteg.getDropeaHealth();
+      assert.equal(h.status, "unknown", "sin llamadas: unknown, jamás datos inventados");
+      assert.ok(h.message.includes("doctor"));
+      sysRepo.recordServiceCheck("dropea", { status: "healthy", ok: true });
+      h = sysInteg.getDropeaHealth();
+      assert.equal(h.status, "healthy");
+      assert.equal(h.createMode, "external_app");
+      assert.ok(h.message.includes("app oficial"), "deja claro quién crea los pedidos");
+    });
+  });
+
+  await test("getDropeaHealth: firmas inválidas recientes degradan a warning", async () => {
+    await withEnv({ DROPEA_API_KEY: "clave-test", DROPEA_API_ENABLED: "1" }, () => {
+      sysRepo.logIntegrationEvent("dropea", "webhook_bad_signature", "warning", "firma inválida");
+      const h = sysInteg.getDropeaHealth();
+      assert.ok(h.counters.webhookBadSignature >= 1);
+      assert.equal(h.status, "warning");
+    });
+  });
+
+  await test("getDropiHealth: apagado → disabled; encendido sin auth confirmada → warning, NUNCA healthy", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: undefined }, () => {
+      assert.equal(sysInteg.getDropiHealth().status, "disabled");
+    });
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const h = sysInteg.getDropiHealth();
+      assert.equal(h.status, "warning");
+      assert.ok(h.message.includes("sin autenticación"));
+    });
+  });
+
+  await test("getTrackingOverview: cuenta activos, stale configurable y bloqueados por dirección", async () => {
+    const o = mkSynced("77001", "#77001");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      raw
+        .prepare(
+          `UPDATE orders SET supplier_status_normalized='in_transit',
+           tracking_last_checked_at = unixepoch() - 8 * 3600 WHERE id = ?`
+        )
+        .run(o.id);
+      // Umbral 12h: 8h sin mirar NO es stale
+      let t = sysTracking.getTrackingOverview();
+      assert.ok(t.activeShipments >= 1);
+      assert.ok(!t.staleOrders.some((x) => x.orderNumber === "#77001"));
+      // Umbral 6h (env): ahora sí
+      await withEnv({ TRACKING_STALE_HOURS: "6" }, () => {
+        const t2 = sysTracking.getTrackingOverview();
+        assert.ok(t2.staleOrders.some((x) => x.orderNumber === "#77001"));
+        assert.equal(t2.status, "warning");
+      });
+      // Bloqueado por dirección (el hallazgo de la city "-")
+      raw
+        .prepare("UPDATE orders SET supplier_sync_status='blocked_address' WHERE id = ?")
+        .run(o.id);
+      t = sysTracking.getTrackingOverview();
+      assert.ok(t.blockedAddress >= 1, "los city '-' se ven en el panel");
+    } finally {
+      raw
+        .prepare(
+          "UPDATE orders SET supplier_status_normalized='delivered', supplier_sync_status='synced' WHERE id = ?"
+        )
+        .run(o.id);
+      raw.close();
+    }
+  });
+
+  await test("getSystemOverview: 9 tarjetas, overall = peor estado OPERATIVO (disabled/unknown no arrastran)", () => {
+    db.setConnectionState({ status: "connected", phone: "34641308254" });
+    const ov = sysOverview.getSystemOverview();
+    assert.equal(ov.cards.length, 9);
+    const rank: Record<string, number> = { healthy: 0, disabled: 0, unknown: 0, warning: 1, critical: 2 };
+    const esperado = ov.cards.reduce((acc, c) => (rank[c.status] > rank[acc] ? c.status : acc),
+      "healthy" as string);
+    const rankEsperado = rank[esperado];
+    assert.equal(rank[ov.overall], rankEsperado, "overall coherente con las tarjetas");
+    assert.equal(ov.emergencyStop, false);
+  });
+
+  await test("getSystemOverview: JAMÁS filtra secretos ni teléfonos completos", async () => {
+    await withEnv(
+      {
+        SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_absolutamente_secreto_123",
+        DROPEA_API_KEY: "clave-dropea-secretisima",
+        DROPEA_WEBHOOK_SECRET: "firma-secreta-webhook",
+        SHOPIFY_STORE_DOMAIN: "x.myshopify.com",
+        DROPEA_API_ENABLED: "1",
+      },
+      () => {
+        db.setConnectionState({ status: "connected", phone: "34641308254" });
+        const json = JSON.stringify(sysOverview.getSystemOverview());
+        assert.ok(!json.includes("shpat_absolutamente_secreto_123"), "token Shopify fuera");
+        assert.ok(!json.includes("clave-dropea-secretisima"), "API key Dropea fuera");
+        assert.ok(!json.includes("firma-secreta-webhook"), "signing secret fuera");
+        assert.ok(!json.includes("34641308254"), "número del negocio nunca completo");
+      }
+    );
+  });
+
+  await test("webhook Dropea con firma inválida deja evento webhook_bad_signature en el feed", async () => {
+    const { processDropeaWebhook } = await import("../src/lib/suppliers/dropea/webhook");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-firma" }, () => {
+      const antes = sysRepo.countIntegrationEvents("dropea", "webhook_bad_signature", 0);
+      const r = processDropeaWebhook('{"topic":"order.created","resource_id":1}', {
+        "x-dropea-signature": "sha256=firmafalsa",
+      });
+      assert.equal(r.status, 401);
+      assert.equal(sysRepo.countIntegrationEvents("dropea", "webhook_bad_signature", 0), antes + 1);
+    });
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
