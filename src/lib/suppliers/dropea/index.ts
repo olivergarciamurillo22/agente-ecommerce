@@ -9,6 +9,7 @@
 // con la nuestra para no duplicar pedidos.)
 // ============================================================
 
+import { dropeaCredentialsPresent } from "./client";
 import {
   ProviderNotConfiguredError,
   type SupplierCreateResult,
@@ -23,8 +24,19 @@ const PLATFORM = "dropea" as const;
 export const dropeaProvider: SupplierProvider = {
   platform: PLATFORM,
 
+  /**
+   * Hay credenciales, pero NO hay cliente HTTP implementado (falta el
+   * handoff). Devolver false aquí es lo que impide que el sistema intente
+   * una llamada real: el día que exista el cliente, esto pasará a
+   * `return dropeaCredentialsPresent();`.
+   */
   isConfigured(): boolean {
-    return false; // sin implementación real todavía
+    return false;
+  },
+
+  /** ¿Están puestas las credenciales? (informativo para el panel/simulador) */
+  hasCredentials(): boolean {
+    return dropeaCredentialsPresent();
   },
 
   validateOrder(input: SupplierOrderInput): SupplierValidationResult {

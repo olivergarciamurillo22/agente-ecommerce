@@ -31,9 +31,15 @@ export interface OrderItem {
   supplier_sync_status: string;
   supplier_external_order_id: string | null;
   supplier_last_error: string | null;
+  supplier_status_normalized: string;
   tracking_number: string | null;
   tracking_url: string | null;
   carrier: string | null;
+  tracking_last_checked_at: number | null;
+  tracking_notification_sent_at: number | null;
+  out_for_delivery_notification_sent_at: number | null;
+  delivered_notification_sent_at: number | null;
+  supplier_pilot_approved: number;
   last_error: string | null;
   shopify_tagged: number;
   whatsapp_sent_at: number | null;
@@ -125,6 +131,20 @@ function fmtMoney(amount: string, currency: string): string {
 
 // Estado de la sincronización con el proveedor (Dropi/Dropea).
 // Hoy todo es simulación: no hay ninguna acción de escritura en el panel.
+/** Estado del ENVÍO (distinto del estado de sincronización). */
+const ENVIO_META: Record<string, string> = {
+  unknown: "sin información",
+  created: "creado",
+  processing: "preparando",
+  shipped: "enviado",
+  in_transit: "en tránsito",
+  out_for_delivery: "EN REPARTO",
+  delivered: "entregado",
+  incident: "INCIDENCIA",
+  returned: "devuelto",
+  cancelled: "cancelado",
+};
+
 const SUPPLIER_META: Record<string, { label: string; cls: string }> = {
   not_ready: { label: "—", cls: "text-brand-muted" },
   manual_review: { label: "REVISIÓN MANUAL", cls: "text-amber-300" },
@@ -561,6 +581,26 @@ export default function OrdersPanel() {
                     <span className="font-mono">{detail.supplier_external_order_id}</span>
                   </div>
                 )}
+                <div className="text-xs text-brand-muted mt-1">
+                  Envío: <span className="text-brand-text">{ENVIO_META[detail.supplier_status_normalized] ?? detail.supplier_status_normalized}</span>
+                  {detail.tracking_last_checked_at && (
+                    <> · última consulta {fmtTime(detail.tracking_last_checked_at)}</>
+                  )}
+                </div>
+                <div className="text-xs mt-2 flex flex-wrap gap-3">
+                  <span title="Confirmación del pedido">
+                    {detail.confirmed_at ? "✓" : "○"} Confirmación
+                  </span>
+                  <span title="Aviso de número de seguimiento">
+                    {detail.tracking_notification_sent_at ? "✓" : "○"} Tracking
+                  </span>
+                  <span title="Aviso de que está en reparto">
+                    {detail.out_for_delivery_notification_sent_at ? "✓" : "○"} En reparto
+                  </span>
+                  <span title="Aviso de entrega">
+                    {detail.delivered_notification_sent_at ? "✓" : "○"} Entregado
+                  </span>
+                </div>
                 {detail.tracking_number && (
                   <div className="text-xs mt-1">
                     📦 {detail.carrier ? `${detail.carrier} · ` : ""}

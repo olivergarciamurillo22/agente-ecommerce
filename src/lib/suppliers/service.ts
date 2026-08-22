@@ -39,6 +39,15 @@ export function supplierTestMode(): boolean {
   return process.env.SUPPLIER_TEST_MODE !== "0";
 }
 
+/**
+ * Modo piloto: mientras esté activo (por defecto lo está), un pedido solo
+ * puede salir a proveedor si Pedro lo ha aprobado EXPLÍCITAMENTE. Se apaga
+ * con SUPPLIER_PILOT_MODE=0, ya en producción plena.
+ */
+export function supplierPilotMode(): boolean {
+  return process.env.SUPPLIER_PILOT_MODE !== "0";
+}
+
 /** Interruptor por plataforma (segunda llave, como en Shopify). */
 export function platformWriteEnabled(platform: SupplierPlatform): boolean {
   if (platform === "dropi") return process.env.DROPIPRO_WRITE_ENABLED === "1";
@@ -207,12 +216,20 @@ export function canSyncSupplier(order: OrderRow, platform: SupplierPlatform): Su
   if (supplierTestMode()) return no("SUPPLIER_TEST_MODE=1: solo simulación");
   if (!platformWriteEnabled(platform)) return no(`escritura no habilitada para ${platform}`);
 
+  // IDEMPOTENCIA PRIMERO: un pedido que ya existe en el proveedor no se
+  // recrea jamás, lo apruebe quien lo apruebe y estén como estén las llaves.
+  if (order.supplier_external_order_id) return no("ya existe en el proveedor (idempotencia)");
+  if (order.status !== "confirmed") return no(`el pedido está en "${order.status}"`);
+
   // Respeta el TEST_MODE de WhatsApp: si el pedido no es elegible para
   // actuar sobre él, tampoco se manda a ningún proveedor.
   if (!orderActionAllowed(order)) return no("pedido fuera de allowlist y sin autorizar");
 
-  if (order.supplier_external_order_id) return no("ya existe en el proveedor (idempotencia)");
-  if (order.status !== "confirmed") return no(`el pedido está en "${order.status}"`);
+  // Durante el piloto, la autorización es POR PEDIDO (no por teléfono):
+  // Pedro aprueba uno a uno los que salen a proveedor.
+  if (supplierPilotMode() && order.supplier_pilot_approved !== 1) {
+    return no("piloto de proveedores: este pedido no está aprobado (supplier_pilot_approved=0)");
+  }
 
   const provider = getProvider(platform);
   if (!provider) return no(`no hay provider para "${platform}"`);

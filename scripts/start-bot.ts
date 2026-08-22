@@ -8,6 +8,7 @@ import "./env-loader";
 import pino from "pino";
 import { start, watchRestartFlag } from "../src/lib/baileys/client";
 import { startOrderScheduler } from "../src/lib/orders/scheduler";
+import { startTrackingScheduler } from "../src/lib/tracking/scheduler";
 import { printSafetyStatus } from "../src/lib/safety";
 import { getPendingOutbox } from "../src/lib/db";
 
@@ -77,6 +78,9 @@ async function main(): Promise<void> {
     // Scheduler de confirmaciones COD: corre aunque WhatsApp aún no esté
     // vinculado (los envíos esperan a que haya conexión; el estado es SQLite).
     startOrderScheduler();
+    // Polling de estado de envíos. Con SUPPLIER_SYNC_ENABLED=0 (por defecto)
+    // no consulta nada: es la red de seguridad de los webhooks de proveedor.
+    startTrackingScheduler();
     logger.info("[bot] esperando QR scan en el dashboard (localhost:3000)...");
   } catch (err) {
     logger.error({ err }, "[bot] error fatal al arrancar");

@@ -7,6 +7,7 @@
 // silencioso que "pareciera" funcionar sería mucho peor.
 // ============================================================
 
+import { dropiCredentialsPresent } from "./client";
 import {
   ProviderNotConfiguredError,
   type SupplierCreateResult,
@@ -21,10 +22,19 @@ const PLATFORM = "dropi" as const;
 export const dropiProvider: SupplierProvider = {
   platform: PLATFORM,
 
+  /**
+   * Hay credenciales, pero NO hay cliente HTTP implementado (falta el
+   * handoff). Devolver false aquí es lo que impide que el sistema intente
+   * una llamada real: el día que exista el cliente, esto pasará a
+   * `return dropiCredentialsPresent();`.
+   */
   isConfigured(): boolean {
-    // Aunque haya credenciales en el .env, NO hay implementación: mientras
-    // esto devuelva false, el sistema nunca intentará una llamada real.
     return false;
+  },
+
+  /** ¿Están puestas las credenciales? (informativo para el panel/simulador) */
+  hasCredentials(): boolean {
+    return dropiCredentialsPresent();
   },
 
   validateOrder(input: SupplierOrderInput): SupplierValidationResult {

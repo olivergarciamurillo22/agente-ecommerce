@@ -1683,6 +1683,7 @@ async function main(): Promise<void> {
       SUPPLIER_SYNC_ENABLED: "1",
       SUPPLIER_TEST_MODE: "0",
       DROPIPRO_WRITE_ENABLED: "1",
+      SUPPLIER_PILOT_MODE: "0", // el piloto se prueba aparte
     };
     // Todas abiertas… pero el provider NO está implementado:
     await withEnv(base, () => {
@@ -1813,7 +1814,315 @@ async function main(): Promise<void> {
     assert.equal(JSON.stringify(db.getOrderById(o.id)), antes, "el pedido no se modificó");
   });
 
-  // ============ 21 · Reinicio del proceso (persistencia) ============
+  // ============ 21 · TRACKING Y AVISOS DE POSTVENTA ============
+  console.log("· Tracking — normalización y transiciones");
+
+  const tracking = await import("../src/lib/tracking/service");
+  const { normalizeSupplierStatus } = await import("../src/lib/tracking/normalizer");
+  const { isTerminalTracking } = await import("../src/lib/tracking/types");
+  const supplierWebhook = await import("../src/lib/suppliers/webhook");
+  const { runTrackingPollTick } = await import("../src/lib/tracking/scheduler");
+
+  /** Pedido confirmado Y ya sincronizado con un proveedor ficticio. */
+  const mkSynced = (shopifyId: string, num: string, phone = "34600111222") => {
+    const o = mkConfirmed(shopifyId, num);
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw
+      .prepare(
+        `UPDATE orders SET supplier_platform='dropea', supplier_sync_status='synced',
+         supplier_external_order_id=?, phone=? WHERE id=?`
+      )
+      .run(`EXT-${shopifyId}`, phone, o.id);
+    raw.close();
+    return db.getOrderById(o.id)!;
+  };
+
+  await test("normalizeSupplierStatus: traduce lo conocido, jamás adivina", () => {
+    assert.equal(normalizeSupplierStatus("ENTREGADO"), "delivered");
+    assert.equal(normalizeSupplierStatus("En reparto"), "out_for_delivery");
+    assert.equal(normalizeSupplierStatus("in_transit"), "in_transit");
+    assert.equal(normalizeSupplierStatus("En tránsito"), "in_transit");
+    assert.equal(normalizeSupplierStatus("devuelto"), "returned");
+    // Vocabulario propio del proveedor que aún no conocemos → unknown
+    assert.equal(normalizeSupplierStatus("GUIA_GENERADA_BODEGA"), "unknown");
+    assert.equal(normalizeSupplierStatus(null), "unknown");
+  });
+
+  await test("SUPPLIER_STATUS_MAP permite añadir estados sin tocar código", async () => {
+    await withEnv({ SUPPLIER_STATUS_MAP: "GUIA_GENERADA:shipped,EN_BODEGA:processing" }, () => {
+      assert.equal(normalizeSupplierStatus("GUIA_GENERADA"), "shipped");
+      assert.equal(normalizeSupplierStatus("en bodega"), "processing");
+    });
+  });
+
+  await test("terminales identificados correctamente", () => {
+    for (const s of ["delivered", "returned", "cancelled"]) assert.equal(isTerminalTracking(s), true);
+    for (const s of ["in_transit", "out_for_delivery", "incident"]) assert.equal(isTerminalTracking(s), false);
+  });
+
+  await test("aparece tracking → UN aviso; repetir el update → NINGUNO más", () => {
+    const o = mkSynced("980001", "1901");
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+
+    const r1 = tracking.processSupplierUpdate(o, {
+      rawStatus: "shipped",
+      trackingNumber: "TRK123",
+      trackingUrl: "https://track.example/TRK123",
+      carrier: "SEUR",
+    });
+    assert.ok(r1.events.includes("TRACKING_AVAILABLE"));
+    assert.ok(r1.notified.includes("TRACKING_AVAILABLE"));
+    const tras1 = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+    assert.equal(tras1.length, antes + 1, "exactamente un mensaje");
+    assert.match(tras1[tras1.length - 1].content, /ya está en camino/);
+    assert.match(tras1[tras1.length - 1].content, /TRK123/);
+
+    // Mismo update otra vez (webhook duplicado): ni un mensaje más.
+    const r2 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, {
+      rawStatus: "shipped",
+      trackingNumber: "TRK123",
+    });
+    assert.equal(r2.events.length, 0, "sin cambios = sin eventos");
+    assert.equal(
+      db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length,
+      antes + 1,
+      "no se reenvía"
+    );
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.tracking_number, "TRK123");
+    assert.equal(row.carrier, "SEUR");
+    assert.ok(row.tracking_first_seen_at, "queda registrado cuándo apareció");
+    assert.ok(row.tracking_notification_sent_at, "queda el sello del aviso");
+  });
+
+  await test("out_for_delivery → UN aviso con el importe; repetido → ninguno", () => {
+    const o = db.getOrderByShopifyId("980001")!;
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+
+    const r1 = tracking.processSupplierUpdate(o, { rawStatus: "En reparto" });
+    assert.ok(r1.notified.includes("OUT_FOR_DELIVERY"));
+    const msgs2 = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+    assert.equal(msgs2.length, antes + 1);
+    const texto = msgs2[msgs2.length - 1].content;
+    assert.match(texto, /está en reparto/);
+    assert.match(texto, /en efectivo/);
+    assert.match(texto, /34,98/, "recuerda el importe en formato español");
+
+    // Otro webhook con el mismo estado: nada.
+    const r2 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery" });
+    assert.equal(r2.notified.length, 0);
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes + 1);
+  });
+
+  await test("delivered con el aviso DESACTIVADO → no manda nada", () => {
+    const o = db.getOrderByShopifyId("980001")!;
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const r = tracking.processSupplierUpdate(o, { rawStatus: "ENTREGADO" });
+    assert.ok(r.events.includes("DELIVERED"));
+    assert.equal(r.notified.length, 0, "DELIVERED_WHATSAPP_ENABLED=0 por defecto");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes);
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+  });
+
+  await test("delivered ACTIVADO → un solo aviso", async () => {
+    const o = mkSynced("980002", "1902", "34600111333");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit", trackingNumber: "TRK9" });
+    await withEnv({ DELIVERED_WHATSAPP_ENABLED: "1" }, () => {
+      const antes = db.getPendingOutbox(999).filter((x) => x.phone === "34600111333").length;
+      const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered" });
+      assert.ok(r.notified.includes("DELIVERED"));
+      const despues = db.getPendingOutbox(999).filter((x) => x.phone === "34600111333");
+      assert.equal(despues.length, antes + 1);
+      assert.match(despues[despues.length - 1].content, /entregado/);
+      // Repetir no reenvía
+      tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered" });
+      assert.equal(
+        db.getPendingOutbox(999).filter((x) => x.phone === "34600111333").length,
+        antes + 1
+      );
+    });
+  });
+
+  await test("incidencia: NO escribe al cliente y manda el pedido a revisión", () => {
+    const o = mkSynced("980003", "1903", "34600111444");
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === "34600111444").length;
+    const r = tracking.processSupplierUpdate(o, { rawStatus: "incidencia" });
+    assert.ok(r.events.includes("INCIDENT"));
+    assert.equal(r.notified.length, 0, "ningún mensaje automático ante incidencias");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === "34600111444").length, antes);
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_sync_status, "manual_review", "visible en el panel");
+    assert.equal(row.status, "confirmed", "la confirmación del cliente no se altera");
+  });
+
+  await test("update atrasado no hace retroceder el estado", () => {
+    const o = mkSynced("980004", "1904", "34600111555");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery" });
+    // Llega tarde un "in_transit" (webhooks desordenados)
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "in_transit" });
+    assert.equal(r.newStatus, "out_for_delivery", "no retrocede");
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+  });
+
+  await test("estado desconocido no pisa lo que ya sabíamos", () => {
+    const o = mkSynced("980005", "1905", "34600111666");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit" });
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "PALABRA_RARA" });
+    assert.equal(r.newStatus, "in_transit");
+  });
+
+  console.log("· Tracking — webhooks de proveedor y polling");
+
+  await test("webhook sin secreto configurado → 503 (fail closed)", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: undefined, DROPEA_HMAC_SECRET: undefined }, () => {
+      const r = supplierWebhook.processSupplierWebhook("dropea", "{}", {});
+      assert.equal(r.status, 503);
+    });
+  });
+
+  await test("webhook con firma inválida → 401 y sin efectos", async () => {
+    const o = mkSynced("980006", "1906", "34600111777");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({ order_id: `EXT-980006`, status: "out_for_delivery" });
+      const r = supplierWebhook.processSupplierWebhook("dropea", body, {
+        "x-signature": "firma-falsa",
+      });
+      assert.equal(r.status, 401);
+      assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "unknown", "no se tocó");
+      assert.equal(
+        db.getPendingOutbox(999).some((x) => x.phone === "34600111777"),
+        false
+      );
+    });
+  });
+
+  await test("webhook con firma VÁLIDA → procesa, avisa una vez y es idempotente", async () => {
+    const o = db.getOrderByShopifyId("980006")!;
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({
+        order_id: "EXT-980006",
+        status: "out_for_delivery",
+        tracking_number: "TRKW1",
+        carrier: "GLS",
+      });
+      const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
+
+      const r1 = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      assert.equal(r1.status, 200);
+      const tras1 = db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length;
+      assert.ok(tras1 >= 1, "avisó al cliente");
+      assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+
+      // EXACTAMENTE el mismo webhook otra vez (reintento del proveedor)
+      const r2 = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      assert.equal(r2.status, 200);
+      assert.equal(
+        db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length,
+        tras1,
+        "ni un mensaje duplicado"
+      );
+    });
+  });
+
+  await test("webhook acepta firma en base64 y con prefijo sha256=", async () => {
+    const o = mkSynced("980007", "1907", "34600111888");
+    await withEnv(
+      { DROPEA_WEBHOOK_SECRET: "secreto-de-prueba", DROPEA_WEBHOOK_SIGNATURE_ENCODING: "base64" },
+      () => {
+        const body = JSON.stringify({ order_id: "EXT-980007", status: "in_transit" });
+        const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
+        const r = supplierWebhook.processSupplierWebhook("dropea", body, {
+          "x-signature": `sha256=${firma}`,
+        });
+        assert.equal(r.status, 200);
+        assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "in_transit");
+      }
+    );
+  });
+
+  await test("webhook de un pedido desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({ order_id: "NO-EXISTE", status: "delivered" });
+      const firma = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
+      const r = supplierWebhook.processSupplierWebhook("dropea", body, { "x-signature": firma });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "pedido desconocido");
+    });
+  });
+
+  await test("polling: bloqueado por gates y sin tocar la red", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = await runTrackingPollTick();
+      assert.equal(r.blocked, "SUPPLIER_SYNC_ENABLED=0");
+      assert.equal(r.checked, 0);
+      // Con sync habilitado sigue sin haber provider implementado:
+      await withEnv({ SUPPLIER_SYNC_ENABLED: "1" }, async () => {
+        const r2 = await runTrackingPollTick();
+        assert.equal(r2.blocked, null);
+        assert.equal(r2.checked, 0, "ningún provider configurado: no consulta");
+      });
+      assert.equal(llamadas, 0, "el polling no hizo ninguna petición");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("polling NO consulta pedidos ya entregados/devueltos", () => {
+    const entregados = db
+      .getOrdersForTrackingPolling(Math.floor(Date.now() / 1000) + 999)
+      .filter((o) => ["delivered", "returned", "cancelled"].includes(o.supplier_status_normalized));
+    assert.equal(entregados.length, 0, "los terminales quedan fuera de la cola");
+  });
+
+  await test("piloto de proveedores: hace falta aprobar el pedido UNO A UNO", async () => {
+    const o = mkConfirmed("980008", "1908");
+    await withEnv(
+      {
+        SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+        SUPPLIER_SYNC_ENABLED: "1",
+        SUPPLIER_TEST_MODE: "0",
+        DROPIPRO_WRITE_ENABLED: "1",
+        SUPPLIER_PILOT_MODE: "1",
+      },
+      () => {
+        const g1 = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+        assert.equal(g1.allowed, false);
+        assert.match(g1.reason ?? "", /no está aprobado/);
+
+        assert.equal(db.setOrderSupplierPilotApproval(o.id, true), true);
+        const g2 = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+        // Aprobado, pero el provider sigue sin implementación real:
+        assert.equal(g2.allowed, false);
+        assert.match(g2.reason ?? "", /no está configurado/);
+      }
+    );
+  });
+
+  await test("los avisos de tracking pasan por el outbox y respetan los gates", async () => {
+    const o = mkSynced("980009", "1909", "34799000111"); // fuera de allowlist
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, () => {
+      const r = tracking.processSupplierUpdate(o, {
+        rawStatus: "shipped",
+        trackingNumber: "TRK-BLOCK",
+      });
+      assert.ok(r.events.includes("TRACKING_AVAILABLE"));
+      assert.equal(r.notified.length, 0, "el gate bloquea el envío a un no autorizado");
+      assert.equal(
+        db.getPendingOutbox(999).some((x) => x.phone === "34799000111"),
+        false,
+        "nada en el outbox"
+      );
+    });
+  });
+
+  // ============ 22 · Reinicio del proceso (persistencia) ============
   await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
     const Database = (await import("better-sqlite3")).default;
     const raw = new Database(path.join(tmpDir, "messages.db"));

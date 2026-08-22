@@ -167,9 +167,21 @@ export interface OrderRow {
   supplier_last_checked_at: number | null;
   /** Estado del envío según el proveedor (texto suyo, sin normalizar todavía). */
   supplier_status: string | null;
+  /** Estado tal cual lo devuelve el proveedor, sin interpretar. */
+  supplier_status_raw: string | null;
+  /** Ese estado normalizado a nuestra máquina (ver TrackingStatus). */
+  supplier_status_normalized: string;
   tracking_number: string | null;
   tracking_url: string | null;
   carrier: string | null;
+  tracking_first_seen_at: number | null;
+  tracking_last_checked_at: number | null;
+  /** Sellos de aviso enviado: su presencia impide repetir el WhatsApp. */
+  tracking_notification_sent_at: number | null;
+  out_for_delivery_notification_sent_at: number | null;
+  delivered_notification_sent_at: number | null;
+  /** Autorización manual, pedido a pedido, para el piloto de proveedores. */
+  supplier_pilot_approved: number;
 
   last_error: string | null;
   clarify_count: number;
@@ -246,9 +258,17 @@ const ORDERS_TABLE_BODY = `
       supplier_synced_at INTEGER,
       supplier_last_checked_at INTEGER,
       supplier_status TEXT,
+      supplier_status_raw TEXT,
+      supplier_status_normalized TEXT NOT NULL DEFAULT 'unknown',
       tracking_number TEXT,
       tracking_url TEXT,
       carrier TEXT,
+      tracking_first_seen_at INTEGER,
+      tracking_last_checked_at INTEGER,
+      tracking_notification_sent_at INTEGER,
+      out_for_delivery_notification_sent_at INTEGER,
+      delivered_notification_sent_at INTEGER,
+      supplier_pilot_approved INTEGER NOT NULL DEFAULT 0,
       last_error TEXT,
       clarify_count INTEGER NOT NULL DEFAULT 0,
       shopify_tagged INTEGER NOT NULL DEFAULT 0,
@@ -459,6 +479,20 @@ function build() {
     ["tracking_number", "TEXT"],
     ["tracking_url", "TEXT"],
     ["carrier", "TEXT"],
+    // --- Fase 3: tracking y avisos de postventa ---
+    // Estado tal cual lo manda el proveedor (sin tocar) y su equivalente
+    // normalizado a nuestra máquina de estados (TrackingStatus).
+    ["supplier_status_raw", "TEXT"],
+    ["supplier_status_normalized", "TEXT NOT NULL DEFAULT 'unknown'"],
+    ["tracking_first_seen_at", "INTEGER"],
+    ["tracking_last_checked_at", "INTEGER"],
+    // Sellos de "ya avisado": su presencia impide repetir el WhatsApp.
+    ["tracking_notification_sent_at", "INTEGER"],
+    ["out_for_delivery_notification_sent_at", "INTEGER"],
+    ["delivered_notification_sent_at", "INTEGER"],
+    // Autorización POR PEDIDO para el piloto de proveedores (distinta de la
+    // allowlist de teléfonos de WhatsApp: aquí decide Pedro pedido a pedido).
+    ["supplier_pilot_approved", "INTEGER NOT NULL DEFAULT 0"],
   ];
   const currentCols = new Set(
     (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
@@ -1418,6 +1452,119 @@ export function setOrderSupplierEvaluation(
        WHERE id = ? AND supplier_external_order_id IS NULL`
     )
     .run(platform, syncStatus, reason?.slice(0, 300) ?? null, id);
+}
+
+/** Tipos de aviso de postventa (cada uno con su sello anti-duplicado). */
+export type TrackingNotificationKind = "tracking" | "out_for_delivery" | "delivered";
+
+const COLUMNA_SELLO: Record<TrackingNotificationKind, string> = {
+  tracking: "tracking_notification_sent_at",
+  out_for_delivery: "out_for_delivery_notification_sent_at",
+  delivered: "delivered_notification_sent_at",
+};
+
+/**
+ * RECLAMA el derecho a enviar un aviso, de forma atómica. Devuelve true solo
+ * la primera vez: el UPDATE condicionado a `IS NULL` garantiza que, aunque
+ * dos procesos vean la misma transición a la vez, únicamente uno gane.
+ */
+export function claimTrackingNotification(id: number, kind: TrackingNotificationKind): boolean {
+  const col = COLUMNA_SELLO[kind];
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET ${col} = unixepoch(), ${TOUCH} WHERE id = ? AND ${col} IS NULL`
+    )
+    .run(id);
+  return info.changes > 0;
+}
+
+/** Devuelve el sello (solo para tests o si el envío se descarta después). */
+export function releaseTrackingNotification(id: number, kind: TrackingNotificationKind): void {
+  ctx().db.prepare(`UPDATE orders SET ${COLUMNA_SELLO[kind]} = NULL WHERE id = ?`).run(id);
+}
+
+/** Guarda lo que el proveedor nos contó del envío (estado y tracking). */
+export function updateOrderTracking(
+  id: number,
+  data: {
+    rawStatus: string | null;
+    normalizedStatus: string;
+    trackingNumber?: string | null;
+    trackingUrl?: string | null;
+    carrier?: string | null;
+    firstTracking: boolean;
+  }
+): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET
+        supplier_status_raw = COALESCE(?, supplier_status_raw),
+        supplier_status_normalized = ?,
+        tracking_number = COALESCE(?, tracking_number),
+        tracking_url = COALESCE(?, tracking_url),
+        carrier = COALESCE(?, carrier),
+        tracking_first_seen_at = CASE WHEN ? THEN COALESCE(tracking_first_seen_at, unixepoch()) ELSE tracking_first_seen_at END,
+        tracking_last_checked_at = unixepoch(),
+        ${TOUCH}
+       WHERE id = ?`
+    )
+    .run(
+      data.rawStatus,
+      data.normalizedStatus,
+      data.trackingNumber ?? null,
+      data.trackingUrl ?? null,
+      data.carrier ?? null,
+      data.firstTracking ? 1 : 0,
+      id
+    );
+}
+
+/** Busca un pedido por su id en el proveedor (para procesar sus webhooks). */
+export function getOrderBySupplierExternalId(externalId: string): OrderRow | null {
+  return (
+    (ctx()
+      .db.prepare("SELECT * FROM orders WHERE supplier_external_order_id = ?")
+      .get(externalId) as OrderRow | undefined) ?? null
+  );
+}
+
+/** Autoriza (o retira) este pedido concreto para el piloto de proveedores. */
+export function setOrderSupplierPilotApproval(id: number, approved: boolean): boolean {
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET supplier_pilot_approved = ?, ${TOUCH} WHERE id = ?`)
+    .run(approved ? 1 : 0, id);
+  return info.changes > 0;
+}
+
+/**
+ * Pedidos ya sincronizados cuyo envío sigue vivo: candidatos a consultar
+ * estado. Excluye los terminales (entregado, devuelto, cancelado) para no
+ * preguntar eternamente por algo que ya acabó.
+ */
+export function getOrdersForTrackingPolling(checkedBefore: number, limit = 25): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE supplier_external_order_id IS NOT NULL
+         AND supplier_status_normalized NOT IN ('delivered','returned','cancelled')
+         AND (tracking_last_checked_at IS NULL OR tracking_last_checked_at <= ?)
+       ORDER BY COALESCE(tracking_last_checked_at, 0) ASC LIMIT ?`
+    )
+    .all(checkedBefore, limit) as OrderRow[];
+}
+
+/**
+ * Manda un pedido a revisión de proveedor SIN la guarda de idempotencia:
+ * hace falta para pedidos YA sincronizados que sufren una incidencia o una
+ * devolución (setOrderSupplierEvaluation no los toca a propósito).
+ */
+export function setOrderSupplierReview(id: number, reason: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_sync_status = 'manual_review', supplier_last_error = ?,
+        supplier_last_checked_at = unixepoch(), ${TOUCH} WHERE id = ?`
+    )
+    .run(reason.slice(0, 300), id);
 }
 
 /** Decide qué dirección se usará con el proveedor ('original' | 'proposed'). */

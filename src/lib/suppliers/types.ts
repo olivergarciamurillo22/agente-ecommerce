@@ -133,8 +133,14 @@ export interface SupplierStatusResult {
  */
 export interface SupplierProvider {
   readonly platform: SupplierPlatform;
-  /** ¿Tiene credenciales y endpoints configurados? */
+  /**
+   * ¿Está listo para operar de verdad? Implica cliente HTTP implementado Y
+   * credenciales. Mientras devuelva false, el sistema no intenta ninguna
+   * llamada real: es el freno que impide operar con una API a medias.
+   */
   isConfigured(): boolean;
+  /** ¿Hay credenciales puestas? (informativo: no implica implementación) */
+  hasCredentials(): boolean;
   /** Validación específica del proveedor (además de la genérica de dirección). */
   validateOrder(input: SupplierOrderInput): SupplierValidationResult;
   /** Simulación local: NO hace red. Devuelve lo que se habría enviado. */
