@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Logo from "./Logo";
 
-type View = "orders" | "chats" | "settings";
+type View = "orders" | "chats" | "system" | "settings";
 interface DashboardHeaderProps {
   phone: string | null;
   view: View;
@@ -35,7 +35,7 @@ export default function DashboardHeader({ phone, view, onViewChange }: Dashboard
         <Logo size={20} />
         <div className="h-9 w-px bg-brand-border" />
         <nav className="inline-flex rounded-lg border border-brand-border p-0.5 bg-brand-bg">
-          {(["orders", "chats", "settings"] as const).map((v) => (
+          {(["orders", "chats", "system", "settings"] as const).map((v) => (
             <button
               key={v}
               onClick={() => onViewChange(v)}
@@ -43,7 +43,7 @@ export default function DashboardHeader({ phone, view, onViewChange }: Dashboard
                 view === v ? "bg-brand-gold text-black" : "text-brand-muted hover:text-brand-text"
               }`}
             >
-              {v === "orders" ? "Pedidos" : v === "chats" ? "Chats" : "Ajustes"}
+              {v === "orders" ? "Pedidos" : v === "chats" ? "Chats" : v === "system" ? "Sistema" : "Ajustes"}
             </button>
           ))}
         </nav>

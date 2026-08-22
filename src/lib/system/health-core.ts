@@ -37,6 +37,8 @@ export interface DatabaseHealth {
   journalMode: string;
   dbSizeBytes: number | null;
   walSizeBytes: number | null;
+  /** Aviso si el WAL está muy hinchado respecto a la DB (checkpoint atrasado). */
+  walWarning: string | null;
   pageCount: number | null;
   freelistCount: number | null;
   schemaVersion: number;
@@ -65,6 +67,7 @@ export function getDatabaseHealth(opts?: { full?: boolean }): DatabaseHealth {
     journalMode: "?",
     dbSizeBytes: null,
     walSizeBytes: null,
+    walWarning: null,
     pageCount: null,
     freelistCount: null,
     schemaVersion: 0,
@@ -103,6 +106,20 @@ export function getDatabaseHealth(opts?: { full?: boolean }): DatabaseHealth {
     const p = dbFilePath();
     if (fs.existsSync(p)) h.dbSizeBytes = fs.statSync(p).size;
     if (fs.existsSync(`${p}-wal`)) h.walSizeBytes = fs.statSync(`${p}-wal`).size;
+
+    // WAL mucho mayor que la DB = el checkpoint lleva tiempo sin correr
+    // (pasa con conexiones siempre abiertas). No es grave ni se "arregla"
+    // desde aquí: se compacta solo al reiniciar el contenedor. Solo se avisa.
+    if (
+      h.walSizeBytes !== null &&
+      h.dbSizeBytes !== null &&
+      h.walSizeBytes > 4 * 1024 * 1024 &&
+      h.walSizeBytes > 4 * h.dbSizeBytes
+    ) {
+      h.walWarning =
+        `el WAL (${formatBytes(h.walSizeBytes)}) es bastante mayor que la DB ` +
+        `(${formatBytes(h.dbSizeBytes)}): checkpoint atrasado. Se compacta solo al reiniciar; no es urgente`;
+    }
 
     for (const table of [
       "orders",

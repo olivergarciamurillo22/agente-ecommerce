@@ -26,6 +26,7 @@
     "typecheck": "tsc --noEmit",
     "clean": "rimraf .next data auth",
     "dropi:webhook:simulate": "tsx scripts/dropi-webhook-simulate.ts",
+    "db:health": "tsx scripts/db-health.ts",
     "dropea:doctor": "tsx scripts/dropea-doctor.ts",
     "dropea:mapping:inspect": "tsx scripts/dropea-mapping-inspect.ts"
   },

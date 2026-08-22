@@ -28,6 +28,10 @@ export interface TrackingOverview {
   incidents: number;
   /** Activos sin NINGUNA comprobación en más de staleHours. */
   stale: number;
+  /** Pedidos parados ANTES del proveedor: dirección inservible (city "-"…)
+   *  o pendientes de revisión humana. El hallazgo nº1 de Pedro, visible. */
+  blockedAddress: number;
+  manualReview: number;
   staleHours: number;
   staleOrders: Array<{ orderNumber: string; state: string; hoursSinceCheck: number | null }>;
   message: string;
@@ -42,6 +46,8 @@ export function getTrackingOverview(): TrackingOverview {
     deliveredToday: 0,
     incidents: 0,
     stale: 0,
+    blockedAddress: 0,
+    manualReview: 0,
     staleHours,
     staleOrders: [],
     message: "",
@@ -78,6 +84,18 @@ export function getTrackingOverview(): TrackingOverview {
       .get(hoy) as { n: number };
     base.deliveredToday = entregados.n;
 
+    const parados = db
+      .prepare(
+        `SELECT supplier_sync_status AS s, COUNT(*) AS n FROM orders
+         WHERE supplier_sync_status IN ('blocked_address','manual_review')
+         GROUP BY supplier_sync_status`
+      )
+      .all() as Array<{ s: string; n: number }>;
+    for (const r of parados) {
+      if (r.s === "blocked_address") base.blockedAddress = r.n;
+      if (r.s === "manual_review") base.manualReview = r.n;
+    }
+
     // Stale: activo y sin comprobación (webhook o polling) en > staleHours.
     // Un pedido sin NINGUNA comprobación usa su primer avistamiento o alta.
     const limite = t - staleHours * 3600;
@@ -107,6 +125,9 @@ export function getTrackingOverview(): TrackingOverview {
   if (base.stale > 0) {
     base.status = "warning";
     base.message = `${base.stale} envío(s) activos sin noticias en más de ${staleHours} h`;
+  } else if (base.blockedAddress > 0) {
+    base.status = "warning";
+    base.message = `${base.blockedAddress} pedido(s) con dirección inservible (la ciudad "-" de Releasit): no pueden ir al proveedor`;
   } else if (base.incidents > 0) {
     base.status = "warning";
     base.message = `${base.incidents} incidencia(s) abiertas`;
