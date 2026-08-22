@@ -19,6 +19,7 @@ import {
   DropeaApiError,
 } from "./client";
 import { normalizeDropeaStatus } from "./status-map";
+import { dropeaCreateMode } from "./create-gate";
 import type { DropeaCreateOrderRequest, DropeaOrder, DropeaProduct } from "./types";
 import {
   ProviderNotConfiguredError,
@@ -130,11 +131,19 @@ export const dropeaProvider: SupplierProvider = {
    * NOTA: crear deja el pedido en PENDING. Para que llegue al proveedor hace
    * falta `confirmDropeaOrder()`, que es una decisión aparte y consciente.
    */
-  async createOrder(): Promise<SupplierCreateResult> {
+  /**
+   * Crear pedido. HOY BLOQUEADO por `canCreateDropeaOrder()`: con
+   * DROPEA_CREATE_MODE=external_app los pedidos los crea su app de Shopify.
+   *
+   * La ruta técnica está preparada (mapper, idempotencia, máquina de estados
+   * create→confirm) pero no se ejecuta hasta que todas las llaves se abran.
+   */
+  async createOrder(input: SupplierOrderInput): Promise<SupplierCreateResult> {
+    // Sin un pedido concreto no se puede evaluar el gate: se falla cerrado.
     throw new ProviderNotConfiguredError(
       PLATFORM,
-      "la creación de pedidos en Dropea aún no está habilitada: faltan store_id y el " +
-        "emparejado de productos con sus variant_id, y hay que resolver la integración antigua"
+      `creación bloqueada (modo ${dropeaCreateMode()}). Usa createDropeaOrderForOrder(), ` +
+        `que evalúa el gate sobre el pedido ${input.shopifyOrderId}`
     );
   },
 

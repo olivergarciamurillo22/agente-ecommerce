@@ -40,6 +40,8 @@ export interface OrderItem {
   out_for_delivery_notification_sent_at: number | null;
   delivered_notification_sent_at: number | null;
   supplier_pilot_approved: number;
+  supplier_create_phase: string;
+  supplier_delivery_note_status: string;
   last_error: string | null;
   shopify_tagged: number;
   whatsapp_sent_at: number | null;
@@ -574,6 +576,18 @@ export default function OrdersPanel() {
                 <div className={supplierLabel(detail).cls}>{supplierLabel(detail).label}</div>
                 {detail.supplier_last_error && (
                   <div className="text-xs text-brand-muted mt-1">{detail.supplier_last_error}</div>
+                )}
+                <div className="text-xs text-brand-muted mt-1">
+                  Fase de creación: {detail.supplier_create_phase}
+                  {detail.supplier_pilot_approved === 1 && (
+                    <span className="text-violet-300"> · piloto aprobado 🔓</span>
+                  )}
+                </div>
+                {detail.supplier_delivery_note_status === "unsupported" && (
+                  <div className="text-xs text-amber-300 mt-1">
+                    ⚠️ La nota del repartidor no se puede enviar a este proveedor: hay que
+                    comunicarla a mano.
+                  </div>
                 )}
                 {detail.supplier_external_order_id && (
                   <div className="text-xs mt-1">

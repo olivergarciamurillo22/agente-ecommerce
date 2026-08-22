@@ -2794,7 +2794,336 @@ async function main(): Promise<void> {
     });
   });
 
-  // ============ 24 · Reinicio del proceso (persistencia) ============
+  // ============ 24 · DROPEA: modo de creación, mapping y piloto ============
+  console.log("· Dropea — modo de creación (external_app) y piloto");
+
+  const createGate = await import("../src/lib/suppliers/dropea/create-gate");
+  const createOrderMod = await import("../src/lib/suppliers/dropea/create-order");
+  const { MISSING_EMAIL_CODE } = await import("../src/lib/suppliers/dropea/mapper");
+
+  /** Todas las llaves abiertas MENOS la que se quiera probar. */
+  const llavesAbiertas = {
+    APP_MODE: "production",
+    EMERGENCY_STOP: "0",
+    SUPPLIER_SYNC_ENABLED: "1",
+    SUPPLIER_TEST_MODE: "1",
+    TEST_MODE: "1",
+    TEST_PHONE_ALLOWLIST: "34600111222",
+    LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
+    DROPEA_API_KEY: "clave",
+    DROPEA_API_ENABLED: "1",
+    DROPEA_WRITE_ENABLED: "1",
+    DROPEA_CREATE_MODE: "our_api",
+    DROPEA_LEGACY_CREATE_ACTIVE: "0",
+    SUPPLIER_PILOT_MODE: "1",
+  };
+
+  await test("external_app (por defecto) BLOQUEA la creación", async () => {
+    const o = mkConfirmed("991001", "3001");
+    db.setOrderSupplierPilotApproval(o.id, true);
+    // Por defecto, sin tocar nada:
+    const porDefecto = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+    assert.equal(porDefecto.allowed, false);
+    assert.equal(createGate.dropeaCreateMode(), "external_app");
+
+    // Y aun con TODAS las demás llaves abiertas:
+    await withEnv({ ...llavesAbiertas, DROPEA_CREATE_MODE: "external_app" }, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, false);
+      assert.equal(g.blocker, "create_mode_external_app");
+      assert.match(g.reason ?? "", /app oficial/);
+    });
+  });
+
+  await test("la app oficial activa bloquea aunque el modo sea our_api", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    await withEnv({ ...llavesAbiertas, DROPEA_LEGACY_CREATE_ACTIVE: "1" }, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, false);
+      assert.equal(g.blocker, "legacy_app_active");
+    });
+    // Sin la variable puesta se asume que sigue activa (lo peor):
+    await withEnv({ ...llavesAbiertas, DROPEA_LEGACY_CREATE_ACTIVE: undefined }, () => {
+      assert.equal(createGate.canCreateDropeaOrder(db.getOrderById(o.id)!).blocker, "legacy_app_active");
+    });
+  });
+
+  await test("matriz completa: quitar CUALQUIER llave bloquea la creación", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    // Con todas abiertas, el gate deja pasar:
+    await withEnv(llavesAbiertas, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, true, `esperaba permitido, bloqueó: ${g.blocker}`);
+    });
+    // Quitando una cada vez:
+    const casos: Array<[string, Record<string, string | undefined>, string]> = [
+      ["emergency stop", { EMERGENCY_STOP: "1" }, "emergency_stop"],
+      ["sync general", { SUPPLIER_SYNC_ENABLED: "0" }, "supplier_sync"],
+      ["api deshabilitada", { DROPEA_API_ENABLED: "0" }, "api_disabled"],
+      ["escritura", { DROPEA_WRITE_ENABLED: "0" }, "write_disabled"],
+      ["candado general", { LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "0" }, "legacy_integrations"],
+      ["test mode en piloto", { TEST_MODE: "0" }, "pilot_without_test_mode"],
+    ];
+    for (const [desc, override, blocker] of casos) {
+      await withEnv({ ...llavesAbiertas, ...override }, () => {
+        const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+        assert.equal(g.allowed, false, desc);
+        assert.equal(g.blocker, blocker, desc);
+      });
+    }
+  });
+
+  await test("piloto sin aprobar y pedido sin confirmar bloquean", async () => {
+    const sinAprobar = mkConfirmed("991002", "3002");
+    await withEnv(llavesAbiertas, () => {
+      assert.equal(
+        createGate.canCreateDropeaOrder(db.getOrderById(sinAprobar.id)!).blocker,
+        "pilot_not_approved"
+      );
+    });
+    const sinConfirmar = mkOrder("991003", "3003", "34600111222");
+    db.setOrderSupplierPilotApproval(sinConfirmar.id, true);
+    await withEnv(llavesAbiertas, () => {
+      assert.equal(
+        createGate.canCreateDropeaOrder(db.getOrderById(sinConfirmar.id)!).blocker,
+        "not_confirmed"
+      );
+    });
+  });
+
+  await test("createDropeaOrderForOrder NO toca la red en modo external_app", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = await createOrderMod.createDropeaOrderForOrder(
+        db.getOrderById(o.id)!,
+        { storeId: 1, variantByTitle: new Map() },
+        {
+          shopifyOrderId: "991001",
+          orderNumber: "3001",
+          customerName: "X Y",
+          phone: "34600111222",
+          email: "x@example.com",
+          finalAddress: {
+            line1: "C 1",
+            line2: null,
+            city: "Madrid",
+            province: "Madrid",
+            postalCode: "28001",
+            country: "ES",
+          },
+          addressSource: "original",
+          items: [{ title: "P", quantity: 1, price: null, sku: null }],
+          total: "10",
+          currency: "EUR",
+          codAmount: "10",
+          deliveryNote: null,
+        }
+      );
+      assert.equal(r.ok, false);
+      assert.equal(r.blocker, "create_mode_external_app");
+      assert.equal(llamadas, 0, "ni una petición a Dropea");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  console.log("· Dropea — idempotencia, adopción y mapping");
+
+  await test("la clave de idempotencia es ESTABLE y válida para su contrato", () => {
+    const k1 = createOrderMod.buildIdempotencyKey("18066042290506", "create");
+    const k2 = createOrderMod.buildIdempotencyKey("18066042290506", "create");
+    assert.equal(k1, k2, "misma entrada → misma clave (nunca aleatoria)");
+    assert.equal(k1, "casamable-shopify-18066042290506-create");
+    assert.notEqual(k1, createOrderMod.buildIdempotencyKey("18066042290506", "confirm"));
+    // Debe cumplir el patrón del contrato: ^[A-Za-z0-9_-]{1,255}$
+    for (const k of [k1, createOrderMod.buildIdempotencyKey("#3305/raro", "confirm")]) {
+      assert.match(k, /^[A-Za-z0-9_-]{1,255}$/);
+    }
+  });
+
+  await test("máquina de estados create→confirm sobrevive a un reinicio", () => {
+    const o = mkConfirmed("991010", "3010");
+    const key = createOrderMod.buildIdempotencyKey("991010", "create");
+
+    // Reclamar la creación: solo el primero gana.
+    assert.equal(db.claimSupplierCreate(o.id, key), true);
+    assert.equal(db.claimSupplierCreate(o.id, key), false, "no se reclama dos veces");
+    let row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "creating");
+    assert.equal(row.supplier_idempotency_key, key, "la clave queda persistida");
+
+    // Simular: creado en Dropea y CAÍDA justo después.
+    db.markSupplierCreated(o.id, "dropea", "77001");
+    row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "created");
+    assert.equal(row.supplier_external_order_id, "77001");
+
+    // Tras el reinicio, intentar crear otra vez NO procede:
+    assert.equal(db.claimSupplierCreate(o.id, key), false, "jamás un segundo create");
+
+    // Confirmar sí procede, una sola vez.
+    const ck = createOrderMod.buildIdempotencyKey("991010", "confirm");
+    assert.equal(db.claimSupplierConfirm(o.id, ck), true);
+    assert.equal(db.claimSupplierConfirm(o.id, ck), false);
+    db.markSupplierConfirmed(o.id);
+    assert.equal(db.getOrderById(o.id)!.supplier_create_phase, "confirmed");
+    // Y la clave del confirm también quedó guardada:
+    assert.equal(db.getOrderById(o.id)!.supplier_confirm_idempotency_key, ck);
+  });
+
+  await test("un fallo de creación NO borra la clave de idempotencia", () => {
+    const o = mkConfirmed("991011", "3011");
+    const key = createOrderMod.buildIdempotencyKey("991011", "create");
+    db.claimSupplierCreate(o.id, key);
+    db.markSupplierCreateFailed(o.id, "error de red");
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "failed");
+    assert.equal(row.supplier_idempotency_key, key, "se reutiliza en el reintento");
+    assert.equal(row.supplier_sync_attempts, 1);
+    // Y se puede reintentar (fase failed sí permite reclamar):
+    assert.equal(db.claimSupplierCreate(o.id, key), true);
+  });
+
+  await test("mapping de productos: exacto se usa, ausente bloquea", () => {
+    const id = db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "LIMPIADOR-ULTRA",
+      shopify_title: "Limpiador Ultrasónico Multiusos",
+      supplier_variant_id: "42",
+      supplier_unit_price: 17.49,
+    });
+    assert.ok(id > 0);
+    const todos = db.listSupplierProductMappings("dropea");
+    const m = todos.find((x) => x.shopify_sku === "LIMPIADOR-ULTRA")!;
+    assert.equal(m.supplier_variant_id, "42");
+    assert.equal(m.supplier_unit_price, 17.49);
+    assert.equal(m.active, 1);
+
+    // Upsert por el mismo SKU actualiza en vez de duplicar:
+    db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "LIMPIADOR-ULTRA",
+      supplier_variant_id: "43",
+    });
+    const tras = db.listSupplierProductMappings("dropea").filter((x) => x.shopify_sku === "LIMPIADOR-ULTRA");
+    assert.equal(tras.length, 1, "no duplica");
+    assert.equal(tras[0].supplier_variant_id, "43", "actualiza");
+    db.deleteSupplierProductMapping(tras[0].id);
+  });
+
+  await test("email ausente bloquea con su código explícito", () => {
+    const base = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: null,
+      finalAddress: {
+        line1: "C 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "P", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: null,
+    };
+    const ctx = { storeId: 1, variantByTitle: new Map([["P", { variantId: 1, unitPrice: 10 }]]) };
+    const r = mapToDropeaCreateOrder(base, ctx);
+    assert.equal(r.request, null);
+    assert.ok(r.errors.some((e) => e.includes(MISSING_EMAIL_CODE)));
+    // Con email, pasa:
+    assert.ok(mapToDropeaCreateOrder({ ...base, email: "a@b.com" }, ctx).request);
+  });
+
+  await test("delivery note: se marca unsupported y es configurable bloquear", async () => {
+    const conNota = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: "a@b.com",
+      finalAddress: {
+        line1: "C 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "P", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: "Llamar antes de subir",
+    };
+    const ctx = { storeId: 1, variantByTitle: new Map([["P", { variantId: 1, unitPrice: 10 }]]) };
+
+    // Por defecto: no bloquea, pero queda registrado como unsupported.
+    const r = mapToDropeaCreateOrder(conNota, ctx);
+    assert.equal(r.deliveryNoteStatus, "unsupported");
+    assert.ok(r.request, "no bloquea por defecto");
+    assert.equal(JSON.stringify(r.request).includes("Llamar antes de subir"), false, "no se cuela en otro campo");
+
+    // Sin nota: not_present
+    assert.equal(mapToDropeaCreateOrder({ ...conNota, deliveryNote: null }, ctx).deliveryNoteStatus, "not_present");
+
+    // Configurable: puede bloquear
+    await withEnv({ DROPEA_BLOCK_ON_DELIVERY_NOTE: "1" }, () => {
+      const b = mapToDropeaCreateOrder(conNota, ctx);
+      assert.equal(b.request, null);
+      assert.match(b.errors.join(" "), /nota para el repartidor/);
+    });
+
+    // Y el estado se persiste en el pedido:
+    const o = mkConfirmed("991020", "3020");
+    db.setOrderDeliveryNoteStatus(o.id, "unsupported");
+    assert.equal(db.getOrderById(o.id)!.supplier_delivery_note_status, "unsupported");
+  });
+
+  await test("webhook duplicado por event_id → un solo efecto", async () => {
+    const o = mkSynced("991030", "3030", "34600111222");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111222").length;
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({
+        topic: "order.status.changed",
+        market: "ES",
+        event_id: "evento-unico-123",
+        event_at: "2026-08-22T10:00:00.000Z",
+        resource_id: 991030,
+        resource: { id: 991030, status: "SHIPPING", sub_status: "SHIPPED", tracking_number: "TRK-DUP" },
+      });
+      const firma =
+        "sha256=" + crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
+
+      const antes = contar();
+      const r1 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r1.status, 200);
+      assert.equal(r1.body.duplicate, undefined);
+      const tras1 = contar();
+      assert.ok(tras1 > antes, "avisó del tracking");
+
+      // Mismo event_id otra vez: se corta ANTES de procesar nada.
+      const r2 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r2.status, 200);
+      assert.equal(r2.body.duplicate, true, "detectado como repetido por event_id");
+      assert.equal(contar(), tras1, "sin efectos");
+    });
+  });
+
+  // ============ 25 · Reinicio del proceso (persistencia) ============
   await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
     const Database = (await import("better-sqlite3")).default;
     const raw = new Database(path.join(tmpDir, "messages.db"));

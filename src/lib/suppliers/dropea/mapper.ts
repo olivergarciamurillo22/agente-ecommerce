@@ -41,12 +41,29 @@ function toCountryCode(country: string | null): string {
   return c.toUpperCase().slice(0, 2);
 }
 
+/** Qué ha pasado con la nota del repartidor frente a este proveedor. */
+export type DeliveryNoteStatus = "not_present" | "unsupported" | "manually_handled" | "sent";
+
+/** Código de validación para el email ausente (se usa en panel y tests). */
+export const MISSING_EMAIL_CODE = "missing_customer_email";
+
+/**
+ * ¿Un pedido con nota para el repartidor debe BLOQUEARSE en Dropea?
+ * Por defecto NO: se registra como "unsupported" y se avisa, pero el pedido
+ * puede seguir. Configurable porque es una decisión de negocio.
+ */
+export function blockOnUnsupportedDeliveryNote(): boolean {
+  return process.env.DROPEA_BLOCK_ON_DELIVERY_NOTE === "1";
+}
+
 export interface DropeaMappingResult {
   request: DropeaCreateOrderRequest | null;
   /** Motivos por los que NO se puede construir el pedido. */
   errors: string[];
   /** Avisos que no impiden crear, pero conviene conocer. */
   warnings: string[];
+  /** Qué pasó con la nota del repartidor. */
+  deliveryNoteStatus: DeliveryNoteStatus;
 }
 
 export interface DropeaMappingContext {
@@ -107,22 +124,35 @@ export function mapToDropeaCreateOrder(
   const phone = toInternationalPhone(input.phone);
   if (!phone) errors.push("falta el teléfono");
 
-  // Su contrato exige email. Si el pedido no trae (habitual en Releasit),
-  // se avisa: hay que decidir si usar uno de contacto de la tienda.
+  // Su contrato exige email y los pedidos de Releasit suelen venir sin él.
+  // Se marca con un código explícito para poder contarlo y filtrarlo.
   const email = (input.email ?? "").trim();
   if (!email) {
-    errors.push("Dropea exige email del cliente y este pedido no tiene");
+    errors.push(
+      `${MISSING_EMAIL_CODE}: Dropea exige email del cliente y este pedido no lo trae ` +
+        "(decisión pendiente: ver docs/DROPEA-API-CONTRACT.md)"
+    );
   }
 
   // --- La nota del repartidor no cabe en su API ---
+  // NO se descarta en silencio ni se cuela en otro campo: se marca como
+  // "unsupported" para que quede en el panel y alguien la gestione.
+  let deliveryNoteStatus: DeliveryNoteStatus = "not_present";
   if (input.deliveryNote && input.deliveryNote.trim()) {
+    deliveryNoteStatus = "unsupported";
     warnings.push(
       "la nota del cliente para el repartidor NO se envía: la API de Dropea no tiene " +
         "ningún campo para observaciones. Hay que comunicarla por otra vía."
     );
+    if (blockOnUnsupportedDeliveryNote()) {
+      errors.push(
+        "el pedido lleva nota para el repartidor y Dropea no admite ese dato " +
+          "(DROPEA_BLOCK_ON_DELIVERY_NOTE=1)"
+      );
+    }
   }
 
-  if (errors.length > 0) return { request: null, errors, warnings };
+  if (errors.length > 0) return { request: null, errors, warnings, deliveryNoteStatus };
 
   const shipping_address: DropeaShippingAddress = {
     first_name: first,
@@ -152,6 +182,7 @@ export function mapToDropeaCreateOrder(
     },
     errors: [],
     warnings,
+    deliveryNoteStatus,
   };
 }
 

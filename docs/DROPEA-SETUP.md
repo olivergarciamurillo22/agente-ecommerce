@@ -5,75 +5,174 @@ manda por chat ni por WhatsApp: se pegan directamente en el `.env` del NAS.**
 
 ---
 
+## Lo primero: quién crea los pedidos
+
+**Hoy los pedidos en Dropea los crea su app oficial de Shopify, no nosotros.**
+Nuestro sistema lee, sigue el envío y avisa al cliente por WhatsApp, pero
+**nunca crea un pedido**. Eso lo impone el código, no solo esta guía:
+
+```env
+DROPEA_CREATE_MODE=external_app     # la app oficial crea; nosotros no
+DROPEA_LEGACY_CREATE_ACTIVE=1       # la app oficial sigue activa
+```
+
+Son dos llaves separadas a propósito: aunque alguien cambiara el modo, la
+segunda seguiría bloqueando la creación. Si creásemos pedidos mientras su app
+también lo hace, **cada compra se enviaría dos veces al cliente**.
+
+---
+
+## Configuración completa del `.env` del NAS
+
+```env
+# API de Dropea (solo lectura por ahora)
+DROPEA_MARKET=es
+DROPEA_API_KEY=            # ⬅ tu API key del panel
+DROPEA_API_ENABLED=1       # permite CONSULTAR (seguro: no modifica nada)
+DROPEA_WRITE_ENABLED=0     # NO permite crear ni cancelar
+
+# Webhooks (avisos de estado y tracking)
+DROPEA_WEBHOOK_SECRET=     # ⬅ el signing secret, NO la API key
+
+# Quién crea los pedidos
+DROPEA_CREATE_MODE=external_app
+DROPEA_LEGACY_CREATE_ACTIVE=1
+```
+
+---
+
 ## Dos credenciales que NO son lo mismo
 
 Es el error más fácil de cometer, así que conviene tenerlo claro:
 
-| | **API key** | **Secreto de webhook (HMAC)** |
+| | **API key** | **Signing secret (webhooks)** |
 |---|---|---|
-| ¿Para qué sirve? | Que *nosotros* llamemos a su API (crear pedidos, consultar estados) | Comprobar que un aviso que llega *de ellos* es auténtico |
+| ¿Para qué sirve? | Que *nosotros* consultemos su API | Comprobar que un aviso que llega *de ellos* es auténtico |
 | ¿Quién la usa? | Nuestro servidor, al salir | Nuestro servidor, al recibir |
-| ¿Dónde se crea? | Panel de API keys | Pantalla de webhooks |
-| Variable en el `.env` | `DROPEA_API_KEY` | `DROPEA_WEBHOOK_SECRET` |
+| ¿Dónde sale? | Panel → Settings → API Keys | Se muestra **al crear la API key**, junto a ella |
+| Variable | `DROPEA_API_KEY` | `DROPEA_WEBHOOK_SECRET` |
+
+Ambas se muestran **una sola vez**. Si se pierden, hay que crear otra key.
+Un detalle de su contrato: el signing secret **es el mismo para todos los
+webhooks** creados con esa API key.
 
 Si se cruzan, no funciona ninguna de las dos cosas.
 
 ---
 
-## Dropea
+## Primera prueba: diagnóstico de solo lectura
 
-### 1 · Crear la API key
+Con la API key puesta y `DROPEA_API_ENABLED=1`, en el NAS:
 
-En **https://v2.app.dropea.com/es/dropshipper/api-keys** crea una clave y
-pégala en el `.env` del NAS:
-
-```env
-DROPEA_API_KEY=...
+```bash
+docker compose exec casamable-agent npm run dropea:doctor
 ```
 
-> ⚠️ Todavía **no podemos usarla**: nos falta su documentación oficial para
-> saber a qué URL llamar y con qué formato. Ver `docs/HANDOFF-PROVEEDORES.md`.
-> Tener la clave puesta no activa nada.
+Te dirá si la autenticación funciona y te dará dos datos que necesitamos:
 
-### 2 · El secreto del webhook
+- **`store_id`** de tu tienda (hace falta para crear pedidos algún día).
+- **El catálogo con los `variant_id`** de cada producto.
 
-En la pantalla **Webhooks for "Casamable"** (la de *"Subscribing to webhooks
-delivers HMAC-signed POSTs"*) estará el secreto de firma. Va a:
+No modifica nada, y no imprime credenciales ni direcciones de clientes.
 
-```env
-DROPEA_WEBHOOK_SECRET=...
+Después, para emparejar nuestros productos con los suyos:
+
+```bash
+docker compose exec casamable-agent npm run dropea:mapping:inspect
 ```
 
-### 3 · La URL del webhook
+Solo mira y compara. Con `-- --apply` guarda los emparejados **exactos por
+SKU**; los dudosos nunca se guardan solos, porque un emparejado equivocado
+enviaría al cliente un producto distinto del que compró.
 
-Cuando toque, la URL de destino será:
+---
+
+## Los avisos de Dropea (webhooks)
+
+Son los que hacen que el cliente reciba el WhatsApp de "tu pedido va en
+camino" sin que nadie mire nada a mano.
+
+**URL a registrar en su panel:**
 
 ```text
 https://agente.casamable.es/api/webhooks/dropea
 ```
 
-Y los topics a suscribir:
+**Eventos a suscribir:** `order.created`, `order.status.changed`,
+`order.cancelled`, y los `issue.*` (incidencias). Cualquier otro evento que
+llegue se ignora sin efectos, así que suscribir de más no rompe nada.
 
-```text
-ORDER_STATUS_CHANGED     ← el importante: dispara los avisos al cliente
-ORDER_CREATED
-ORDER_CANCELLED
-ISSUE_CREATED            ← incidencias (no escriben al cliente, solo avisan a Pedro)
-ISSUE_RESOLVED
-ISSUE_STATUS_CHANGED
+### ⏳ Cuándo configurarlo
+
+**No antes de que el sistema esté corriendo en el NAS con `DROPEA_WEBHOOK_SECRET`
+puesto.** El orden correcto es:
+
+1. Crear la API key → guardar las **dos** credenciales.
+2. Pegarlas en el `.env` del NAS y reiniciar el contenedor.
+3. Comprobar con `dropea:doctor` que la API responde.
+4. **Entonces** registrar el webhook en su panel.
+
+Si se registra antes, Dropea empieza a mandar avisos que nuestro servidor
+rechaza por firma inválida. No es peligroso (rechazar es lo correcto), pero
+esos avisos se pierden: no se reintentan solos.
+
+### Qué pasa si la firma no cuadra
+
+Se rechaza con 401 y **no se toca ningún pedido ni se manda ningún WhatsApp**.
+Es el comportamiento buscado: preferimos perder un aviso a mandarle a un
+cliente un mensaje basado en algo que no sabemos si viene de Dropea.
+
+Si ves 401 repetidos en los logs, casi seguro que `DROPEA_WEBHOOK_SECRET`
+tiene la API key en vez del signing secret.
+
+---
+
+## Cómo mirar los logs
+
+Todo lo de proveedores va marcado con `[SUPPLIER]`:
+
+```bash
+# Ver en vivo
+docker compose logs -f casamable-agent | grep SUPPLIER
+
+# Últimas 200 líneas de todo
+docker compose logs --tail 200 casamable-agent
 ```
 
-### 4 · ⛔ Cuándo NO suscribirlo todavía
+Qué esperar de cada cosa:
 
-**No suscribas el webhook hasta que se cumplan las tres cosas:**
+| Lo que ves | Qué significa |
+|---|---|
+| `webhook Dropea order.status.changed ...` | Llegó un aviso y se aplicó |
+| `event_id repetido — ignorado` | Normal: Dropea reintenta, nosotros no duplicamos |
+| `topic desconocido "..." — ignorado` | Un evento que no manejamos. Inofensivo |
+| `firma inválida` / 401 | El `DROPEA_WEBHOOK_SECRET` no es el correcto |
+| `incidencia de Dropea` | Ese pedido necesita que alguien lo mire |
 
-1. El secreto está puesto en el `.env` del NAS y el contenedor reiniciado.
-2. Tenemos la documentación de Dropea y hemos confirmado el nombre exacto de
-   la cabecera de la firma y su codificación.
-3. Está resuelto el asunto de la integración antigua (ver más abajo).
+Los logs **no** imprimen credenciales ni direcciones de clientes: solo el
+número de pedido.
 
-Si se suscribe antes, sus avisos llegarán y serán rechazados. No es grave
-—no se pierde nada, ellos reintentan— pero no sirve de nada.
+Para ver el estado de todos los frenos sin entrar por SSH:
+`https://agente.casamable.es/api/suppliers/status`
+
+---
+
+## ⚠️ Antes de reiniciar producción
+
+`docker compose restart` **corta la sesión de WhatsApp durante unos segundos**
+mientras Baileys se reconecta. No borra nada (la sesión sobrevive en `auth/`),
+pero durante ese hueco no salen mensajes.
+
+Por eso:
+
+- **No reinicies a ciegas** para "ver si se arregla". Mira los logs primero.
+- Evita reiniciar entre las 10:00 y las 21:00, que es cuando salen los
+  mensajes a clientes.
+- Después de reiniciar, comprueba que WhatsApp volvió:
+  `https://agente.casamable.es/api/health`
+
+Para apagar algo, cambiar el `.env` y reiniciar es más seguro que tocar
+código o borrar el contenedor.
 
 ---
 
@@ -163,3 +262,19 @@ DROPIPRO_WEBHOOK_ENABLED=0    # deja de aceptar avisos de Dropi
 ```
 
 Después, en el NAS: `docker compose restart casamable-agent`.
+
+---
+
+## Resumen de en qué punto estamos
+
+| | Estado |
+|---|---|
+| Leer pedidos y estados de Dropea | ✅ listo (solo falta la API key) |
+| Recibir avisos de Dropea | ✅ listo (solo falta el signing secret) |
+| Avisar al cliente por WhatsApp del envío | ✅ listo |
+| **Crear pedidos en Dropea** | ⛔ **bloqueado a propósito** — lo hace su app oficial |
+| Recibir avisos de Dropi | ⛔ bloqueado — falta saber si firman |
+| Traducir los estados de Dropi | ⛔ falta la lista de `status_id` |
+
+Lo bloqueado no es que falte programarlo: está hecho y probado, pero apagado
+hasta tener el dato que falta.

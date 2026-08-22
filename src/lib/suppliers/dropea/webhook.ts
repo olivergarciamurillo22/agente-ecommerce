@@ -16,6 +16,7 @@
 import crypto from "node:crypto";
 import pino from "pino";
 import {
+  claimWebhookEvent,
   getOrderByShopifyId,
   getOrderBySupplierExternalId,
   getOrderByTrackingNumber,
@@ -208,6 +209,22 @@ export function processDropeaWebhook(
   }
 
   const topic = envelope.topic;
+
+  // 3.5. DEDUPLICACIÓN por event_id, como pide su contrato ("store it for
+  //      idempotent processing"). Un reintento de Dropea no vuelve a
+  //      producir efectos, ni siquiera parciales.
+  if (typeof envelope.event_id === "string" && envelope.event_id.trim()) {
+    const nuevo = claimWebhookEvent(
+      envelope.event_id.trim(),
+      "dropea",
+      topic,
+      String(envelope.resource_id)
+    );
+    if (!nuevo) {
+      logger.info(`[SUPPLIER] webhook Dropea ${topic} event_id repetido — ignorado`);
+      return { status: 200, body: { ok: true, duplicate: true } };
+    }
+  }
 
   // 4. Dispatcher explícito por topic (unión discriminada, sin heurísticas).
   if (!isDropeaTopic(topic)) {

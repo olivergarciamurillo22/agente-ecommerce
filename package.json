@@ -26,7 +26,8 @@
     "typecheck": "tsc --noEmit",
     "clean": "rimraf .next data auth",
     "dropi:webhook:simulate": "tsx scripts/dropi-webhook-simulate.ts",
-    "dropea:doctor": "tsx scripts/dropea-doctor.ts"
+    "dropea:doctor": "tsx scripts/dropea-doctor.ts",
+    "dropea:mapping:inspect": "tsx scripts/dropea-mapping-inspect.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
