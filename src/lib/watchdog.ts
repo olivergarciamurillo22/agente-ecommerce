@@ -26,6 +26,7 @@ import {
 } from "./db";
 import { completeText } from "./openrouter";
 import { canSendRealWhatsApp } from "./safety";
+import { heartbeat } from "./system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -221,6 +222,7 @@ async function runDailyAudit(): Promise<void> {
 }
 
 async function tick(): Promise<void> {
+  heartbeat("scheduler:watchdog"); // latido para el Control Center (best-effort)
   try {
     await checkMute();
   } catch (err) {

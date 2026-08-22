@@ -24,6 +24,7 @@ import { getProvider, supplierSyncEnabled } from "../suppliers/service";
 import { ProviderNotConfiguredError, type SupplierPlatform } from "../suppliers/types";
 import { processSupplierUpdate } from "./service";
 import { isTerminalTracking, type TrackingStatus } from "./types";
+import { runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -127,7 +128,12 @@ export function startTrackingScheduler(): void {
   timer = setInterval(() => {
     if (ticking) return;
     ticking = true;
-    void runTrackingPollTick()
+    // Instrumentación best-effort (latido + scheduler_runs). "checked" es el
+    // trabajo real; los skipped no cuentan como procesado.
+    void runInstrumented("scheduler:tracking", "tracking", async () => {
+      const r = await runTrackingPollTick();
+      return { processed: r.checked, errors: 0 };
+    })
       .catch((err) =>
         logger.error(
           { err: err instanceof Error ? err.message : String(err) },

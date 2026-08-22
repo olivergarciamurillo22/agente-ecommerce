@@ -17,6 +17,7 @@ import {
 import { normalizeSupplierStatus } from "./normalizer";
 import { notifyTrackingEvent } from "./notifications";
 import type { SupplierUpdate, TrackingEvent, TrackingStatus } from "./types";
+import { logIntegrationEvent } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -98,6 +99,16 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
     if (newStatus === "returned") events.push("RETURNED");
     logger.info(
       `[TRACKING] #${order.shopify_order_number} ${previousStatus} → ${newStatus}`
+    );
+    // Feed del Control Center: qué cambió, en qué pedido, desde qué proveedor.
+    logIntegrationEvent(
+      (order.supplier_platform === "dropea" || order.supplier_platform === "dropi"
+        ? order.supplier_platform
+        : "tracking"),
+      "tracking_update",
+      newStatus === "incident" || newStatus === "returned" ? "warning" : "info",
+      `envío: ${previousStatus} → ${newStatus}`,
+      order.shopify_order_number
     );
   }
 

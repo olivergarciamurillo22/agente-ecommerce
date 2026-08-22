@@ -173,6 +173,7 @@ export async function dropeaRequest<T>(opts: DropeaRequestOptions): Promise<T> {
   } catch (err) {
     // Sin respuesta: no sabemos si llegó a procesarse. NUNCA marcar como
     // retryable una mutación aquí — podría haberse creado el pedido.
+    registrarSalud(false, `sin respuesta de Dropea (${opts.path})`);
     throw new DropeaApiError({
       message: `no se pudo contactar con Dropea: ${err instanceof Error ? err.message : "error de red"}`,
       httpStatus: 0,
@@ -184,6 +185,9 @@ export async function dropeaRequest<T>(opts: DropeaRequestOptions): Promise<T> {
   const restantes = res.headers.get("x-ratelimit-remaining");
   if (restantes !== null && Number(restantes) <= 5) {
     logger.warn(`[SUPPLIER] Dropea: quedan ${restantes} peticiones en la ventana actual`);
+  }
+  if (res.status === 429) {
+    registrarRateLimit();
   }
 
   const texto = await res.text();
@@ -202,12 +206,44 @@ export async function dropeaRequest<T>(opts: DropeaRequestOptions): Promise<T> {
   }
 
   if (!res.ok) {
-    throw construirError(res.status, envelope, res.headers.get("retry-after"));
+    const error = construirError(res.status, envelope, res.headers.get("retry-after"));
+    registrarSalud(false, error.message);
+    throw error;
   }
 
   if (!envelope || envelope.success === false) {
-    throw construirError(res.status, envelope, null);
+    const error = construirError(res.status, envelope, null);
+    registrarSalud(false, error.message);
+    throw error;
   }
 
+  registrarSalud(true);
   return envelope.data as T;
+}
+
+// --- Observabilidad best-effort (import perezoso: este cliente también corre
+// en scripts CLI donde cargar la DB solo para apuntar salud sería un peaje) ---
+
+function registrarSalud(ok: boolean, error?: string): void {
+  void import("../../system/repo")
+    .then((repo) => {
+      repo.recordServiceCheck("dropea", {
+        status: ok ? "healthy" : "warning",
+        ok,
+        error,
+      });
+    })
+    .catch(() => {
+      /* nunca romper una petición por la observabilidad */
+    });
+}
+
+function registrarRateLimit(): void {
+  void import("../../system/repo")
+    .then((repo) => {
+      repo.logIntegrationEvent("dropea", "rate_limited", "warning", "429 de Dropea: límite de peticiones");
+    })
+    .catch(() => {
+      /* best-effort */
+    });
 }

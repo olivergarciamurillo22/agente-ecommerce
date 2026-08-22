@@ -3,6 +3,7 @@ import pino from "pino";
 import fs from "node:fs";
 import { getPendingOutbox, markOutboxSent, revertOutboxSent, getConversationById } from "../db";
 import { canSendRealWhatsApp, logOnce, maskPhone } from "../safety";
+import { heartbeat, recordSchedulerRun, recordServiceCheck } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -31,8 +32,17 @@ export function startOutboxLoop(sock: WASocket): void {
   if (outboxTimer) return;
 
   outboxTimer = setInterval(async () => {
+    // Latido para el Control Center (con throttle interno: escribe ~1/min
+    // aunque este loop corra cada 2s). Nunca puede romper el envío.
+    heartbeat("scheduler:outbox");
+
     const pending = getPendingOutbox(20);
     if (pending.length === 0) return;
+
+    const startedAt = Math.floor(Date.now() / 1000);
+    let enviados = 0;
+    let fallos = 0;
+    let ultimoError: string | null = null;
 
     const now = Math.floor(Date.now() / 1000);
 
@@ -82,14 +92,36 @@ export function startOutboxLoop(sock: WASocket): void {
           await sock.sendMessage(jid, { text: item.content });
         }
         logger.info(`[bot] → outbox enviado a ${maskPhone(item.phone)}: "${item.content.slice(0, 40)}..."`);
+        enviados++;
       } catch (err) {
         // Fallo blando (desconexión transitoria): devolver a la cola y
         // reintentar en el siguiente tick.
         revertOutboxSent(item.id);
+        fallos++;
+        ultimoError = err instanceof Error ? err.message : String(err);
         logger.warn(
           { err: err instanceof Error ? err.message : String(err) },
           `[bot] outbox #${item.id} falló, reintentando`
         );
+      }
+    }
+
+    // Registro del tick CON contenido (los vacíos no generan filas).
+    if (enviados > 0 || fallos > 0) {
+      recordSchedulerRun("outbox", {
+        startedAt,
+        finishedAt: Math.floor(Date.now() / 1000),
+        status: fallos > 0 ? "error" : "ok",
+        processedCount: enviados,
+        errorCount: fallos,
+        lastError: ultimoError,
+      });
+      if (fallos > 0) {
+        recordServiceCheck("whatsapp", {
+          status: "warning",
+          ok: false,
+          error: `fallo enviando por Baileys: ${ultimoError ?? "?"}`,
+        });
       }
     }
   }, 2000);

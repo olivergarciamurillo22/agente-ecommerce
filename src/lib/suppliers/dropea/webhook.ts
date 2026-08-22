@@ -28,6 +28,8 @@ import { processSupplierUpdate } from "../../tracking/service";
 import { normalizeDropeaStatus } from "./status-map";
 import { isDropeaTopic, type DropeaOrder, type DropeaWebhookEnvelope } from "./types";
 
+import { logIntegrationEvent } from "../../system/repo";
+
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
 /** Cabeceras que define el contrato (en minúsculas, como llegan). */
@@ -194,6 +196,9 @@ export function processDropeaWebhook(
   // 2. Firma ANTES de mirar el contenido.
   if (!verifyDropeaSignature(rawBody, headers[DROPEA_SIGNATURE_HEADER], secret)) {
     logger.warn("[SUPPLIER] webhook de Dropea con firma inválida — rechazado");
+    // Queda en el feed: una racha de estas casi siempre es el secret mal
+    // pegado (API key en vez del signing secret) o alguien probando la URL.
+    logIntegrationEvent("dropea", "webhook_bad_signature", "warning", "webhook rechazado por firma inválida");
     return { status: 401, body: { ok: false, error: "firma inválida" } };
   }
 
@@ -222,6 +227,7 @@ export function processDropeaWebhook(
     );
     if (!nuevo) {
       logger.info(`[SUPPLIER] webhook Dropea ${topic} event_id repetido — ignorado`);
+      logIntegrationEvent("dropea", "webhook_duplicate", "info", `reintento de ${topic} ignorado (dedup por event_id)`);
       return { status: 200, body: { ok: true, duplicate: true } };
     }
   }

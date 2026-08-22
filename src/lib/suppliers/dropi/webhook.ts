@@ -18,6 +18,7 @@ import {
   type OrderRow,
 } from "../../db";
 import { processSupplierUpdate } from "../../tracking/service";
+import { logIntegrationEvent } from "../../system/repo";
 import { normalizeDropiStatus } from "./status-map";
 import { validateDropiPayload, type DropiOrderUpdatePayload } from "./types";
 
@@ -102,6 +103,12 @@ export function processDropiWebhook(rawBody: string): DropiWebhookResult {
   //    el texto original pero NO se avisa al cliente de nada.
   const normalizado = normalizeDropiStatus(payload.status_id, payload.status_name);
   if (normalizado === "unknown") {
+    logIntegrationEvent(
+      "dropi",
+      "unknown_status",
+      "info",
+      `estado sin mapear: id=${payload.status_id} "${payload.status_name}"`
+    );
     logger.warn(
       `[SUPPLIER] estado de Dropi sin confirmar: id=${payload.status_id} "${payload.status_name}". ` +
         `Añádelo a DROPI_STATUS_MAP cuando se confirme su significado.`

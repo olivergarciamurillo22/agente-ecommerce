@@ -77,6 +77,16 @@ async function main(): Promise<void> {
     for (const s of items.slice(0, 10)) {
       console.log(`   · store_id=${s.id ?? s.store_id} · ${s.name ?? "—"} · ${s.type ?? ""} ${s.status ?? ""}`);
     }
+    // Persistir el store_id (si hay UNA tienda, sin ambigüedad) para que el
+    // Control Center lo enseñe sin repetir la llamada. No es un secreto.
+    if (items.length === 1) {
+      const unico = items[0].id ?? items[0].store_id;
+      if (unico !== undefined && unico !== null) {
+        const db = await import("../src/lib/db");
+        db.setSetting("dropea_store_id", String(unico));
+        console.log(`   (store_id=${unico} guardado para el panel)`);
+      }
+    }
   } catch (err) {
     console.log(`   ✗ ${(err as Error).message}`);
   }

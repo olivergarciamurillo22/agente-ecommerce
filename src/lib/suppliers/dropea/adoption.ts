@@ -11,6 +11,7 @@
 // ============================================================
 
 import pino from "pino";
+import { logIntegrationEvent } from "../../system/repo";
 import {
   getOrderById,
   markSupplierCreated,
@@ -75,6 +76,7 @@ export async function adoptDropeaOrder(order: OrderRow): Promise<AdoptionResult>
   logger.info(
     `[SUPPLIER] #${order.shopify_order_number} adoptado de la app oficial de Dropea (id ${externalId})`
   );
+  logIntegrationEvent("dropea", "order_adopted", "info", "pedido adoptado de la app oficial", order.shopify_order_number);
 
   // Arrancar el seguimiento con lo que ya sepa Dropea de este envío.
   const fresco = getOrderById(order.id) ?? order;

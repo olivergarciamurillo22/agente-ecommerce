@@ -443,7 +443,58 @@ function build() {
     );
     CREATE INDEX IF NOT EXISTS idx_webhook_events_time
       ON supplier_webhook_events(received_at);
+
+    -- ====== Observabilidad (Control Center) ======
+    -- Una fila por servicio vigilado (whatsapp, shopify, dropea…), upsert.
+    -- Sin secretos ni PII: metadata_json pasa por el sanitizador antes de entrar.
+    CREATE TABLE IF NOT EXISTS service_health (
+      service TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK(status IN ('healthy','warning','critical','disabled','unknown')),
+      last_success_at INTEGER,
+      last_error_at INTEGER,
+      last_error_message TEXT,
+      last_checked_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      metadata_json TEXT
+    );
+
+    -- Ejecuciones de schedulers. Los ticks sin trabajo NO se guardan (el
+    -- outbox corre cada 2s y llenaría la tabla); su latido va a service_health.
+    CREATE TABLE IF NOT EXISTS scheduler_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduler_name TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('ok','error')),
+      processed_count INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduler_runs
+      ON scheduler_runs(scheduler_name, started_at);
+
+    -- Feed técnico de eventos. message SIEMPRE sanitizado (sin teléfonos,
+    -- direcciones, tokens ni payloads); la referencia al pedido es el número.
+    CREATE TABLE IF NOT EXISTS integration_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      integration TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('info','warning','critical')),
+      order_ref TEXT,
+      message TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_events
+      ON integration_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_integration_events_sev
+      ON integration_events(severity, created_at);
   `);
+
+  // Versión de esquema: hasta ahora no se estampaba (user_version=0). Las
+  // migraciones siguen siendo idempotentes por sí mismas; esto solo da un
+  // número legible en el Control Center. Subir en 1 con cada cambio de schema.
+  if ((db.pragma("user_version", { simple: true }) as number) < SCHEMA_VERSION) {
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  }
 
   // Migración: columna `jid` en conversations. Guarda la dirección completa del contacto
   // (p.ej. <numero>@s.whatsapp.net o <lid>@lid) para poder responderle por el dominio correcto.
@@ -506,6 +557,11 @@ function build() {
     // Marca del envío: 1 = pertenece a un pedido autorizado a mano para el
     // piloto. El loop del outbox la usa al revalidar los safety gates.
     db.exec("ALTER TABLE outbox ADD COLUMN authorized INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!obCols.some((c) => c.name === "sent_at")) {
+    // Cuándo se envió de verdad (created_at solo dice cuándo se encoló).
+    // Lo usa el Control Center para "último envío" y "enviados recientes".
+    db.exec("ALTER TABLE outbox ADD COLUMN sent_at INTEGER");
   }
 
   // Migración fase 2 (proveedores Dropi/Dropea). Columnas nuevas sin CHECK,
@@ -640,7 +696,9 @@ function build() {
   const stmtGetPendingOutbox = db.prepare<[number], OutboxItem>(
     "SELECT * FROM outbox WHERE sent = 0 ORDER BY created_at ASC LIMIT ?"
   );
-  const stmtMarkOutboxSent = db.prepare("UPDATE outbox SET sent = 1 WHERE id = ?");
+  const stmtMarkOutboxSent = db.prepare(
+    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ?"
+  );
 
   // --- Borrado de conversaciones (atómico) ---
   const stmtDeleteMessages = db.prepare(
@@ -719,6 +777,23 @@ function ctx(): ReturnType<typeof build> {
     _ctx = build();
   }
   return _ctx;
+}
+
+/** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
+export const SCHEMA_VERSION = 2;
+
+/**
+ * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
+ * que mantiene sus consultas en su propio repository en vez de engordar este
+ * archivo. SOLO para ese módulo: el resto del código usa las funciones de aquí.
+ */
+export function systemDbHandle(): Database.Database {
+  return ctx().db;
+}
+
+/** Ruta del fichero .db (para medir tamaños; nunca para servirlo por HTTP). */
+export function dbFilePath(): string {
+  return DB_PATH;
 }
 
 // ============================================================
@@ -887,7 +962,7 @@ export function markOutboxSent(id: number): void {
  * así un fallo blando se reintenta sin que un crash pueda duplicar el envío.
  */
 export function revertOutboxSent(id: number): void {
-  ctx().db.prepare("UPDATE outbox SET sent = 0 WHERE id = ?").run(id);
+  ctx().db.prepare("UPDATE outbox SET sent = 0, sent_at = NULL WHERE id = ?").run(id);
 }
 
 // ============================================================

@@ -18,6 +18,7 @@
 // ============================================================
 
 import pino from "pino";
+import { logIntegrationEvent } from "../../system/repo";
 import {
   claimSupplierConfirm,
   claimSupplierCreate,
@@ -99,6 +100,7 @@ export async function createDropeaOrderForOrder(
       logger.info(
         `[SUPPLIER] #${order.shopify_order_number} ya existía en Dropea (${existente.id}): adoptado, no se crea`
       );
+      logIntegrationEvent("dropea", "order_adopted", "info", "ya existía en Dropea: adoptado en vez de crear", order.shopify_order_number);
       return {
         ok: true,
         externalOrderId: String(existente.id),
