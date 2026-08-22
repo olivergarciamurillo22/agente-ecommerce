@@ -111,7 +111,14 @@ Reglas fijas que conviene conocer:
   más de 24 h, es critical.
 - **Schedulers**: latido atrasado más de 3× su intervalo → warning; más de
   10× → critical; sin latido nunca → `unknown` (en local con el bot parado
-  es lo normal).
+  es lo normal). **Ojo con el arranque en frío**: cada scheduler solo puede
+  dar su primer latido después de esperar su propio intervalo completo, así
+  que `tracking` y `watchdog` (cada 5 min) se muestran como *"nunca ha dado
+  señales"* durante los primeros 5 minutos tras un despliegue o reinicio —
+  no es un fallo, es el tiempo normal de espera hasta el primer tick.
+  Confirmado en el [smoke test 2026-08-22](SMOKE-TEST-NAS-2026-08-22.md):
+  contenedor arriba a las 20:02:42, primeros latidos de `tracking`/`watchdog`
+  a las 20:07:42/43, al segundo exacto.
 - **Backups**: además de la edad, se comprueba la **integridad de la última
   copia** (`quick_check` sobre el fichero, cacheado): una copia corrupta es
   critical aunque sea de hace cinco minutos.
@@ -119,6 +126,15 @@ Reglas fijas que conviene conocer:
   avisa (checkpoint atrasado, pasa con conexiones siempre abiertas). Se
   compacta solo al reiniciar el contenedor; no es urgente y el panel no
   intenta "arreglarlo".
+  **Detectado en el NAS** ([smoke test 2026-08-22](SMOKE-TEST-NAS-2026-08-22.md)):
+  un WAL de 3.9 MB sobre una DB de 264 KB no disparó el aviso, porque el
+  piso absoluto vigente en ese momento era de 4 MB y el WAL se quedó justo
+  por debajo. El piso se bajó a los 2 MB actuales ese mismo día
+  precisamente por este hallazgo. También se confirmó que **reiniciar el
+  contenedor no compacta el WAL** (el fichero se reutiliza, no se trunca
+  salvo `journal_size_limit`); lo que sí funciona es el *checkpoint*, que
+  vuelca datos del WAL al `.db` principal sin reducir el tamaño reservado
+  del WAL.
 
 ---
 
