@@ -28,6 +28,9 @@ import {
   type WhatsAppHealth,
 } from "./health-integrations";
 import { getTrackingOverview, type TrackingOverview } from "./tracking-overview";
+import { getDeliveryMetrics, type DeliveryMetrics } from "./delivery-metrics";
+import { getBusinessAlerts, type BusinessAlertsResult } from "./business-alerts";
+import { getUnitEconomics, type UnitEconomics } from "./unit-economics";
 import { listIntegrationEvents } from "./repo";
 import { emergencyStop } from "../safety";
 import type { HealthCard, HealthStatus, IntegrationEventRow } from "./types";
@@ -46,6 +49,13 @@ export interface SystemOverview {
   outbox: OutboxHealth;
   schedulers: SchedulerHealth[];
   tracking: TrackingOverview;
+  /** Fase A · sección de negocio: entrega, alertas y economía. */
+  business: {
+    status: HealthStatus;
+    delivery: DeliveryMetrics;
+    alerts: BusinessAlertsResult;
+    economics: UnitEconomics;
+  };
   /** Últimos problemas (warning/critical) para el Overview. */
   recentProblems: IntegrationEventRow[];
 }
@@ -75,6 +85,9 @@ export function getSystemOverview(): SystemOverview {
   const schedulers = getSchedulersHealth();
   const tracking = getTrackingOverview();
   const t = Math.floor(Date.now() / 1000);
+  const delivery = getDeliveryMetrics();
+  const alerts = getBusinessAlerts(delivery);
+  const economics = getUnitEconomics();
 
   const todosSinSenales = schedulers.every((s) => s.status === "unknown");
   const schedulersWorst: HealthStatus = todosSinSenales
@@ -159,6 +172,17 @@ export function getSystemOverview(): SystemOverview {
       lastCheckedAt: t,
       detail: "tracking",
     },
+    {
+      service: "business",
+      label: "Negocio",
+      status: alerts.status,
+      message:
+        alerts.status === "healthy"
+          ? "tasa de entrega y operativa dentro de umbrales"
+          : (alerts.alerts.find((a) => a.status === alerts.status)?.message ?? "revisar"),
+      lastCheckedAt: t,
+      detail: "business",
+    },
   ];
 
   // SQLite manda: sin base de datos fiable, el resto de estados no vale nada.
@@ -183,6 +207,7 @@ export function getSystemOverview(): SystemOverview {
     outbox,
     schedulers,
     tracking,
+    business: { status: alerts.status, delivery, alerts, economics },
     recentProblems,
   };
 }

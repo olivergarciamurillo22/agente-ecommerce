@@ -148,7 +148,87 @@ interface Overview {
     staleOrders: Array<{ orderNumber: string; state: string; hoursSinceCheck: number | null }>;
     message: string;
   };
+  business: {
+    status: Status;
+    delivery: {
+      today: DeliveryWindow;
+      last7d: DeliveryWindow;
+      last30d: DeliveryWindow;
+      minSample: number;
+    };
+    alerts: {
+      status: Status;
+      alerts: Array<{
+        id: string;
+        category: "business" | "operations";
+        status: Status;
+        label: string;
+        message: string;
+        value: number | null;
+        threshold: number | null;
+      }>;
+      snapshot: {
+        needsCallTotal: number;
+        needsCallStale: number;
+        openIncidents: number;
+        supplierFailures24h: number;
+        trackingNotifyFailures24h: number;
+        trackingStale: number;
+      };
+    };
+    economics: {
+      today: EconomicsWindow;
+      last7d: EconomicsWindow;
+      last30d: EconomicsWindow;
+      skusWithoutCost: Array<{ sku: string; title: string }>;
+      costsConfigured: number;
+      adSpendDays: number;
+    };
+  };
   recentProblems: EventRow[];
+}
+
+interface DeliveryBucket {
+  key: string;
+  shipped: number;
+  delivered: number;
+  returned: number;
+  pending: number;
+  incidents: number;
+  deliveryRate: number | null;
+}
+interface DeliveryWindow extends DeliveryBucket {
+  created: number;
+  cancelled: number;
+  avgHoursToDeliver: number | null;
+  byProduct: DeliveryBucket[];
+  bySupplier: DeliveryBucket[];
+  byCarrier: DeliveryBucket[];
+}
+interface EconomicsWindow {
+  shippedOrders: number;
+  deliveredOrders: number;
+  returnedOrders: number;
+  grossRevenue: number;
+  deliveredRevenue: number;
+  productCost: number | null;
+  shippingCost: number | null;
+  codFees: number | null;
+  adSpend: number | null;
+  estimatedMargin: number | null;
+  estimatedMarginPct: number | null;
+  grossRoas: number | null;
+  netRoas: number | null;
+  complete: boolean;
+  missing: string[];
+  currency: string;
+}
+interface CostRow {
+  sku: string;
+  title: string | null;
+  product_cost: number | null;
+  shipping_cost: number | null;
+  cod_fee: number | null;
 }
 
 // --- Presentación de estados ---
@@ -238,6 +318,182 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
   );
 }
 
+function pct(v: number | null | undefined): string {
+  return v == null ? "—" : `${v} %`;
+}
+function money(v: number | null | undefined, cur = "EUR"): string {
+  if (v == null) return "—";
+  return `${v.toLocaleString("es-ES", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${cur === "EUR" ? "€" : cur}`;
+}
+function rateColor(v: number | null, warn = 70, crit = 65): string {
+  if (v == null) return "text-brand-muted";
+  if (v < crit) return "text-red-300";
+  if (v < warn) return "text-amber-300";
+  return "text-emerald-300";
+}
+
+function BucketTable({ title, rows }: { title: string; rows: DeliveryBucket[] }) {
+  return (
+    <Section title={title}>
+      {rows.length === 0 ? (
+        <div className="text-sm text-brand-muted">Sin envíos en la ventana.</div>
+      ) : (
+        <table className="w-full text-xs">
+          <thead className="text-brand-muted">
+            <tr>
+              <th className="text-left font-normal py-1">Clave</th>
+              <th className="text-right font-normal">Env.</th>
+              <th className="text-right font-normal">Entr.</th>
+              <th className="text-right font-normal">Dev.</th>
+              <th className="text-right font-normal">Pend.</th>
+              <th className="text-right font-normal">Tasa</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} className="border-t border-brand-border/30">
+                <td className="py-1 pr-2 truncate max-w-[220px]" title={r.key}>{r.key}</td>
+                <td className="text-right">{r.shipped}</td>
+                <td className="text-right">{r.delivered}</td>
+                <td className="text-right">{r.returned}</td>
+                <td className="text-right">{r.pending}</td>
+                <td className={`text-right ${rateColor(r.deliveryRate)}`}>{pct(r.deliveryRate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Section>
+  );
+}
+
+function EconomicsCard({ title, w }: { title: string; w: EconomicsWindow }) {
+  return (
+    <Section title={title}>
+      <div className="mb-2">
+        <StatusPill status={w.complete ? "healthy" : "unknown"} />
+        <span className="ml-2 text-xs text-brand-muted">
+          {w.complete ? "datos completos" : w.shippedOrders === 0 ? "sin envíos en la ventana" : "incompleto"}
+        </span>
+      </div>
+      <Row k="Enviados / entregados / devueltos" v={`${w.shippedOrders} / ${w.deliveredOrders} / ${w.returnedOrders}`} />
+      <Row k="Facturación bruta (enviados)" v={money(w.grossRevenue, w.currency)} />
+      <Row k="Ingresos entregados (reales)" v={money(w.deliveredRevenue, w.currency)} />
+      <Row k="Coste de producto" v={money(w.productCost, w.currency)} />
+      <Row k="Coste de envío" v={money(w.shippingCost, w.currency)} />
+      <Row k="Comisiones COD" v={money(w.codFees, w.currency)} />
+      <Row k="Gasto en ads (manual)" v={money(w.adSpend, w.currency)} />
+      <Row k="Margen estimado" v={w.estimatedMargin == null ? "—" : `${money(w.estimatedMargin, w.currency)} (${pct(w.estimatedMarginPct)})`} />
+      <Row k="ROAS bruto / neto" v={`${w.grossRoas ?? "—"} / ${w.netRoas ?? "—"}`} />
+      {w.missing.length > 0 && (
+        <div className="mt-2 text-[11px] text-amber-300/90">
+          Falta: {w.missing.slice(0, 5).join(" · ")}
+          {w.missing.length > 5 ? ` · y ${w.missing.length - 5} más` : ""}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: Array<{ sku: string; title: string }> }) {
+  const [rows, setRows] = useState<CostRow[]>([]);
+  const [form, setForm] = useState({ sku: "", title: "", product_cost: "", shipping_cost: "", cod_fee: "" });
+  const [adDay, setAdDay] = useState(() => new Date().toISOString().slice(0, 10));
+  const [adAmount, setAdAmount] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/system/costs", { cache: "no-store" });
+      if (res.ok) setRows(((await res.json()) as { costs: CostRow[] }).costs);
+    } catch {
+      /* siguiente intento */
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const saveCost = async () => {
+    setMsg(null);
+    const res = await fetch("/api/system/costs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(form),
+    });
+    if (res.ok) {
+      setForm({ sku: "", title: "", product_cost: "", shipping_cost: "", cod_fee: "" });
+      await load();
+      onSaved();
+      setMsg("Coste guardado.");
+    } else setMsg("No se pudo guardar el coste.");
+  };
+  const saveAd = async () => {
+    setMsg(null);
+    const res = await fetch("/api/system/ad-spend", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ day: adDay, amount: adAmount }),
+    });
+    if (res.ok) {
+      setAdAmount("");
+      onSaved();
+      setMsg("Gasto en ads guardado.");
+    } else setMsg("No se pudo guardar el gasto.");
+  };
+  const input = "bg-brand-bg border border-brand-border rounded-lg px-2 py-1 text-xs w-full";
+
+  return (
+    <Section title="Costes (entrada manual)">
+      <div className="text-[11px] text-brand-muted mb-2">
+        Coste por unidad y SKU. Sin estos datos la economía sale “incompleta”; nunca se estima.
+      </div>
+      {suggested.length > 0 && (
+        <div className="text-[11px] text-amber-300/90 mb-2">
+          SKUs vistos sin coste:{" "}
+          {suggested.map((s) => (
+            <button
+              key={s.sku}
+              className="underline mr-2"
+              onClick={() => setForm({ ...form, sku: s.sku, title: s.title })}
+            >
+              {s.sku}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 mb-2">
+        <input className={input} placeholder="SKU" value={form.sku} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
+        <input className={input} placeholder="Nombre" value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} />
+        <input className={input} placeholder="Producto €" value={form.product_cost} onChange={(e) => setForm({ ...form, product_cost: e.target.value })} />
+        <input className={input} placeholder="Envío €" value={form.shipping_cost} onChange={(e) => setForm({ ...form, shipping_cost: e.target.value })} />
+        <input className={input} placeholder="COD €" value={form.cod_fee} onChange={(e) => setForm({ ...form, cod_fee: e.target.value })} />
+      </div>
+      <button onClick={saveCost} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-black">
+        Guardar coste
+      </button>
+      <div className="mt-3 space-y-1">
+        {rows.map((r) => (
+          <Row
+            key={r.sku}
+            k={`${r.sku}${r.title ? ` · ${r.title}` : ""}`}
+            v={`prod ${r.product_cost ?? "—"} · envío ${r.shipping_cost ?? "—"} · COD ${r.cod_fee ?? "—"}`}
+          />
+        ))}
+      </div>
+      <div className="mt-4 text-[11px] uppercase tracking-wider text-brand-muted mb-1">Gasto en ads por día</div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+        <input className={input} type="date" value={adDay} onChange={(e) => setAdDay(e.target.value)} />
+        <input className={input} placeholder="Importe €" value={adAmount} onChange={(e) => setAdAmount(e.target.value)} />
+        <button onClick={saveAd} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-black">
+          Guardar gasto
+        </button>
+      </div>
+      {msg && <div className="mt-2 text-[11px] text-brand-muted">{msg}</div>}
+    </Section>
+  );
+}
+
 const TABS = [
   ["overview", "Resumen"],
   ["integrations", "Integraciones"],
@@ -246,6 +502,7 @@ const TABS = [
   ["schedulers", "Tareas"],
   ["outbox", "Cola de envíos"],
   ["tracking", "Envíos"],
+  ["business", "Negocio"],
   ["events", "Eventos"],
 ] as const;
 type Tab = (typeof TABS)[number][0];
@@ -622,6 +879,75 @@ export default function SystemPanel() {
               ))
             )}
           </Section>
+        </div>
+      )}
+
+      {tab === "business" && (
+        <div className="space-y-3">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <Section title="Operativa">
+              <div className="mb-2">
+                <StatusPill status={data.business.alerts.status} />
+              </div>
+              <Row k="Pendientes de llamada" v={data.business.alerts.snapshot.needsCallTotal} />
+              <Row
+                k="· atrasados"
+                v={<span className={data.business.alerts.snapshot.needsCallStale ? "text-amber-300" : ""}>{data.business.alerts.snapshot.needsCallStale}</span>}
+              />
+              <Row k="Incidencias abiertas" v={data.business.alerts.snapshot.openIncidents} />
+              <Row k="Entregados hoy" v={data.business.delivery.today.delivered} />
+              <Row k="Devueltos (7 d)" v={data.business.delivery.last7d.returned} />
+              <Row k="Envíos sin noticias" v={data.business.alerts.snapshot.trackingStale} />
+            </Section>
+            <Section title="Rendimiento">
+              <Row k="Entrega hoy" v={<span className={rateColor(data.business.delivery.today.deliveryRate)}>{pct(data.business.delivery.today.deliveryRate)}</span>} />
+              <Row k="Entrega 7 días" v={<span className={rateColor(data.business.delivery.last7d.deliveryRate)}>{pct(data.business.delivery.last7d.deliveryRate)}</span>} />
+              <Row k="Entrega 30 días" v={<span className={rateColor(data.business.delivery.last30d.deliveryRate)}>{pct(data.business.delivery.last30d.deliveryRate)}</span>} />
+              <Row k="Enviados / resueltos (7 d)" v={`${data.business.delivery.last7d.shipped} / ${data.business.delivery.last7d.delivered + data.business.delivery.last7d.returned}`} />
+              <Row k="Horas medias hasta entrega (30 d)" v={data.business.delivery.last30d.avgHoursToDeliver ?? "—"} />
+              <div className="text-[11px] text-brand-muted mt-2">
+                Tasa = entregados / (entregados + devueltos). Los envíos en curso no cuentan. Muestra mínima: {data.business.delivery.minSample}.
+              </div>
+            </Section>
+            <Section title="Economía (30 días)">
+              <Row k="Facturación bruta" v={money(data.business.economics.last30d.grossRevenue, data.business.economics.last30d.currency)} />
+              <Row k="Ingresos entregados" v={money(data.business.economics.last30d.deliveredRevenue, data.business.economics.last30d.currency)} />
+              <Row k="Margen estimado" v={money(data.business.economics.last30d.estimatedMargin, data.business.economics.last30d.currency)} />
+              <Row k="ROAS bruto / neto" v={`${data.business.economics.last30d.grossRoas ?? "—"} / ${data.business.economics.last30d.netRoas ?? "—"}`} />
+              <div className="mt-2">
+                <StatusPill status={data.business.economics.last30d.complete ? "healthy" : "unknown"} />
+                <span className="ml-2 text-[11px] text-brand-muted">
+                  {data.business.economics.last30d.complete ? "datos completos" : "incompleto: faltan costes o ads"}
+                </span>
+              </div>
+            </Section>
+          </div>
+
+          <Section title="Alertas de negocio y operativa">
+            {data.business.alerts.alerts.map((a) => (
+              <div key={a.id} className="flex items-start gap-2 text-xs py-1.5 border-b border-brand-border/30 last:border-0">
+                <StatusPill status={a.status} />
+                <span className="uppercase text-brand-muted w-20">{a.category === "business" ? "negocio" : "operativa"}</span>
+                <span className="flex-1">
+                  <span className="font-semibold">{a.label}</span> — {a.message}
+                </span>
+              </div>
+            ))}
+          </Section>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <BucketTable title="Por producto (30 d)" rows={data.business.delivery.last30d.byProduct} />
+            <BucketTable title="Por proveedor (30 d)" rows={data.business.delivery.last30d.bySupplier} />
+            <BucketTable title="Por transportista (30 d)" rows={data.business.delivery.last30d.byCarrier} />
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <EconomicsCard title="Economía · hoy" w={data.business.economics.today} />
+            <EconomicsCard title="Economía · 7 días" w={data.business.economics.last7d} />
+            <EconomicsCard title="Economía · 30 días" w={data.business.economics.last30d} />
+          </div>
+
+          <CostsEditor onSaved={refresh} suggested={data.business.economics.skusWithoutCost} />
         </div>
       )}
 
