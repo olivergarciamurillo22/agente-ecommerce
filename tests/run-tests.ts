@@ -37,6 +37,10 @@ process.env.WHATSAPP_SEND_ENABLED = "1";
 process.env.EMERGENCY_STOP = "0";
 process.env.TEST_MODE = "0";
 process.env.MAX_ORDER_AGE_MINUTES = "9999999"; // los tests de timing viajan al futuro
+// La ventana horaria haría fallar la suite según la hora del reloj (antes de
+// las 09:00 no saldría ningún envío). Se desactiva aquí; sus tests la activan
+// explícitamente con withEnv() y horas inyectadas.
+process.env.WHATSAPP_WINDOW_ENABLED = "0";
 delete process.env.SHOPIFY_WRITE_ENABLED;
 delete process.env.TEST_PHONE_ALLOWLIST;
 delete process.env.OUTBOX_MAX_AGE_MINUTES;
@@ -1298,13 +1302,13 @@ async function main(): Promise<void> {
     // 2026-08-20 a las 03:00 y 12:00 hora de Madrid (verano, UTC+2)
     const madrugada = Date.parse("2026-08-20T01:00:00Z"); // 03:00 local
     const mediodia = Date.parse("2026-08-20T10:00:00Z"); // 12:00 local
-    await withEnv({ WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
+    await withEnv({ WHATSAPP_WINDOW_ENABLED: "1", WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
       assert.equal(safety.insideSendWindow(madrugada), false, "03:00 está fuera");
       assert.equal(safety.insideSendWindow(mediodia), true, "12:00 está dentro");
       assert.equal(safety.localMinutesNow(mediodia), 12 * 60);
     });
     // Franja nocturna (cruza medianoche): 22:00-06:00
-    await withEnv({ WHATSAPP_WINDOW_START: "22:00", WHATSAPP_WINDOW_END: "06:00" }, () => {
+    await withEnv({ WHATSAPP_WINDOW_ENABLED: "1", WHATSAPP_WINDOW_START: "22:00", WHATSAPP_WINDOW_END: "06:00" }, () => {
       assert.equal(safety.insideSendWindow(madrugada), true, "03:00 entra en la nocturna");
       assert.equal(safety.insideSendWindow(mediodia), false);
     });
@@ -1319,7 +1323,7 @@ async function main(): Promise<void> {
   });
 
   await test("nextWindowOpen apunta a la siguiente apertura", async () => {
-    await withEnv({ WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
+    await withEnv({ WHATSAPP_WINDOW_ENABLED: "1", WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
       const madrugada = Date.parse("2026-08-20T01:00:00Z"); // 03:00 local → faltan 6h
       const abre = safety.nextWindowOpen(madrugada);
       assert.equal(abre - Math.floor(madrugada / 1000), 6 * 3600);
@@ -1333,6 +1337,7 @@ async function main(): Promise<void> {
     await withEnv(
       {
         TEST_MODE: "0",
+        WHATSAPP_WINDOW_ENABLED: "1",
         WHATSAPP_WINDOW_START: "09:00",
         WHATSAPP_WINDOW_END: "09:01", // ventana de 1 minuto: casi seguro cerrada
         MAX_ORDER_AGE_MINUTES: "30",

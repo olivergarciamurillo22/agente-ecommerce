@@ -113,7 +113,7 @@ export function getDatabaseHealth(opts?: { full?: boolean }): DatabaseHealth {
     if (
       h.walSizeBytes !== null &&
       h.dbSizeBytes !== null &&
-      h.walSizeBytes > 4 * 1024 * 1024 &&
+      h.walSizeBytes > 2 * 1024 * 1024 &&
       h.walSizeBytes > 4 * h.dbSizeBytes
     ) {
       h.walWarning =

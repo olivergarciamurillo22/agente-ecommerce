@@ -115,7 +115,7 @@ Reglas fijas que conviene conocer:
 - **Backups**: además de la edad, se comprueba la **integridad de la última
   copia** (`quick_check` sobre el fichero, cacheado): una copia corrupta es
   critical aunque sea de hace cinco minutos.
-- **WAL hinchado**: si el `-wal` supera 4 MB y 4× el tamaño de la DB, se
+- **WAL hinchado**: si el `-wal` supera 2 MB y 4× el tamaño de la DB, se
   avisa (checkpoint atrasado, pasa con conexiones siempre abiertas). Se
   compacta solo al reiniciar el contenedor; no es urgente y el panel no
   intenta "arreglarlo".
