@@ -4003,6 +4003,141 @@ async function main(): Promise<void> {
     });
   });
 
+  // ============ E1 · Eje de cierre (espejo de Shopify) ============
+  console.log("· E1 — eje de cierre");
+
+  await test("E1 migración: DB vacía → columnas nuevas con sus defaults, sin CHECK que rechace nada", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "e1-empty.db"));
+    // Tabla mínima "pre-E1": sin closure_status/closure_source/closure_at.
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    db.migrateClosureAxis(raw);
+
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.ok(cols.includes("closure_status"));
+    assert.ok(cols.includes("closure_source"));
+    assert.ok(cols.includes("closure_at"));
+
+    // Una fila insertada DESPUÉS de migrar, sin mencionar las columnas nuevas,
+    // debe caer en el default: 'unknown', sin origen ni fecha.
+    raw.prepare("INSERT INTO orders (shopify_order_id) VALUES ('e1-empty-1')").run();
+    const fila = raw.prepare("SELECT closure_status, closure_source, closure_at FROM orders WHERE shopify_order_id = 'e1-empty-1'").get();
+    assert.equal(fila.closure_status, "unknown");
+    assert.equal(fila.closure_source, null);
+    assert.equal(fila.closure_at, null);
+    raw.close();
+  });
+
+  await test("E1 migración: DB con filas de un esquema anterior → backfill a 'unknown', NUNCA se infiere del status viejo", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "e1-existing-rows.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    // Filas previas con estados MUY dispares del eje de confirmación — si la
+    // migración "adivinara" el cierre a partir de status, aquí se notaría.
+    raw.prepare("INSERT INTO orders (shopify_order_id, status) VALUES ('e1-old-1', 'confirmed')").run();
+    raw.prepare("INSERT INTO orders (shopify_order_id, status) VALUES ('e1-old-2', 'needs_call')").run();
+    raw.prepare("INSERT INTO orders (shopify_order_id, status) VALUES ('e1-old-3', 'cancelled')").run();
+
+    db.migrateClosureAxis(raw);
+
+    const filas = raw.prepare("SELECT shopify_order_id, closure_status, closure_source, closure_at FROM orders ORDER BY id").all();
+    assert.equal(filas.length, 3);
+    for (const f of filas) {
+      assert.equal(f.closure_status, "unknown", `${f.shopify_order_id} debe arrancar en unknown, no inferido de status`);
+      assert.equal(f.closure_source, null);
+      assert.equal(f.closure_at, null);
+    }
+    raw.close();
+  });
+
+  await test("E1 migración: correr dos veces (o tres) es un no-op — no rompe nada ni pisa datos ya migrados", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "e1-twice.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    raw.prepare("INSERT INTO orders (shopify_order_id, status) VALUES ('e1-twice-1', 'confirmed')").run();
+
+    assert.doesNotThrow(() => db.migrateClosureAxis(raw), "primera pasada");
+    assert.doesNotThrow(() => db.migrateClosureAxis(raw), "segunda pasada: no debe fallar por columna/índice duplicados");
+    assert.doesNotThrow(() => db.migrateClosureAxis(raw), "tercera pasada, por si acaso");
+
+    // Ni la fila preexistente ni el esquema se han corrompido.
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.equal(cols.filter((c: string) => c === "closure_status").length, 1, "la columna no se duplica");
+    const fila = raw.prepare("SELECT closure_status, closure_source, closure_at FROM orders WHERE shopify_order_id = 'e1-twice-1'").get();
+    assert.equal(fila.closure_status, "unknown");
+    assert.equal(fila.closure_source, null);
+    assert.equal(fila.closure_at, null);
+
+    // Y ahora, sobre esta misma tabla ya migrada, escribir un cierre real y
+    // volver a migrar no debe pisarlo (comprobación de que el "no-op" respeta
+    // también filas que ya tienen un cierre asignado, no solo las 'unknown').
+    raw.prepare("UPDATE orders SET closure_status = 'delivered', closure_source = 'shopify', closure_at = 123 WHERE shopify_order_id = 'e1-twice-1'").run();
+    db.migrateClosureAxis(raw);
+    const trasSegundoCierre = raw.prepare("SELECT closure_status, closure_source, closure_at FROM orders WHERE shopify_order_id = 'e1-twice-1'").get();
+    assert.equal(trasSegundoCierre.closure_status, "delivered");
+    assert.equal(trasSegundoCierre.closure_source, "shopify");
+    assert.equal(trasSegundoCierre.closure_at, 123);
+    raw.close();
+  });
+
+  await test("E1 transiciones de cierre (canTransitionClosure): terminal no se abandona; unknown/in_progress van a cualquier sitio", () => {
+    assert.equal(db.canTransitionClosure("unknown", "in_progress"), true);
+    assert.equal(db.canTransitionClosure("unknown", "delivered"), true);
+    assert.equal(db.canTransitionClosure("in_progress", "delivered"), true);
+    assert.equal(db.canTransitionClosure("in_progress", "refused"), true);
+    assert.equal(db.canTransitionClosure("in_progress", "cancelled"), true);
+    // Idempotente: repetir el mismo valor siempre está permitido.
+    assert.equal(db.canTransitionClosure("delivered", "delivered"), true);
+    assert.equal(db.canTransitionClosure("unknown", "unknown"), true);
+    // Terminal → distinto: bloqueado siempre, para los tres terminales.
+    assert.equal(db.canTransitionClosure("delivered", "cancelled"), false);
+    assert.equal(db.canTransitionClosure("refused", "unknown"), false);
+    assert.equal(db.canTransitionClosure("cancelled", "in_progress"), false);
+  });
+
+  await test("E1 setOrderClosure: escribe si la transición vale, no toca nada si el pedido ya está en otro cierre terminal", () => {
+    const o = mkOrder("990700", "3700", "34600119700");
+    const antes = db.getOrderById(o.id)!;
+    assert.equal(antes.closure_status, "unknown", "un pedido nuevo arranca en unknown");
+    assert.equal(antes.closure_source, null);
+    assert.equal(antes.closure_at, null);
+
+    assert.equal(db.setOrderClosure(o.id, "in_progress", "shopify", 1000), true);
+    let actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "in_progress");
+    assert.equal(actual.closure_source, "shopify");
+    assert.equal(actual.closure_at, 1000);
+
+    assert.equal(db.setOrderClosure(o.id, "delivered", "dropea", 2000), true);
+    actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "delivered");
+    assert.equal(actual.closure_source, "dropea");
+    assert.equal(actual.closure_at, 2000);
+
+    // Terminal ya alcanzado: un intento de moverlo a OTRO valor se ignora.
+    assert.equal(db.setOrderClosure(o.id, "cancelled", "manual", 3000), false, "no se abandona un cierre terminal");
+    actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "delivered", "sigue delivered, no se pisó");
+    assert.equal(actual.closure_source, "dropea", "el origen tampoco cambió");
+    assert.equal(actual.closure_at, 2000);
+
+    // Repetir el MISMO valor sí está permitido (p.ej. una segunda fuente
+    // corrobora el mismo cierre): se actualiza el origen/fecha.
+    assert.equal(db.setOrderClosure(o.id, "delivered", "shopify", 2500), true);
+    actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_source, "shopify", "la fuente más reciente sí se registra");
+    assert.equal(actual.closure_at, 2500);
+
+    // Pedido inexistente: no revienta, simplemente no hace nada.
+    assert.equal(db.setOrderClosure(999999999, "delivered", "shopify"), false);
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
