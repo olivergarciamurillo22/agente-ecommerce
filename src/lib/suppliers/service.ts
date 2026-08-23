@@ -15,6 +15,7 @@ import type { OrderRow } from "../db";
 import { emergencyStop, orderActionAllowed } from "../safety";
 import { resolveFinalAddress, describeAddressIssue } from "./address";
 import { resolveSupplier } from "./router";
+import { orderLineItems } from "../orders/line-items";
 import { dropiProvider } from "./dropi";
 import { dropeaProvider } from "./dropea";
 import {
@@ -148,7 +149,7 @@ export function evaluateOrderForSupplier(order: OrderRow): SupplierEvaluation {
     email: order.email,
     finalAddress: dir.address,
     addressSource: dir.source ?? "original",
-    items: parseItems(order.product_summary),
+    items: buildItems(order),
     total: order.total_price,
     currency: order.currency,
     // COD: el cliente paga el total al repartidor.
@@ -185,9 +186,21 @@ export function evaluateOrderForSupplier(order: OrderRow): SupplierEvaluation {
 }
 
 /**
+ * Artículos del DTO. Primero las líneas REALES del payload de Shopify (con
+ * SKU e IDs, sin líneas de servicio); si no hay payload, se reconstruyen
+ * desde `product_summary` como respaldo (sin SKU).
+ */
+function buildItems(order: OrderRow): SupplierOrderInput["items"] {
+  const reales = orderLineItems(order).filter((l) => !l.isService);
+  if (reales.length > 0) {
+    return reales.map((l) => ({ title: l.title, quantity: l.quantity, price: l.price, sku: l.sku }));
+  }
+  return parseItems(order.product_summary);
+}
+
+/**
  * Reconstruye los artículos desde `product_summary` ("2x Producto" por línea).
- * Provisional: cuando el handoff pida SKUs habrá que guardarlos al recibir el
- * pedido, porque el resumen no los contiene.
+ * Respaldo para pedidos sin raw_payload.
  */
 function parseItems(summary: string | null): SupplierOrderInput["items"] {
   const lineas = (summary ?? "").split("\n").map((l) => l.trim()).filter(Boolean);

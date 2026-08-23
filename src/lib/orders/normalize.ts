@@ -31,6 +31,9 @@ export interface ShopifyLineItem {
   title?: string | null;
   quantity?: number | null;
   price?: string | null;
+  sku?: string | null;
+  product_id?: number | string | null;
+  variant_id?: number | string | null;
 }
 
 export interface ShopifyOrderPayload {

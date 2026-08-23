@@ -180,6 +180,10 @@ export interface OrderRow {
   tracking_notification_sent_at: number | null;
   out_for_delivery_notification_sent_at: number | null;
   delivered_notification_sent_at: number | null;
+  delivery_attempt_notification_sent_at: number | null;
+  pickup_point_notification_sent_at: number | null;
+  /** Nombre/dirección/enlace del punto de recogida que reporta el proveedor. */
+  pickup_point_info: string | null;
   /** Autorización manual, pedido a pedido, para el piloto de proveedores. */
   supplier_pilot_approved: number;
   /** Fase de creación: none | creating | created | confirming | confirmed | failed. */
@@ -275,6 +279,9 @@ const ORDERS_TABLE_BODY = `
       tracking_notification_sent_at INTEGER,
       out_for_delivery_notification_sent_at INTEGER,
       delivered_notification_sent_at INTEGER,
+      delivery_attempt_notification_sent_at INTEGER,
+      pickup_point_notification_sent_at INTEGER,
+      pickup_point_info TEXT,
       supplier_pilot_approved INTEGER NOT NULL DEFAULT 0,
       supplier_create_phase TEXT NOT NULL DEFAULT 'none',
       supplier_idempotency_key TEXT,
@@ -487,6 +494,49 @@ function build() {
       ON integration_events(created_at);
     CREATE INDEX IF NOT EXISTS idx_integration_events_sev
       ON integration_events(severity, created_at);
+
+    -- ====== Fase A · Histórico de estados de envío ======
+    -- Una fila por TRANSICIÓN REAL del estado normalizado de un envío.
+    -- Es la fuente de la tasa de entrega: nunca se estima, se cuenta aquí.
+    -- Dedupe: por event_id cuando el proveedor lo manda (índice único parcial)
+    -- y, sin event_id, por (pedido, de, a, raw) dentro de la misma ventana.
+    CREATE TABLE IF NOT EXISTS order_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      shopify_order_id TEXT NOT NULL,
+      supplier_platform TEXT,
+      carrier TEXT,
+      previous_status TEXT NOT NULL,
+      new_status TEXT NOT NULL,
+      raw_status TEXT,
+      raw_sub_status TEXT,
+      source TEXT NOT NULL CHECK(source IN ('webhook','polling','manual','reconciliation')),
+      event_id TEXT,
+      occurred_at INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_osh_event_id
+      ON order_status_history(event_id) WHERE event_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_osh_order ON order_status_history(order_id, occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_osh_status ON order_status_history(new_status, occurred_at);
+
+    -- ====== Fase A · Unit economics (entrada manual, sin inventar) ======
+    -- Coste por SKU. Si un SKU no está aquí, la economía sale "incompleta".
+    CREATE TABLE IF NOT EXISTS product_costs (
+      sku TEXT PRIMARY KEY,
+      title TEXT,
+      product_cost REAL,
+      shipping_cost REAL,
+      cod_fee REAL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    -- Gasto en publicidad por día (YYYY-MM-DD). Manual hasta que exista fuente.
+    CREATE TABLE IF NOT EXISTS daily_ad_spend (
+      day TEXT PRIMARY KEY,
+      amount REAL NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
   `);
 
   // Versión de esquema: hasta ahora no se estampaba (user_version=0). Las
@@ -592,6 +642,11 @@ function build() {
     ["tracking_notification_sent_at", "INTEGER"],
     ["out_for_delivery_notification_sent_at", "INTEGER"],
     ["delivered_notification_sent_at", "INTEGER"],
+    // Fase A: avisos nuevos (intento fallido, punto de recogida) y el dato
+    // del punto de recogida tal cual lo cuenta el proveedor (sin PII nuestra).
+    ["delivery_attempt_notification_sent_at", "INTEGER"],
+    ["pickup_point_notification_sent_at", "INTEGER"],
+    ["pickup_point_info", "TEXT"],
     // Autorización POR PEDIDO para el piloto de proveedores (distinta de la
     // allowlist de teléfonos de WhatsApp: aquí decide Pedro pedido a pedido).
     ["supplier_pilot_approved", "INTEGER NOT NULL DEFAULT 0"],
@@ -780,7 +835,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1585,12 +1640,19 @@ export function setOrderSupplierEvaluation(
 }
 
 /** Tipos de aviso de postventa (cada uno con su sello anti-duplicado). */
-export type TrackingNotificationKind = "tracking" | "out_for_delivery" | "delivered";
+export type TrackingNotificationKind =
+  | "tracking"
+  | "out_for_delivery"
+  | "delivered"
+  | "delivery_attempt"
+  | "pickup_point";
 
 const COLUMNA_SELLO: Record<TrackingNotificationKind, string> = {
   tracking: "tracking_notification_sent_at",
   out_for_delivery: "out_for_delivery_notification_sent_at",
   delivered: "delivered_notification_sent_at",
+  delivery_attempt: "delivery_attempt_notification_sent_at",
+  pickup_point: "pickup_point_notification_sent_at",
 };
 
 /**
@@ -1622,6 +1684,7 @@ export function updateOrderTracking(
     trackingNumber?: string | null;
     trackingUrl?: string | null;
     carrier?: string | null;
+    pickupPointInfo?: string | null;
     firstTracking: boolean;
   }
 ): void {
@@ -1633,6 +1696,7 @@ export function updateOrderTracking(
         tracking_number = COALESCE(?, tracking_number),
         tracking_url = COALESCE(?, tracking_url),
         carrier = COALESCE(?, carrier),
+        pickup_point_info = COALESCE(?, pickup_point_info),
         tracking_first_seen_at = CASE WHEN ? THEN COALESCE(tracking_first_seen_at, unixepoch()) ELSE tracking_first_seen_at END,
         tracking_last_checked_at = unixepoch(),
         ${TOUCH}
@@ -1644,6 +1708,7 @@ export function updateOrderTracking(
       data.trackingNumber ?? null,
       data.trackingUrl ?? null,
       data.carrier ?? null,
+      data.pickupPointInfo ?? null,
       data.firstTracking ? 1 : 0,
       id
     );
@@ -1669,6 +1734,166 @@ export function setOrderSupplierPlatformAndExternalId(
     )
     .run(platform, externalOrderId, id);
   return info.changes > 0;
+}
+
+
+// --- Fase A · Histórico de estados de envío ---
+
+export type StatusHistorySource = "webhook" | "polling" | "manual" | "reconciliation";
+
+export interface OrderStatusHistoryRow {
+  id: number;
+  order_id: number;
+  shopify_order_id: string;
+  supplier_platform: string | null;
+  carrier: string | null;
+  previous_status: string;
+  new_status: string;
+  raw_status: string | null;
+  raw_sub_status: string | null;
+  source: StatusHistorySource;
+  event_id: string | null;
+  occurred_at: number;
+  recorded_at: number;
+}
+
+export interface StatusHistoryInput {
+  orderId: number;
+  shopifyOrderId: string;
+  supplierPlatform: string | null;
+  carrier: string | null;
+  previousStatus: string;
+  newStatus: string;
+  rawStatus: string | null;
+  rawSubStatus?: string | null;
+  source: StatusHistorySource;
+  eventId?: string | null;
+  /** Epoch segundos. Si no se conoce, ahora. */
+  occurredAt?: number | null;
+}
+
+/**
+ * Persiste UNA transición. Devuelve el id de la fila nueva o null si era un
+ * duplicado. Reglas de dedupe:
+ *   1. Con event_id: el índice único manda (un webhook reintentado no repite).
+ *   2. Sin event_id: misma (pedido, de, a, raw) en los últimos 10 minutos
+ *      se considera el mismo hecho (dos pollings seguidos, un reintento).
+ */
+export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
+  const db = ctx().db;
+  const occurredAt = h.occurredAt ?? Math.floor(Date.now() / 1000);
+  const eventId = (h.eventId ?? "").trim() || null;
+  if (eventId) {
+    const dup = db.prepare("SELECT 1 FROM order_status_history WHERE event_id = ?").get(eventId);
+    if (dup) return null;
+  } else {
+    const dup = db
+      .prepare(
+        `SELECT 1 FROM order_status_history
+         WHERE order_id = ? AND previous_status = ? AND new_status = ?
+           AND IFNULL(raw_status,'') = IFNULL(?, '')
+           AND occurred_at >= ?`
+      )
+      .get(h.orderId, h.previousStatus, h.newStatus, h.rawStatus ?? null, occurredAt - 600);
+    if (dup) return null;
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO order_status_history
+        (order_id, shopify_order_id, supplier_platform, carrier, previous_status, new_status,
+         raw_status, raw_sub_status, source, event_id, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      h.orderId,
+      h.shopifyOrderId,
+      h.supplierPlatform ?? null,
+      h.carrier ?? null,
+      h.previousStatus,
+      h.newStatus,
+      h.rawStatus ?? null,
+      h.rawSubStatus ?? null,
+      h.source,
+      eventId,
+      occurredAt
+    );
+  return Number(info.lastInsertRowid);
+}
+
+export function listOrderStatusHistory(orderId: number): OrderStatusHistoryRow[] {
+  return ctx()
+    .db.prepare("SELECT * FROM order_status_history WHERE order_id = ? ORDER BY occurred_at, id")
+    .all(orderId) as OrderStatusHistoryRow[];
+}
+
+// --- Fase A · Costes (unit economics, entrada manual) ---
+
+export interface ProductCostRow {
+  sku: string;
+  title: string | null;
+  product_cost: number | null;
+  shipping_cost: number | null;
+  cod_fee: number | null;
+  updated_at: number;
+}
+
+export function listProductCosts(): ProductCostRow[] {
+  return ctx().db.prepare("SELECT * FROM product_costs ORDER BY sku").all() as ProductCostRow[];
+}
+
+export function upsertProductCost(c: {
+  sku: string;
+  title?: string | null;
+  product_cost?: number | null;
+  shipping_cost?: number | null;
+  cod_fee?: number | null;
+}): void {
+  const sku = c.sku.trim();
+  if (!sku) throw new Error("sku vacío");
+  ctx()
+    .db.prepare(
+      `INSERT INTO product_costs (sku, title, product_cost, shipping_cost, cod_fee, updated_at)
+       VALUES (?, ?, ?, ?, ?, unixepoch())
+       ON CONFLICT(sku) DO UPDATE SET
+         title = COALESCE(excluded.title, product_costs.title),
+         product_cost = COALESCE(excluded.product_cost, product_costs.product_cost),
+         shipping_cost = COALESCE(excluded.shipping_cost, product_costs.shipping_cost),
+         cod_fee = COALESCE(excluded.cod_fee, product_costs.cod_fee),
+         updated_at = unixepoch()`
+    )
+    .run(sku, c.title ?? null, c.product_cost ?? null, c.shipping_cost ?? null, c.cod_fee ?? null);
+}
+
+export function deleteProductCost(sku: string): void {
+  ctx().db.prepare("DELETE FROM product_costs WHERE sku = ?").run(sku);
+}
+
+export interface DailyAdSpendRow {
+  day: string;
+  amount: number;
+  source: string;
+  updated_at: number;
+}
+
+export function listDailyAdSpend(fromDay?: string, toDay?: string): DailyAdSpendRow[] {
+  const db = ctx().db;
+  if (fromDay && toDay) {
+    return db
+      .prepare("SELECT * FROM daily_ad_spend WHERE day >= ? AND day <= ? ORDER BY day")
+      .all(fromDay, toDay) as DailyAdSpendRow[];
+  }
+  return db.prepare("SELECT * FROM daily_ad_spend ORDER BY day DESC LIMIT 90").all() as DailyAdSpendRow[];
+}
+
+export function upsertDailyAdSpend(day: string, amount: number, source = "manual"): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("día inválido (YYYY-MM-DD)");
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("importe inválido");
+  ctx()
+    .db.prepare(
+      `INSERT INTO daily_ad_spend (day, amount, source, updated_at) VALUES (?, ?, ?, unixepoch())
+       ON CONFLICT(day) DO UPDATE SET amount = excluded.amount, source = excluded.source, updated_at = unixepoch()`
+    )
+    .run(day, amount, source);
 }
 
 // --- Correspondencia de productos con el proveedor ---

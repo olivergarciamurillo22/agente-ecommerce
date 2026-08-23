@@ -1,87 +1,130 @@
 // ============================================================
 // Enrutado de pedidos al proveedor que toca (Dropi PRO / Dropea).
 //
-// ESTADO ACTUAL: no sabemos qué producto va a cada proveedor. Hasta que
-// llegue el handoff de Pedro, TODO sale como "unknown" → revisión humana.
-// Adivinar aquí significaría mandar un pedido al proveedor equivocado.
+// FUENTE DE VERDAD: la tabla `supplier_product_mapping`. Un producto va al
+// proveedor al que está mapeado (por variant_id, product_id o SKU de
+// Shopify). NUNCA se decide por el título del producto.
 //
-// Cuando existan las reglas reales (por SKU, por producto o por tags de
-// Shopify), se implementan en `reglasConfiguradas()` sin tocar nada más.
+// Regla de negocio (confirmada 22-08-2026):
+//   · la línea tiene mapping activo a Dropea      → dropea
+//   · no tiene mapping Dropea pero sí a Dropi     → dropi
+//   · líneas de los dos proveedores en un pedido  → manual_review (mixed)
+//   · alguna línea de producto sin mapping        → manual_review (unmapped)
+//   · sin líneas de producto (solo servicios)     → manual_review (no_items)
+//
+// Las líneas de servicio (seguro de envío: sin SKU ni IDs) no cuentan.
 // ============================================================
 
-import type { OrderRow } from "../db";
+import { listSupplierProductMappings, type OrderRow, type SupplierProductMapping } from "../db";
+import { orderLineItems, type OrderLineItem } from "../orders/line-items";
 import type { SupplierPlatform } from "./types";
+
+export type RoutingCode =
+  | "mapped"
+  | "mixed_supplier"
+  | "unmapped_products"
+  | "no_product_lines"
+  | "no_line_items";
 
 export interface RoutingResult {
   platform: SupplierPlatform;
   /** Por qué se decidió eso (para el panel y los logs). */
   reason: string;
+  /** Código estable para tests y métricas. */
+  code: RoutingCode;
+  /** Qué proveedor tocó a cada línea de producto (null = sin mapping). */
+  lines: Array<{ title: string; sku: string | null; platform: SupplierPlatform | null }>;
 }
 
+/** Solo proveedores reales cuentan para enrutar (no "manual"/"unknown"). */
+const ROUTABLE: SupplierPlatform[] = ["dropi", "dropea"];
+
 /**
- * Reglas de enrutado desde variables de entorno, pensadas para PRUEBAS
- * mientras no hay handoff. Formato:
- *
- *   SUPPLIER_ROUTING_RULES=dropi:cortauñas|pulidor,dropea:limpiador
- *
- * Cada regla es `plataforma:palabra|palabra`; se busca en el resumen de
- * productos del pedido. Sin esta variable no hay routing automático.
+ * Busca la correspondencia de una línea. Prioridad: variant_id (más
+ * específico) > product_id > SKU. Devuelve la plataforma o null.
  */
-function reglasConfiguradas(): Array<{ platform: SupplierPlatform; keywords: string[] }> {
-  const raw = (process.env.SUPPLIER_ROUTING_RULES ?? "").trim();
-  if (!raw) return [];
-  const reglas: Array<{ platform: SupplierPlatform; keywords: string[] }> = [];
-  for (const parte of raw.split(",")) {
-    const [plataforma, kw] = parte.split(":");
-    const p = (plataforma ?? "").trim().toLowerCase();
-    if (p !== "dropi" && p !== "dropea" && p !== "manual") continue;
-    const keywords = (kw ?? "")
-      .split("|")
-      .map((k) => k.trim().toLowerCase())
-      .filter(Boolean);
-    if (keywords.length) reglas.push({ platform: p as SupplierPlatform, keywords });
+export function matchLineToMapping(
+  line: OrderLineItem,
+  mappings: SupplierProductMapping[]
+): SupplierProductMapping | null {
+  const activos = mappings.filter((m) => m.active === 1 && ROUTABLE.includes(m.supplier_platform as SupplierPlatform));
+  if (line.variantId) {
+    const m = activos.find((x) => x.shopify_variant_id && x.shopify_variant_id === line.variantId);
+    if (m) return m;
   }
-  return reglas;
-}
-
-/** minúsculas y sin tildes, para comparar títulos de producto. */
-function normaliza(texto: string): string {
-  return texto
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "");
+  if (line.productId) {
+    const m = activos.find((x) => x.shopify_product_id && x.shopify_product_id === line.productId);
+    if (m) return m;
+  }
+  if (line.sku) {
+    const sku = line.sku.toLowerCase();
+    const m = activos.find((x) => x.shopify_sku && x.shopify_sku.toLowerCase() === sku);
+    if (m) return m;
+  }
+  return null;
 }
 
 /**
- * ¿A qué proveedor va este pedido?
- *
- * Sin reglas configuradas → "unknown" SIEMPRE. Es deliberado: es preferible
- * que Pedro enrute a mano diez pedidos a que el sistema mande uno al
- * proveedor equivocado.
+ * ¿A qué proveedor va este pedido? Función pura sobre la fila + mappings.
  */
-export function resolveSupplier(order: OrderRow): RoutingResult {
-  const reglas = reglasConfiguradas();
-  if (reglas.length === 0) {
+export function resolveSupplierWith(
+  order: Pick<OrderRow, "raw_payload">,
+  mappings: SupplierProductMapping[]
+): RoutingResult {
+  const items = orderLineItems(order);
+  if (items.length === 0) {
     return {
       platform: "unknown",
-      reason: "sin reglas de enrutado configuradas (pendiente del handoff de Dropi/Dropea)",
+      code: "no_line_items",
+      reason: "el pedido no tiene líneas legibles (sin raw_payload): decisión humana",
+      lines: [],
+    };
+  }
+  const productos = items.filter((i) => !i.isService);
+  if (productos.length === 0) {
+    return {
+      platform: "unknown",
+      code: "no_product_lines",
+      reason: "el pedido solo tiene líneas de servicio (sin SKU ni producto): decisión humana",
+      lines: [],
     };
   }
 
-  const productos = normaliza(order.product_summary ?? "");
-  const coincidencias = reglas.filter((r) => r.keywords.some((k) => productos.includes(normaliza(k))));
+  const lines = productos.map((l) => {
+    const m = matchLineToMapping(l, mappings);
+    return { title: l.title, sku: l.sku, platform: (m?.supplier_platform as SupplierPlatform) ?? null };
+  });
 
-  if (coincidencias.length === 0) {
-    return { platform: "unknown", reason: "ningún producto del pedido casa con las reglas" };
-  }
-  // Si el pedido casa con DOS proveedores distintos, no elegimos por él.
-  const plataformas = new Set(coincidencias.map((c) => c.platform));
+  const sinMapping = lines.filter((l) => l.platform === null);
+  const plataformas = new Set(lines.map((l) => l.platform).filter((p): p is SupplierPlatform => p !== null));
+
   if (plataformas.size > 1) {
     return {
       platform: "unknown",
-      reason: `el pedido casa con varios proveedores (${[...plataformas].join(", ")}): decisión humana`,
+      code: "mixed_supplier",
+      reason: `el pedido mezcla productos de ${[...plataformas].join(" y ")}: hay que partirlo a mano`,
+      lines,
     };
   }
-  const platform = coincidencias[0].platform;
-  return { platform, reason: `regla de enrutado por producto → ${platform}` };
+  if (sinMapping.length > 0) {
+    const nombres = sinMapping.map((l) => l.sku ?? l.title).join(", ");
+    return {
+      platform: "unknown",
+      code: "unmapped_products",
+      reason: `producto(s) sin correspondencia de proveedor: ${nombres}. Añádelos en supplier_product_mapping`,
+      lines,
+    };
+  }
+  const platform = [...plataformas][0];
+  return {
+    platform,
+    code: "mapped",
+    reason: `todas las líneas están mapeadas a ${platform} (${lines.map((l) => l.sku ?? l.title).join(", ")})`,
+    lines,
+  };
+}
+
+/** Versión con acceso a la base de datos (la que usa el servicio). */
+export function resolveSupplier(order: OrderRow): RoutingResult {
+  return resolveSupplierWith(order, listSupplierProductMappings());
 }
