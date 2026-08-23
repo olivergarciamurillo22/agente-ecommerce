@@ -1,7 +1,11 @@
 # Plan de cierre — todo lo que queda (23-08-2026)
 
-> **Estado a 23-08-2026 (tarde): FASE A EJECUTADA** en `feat/dropi-dropea`,
-> sin desplegar. Ver § "Fase A · estado" al final. Ajuste de prioridad
+> **Estado a 23-08-2026: FASE A IMPLEMENTADA E INTEGRADA EN `main`**
+> (merge `2652942`, 206 tests / typecheck / build en verde en `main`).
+> **NO es "production ready"**: esta versión aún no se ha validado en el
+> NAS real. Siguiente paso: `git pull origin main` en el NAS, rebuild y
+> smoke test (ver `SMOKE-TEST-NAS-2026-08-22.md` como guion). Ver
+> § "Fase A · estado" al final. Ajuste de prioridad
 > confirmado por Pedro: **Dropea sigue como integración externa
 > supervisada** (`DROPEA_CREATE_MODE=external_app`: adoptar, reconciliar,
 > webhooks, tracking, avisar); **la creación propia de pedidos se
