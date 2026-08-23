@@ -145,6 +145,7 @@ async function main(): Promise<void> {
   );
   const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
+  const backfill = await import("../src/lib/shopify/backfill");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
@@ -4136,6 +4137,142 @@ async function main(): Promise<void> {
 
     // Pedido inexistente: no revienta, simplemente no hace nada.
     assert.equal(db.setOrderClosure(999999999, "delivered", "shopify"), false);
+  });
+
+  // ============ E3 · Backfill del histórico de Shopify ============
+  console.log("· E3 — backfill del histórico");
+
+  const backfillOrder = (overrides: Record<string, unknown> = {}) =>
+    codPayload(overrides) as unknown as import("../src/lib/shopify/backfill").ShopifyBackfillOrder;
+
+  await test("E3 salvaguarda estructural: el módulo de backfill y su script NO importan WhatsApp/Baileys, ni de lejos", () => {
+    const prohibido = [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+    ];
+    for (const rel of ["src/lib/shopify/backfill.ts", "scripts/shopify-backfill.ts"]) {
+      const contenido = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const patron of prohibido) {
+        assert.ok(!patron.test(contenido), `${rel} no debe contener ${patron} — un import de WhatsApp aquí es el fallo, no un flag`);
+      }
+    }
+  });
+
+  await test("E3 decideBackfillAction: no-COD y sin señal se saltan; cancelled/fulfilled deciden inserción", () => {
+    const noCod = backfillOrder({ id: 995001, gateway: "Tarjeta", payment_gateway_names: ["Tarjeta"], tags: "" });
+    assert.equal(backfill.decideBackfillAction(null, noCod).kind, "skip_not_cod");
+
+    const sinSenal = backfillOrder({ id: 995002 }); // ni cancelled_at ni fulfillment_status
+    assert.equal(backfill.decideBackfillAction(null, sinSenal).kind, "skip_no_signal");
+
+    const cancelado = backfillOrder({ id: 995003, cancelled_at: "2026-08-20T10:00:00Z" });
+    const a1 = backfill.decideBackfillAction(null, cancelado);
+    assert.equal(a1.kind, "insert_cancelled");
+    assert.equal(a1.signal?.status, "cancelled");
+    assert.equal(a1.signal?.at, Math.floor(Date.parse("2026-08-20T10:00:00Z") / 1000), "closure_at es la fecha de Shopify, no now()");
+
+    const despachado = backfillOrder({ id: 995004, fulfillment_status: "fulfilled", updated_at: "2026-08-21T11:00:00Z" });
+    const a2 = backfill.decideBackfillAction(null, despachado);
+    assert.equal(a2.kind, "insert_in_progress");
+    assert.notEqual(a2.signal?.status, "delivered", "fulfilled NUNCA es delivered");
+  });
+
+  await test("E3 decideBackfillAction: nunca pisa un pedido que ya tiene closure_source propio (webhook primero)", () => {
+    const o = mkOrder("995010", "3910", "34600119910");
+    db.setOrderClosure(o.id, "in_progress", "dropea", 1000); // "ya llegó un webhook"
+    const conFuente = db.getOrderById(o.id)!;
+    const cancelado = backfillOrder({ id: 995010, cancelled_at: "2026-08-20T10:00:00Z" });
+    assert.equal(backfill.decideBackfillAction(conFuente, cancelado).kind, "skip_has_own_source");
+  });
+
+  await test("E3 decideBackfillAction: pedido existente sin fuente propia (unknown) → update, no insert", () => {
+    const o = mkOrder("995011", "3911", "34600119911");
+    const existente = db.getOrderById(o.id)!;
+    assert.equal(existente.closure_status, "unknown");
+    const cancelado = backfillOrder({ id: 995011, cancelled_at: "2026-08-20T10:00:00Z" });
+    assert.equal(backfill.decideBackfillAction(existente, cancelado).kind, "update_cancelled");
+  });
+
+  await test("E3 runShopifyBackfill (dry-run): cuenta el desglose completo y NO escribe nada ni mueve el checkpoint", async () => {
+    const antesCheckpoint = db.getSetting("shopify_backfill_cursor");
+    const pagina = {
+      orders: [
+        backfillOrder({ id: 995101, cancelled_at: "2026-08-20T09:00:00Z" }),
+        backfillOrder({ id: 995102, fulfillment_status: "fulfilled", updated_at: "2026-08-20T10:00:00Z" }),
+        backfillOrder({ id: 995103, gateway: "Tarjeta", payment_gateway_names: ["Tarjeta"], tags: "" }),
+      ],
+      nextCursor: null,
+    };
+    const report = await backfill.runShopifyBackfill({
+      dryRun: true,
+      pageFetcher: async () => pagina,
+    });
+    assert.equal(report.summary.toCancelled, 1);
+    assert.equal(report.summary.toInProgress, 1);
+    assert.equal(report.summary.unchanged, 1);
+    assert.equal(report.counts.skip_not_cod, 1);
+    assert.equal(db.getOrderByShopifyId("995101"), null, "dry-run no inserta nada");
+    assert.equal(db.getSetting("shopify_backfill_cursor"), antesCheckpoint, "dry-run no toca el checkpoint");
+  });
+
+  await test("E3 runShopifyBackfill (--apply): inserta con status ignored_old (nunca dispara colas) y actualiza cierre existente", async () => {
+    const oExistente = mkOrder("995201", "3920", "34600119920"); // ya en la DB, closure unknown
+    const pagina = {
+      orders: [
+        backfillOrder({ id: 995200, cancelled_at: "2026-08-20T09:00:00Z" }), // NO existe: se inserta
+        backfillOrder({ id: 995201, fulfillment_status: "fulfilled", updated_at: "2026-08-20T11:00:00Z" }), // SÍ existe: se actualiza
+      ],
+      nextCursor: null,
+    };
+    const report = await backfill.runShopifyBackfill({ dryRun: false, pageFetcher: async () => pagina });
+    assert.equal(report.summary.toCancelled, 1);
+    assert.equal(report.summary.toInProgress, 1);
+
+    const insertado = db.getOrderByShopifyId("995200")!;
+    assert.ok(insertado, "el pedido que no existía se insertó");
+    assert.equal(insertado.status, "ignored_old", "jamás pending_send/awaiting_reply: no debe disparar ninguna cola");
+    assert.equal(insertado.closure_status, "cancelled");
+    assert.equal(insertado.closure_source, "shopify");
+    assert.equal(insertado.closure_at, Math.floor(Date.parse("2026-08-20T09:00:00Z") / 1000));
+
+    const actualizado = db.getOrderById(oExistente.id)!;
+    assert.equal(actualizado.closure_status, "in_progress");
+    assert.equal(actualizado.closure_source, "shopify");
+    assert.equal(actualizado.closure_at, Math.floor(Date.parse("2026-08-20T11:00:00Z") / 1000));
+    // El status de la máquina de confirmación NO se toca por el backfill.
+    assert.equal(actualizado.status, oExistente.status);
+  });
+
+  await test("E3 runShopifyBackfill: paginación + checkpoint reanudable — no repite páginas ya completadas", async () => {
+    const paginas = [
+      { orders: [backfillOrder({ id: 995301, cancelled_at: "2026-08-20T09:00:00Z" })], nextCursor: "cursor-pagina-2" },
+      { orders: [backfillOrder({ id: 995302, cancelled_at: "2026-08-20T09:00:00Z" })], nextCursor: null },
+    ];
+    const cursoresPedidos: Array<string | null> = [];
+    const fetcherLimitado: import("../src/lib/shopify/backfill").PageFetcher = async (cursor) => {
+      cursoresPedidos.push(cursor);
+      return cursor === null ? paginas[0] : paginas[1];
+    };
+
+    // Primera ejecución: se detiene tras la página 1 (maxPages: 1) — simula
+    // un proceso interrumpido a mitad del histórico.
+    const r1 = await backfill.runShopifyBackfill({ dryRun: false, pageFetcher: fetcherLimitado, maxPages: 1, resetCheckpoint: true });
+    assert.equal(r1.done, false);
+    assert.equal(r1.pagesProcessed, 1);
+    assert.equal(db.getSetting("shopify_backfill_cursor"), "cursor-pagina-2", "el checkpoint queda apuntando a la siguiente página");
+
+    // Segunda ejecución (nueva "invocación" del script): SIN resetCheckpoint,
+    // debe reanudar desde "cursor-pagina-2", no repetir la página 1.
+    const r2 = await backfill.runShopifyBackfill({ dryRun: false, pageFetcher: fetcherLimitado });
+    assert.equal(r2.done, true);
+    assert.deepEqual(cursoresPedidos, [null, "cursor-pagina-2"], "no se repite el cursor ya procesado");
+    assert.ok(db.getOrderByShopifyId("995301"), "lo de la primera ejecución sigue aplicado");
+    assert.ok(db.getOrderByShopifyId("995302"), "lo de la segunda ejecución también se aplicó");
+    assert.equal(db.getSetting("shopify_backfill_cursor"), "", "al terminar, el checkpoint se limpia");
   });
 
   // ============ Resumen ============
