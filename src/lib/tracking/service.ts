@@ -10,6 +10,7 @@
 import pino from "pino";
 import {
   getOrderById,
+  insertOrderStatusHistory,
   setOrderSupplierReview,
   updateOrderTracking,
   type OrderRow,
@@ -32,6 +33,8 @@ export interface ProcessUpdateResult {
   notified: TrackingEvent[];
   /** true si en este update apareció el tracking por primera vez. */
   trackingAppeared: boolean;
+  /** Id de la fila de order_status_history creada (null si no hubo transición o era duplicado). */
+  historyId: number | null;
 }
 
 /** Orden del ciclo de vida: sirve para no "retroceder" con updates atrasados. */
@@ -44,10 +47,20 @@ const ORDEN: Record<TrackingStatus, number> = {
   out_for_delivery: 5,
   delivered: 6,
   // Estados fuera de la línea normal: no compiten por orden.
+  // (intento fallido y punto de recogida pueden llegar tras "en reparto" y
+  // volver a "en reparto" al día siguiente: no son retrocesos).
+  delivery_attempted: -1,
+  at_pickup_point: -1,
   incident: -1,
   returned: -1,
   cancelled: -1,
 };
+
+function formatPickupPoint(p: SupplierUpdate["pickupPoint"]): string | null {
+  if (!p) return null;
+  const partes = [p.name, p.address, p.url].map((x) => (x ?? "").trim()).filter(Boolean);
+  return partes.length ? partes.join(" · ").slice(0, 500) : null;
+}
 
 /**
  * Procesa una actualización del proveedor sobre un pedido.
@@ -79,6 +92,8 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
   const teniaTracking = Boolean((order.tracking_number ?? "").trim());
   const trackingAppeared = !teniaTracking && Boolean(nuevoTracking);
 
+  const pickupInfo = formatPickupPoint(update.pickupPoint);
+
   // 1. Persistir lo que sabemos ahora.
   updateOrderTracking(order.id, {
     rawStatus: update.rawStatus ?? null,
@@ -86,20 +101,39 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
     trackingNumber: nuevoTracking,
     trackingUrl: update.trackingUrl ?? null,
     carrier: update.carrier ?? null,
+    pickupPointInfo: pickupInfo,
     firstTracking: trackingAppeared,
   });
 
   // 2. ¿Qué eventos produce este cambio?
   const events: TrackingEvent[] = [];
+  let historyId: number | null = null;
   if (trackingAppeared) events.push("TRACKING_AVAILABLE");
   if (newStatus !== previousStatus) {
     if (newStatus === "out_for_delivery") events.push("OUT_FOR_DELIVERY");
+    if (newStatus === "delivery_attempted") events.push("DELIVERY_ATTEMPT_FAILED");
+    if (newStatus === "at_pickup_point") events.push("PICKUP_POINT_AVAILABLE");
     if (newStatus === "delivered") events.push("DELIVERED");
     if (newStatus === "incident") events.push("INCIDENT");
     if (newStatus === "returned") events.push("RETURNED");
     logger.info(
       `[TRACKING] #${order.shopify_order_number} ${previousStatus} → ${newStatus}`
     );
+    // Histórico: la transición REAL, una sola vez (dedupe por event_id o
+    // por transición reciente). Es la base de la tasa de entrega.
+    historyId = insertOrderStatusHistory({
+      orderId: order.id,
+      shopifyOrderId: order.shopify_order_id,
+      supplierPlatform: order.supplier_platform ?? null,
+      carrier: (update.carrier ?? order.carrier) ?? null,
+      previousStatus,
+      newStatus,
+      rawStatus: update.rawStatus ?? null,
+      rawSubStatus: update.rawSubStatus ?? null,
+      source: update.source ?? "polling",
+      eventId: update.eventId ?? null,
+      occurredAt: update.occurredAt ?? null,
+    });
     // Feed del Control Center: qué cambió, en qué pedido, desde qué proveedor.
     logIntegrationEvent(
       (order.supplier_platform === "dropea" || order.supplier_platform === "dropi"
@@ -133,5 +167,5 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
     );
   }
 
-  return { previousStatus, newStatus, events, notified, trackingAppeared };
+  return { previousStatus, newStatus, events, notified, trackingAppeared, historyId };
 }

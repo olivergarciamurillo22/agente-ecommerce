@@ -109,7 +109,8 @@ function findOrder(
 function aplicarEventoPedido(
   order: OrderRow,
   resource: Record<string, unknown>,
-  resourceId: number
+  resourceId: number,
+  meta: { eventId: string | null; occurredAt: number | null } = { eventId: null, occurredAt: null }
 ): DropeaWebhookResult {
   const pedido = resource as unknown as DropeaOrder;
 
@@ -129,10 +130,14 @@ function aplicarEventoPedido(
 
   const resultado = processSupplierUpdate(order, {
     rawStatus: raw,
+    rawSubStatus: pedido.sub_status ?? null,
     normalizedOverride: normalizado,
     trackingNumber: pedido.tracking_number ?? null,
     trackingUrl: pedido.tracking_url ?? null,
     carrier: pedido.carrier ?? null,
+    source: "webhook",
+    eventId: meta.eventId,
+    occurredAt: meta.occurredAt,
   });
 
   return {
@@ -252,8 +257,16 @@ export function processDropeaWebhook(
   switch (topic) {
     case "order.created":
     case "order.status.changed":
-    case "order.cancelled":
-      return aplicarEventoPedido(order, resource, envelope.resource_id);
+    case "order.cancelled": {
+      const eventAt = typeof envelope.event_at === "string" ? Date.parse(envelope.event_at) : NaN;
+      return aplicarEventoPedido(order, resource, envelope.resource_id, {
+        eventId:
+          typeof envelope.event_id === "string" && envelope.event_id.trim()
+            ? `dropea:${envelope.event_id.trim()}`
+            : null,
+        occurredAt: Number.isFinite(eventAt) ? Math.floor(eventAt / 1000) : null,
+      });
+    }
     case "issue.created":
     case "issue.status.changed":
     case "issue.resolved":

@@ -27,6 +27,18 @@ export type TrackingStatus =
   | "shipped"
   | "in_transit"
   | "out_for_delivery"
+  /**
+   * Intento de entrega fallido (cliente ausente…). Confirmado en el contrato
+   * de Dropea (`sub_status = DELIVERY_ATTEMPTED`). El envío sigue vivo: el
+   * transportista volverá a intentarlo.
+   */
+  | "delivery_attempted"
+  /**
+   * Disponible en punto de recogida. NINGÚN proveedor lo reporta hoy (no
+   * está en el spec de Dropea; Dropi sin catálogo). Existe en el vocabulario
+   * para que el día que un proveedor lo confirme solo haya que mapearlo.
+   */
+  | "at_pickup_point"
   | "delivered"
   | "incident"
   | "returned"
@@ -39,6 +51,8 @@ export const TRACKING_STATUSES: TrackingStatus[] = [
   "shipped",
   "in_transit",
   "out_for_delivery",
+  "delivery_attempted",
+  "at_pickup_point",
   "delivered",
   "incident",
   "returned",
@@ -63,9 +77,21 @@ export function isTerminalTracking(status: string): boolean {
 export type TrackingEvent =
   | "TRACKING_AVAILABLE"
   | "OUT_FOR_DELIVERY"
+  | "DELIVERY_ATTEMPT_FAILED"
+  | "PICKUP_POINT_AVAILABLE"
   | "DELIVERED"
   | "INCIDENT"
   | "RETURNED";
+
+/** De dónde viene una actualización (se persiste en order_status_history). */
+export type TrackingSource = "webhook" | "polling" | "manual" | "reconciliation";
+
+/** Datos del punto de recogida, si el proveedor los manda. Sin PII nuestra. */
+export interface PickupPointInfo {
+  name?: string | null;
+  address?: string | null;
+  url?: string | null;
+}
 
 /** Lo que un proveedor nos cuenta de un envío (ya sea por webhook o polling). */
 export interface SupplierUpdate {
@@ -80,4 +106,14 @@ export interface SupplierUpdate {
   trackingNumber?: string | null;
   trackingUrl?: string | null;
   carrier?: string | null;
+  /** Sub-estado del proveedor, tal cual (Dropea lo tiene; Dropi no). */
+  rawSubStatus?: string | null;
+  /** Origen del update. Por defecto "polling" (el caso sin webhook). */
+  source?: TrackingSource;
+  /** Id del evento del proveedor, si existe: dedupe del histórico. */
+  eventId?: string | null;
+  /** Momento del hecho según el proveedor (epoch s). Si no, ahora. */
+  occurredAt?: number | null;
+  /** Punto de recogida, si el proveedor lo reporta. */
+  pickupPoint?: PickupPointInfo | null;
 }

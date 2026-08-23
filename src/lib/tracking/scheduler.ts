@@ -96,6 +96,7 @@ export async function runTrackingPollTick(nowSec?: number): Promise<TrackingPoll
         trackingNumber: estado.trackingNumber ?? null,
         trackingUrl: estado.trackingUrl ?? null,
         carrier: estado.carrier ?? null,
+        source: "polling",
       });
       if (r.events.length) result.updated++;
     } catch (err) {

@@ -108,8 +108,10 @@ const POR_SUB_STATUS: Partial<Record<DropeaSubStatus, TrackingStatus>> = {
   // Devoluciones al origen
   REFUSED: "returned",
   REFUSED_LOST_DAMAGED: "returned",
+  // Intento de entrega fallido: el envío sigue vivo, el transportista
+  // volverá a pasar. Es el momento de avisar al cliente (Fase A).
+  DELIVERY_ATTEMPTED: "delivery_attempted",
   // Problemas que requieren intervención humana
-  DELIVERY_ATTEMPTED: "incident",
   DELIVERY_EXCEPTION: "incident",
   LOST_DAMAGED: "incident",
   REVIEW: "incident",

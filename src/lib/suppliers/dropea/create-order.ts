@@ -158,6 +158,7 @@ export async function createDropeaOrderForOrder(
     }
     const mensaje = err instanceof Error ? err.message : "error desconocido";
     markSupplierCreateFailed(order.id, mensaje);
+    logIntegrationEvent("dropea", "order_create_failed", "warning", "fallo creando/confirmando en Dropea", order.shopify_order_number);
     return { ok: false, externalOrderId: null, detail: mensaje, blocker: "api_error" };
   }
 }
@@ -211,6 +212,7 @@ export async function confirmDropeaOrder(orderId: number): Promise<CreateOrderOu
   } catch (err) {
     const mensaje = err instanceof Error ? err.message : "error";
     markSupplierCreateFailed(order.id, `confirmación: ${mensaje}`);
+    logIntegrationEvent("dropea", "order_create_failed", "warning", "fallo creando/confirmando en Dropea", order.shopify_order_number);
     return {
       ok: false,
       externalOrderId: order.supplier_external_order_id,

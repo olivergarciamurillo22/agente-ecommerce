@@ -85,10 +85,12 @@ export async function adoptDropeaOrder(order: OrderRow): Promise<AdoptionResult>
     rawStatus: encontrado.sub_status
       ? `${encontrado.status}.${encontrado.sub_status}`
       : String(encontrado.status),
+    rawSubStatus: encontrado.sub_status ?? null,
     normalizedOverride: normalizado,
     trackingNumber: encontrado.tracking_number ?? null,
     trackingUrl: encontrado.tracking_url ?? null,
     carrier: encontrado.carrier ?? null,
+    source: "reconciliation",
   });
 
   return { adopted: true, externalOrderId: externalId, reason: "adoptado de la app oficial" };
@@ -106,10 +108,12 @@ export async function reconcileDropeaOrder(order: OrderRow): Promise<boolean> {
     const raw = remoto.sub_status ? `${remoto.status}.${remoto.sub_status}` : String(remoto.status);
     const r = processSupplierUpdate(order, {
       rawStatus: raw,
+      rawSubStatus: remoto.sub_status ?? null,
       normalizedOverride: normalizado,
       trackingNumber: remoto.tracking_number ?? null,
       trackingUrl: remoto.tracking_url ?? null,
       carrier: remoto.carrier ?? null,
+      source: "reconciliation",
     });
     if (r.events.length) {
       logger.info(

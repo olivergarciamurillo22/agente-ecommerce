@@ -13,7 +13,16 @@ import type { HealthStatus } from "./types";
 const now = () => Math.floor(Date.now() / 1000);
 
 /** Estados que cuentan como envío VIVO (ni terminales ni pre-proveedor). */
-const ACTIVE_STATES = ["created", "processing", "shipped", "in_transit", "out_for_delivery", "incident"];
+const ACTIVE_STATES = [
+  "created",
+  "processing",
+  "shipped",
+  "in_transit",
+  "out_for_delivery",
+  "delivery_attempted",
+  "at_pickup_point",
+  "incident",
+];
 
 export function trackingStaleHours(): number {
   const v = parseFloat(process.env.TRACKING_STALE_HOURS ?? "");

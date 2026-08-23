@@ -121,10 +121,17 @@ export function processDropiWebhook(rawBody: string): DropiWebhookResult {
     // Se manda el nombre original: el motor lo guarda como raw. La
     // normalización de Dropi la hemos hecho aquí, así que se pasa ya resuelta.
     rawStatus: payload.status_name,
+    rawSubStatus: String(payload.status_id),
     normalizedOverride: normalizado,
     trackingNumber: payload.tracking_code || null,
     trackingUrl: payload.tracking_url,
     carrier: payload.shipping_company || null,
+    source: "webhook",
+    // Dropi no manda event_id: la clave estable es pedido + estado + fecha del evento.
+    eventId: `dropi:${payload.order_id}:${payload.status_id}:${payload.event_date}`,
+    occurredAt: Number.isFinite(Date.parse(payload.event_date))
+      ? Math.floor(Date.parse(payload.event_date) / 1000)
+      : null,
   });
 
   logger.info(
