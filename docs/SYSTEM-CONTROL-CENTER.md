@@ -191,7 +191,7 @@ entorno, como siempre.
 ## Cómo probarlo
 
 ```bash
-npm test              # 183 tests, 25 del Control Center
+npm test              # 206 tests (25 del Control Center, 23 de la Fase A)
 npm run db:health     # la CLI contra tu DB local
 npm run dev           # panel → pestaña "Sistema"
 ```
@@ -200,6 +200,32 @@ En local lo esperable es: SQLite healthy, backups unknown/viejos, WhatsApp
 critical si el bot está parado, Dropea/Dropi disabled, schedulers unknown.
 Eso **es** el comportamiento correcto: el panel dice la verdad del entorno
 en el que corre.
+
+## Pestaña "Negocio" (Fase A, 23-08-2026)
+
+Décima tarjeta del resumen y pestaña propia. Tres bloques:
+
+- **Operativa**: pendientes de llamada (y cuántos atrasados), incidencias
+  abiertas, entregados hoy, devueltos 7 d, envíos sin noticias.
+- **Rendimiento**: tasa de entrega hoy / 7 d / 30 d, enviados vs resueltos,
+  horas medias hasta entrega; desglose por producto, proveedor y
+  transportista (30 d).
+- **Economía**: facturación bruta, ingresos entregados, margen estimado,
+  ROAS bruto/neto, por ventana; y el editor de costes por SKU + gasto en
+  ads por día.
+
+Las alertas van etiquetadas por categoría (**negocio** / **operativa**) y
+no se mezclan con las técnicas del resto del panel. Fórmulas, fuentes y
+umbrales: `docs/BUSINESS-METRICS.md`.
+
+Tablas nuevas (esquema **v3**): `order_status_history`, `product_costs`,
+`daily_ad_spend`. Columnas nuevas en `orders`:
+`delivery_attempt_notification_sent_at`, `pickup_point_notification_sent_at`,
+`pickup_point_info`. Migración aditiva: `main` las ignora.
+
+Variables nuevas (todas con default): `DELIVERY_RATE_WARN/CRIT/MIN_SAMPLE`,
+`NEEDS_CALL_STALE_HOURS`, `NEEDS_CALL_CRIT_COUNT`, `SUPPLIER_FAILURES_WARN`,
+`OPEN_INCIDENTS_WARN`, `TRACKING_NOTIFY_FAIL_WARN`.
 
 ## Cómo interpretar los estados sin volverse loco
 

@@ -1530,6 +1530,13 @@ async function main(): Promise<void> {
       postal_code: "postal_code" in extra ? extra.postal_code! : "04007",
       country: "España",
       status: "pending_send",
+      // Líneas reales (con SKU e IDs): es lo que usa el routing por mapping.
+      raw_payload: JSON.stringify({
+        line_items: [
+          { title: "Limpiador Ultrasónico Multiusos", quantity: 1, price: "34.98", sku: "LIMP-001", product_id: 111, variant_id: 1111 },
+          { title: "Seguro de Envío", quantity: 1, price: "1.99" },
+        ],
+      }),
     }).order;
     db.claimOrderInitialSend(o.id);
     return db.getOrderById(o.id)!;
@@ -1575,25 +1582,30 @@ async function main(): Promise<void> {
     assert.ok(sinCalle.issues.includes("missing_address"));
   });
 
-  await test("routing: sin reglas configuradas SIEMPRE unknown (nunca adivina)", () => {
+  await test("routing: sin mapping SIEMPRE unknown → manual_review (nunca adivina por título)", () => {
     const o = mkConfirmed("970001", "1801");
-    assert.equal(resolveSupplier(o).platform, "unknown");
+    const r = resolveSupplier(o);
+    assert.equal(r.platform, "unknown");
+    assert.equal(r.code, "unmapped_products");
     const ev = suppliers.evaluateOrderForSupplier(o);
     assert.equal(ev.status, "manual_review");
-    assert.match(ev.reason, /sin reglas de enrutado/);
+    assert.match(ev.reason, /sin correspondencia de proveedor/);
   });
 
-  await test("routing con reglas: enruta por producto y detecta ambigüedad", async () => {
+  await test("routing por mapping: SKU mapeado a Dropi → dropi (la línea de servicio no cuenta)", () => {
+    // Mapping de prueba: el limpiador va a Dropi PRO. Es el que usan el
+    // resto de tests de proveedores de esta sección.
+    db.upsertSupplierProductMapping({
+      supplier_platform: "dropi",
+      shopify_sku: "LIMP-001",
+      shopify_title: "Limpiador Ultrasónico Multiusos",
+      supplier_variant_id: "LIMP-001",
+    });
     const o = db.getOrderByShopifyId("970001")!;
-    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
-      assert.equal(resolveSupplier(o).platform, "dropi");
-    });
-    // Dos proveedores compiten por el mismo pedido → decisión humana
-    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador,dropea:ultrasónico" }, () => {
-      const r = resolveSupplier(o);
-      assert.equal(r.platform, "unknown");
-      assert.match(r.reason, /varios proveedores/);
-    });
+    const r = resolveSupplier(o);
+    assert.equal(r.platform, "dropi");
+    assert.equal(r.code, "mapped");
+    assert.equal(r.lines.length, 1, "el seguro de envío no entra en el routing");
   });
 
   await test("pedido con city '-' → blocked_address, nunca ready", async () => {
@@ -3556,10 +3568,11 @@ async function main(): Promise<void> {
     }
   });
 
-  await test("getSystemOverview: 9 tarjetas, overall = peor estado OPERATIVO (disabled/unknown no arrastran)", () => {
+  await test("getSystemOverview: 10 tarjetas (con Negocio), overall = peor estado OPERATIVO (disabled/unknown no arrastran)", () => {
     db.setConnectionState({ status: "connected", phone: "34641308254" });
     const ov = sysOverview.getSystemOverview();
-    assert.equal(ov.cards.length, 9);
+    assert.equal(ov.cards.length, 10);
+    assert.ok(ov.cards.some((c) => c.service === "business"), "tarjeta de negocio presente");
     const rank: Record<string, number> = { healthy: 0, disabled: 0, unknown: 0, warning: 1, critical: 2 };
     const esperado = ov.cards.reduce((acc, c) => (rank[c.status] > rank[acc] ? c.status : acc),
       "healthy" as string);
@@ -3597,6 +3610,396 @@ async function main(): Promise<void> {
       });
       assert.equal(r.status, 401);
       assert.equal(sysRepo.countIntegrationEvents("dropea", "webhook_bad_signature", 0), antes + 1);
+    });
+  });
+
+
+  // ============ 30 · FASE A — routing por mapping, histórico, métricas, alertas, economía ============
+  console.log("\n— Fase A —");
+
+  const { resolveSupplierWith } = await import("../src/lib/suppliers/router");
+  const deliveryMetrics = await import("../src/lib/system/delivery-metrics");
+  const businessAlerts = await import("../src/lib/system/business-alerts");
+  const unitEconomics = await import("../src/lib/system/unit-economics");
+  const dropiCreate = await import("../src/lib/suppliers/dropi/create-order");
+  const { canCreateDropiOrder } = await import("../src/lib/suppliers/dropi/create-gate");
+  const trackingNotif = await import("../src/lib/tracking/notifications");
+
+  const payloadCon = (lineas: Array<Record<string, unknown>>) => JSON.stringify({ line_items: lineas });
+  const MAPPINGS = [
+    { id: 1, supplier_platform: "dropea", shopify_product_id: "9001", shopify_variant_id: "90011", shopify_sku: "10428", shopify_title: "Cortaúñas Eléctrico 3 en 1", supplier_product_id: "a3f618c76fb450ce890e7189", supplier_variant_id: "v-dropea-1", supplier_unit_price: 29.9, active: 1, created_at: 0, updated_at: 0 },
+    { id: 2, supplier_platform: "dropi", shopify_product_id: "9002", shopify_variant_id: "90021", shopify_sku: "LIMP-001", shopify_title: "Limpiador Ultrasónico Multiusos", supplier_product_id: null, supplier_variant_id: "LIMP-001", supplier_unit_price: null, active: 1, created_at: 0, updated_at: 0 },
+    { id: 3, supplier_platform: "dropi", shopify_product_id: null, shopify_variant_id: null, shopify_sku: "INACTIVO", shopify_title: "Viejo", supplier_product_id: null, supplier_variant_id: "x", supplier_unit_price: null, active: 0, created_at: 0, updated_at: 0 },
+  ];
+
+  await test("A1 routing: producto mapeado a Dropea → dropea", () => {
+    const r = resolveSupplierWith(
+      { raw_payload: payloadCon([{ title: "Cortaúñas Eléctrico 3 en 1", quantity: 1, sku: "10428", product_id: 9001, variant_id: 90011 }, { title: "Seguro de Envío", quantity: 1 }]) },
+      MAPPINGS
+    );
+    assert.equal(r.platform, "dropea");
+    assert.equal(r.code, "mapped");
+    assert.equal(r.lines.length, 1, "el seguro de envío no cuenta");
+  });
+
+  await test("A1 routing: producto mapeado a Dropi → dropi (por SKU aunque cambien los IDs)", () => {
+    const r = resolveSupplierWith(
+      { raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "limp-001", product_id: 777, variant_id: 7777 }]) },
+      MAPPINGS
+    );
+    assert.equal(r.platform, "dropi");
+    assert.equal(r.code, "mapped");
+  });
+
+  await test("A1 routing: pedido mixto Dropea + Dropi → unknown / mixed_supplier (manual_review)", () => {
+    const r = resolveSupplierWith(
+      { raw_payload: payloadCon([{ title: "Cortaúñas", quantity: 1, sku: "10428" }, { title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      MAPPINGS
+    );
+    assert.equal(r.platform, "unknown");
+    assert.equal(r.code, "mixed_supplier");
+  });
+
+  await test("A1 routing: sin mapping → unknown / unmapped_products; mapping inactivo no cuenta", () => {
+    const r = resolveSupplierWith({ raw_payload: payloadCon([{ title: "Pulidor", quantity: 1, sku: "PUL-9" }]) }, MAPPINGS);
+    assert.equal(r.platform, "unknown");
+    assert.equal(r.code, "unmapped_products");
+    const r2 = resolveSupplierWith({ raw_payload: payloadCon([{ title: "Viejo", quantity: 1, sku: "INACTIVO" }]) }, MAPPINGS);
+    assert.equal(r2.code, "unmapped_products");
+    // Un pedido mapeado parcialmente también es revisión: nunca se manda a medias.
+    const r3 = resolveSupplierWith({ raw_payload: payloadCon([{ title: "Cortaúñas", quantity: 1, sku: "10428" }, { title: "Pulidor", quantity: 1, sku: "PUL-9" }]) }, MAPPINGS);
+    assert.equal(r3.code, "unmapped_products");
+  });
+
+  await test("A1 routing: sin raw_payload o solo servicios → unknown (no adivina por product_summary)", () => {
+    assert.equal(resolveSupplierWith({ raw_payload: null }, MAPPINGS).code, "no_line_items");
+    assert.equal(resolveSupplierWith({ raw_payload: "{no json" }, MAPPINGS).code, "no_line_items");
+    assert.equal(resolveSupplierWith({ raw_payload: payloadCon([{ title: "Seguro de Envío", quantity: 1 }]) }, MAPPINGS).code, "no_product_lines");
+  });
+
+  await test("A2 histórico: cada transición real se persiste UNA vez; mismo estado no crea fila", () => {
+    const o = mkSynced("990001", "3001", "34600119001");
+    const r1 = tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "H1", source: "polling" });
+    assert.ok(r1.historyId, "primera transición registrada");
+    const r2 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "shipped", source: "polling" });
+    assert.equal(r2.historyId, null, "mismo estado: sin transición");
+    const h = db.listOrderStatusHistory(o.id);
+    assert.equal(h.length, 1);
+    assert.equal(h[0].previous_status, "unknown");
+    assert.equal(h[0].new_status, "shipped");
+    assert.equal(h[0].source, "polling");
+    assert.equal(h[0].supplier_platform, "dropea");
+  });
+
+  await test("A2 histórico: dedupe por event_id (mismo evento dos veces → una fila)", () => {
+    const o = mkSynced("990002", "3002", "34600119002");
+    const a = db.insertOrderStatusHistory({ orderId: o.id, shopifyOrderId: o.shopify_order_id, supplierPlatform: "dropea", carrier: "GLS", previousStatus: "unknown", newStatus: "shipped", rawStatus: "SHIPPING.SHIPPED", source: "webhook", eventId: "evt-unico-1" });
+    const b = db.insertOrderStatusHistory({ orderId: o.id, shopifyOrderId: o.shopify_order_id, supplierPlatform: "dropea", carrier: "GLS", previousStatus: "unknown", newStatus: "shipped", rawStatus: "SHIPPING.SHIPPED", source: "webhook", eventId: "evt-unico-1" });
+    assert.ok(a);
+    assert.equal(b, null);
+    assert.equal(db.listOrderStatusHistory(o.id).length, 1);
+  });
+
+  await test("A2 histórico: polling repetido de la misma transición no duplica (clave estable sin event_id)", () => {
+    const o = mkSynced("990003", "3003", "34600119003");
+    const base = { orderId: o.id, shopifyOrderId: o.shopify_order_id, supplierPlatform: "dropea", carrier: null, previousStatus: "shipped", newStatus: "in_transit", rawStatus: "SHIPPING", source: "polling" as const };
+    assert.ok(db.insertOrderStatusHistory(base));
+    assert.equal(db.insertOrderStatusHistory(base), null, "misma transición en la ventana → duplicado");
+    // Una transición DISTINTA sí entra.
+    assert.ok(db.insertOrderStatusHistory({ ...base, previousStatus: "in_transit", newStatus: "out_for_delivery" }));
+    assert.equal(db.listOrderStatusHistory(o.id).length, 2);
+  });
+
+  await test("A2 histórico: webhook Dropea duplicado (mismo event_id) no duplica el histórico ni el aviso", async () => {
+    const o = mkSynced("990004", "3004", "34600119004");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(990004, { id: 990004, status: "SHIPPING", sub_status: "SHIPPED", tracking_number: "TRKH4", carrier: "GLS" });
+      const firma = firmaDropea(body);
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
+    });
+    const h = db.listOrderStatusHistory(o.id);
+    assert.equal(h.length, 1);
+    assert.equal(h[0].source, "webhook");
+    assert.equal(h[0].event_id, "dropea:evt-990004-order.status.changed");
+    assert.equal(h[0].raw_sub_status, "SHIPPED");
+    assert.equal(h[0].occurred_at, Math.floor(Date.parse("2026-08-22T10:00:00.000Z") / 1000), "fecha del hecho según Dropea");
+  });
+
+  await test("A3 tasa de entrega: entregados / (entregados + devueltos); en curso NO cuentan", () => {
+    assert.equal(deliveryMetrics.computeDeliveryRate(7, 3), 70);
+    assert.equal(deliveryMetrics.computeDeliveryRate(0, 0), null);
+    assert.equal(deliveryMetrics.computeDeliveryRate(2, 1), 66.7);
+
+    // Escenario real en DB: 3 enviados → 2 entregados, 1 devuelto, 1 en tránsito (no resuelto)
+    const mk = (id: string, num: string, tel: string) => mkSynced(id, num, tel);
+    const a = mk("990010", "3010", "34600119010");
+    const b = mk("990011", "3011", "34600119011");
+    const c = mk("990012", "3012", "34600119012");
+    const d = mk("990013", "3013", "34600119013");
+    for (const o of [a, b, c, d]) tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: `T${o.id}`, carrier: o.id === d.id ? "CEX-A3" : "GLS-A3", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(a.id)!, { rawStatus: "delivered", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(b.id)!, { rawStatus: "delivered", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(c.id)!, { rawStatus: "returned", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(d.id)!, { rawStatus: "in_transit", source: "polling" });
+
+    const ahora = Math.floor(Date.now() / 1000);
+    const w = deliveryMetrics.getDeliveryWindow(ahora - 60, ahora + 2);
+    // Otros tests de esta misma ejecución también han enviado pedidos: se
+    // comprueba por transportista (claves únicas de este test) y en agregado.
+    assert.ok(w.shipped >= 4);
+    const gls = w.byCarrier.find((x) => x.key === "GLS-A3")!;
+    assert.equal(gls.shipped, 3);
+    assert.equal(gls.delivered, 2);
+    assert.equal(gls.returned, 1);
+    assert.equal(gls.pending, 0);
+    assert.equal(gls.deliveryRate, 66.7);
+    const correos = w.byCarrier.find((x) => x.key === "CEX-A3")!;
+    assert.equal(correos.pending, 1, "el que sigue en tránsito no está resuelto");
+    assert.equal(correos.deliveryRate, null, "sin resueltos → sin tasa, no 0 %");
+    assert.ok((w.bySupplier.find((x) => x.key === "dropea")?.shipped ?? 0) >= 4);
+    assert.ok(w.byProduct.length >= 1);
+    assert.equal(w.delivered + w.returned + w.pending, w.shipped, "todo enviado está resuelto o pendiente");
+    assert.equal(w.deliveryRate, deliveryMetrics.computeDeliveryRate(w.delivered, w.returned));
+    assert.ok((w.avgHoursToDeliver ?? 0) >= 0);
+    // Fuera de la ventana: nada.
+    assert.equal(deliveryMetrics.getDeliveryWindow(ahora - 7200, ahora - 3600).shipped, 0);
+  });
+
+  await test("A3 terminales/no terminales: delivery_attempted y at_pickup_point siguen vivos", () => {
+    assert.equal(isTerminalTracking("delivery_attempted"), false);
+    assert.equal(isTerminalTracking("at_pickup_point"), false);
+    assert.equal(isTerminalTracking("delivered"), true);
+    assert.equal(isTerminalTracking("returned"), true);
+  });
+
+  await test("A4 DELIVERY_ATTEMPT_FAILED: Dropea DELIVERY_ATTEMPTED → evento; apagado → revisión humana sin mensaje", () => {
+    const { normalizeDropeaStatus } = require("../src/lib/suppliers/dropea/status-map");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "DELIVERY_ATTEMPTED"), "delivery_attempted");
+    const o = mkSynced("990020", "3020", "34600119020");
+    tracking.processSupplierUpdate(o, { rawStatus: "SHIPPING.OUT_FOR_DELIVERY", normalizedOverride: "out_for_delivery", trackingNumber: "TA1", source: "webhook" });
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119020").length;
+    const antes = contar();
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "SHIPPING.DELIVERY_ATTEMPTED", normalizedOverride: "delivery_attempted", source: "webhook" });
+    assert.deepEqual(r.events, ["DELIVERY_ATTEMPT_FAILED"]);
+    assert.equal(r.notified.length, 0, "apagado por defecto: sin mensaje");
+    assert.equal(contar(), antes);
+    const fresco = db.getOrderById(o.id)!;
+    assert.equal(fresco.supplier_sync_status, "manual_review");
+    assert.equal(fresco.delivery_attempt_notification_sent_at, null, "no se consumió el sello");
+    // Vuelve a reparto al día siguiente: no es un retroceso.
+    const r2 = tracking.processSupplierUpdate(fresco, { rawStatus: "SHIPPING.OUT_FOR_DELIVERY", normalizedOverride: "out_for_delivery", source: "webhook" });
+    assert.equal(r2.newStatus, "out_for_delivery");
+  });
+
+  await test("A4 DELIVERY_ATTEMPT_FAILED: activado → UN mensaje (configurable) y nunca dos", async () => {
+    const o = mkSynced("990021", "3021", "34600119021");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery", trackingNumber: "TA2", source: "webhook" });
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119021").length;
+    await withEnv({ DELIVERY_ATTEMPT_WHATSAPP_ENABLED: "1", DELIVERY_ATTEMPT_MESSAGE: "Hola {nombre}, {tienda}: no pudimos entregar. Importe {importe}." }, () => {
+      const antes = contar();
+      const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { normalizedOverride: "delivery_attempted", rawStatus: "attempt", source: "webhook" });
+      assert.deepEqual(r.notified, ["DELIVERY_ATTEMPT_FAILED"]);
+      assert.equal(contar(), antes + 1);
+      const msg = db.getPendingOutbox(999).filter((x) => x.phone === "34600119021").pop()!;
+      assert.match(msg.content, /no pudimos entregar/);
+      assert.match(msg.content, /34,98|34\.98/);
+      // Segundo intento fallido: sello ya puesto → sin segundo mensaje
+      tracking.processSupplierUpdate(db.getOrderById(o.id)!, { normalizedOverride: "out_for_delivery", rawStatus: "ofd", source: "webhook" });
+      const r3 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { normalizedOverride: "delivery_attempted", rawStatus: "attempt", source: "webhook" });
+      assert.deepEqual(r3.events, ["DELIVERY_ATTEMPT_FAILED"]);
+      assert.equal(r3.notified.length, 0);
+      assert.equal(contar(), antes + 1);
+    });
+  });
+
+  await test("A4 PICKUP_POINT_AVAILABLE: sin datos del punto → revisión; con datos y activado → mensaje con el punto", async () => {
+    const o = mkSynced("990022", "3022", "34600119022");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit", trackingNumber: "TP1", source: "webhook" });
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119022").length;
+    await withEnv({ PICKUP_POINT_WHATSAPP_ENABLED: "1" }, () => {
+      const antes = contar();
+      const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { normalizedOverride: "at_pickup_point", rawStatus: "pickup", source: "webhook" });
+      assert.deepEqual(r.events, ["PICKUP_POINT_AVAILABLE"]);
+      assert.equal(r.notified.length, 0, "sin dirección del punto no hay mensaje");
+      assert.equal(contar(), antes);
+      assert.equal(db.getOrderById(o.id)!.supplier_sync_status, "manual_review");
+    });
+    const o2 = mkSynced("990023", "3023", "34600119023");
+    tracking.processSupplierUpdate(o2, { rawStatus: "in_transit", trackingNumber: "TP2", source: "webhook" });
+    const contar2 = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119023").length;
+    await withEnv({ PICKUP_POINT_WHATSAPP_ENABLED: "1" }, () => {
+      const antes = contar2();
+      const r = tracking.processSupplierUpdate(db.getOrderById(o2.id)!, {
+        normalizedOverride: "at_pickup_point",
+        rawStatus: "pickup",
+        source: "webhook",
+        pickupPoint: { name: "Estanco Plaza Mayor", address: "Plaza Mayor 3, Almería" },
+      });
+      assert.deepEqual(r.notified, ["PICKUP_POINT_AVAILABLE"]);
+      assert.equal(contar2(), antes + 1);
+      const msg = db.getPendingOutbox(999).filter((x) => x.phone === "34600119023").pop()!;
+      assert.match(msg.content, /Estanco Plaza Mayor/);
+    });
+    // Apagado (default): revisión, sin mensaje aunque haya datos.
+    const o3 = mkSynced("990024", "3024", "34600119024");
+    const r3 = tracking.processSupplierUpdate(o3, { normalizedOverride: "at_pickup_point", rawStatus: "pickup", source: "webhook", pickupPoint: { name: "X" } });
+    assert.equal(r3.notified.length, 0);
+  });
+
+  await test("A4 anti-spam: tope de avisos por pedido (TRACKING_MAX_NOTIFICATIONS_PER_ORDER)", async () => {
+    const o = mkSynced("990025", "3025", "34600119025");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119025").length;
+    await withEnv({ TRACKING_MAX_NOTIFICATIONS_PER_ORDER: "1" }, () => {
+      const antes = contar();
+      tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TS1", source: "webhook" }); // 1º aviso
+      assert.equal(contar(), antes + 1);
+      const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery", source: "webhook" });
+      assert.deepEqual(r.events, ["OUT_FOR_DELIVERY"]);
+      assert.equal(r.notified.length, 0, "tope alcanzado");
+      assert.equal(contar(), antes + 1);
+      assert.equal(trackingNotif.trackingNotificationsSent(db.getOrderById(o.id)!), 1);
+    });
+  });
+
+  await test("A5 alertas: tasa < 70 → warning, < 65 → critical, muestra insuficiente → unknown", () => {
+    const t = { deliveryWarn: 70, deliveryCrit: 65, deliveryMinSample: 10 };
+    assert.equal(businessAlerts.evalDeliveryRate(72, 20, t).status, "healthy");
+    assert.equal(businessAlerts.evalDeliveryRate(69.9, 20, t).status, "warning");
+    assert.equal(businessAlerts.evalDeliveryRate(64.9, 20, t).status, "critical");
+    assert.equal(businessAlerts.evalDeliveryRate(50, 3, t).status, "unknown", "3 resueltos no bastan");
+    assert.equal(businessAlerts.evalDeliveryRate(null, 0, t).status, "unknown");
+    const a = businessAlerts.evalDeliveryRate(64.9, 20, t);
+    assert.equal(a.category, "business");
+    assert.match(a.message, /break-even/);
+  });
+
+  await test("A5 alertas: needs_call > 12 h → warning; muchos → critical; fallos proveedor; stale; incidencias; avisos fallidos", () => {
+    const t = businessAlerts.businessThresholds();
+    assert.equal(businessAlerts.evalNeedsCall(0, 2, t).status, "healthy");
+    assert.equal(businessAlerts.evalNeedsCall(1, 2, t).status, "warning");
+    assert.equal(businessAlerts.evalNeedsCall(5, 6, t).status, "critical");
+    assert.equal(businessAlerts.evalNeedsCall(1, 2, t).category, "operations");
+    assert.equal(businessAlerts.evalSupplierFailures(2, t).status, "healthy");
+    assert.equal(businessAlerts.evalSupplierFailures(3, t).status, "warning");
+    assert.equal(businessAlerts.evalTrackingStale(0, 12).status, "healthy");
+    assert.equal(businessAlerts.evalTrackingStale(2, 12).status, "warning");
+    assert.equal(businessAlerts.evalOpenIncidents(0, t).status, "healthy");
+    assert.equal(businessAlerts.evalOpenIncidents(1, t).status, "warning");
+    assert.equal(businessAlerts.evalTrackingNotifyFailures(5, t).status, "healthy");
+    assert.equal(businessAlerts.evalTrackingNotifyFailures(6, t).status, "warning");
+  });
+
+  await test("A5 alertas: needs_call atrasado se lee de la DB (needs_call_at) y umbrales por env", async () => {
+    const o = mkSent("990030", "3030");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE orders SET status='needs_call', needs_call_at = unixepoch() - 13*3600 WHERE id = ?").run(o.id);
+    raw.close();
+    const snap = businessAlerts.readBusinessSnapshot();
+    assert.ok(snap.needsCallTotal >= 1);
+    assert.ok(snap.needsCallStale >= 1, "13 h > 12 h → atrasado");
+    await withEnv({ NEEDS_CALL_STALE_HOURS: "24" }, () => {
+      const s2 = businessAlerts.readBusinessSnapshot(Math.floor(Date.now() / 1000), 24);
+      assert.equal(s2.needsCallStale, 0, "con umbral 24 h ya no está atrasado");
+    });
+    const res = businessAlerts.getBusinessAlerts();
+    assert.ok(res.alerts.find((a) => a.id === "needs_call_stale")!.status !== "healthy");
+    assert.ok(["warning", "critical"].includes(res.status));
+  });
+
+  await test("A6 unit economics: sin costes ni ads → incompleto con la lista de lo que falta, cifras reales intactas", () => {
+    const ahora = Math.floor(Date.now() / 1000);
+    const rows = [
+      { id: 1, status: "delivered", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+    ];
+    const w = unitEconomics.computeEconomics(rows, [], new Map(), ahora - 86400, ahora);
+    assert.equal(w.complete, false);
+    assert.equal(w.grossRevenue, 69.96);
+    assert.equal(w.deliveredRevenue, 34.98);
+    assert.equal(w.productCost, null);
+    assert.equal(w.adSpend, null);
+    assert.equal(w.estimatedMargin, null);
+    assert.equal(w.netRoas, null);
+    assert.ok(w.missing.some((m) => m.includes("LIMP-001")));
+    assert.ok(w.missing.some((m) => m.includes("ads")));
+  });
+
+  await test("A6 unit economics: con costes y ads → completo; margen y ROAS bruto/neto correctos", () => {
+    const ahora = Math.floor(Date.now() / 1000);
+    const rows = [
+      { id: 1, status: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+    ];
+    const costs = [{ sku: "LIMP-001", title: "Limpiador", product_cost: 5, shipping_cost: 4, cod_fee: 1, updated_at: 0 }];
+    const hoy = new Date();
+    const dia = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}-${String(hoy.getDate()).padStart(2, "0")}`;
+    const inicioDia = deliveryMetrics.startOfLocalDay();
+    const w = unitEconomics.computeEconomics(rows, costs, new Map([[dia, 10]]), inicioDia, ahora + 1);
+    assert.equal(w.complete, true);
+    assert.deepEqual(w.missing, []);
+    assert.equal(w.grossRevenue, 60);
+    assert.equal(w.deliveredRevenue, 40);
+    assert.equal(w.productCost, 15, "3 unidades × 5, se entreguen o no");
+    assert.equal(w.shippingCost, 12, "3 × 4");
+    assert.equal(w.codFees, 2, "solo las 2 unidades entregadas");
+    assert.equal(w.adSpend, 10);
+    assert.equal(w.estimatedMargin, 40 - 15 - 12 - 2 - 10);
+    assert.equal(w.grossRoas, 6);
+    assert.equal(w.netRoas, 4);
+  });
+
+  await test("A6 costes y ads: alta/edición en DB y lectura por getUnitEconomics", () => {
+    db.upsertProductCost({ sku: "LIMP-001", title: "Limpiador", product_cost: 5, shipping_cost: 4 });
+    db.upsertProductCost({ sku: "LIMP-001", cod_fee: 0.7 });
+    const c = db.listProductCosts().find((x) => x.sku === "LIMP-001")!;
+    assert.equal(c.product_cost, 5);
+    assert.equal(c.cod_fee, 0.7, "la segunda llamada no borra lo anterior");
+    db.upsertDailyAdSpend("2026-08-22", 123.45);
+    db.upsertDailyAdSpend("2026-08-22", 100);
+    assert.equal(db.listDailyAdSpend("2026-08-22", "2026-08-22")[0].amount, 100);
+    assert.throws(() => db.upsertDailyAdSpend("22/08/2026", 1));
+    assert.throws(() => db.upsertDailyAdSpend("2026-08-22", -1));
+    const ue = unitEconomics.getUnitEconomics();
+    assert.ok(ue.costsConfigured >= 1);
+    assert.ok(ue.last30d.shippedOrders >= 1);
+  });
+
+  await test("A8 Dropi: gate falla cerrado (cliente no implementado) y createOrder nunca toca la red ni cambia de fase", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    const g = canCreateDropiOrder(o);
+    assert.equal(g.allowed, false);
+    assert.equal(g.blocker, "client_not_implemented");
+    await withEnv({ LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1", SUPPLIER_SYNC_ENABLED: "1", DROPIPRO_WRITE_ENABLED: "1", DROPIPRO_CREATE_ENABLED: "1", DROPIPRO_API_BASE_URL: "https://api.example", DROPIPRO_API_KEY: "k" }, async () => {
+      assert.equal(canCreateDropiOrder(o).blocker, "client_not_implemented", "ni con todas las llaves abiertas: falta el cliente");
+      const antes = JSON.stringify(db.getOrderById(o.id));
+      const r = await dropiCreate.createDropiOrderForOrder(o, suppliers.evaluateOrderForSupplier(o).input!);
+      assert.equal(r.ok, false);
+      assert.equal(r.blocker, "client_not_implemented");
+      assert.equal(JSON.stringify(db.getOrderById(o.id)), antes, "sin efectos en la DB");
+    });
+    // Borrador por mapping: una línea sin mapping impide crear.
+    const draft = dropiCreate.buildDropiOrderDraft(
+      { raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }, { title: "Pulidor", quantity: 1, sku: "PUL-9" }]), shopify_order_id: "1" },
+      MAPPINGS as never
+    );
+    assert.equal(draft.lines.length, 1);
+    assert.equal(draft.lines[0].dropiVariantId, "LIMP-001");
+    assert.equal(draft.errors.length, 1);
+    assert.equal(dropiCreate.buildDropiIdempotencyKey("12345"), "casamable-shopify-12345-dropi-create");
+  });
+
+  await test("A7 overview: sección business presente y sin fuga de secretos ni teléfonos", async () => {
+    await withEnv({ SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_secreto_faseA", DROPEA_API_KEY: "dropea-key-faseA", DROPIPRO_API_KEY: "dropi-key-faseA" }, () => {
+      const ov = sysOverview.getSystemOverview();
+      assert.ok(ov.business.delivery.last7d);
+      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 6);
+      assert.ok(ov.business.economics.last30d);
+      const json = JSON.stringify(ov);
+      for (const s of ["shpat_secreto_faseA", "dropea-key-faseA", "dropi-key-faseA", "34600119021", "Calle Ejemplo"]) {
+        assert.ok(!json.includes(s), `"${s}" no debe salir por /api/system`);
+      }
     });
   });
 

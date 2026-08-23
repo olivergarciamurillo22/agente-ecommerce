@@ -119,6 +119,32 @@ dice nada sobre cómo crear un pedido en Dropi. Sigue pendiente:
 
 ---
 
+## 5 · Lo que YA está preparado del lado nuestro (Fase A, 23-08-2026)
+
+Dropi PRO es el proveedor donde **sí queremos crear pedidos nosotros**
+(su app Dropify PRO está rota y Pedro los mete a mano). Sin la API no se
+puede hacer la llamada, pero el andamiaje está listo y probado:
+
+- **Routing**: `supplier_product_mapping` con `supplier_platform='dropi'`
+  → el pedido se enruta a Dropi (`src/lib/suppliers/router.ts`). Mientras
+  no sepamos cómo identifica Dropi sus productos, `supplier_variant_id`
+  lleva el SKU de Shopify como identificador provisional.
+- **Gate propio** (`dropi/create-gate.ts`, fail-closed): exige cliente
+  implementado + `LEGACY_SUPPLIER_INTEGRATIONS_DISABLED=1` +
+  `SUPPLIER_SYNC_ENABLED=1` + `DROPIPRO_WRITE_ENABLED=1` +
+  `DROPIPRO_CREATE_ENABLED=1` + pedido confirmado, enrutado a dropi, sin
+  id externo, aprobado para el piloto y con `TEST_MODE=1`.
+- **Creación idempotente** (`dropi/create-order.ts`): clave estable
+  `casamable-shopify-<id>-dropi-create`, reclamo atómico de fase, borrador
+  construido desde el mapping (una línea sin mapping impide crear). Hoy el
+  gate corta en `client_not_implemented` antes de reclamar nada.
+- **Histórico de estados**: el webhook (cuando se active) persiste cada
+  transición con `event_id` derivado de `order_id + status_id + event_date`.
+
+Cuando llegue la documentación: implementar `dropiRequest()` en
+`client.ts`, el mapper real en `mapper.ts`, `isConfigured()` en `index.ts`
+y rellenar `status-map.ts`. Nada más tiene que cambiar.
+
 ## Resumen de estado
 
 | Parte | Estado |
