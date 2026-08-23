@@ -230,17 +230,29 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
             : buildDeliveredMessage(order);
 
   // Vía outbox (nunca Baileys directo): hereda reintentos y safety gates.
-  const encolado = sendWhatsAppMessage(order.phone, texto, {
-    name: order.customer_name ?? undefined,
-    orderAuthorized: order.pilot_authorized === 1,
-  });
+  let encolado: boolean;
+  try {
+    encolado = sendWhatsAppMessage(order.phone, texto, {
+      name: order.customer_name ?? undefined,
+      orderAuthorized: order.pilot_authorized === 1,
+    });
+  } catch (err) {
+    // Fallo real (excepción al encolar, no un bloqueo deliberado): SÍ cuenta
+    // para la alerta "avisos de tracking fallidos" del Control Center.
+    const motivo = err instanceof Error ? err.message : String(err);
+    logger.error(`[WHATSAPP] #${order.shopify_order_number} ${event}: fallo al encolar — ${motivo}`);
+    logIntegrationEvent("tracking", "notification_failed", "warning", `aviso ${event} falló al encolar: ${motivo}`, order.shopify_order_number);
+    return false;
+  }
 
   logger.info(
     `[WHATSAPP] #${order.shopify_order_number} queued ${event}${encolado ? "" : " (bloqueado por safety gates)"}`
   );
   if (!encolado) {
-    // Cuenta para la alerta "avisos de tracking fallidos" del Control Center.
-    logIntegrationEvent("tracking", "notification_blocked", "warning", `aviso ${event} bloqueado por safety gates`, order.shopify_order_number);
+    // Bloqueo deliberado (TEST_MODE, fuera de allowlist, safe mode,
+    // EMERGENCY_STOP...): se registra para trazabilidad pero NO cuenta como
+    // fallo operativo — no debe disparar la alerta de "avisos fallidos".
+    logIntegrationEvent("tracking", "notification_skipped_by_gate", "info", `aviso ${event} bloqueado por safety gates`, order.shopify_order_number);
   }
   return encolado;
 }

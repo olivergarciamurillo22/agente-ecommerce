@@ -3890,6 +3890,43 @@ async function main(): Promise<void> {
     assert.equal(businessAlerts.evalTrackingNotifyFailures(6, t).status, "warning");
   });
 
+  await test("A5 alertas: bloqueo deliberado (TEST_MODE/allowlist) NO cuenta como fallo; los fallos reales sí", async () => {
+    const antes = businessAlerts.readBusinessSnapshot().trackingNotifyFailures24h;
+
+    // 10 avisos bloqueados por allowlist: notifyTrackingEvent real, de punta a
+    // punta, pasando por notifications.ts → logIntegrationEvent. Deliberado:
+    // no debe disparar la alerta.
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600999999" }, () => {
+      for (let i = 0; i < 10; i++) {
+        const o = mkSynced(`990600${i}`, `3600${i}`, `346110006${i}`);
+        tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: `TBQ${i}`, source: "polling" });
+      }
+    });
+
+    const trasBloqueos = businessAlerts.readBusinessSnapshot().trackingNotifyFailures24h;
+    assert.equal(trasBloqueos, antes, "10 avisos bloqueados por allowlist no cuentan como fallo");
+    assert.equal(
+      businessAlerts.getBusinessAlerts().alerts.find((a) => a.id === "tracking_notify_failures")!.status,
+      "healthy",
+      "la alerta sigue healthy con solo bloqueos deliberados"
+    );
+
+    // 6 fallos reales (el motivo real es irrelevante para la alerta: lo único
+    // que importa es que quedan registrados como notification_failed, no
+    // notification_skipped_by_gate).
+    for (let i = 0; i < 6; i++) {
+      sysRepo.logIntegrationEvent("tracking", "notification_failed", "warning", `fallo real simulado ${i}`, `3600${i}`);
+    }
+
+    const trasFallos = businessAlerts.readBusinessSnapshot().trackingNotifyFailures24h;
+    assert.equal(trasFallos, antes + 6, "los 6 fallos reales sí se cuentan");
+    assert.equal(
+      businessAlerts.getBusinessAlerts().alerts.find((a) => a.id === "tracking_notify_failures")!.status,
+      "warning",
+      "6 fallos reales superan el umbral por defecto (5) y disparan la alerta"
+    );
+  });
+
   await test("A5 alertas: needs_call atrasado se lee de la DB (needs_call_at) y umbrales por env", async () => {
     const o = mkSent("990030", "3030");
     const Database = require("better-sqlite3");

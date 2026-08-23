@@ -12,7 +12,9 @@
 //   NEEDS_CALL_CRIT_COUNT=5     a partir de cuántos, critical
 //   SUPPLIER_FAILURES_WARN=3    fallos de proveedor en 24 h
 //   OPEN_INCIDENTS_WARN=1       incidencias abiertas
-//   TRACKING_NOTIFY_FAIL_WARN=5 avisos de tracking bloqueados/fallidos en 24 h
+//   TRACKING_NOTIFY_FAIL_WARN=5 avisos de tracking con FALLO REAL en 24 h
+//     (no cuenta los bloqueos deliberados: TEST_MODE, allowlist, safe mode,
+//     EMERGENCY_STOP — esos son "notification_skipped_by_gate", no fallos)
 // ============================================================
 
 import { systemDbHandle } from "../db";
@@ -161,9 +163,9 @@ export function evalOpenIncidents(open: number, t: Pick<Thresholds, "openInciden
 export function evalTrackingNotifyFailures(count24h: number, t: Pick<Thresholds, "trackingNotifyFailWarn">): BusinessAlert {
   const base = { id: "tracking_notify_failures", category: "operations" as const, label: "Avisos de envío fallidos (24 h)" };
   if (count24h > t.trackingNotifyFailWarn) {
-    return { ...base, status: "warning", value: count24h, threshold: t.trackingNotifyFailWarn, message: `${count24h} aviso(s) de envío bloqueados o fallidos en 24 h` };
+    return { ...base, status: "warning", value: count24h, threshold: t.trackingNotifyFailWarn, message: `${count24h} aviso(s) de envío con fallo real en 24 h` };
   }
-  return { ...base, status: "healthy", value: count24h, threshold: t.trackingNotifyFailWarn, message: count24h ? `${count24h} aviso(s) bloqueados, dentro del umbral` : "todos los avisos de envío salieron" };
+  return { ...base, status: "healthy", value: count24h, threshold: t.trackingNotifyFailWarn, message: count24h ? `${count24h} aviso(s) fallidos, dentro del umbral` : "todos los avisos de envío salieron o se bloquearon a propósito" };
 }
 
 // --- Lectura de cifras ---
@@ -199,7 +201,7 @@ export function readBusinessSnapshot(nowS = Math.floor(Date.now() / 1000), stale
     countIntegrationEvents("dropi", "order_create_failed", desde24h) +
     countIntegrationEvents("dropea", "api_error", desde24h) +
     countIntegrationEvents("dropi", "api_error", desde24h);
-  const notifyFailures = countIntegrationEvents("tracking", "notification_blocked", desde24h);
+  const notifyFailures = countIntegrationEvents("tracking", "notification_failed", desde24h);
 
   // Stale tracking: misma definición que tracking-overview.
   const activos = ["created", "processing", "shipped", "in_transit", "out_for_delivery", "delivery_attempted", "at_pickup_point", "incident"];
