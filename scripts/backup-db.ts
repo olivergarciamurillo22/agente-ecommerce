@@ -86,6 +86,20 @@ async function main(): Promise<void> {
   console.log(
     `[backup] retención ${RETENTION_DAYS} días: ${borrados} copia(s) antigua(s) borrada(s), ${quedan} conservada(s)`
   );
+
+  // Observabilidad: dejar constancia en la DB principal de que la copia se
+  // hizo y pasó la verificación. Best-effort: si falla, el backup vale igual.
+  try {
+    const { recordServiceCheck, logIntegrationEvent } = await import("../src/lib/system/repo");
+    recordServiceCheck("backups", {
+      status: "healthy",
+      ok: true,
+      metadata: { copies: quedan, lastFile: path.basename(destino) },
+    });
+    logIntegrationEvent("backup", "backup_ok", "info", `copia verificada: ${path.basename(destino)}`);
+  } catch {
+    /* sin observabilidad no pasa nada */
+  }
 }
 
 main().catch((err) => {

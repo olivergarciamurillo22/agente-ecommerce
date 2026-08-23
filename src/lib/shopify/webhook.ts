@@ -18,6 +18,7 @@ import {
   type ShopifyOrderPayload,
 } from "../orders/normalize";
 import { verifyShopifyHmac } from "./hmac";
+import { logIntegrationEvent } from "../system/repo";
 import { maxOrderAgeMinutes } from "../safety";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -43,6 +44,8 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
 
   if (!verifyShopifyHmac(rawBody, headers.hmac, secret)) {
     logger.warn(`[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}) — rechazado`);
+    // Al feed: una racha de estos es un secret mal pegado o alguien probando.
+    logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
   }
 

@@ -149,6 +149,51 @@ export interface OrderRow {
    * se mide la antigüedad: esperar a propósito NUNCA lo convierte en ignored_old.
    */
   deferred_until: number | null;
+
+  // --- Proveedor (Dropi / Dropea) — fase 2, hoy solo simulación ---
+  /** Dirección elegida para el proveedor: 'original' | 'proposed' | null (sin decidir). */
+  final_address_source: string | null;
+  /** Plataforma resuelta por el router: 'dropi' | 'dropea' | 'manual' | 'unknown' | null. */
+  supplier_platform: string | null;
+  /** Estado de sincronización. Ver SUPPLIER_SYNC_STATUSES en suppliers/types.ts. */
+  supplier_sync_status: string;
+  /** Id del pedido en el proveedor. Su presencia BLOQUEA recrearlo (idempotencia). */
+  supplier_external_order_id: string | null;
+  /** Referencia estable que enviamos al proveedor (nuestro shopify_order_id). */
+  supplier_reference: string | null;
+  supplier_sync_attempts: number;
+  supplier_last_error: string | null;
+  supplier_synced_at: number | null;
+  supplier_last_checked_at: number | null;
+  /** Estado del envío según el proveedor (texto suyo, sin normalizar todavía). */
+  supplier_status: string | null;
+  /** Estado tal cual lo devuelve el proveedor, sin interpretar. */
+  supplier_status_raw: string | null;
+  /** Ese estado normalizado a nuestra máquina (ver TrackingStatus). */
+  supplier_status_normalized: string;
+  tracking_number: string | null;
+  tracking_url: string | null;
+  carrier: string | null;
+  tracking_first_seen_at: number | null;
+  tracking_last_checked_at: number | null;
+  /** Sellos de aviso enviado: su presencia impide repetir el WhatsApp. */
+  tracking_notification_sent_at: number | null;
+  out_for_delivery_notification_sent_at: number | null;
+  delivered_notification_sent_at: number | null;
+  delivery_attempt_notification_sent_at: number | null;
+  pickup_point_notification_sent_at: number | null;
+  /** Nombre/dirección/enlace del punto de recogida que reporta el proveedor. */
+  pickup_point_info: string | null;
+  /** Autorización manual, pedido a pedido, para el piloto de proveedores. */
+  supplier_pilot_approved: number;
+  /** Fase de creación: none | creating | created | confirming | confirmed | failed. */
+  supplier_create_phase: string;
+  /** Claves de idempotencia ya usadas (nunca se regeneran en un reintento). */
+  supplier_idempotency_key: string | null;
+  supplier_confirm_idempotency_key: string | null;
+  /** not_present | unsupported | manually_handled | sent */
+  supplier_delivery_note_status: string;
+
   last_error: string | null;
   clarify_count: number;
   shopify_tagged: number;
@@ -211,6 +256,37 @@ const ORDERS_TABLE_BODY = `
       customer_note TEXT,
       pilot_authorized INTEGER NOT NULL DEFAULT 0,
       deferred_until INTEGER,
+      -- Qué dirección se usará con el proveedor: 'original' | 'proposed'.
+      -- NULL = sin decidir (si hay proposed_address, queda a revisión humana).
+      final_address_source TEXT,
+      -- Sincronización con el proveedor (Dropi/Dropea). Ver SupplierSyncStatus.
+      supplier_platform TEXT,
+      supplier_sync_status TEXT NOT NULL DEFAULT 'not_ready',
+      supplier_external_order_id TEXT,
+      supplier_reference TEXT,
+      supplier_sync_attempts INTEGER NOT NULL DEFAULT 0,
+      supplier_last_error TEXT,
+      supplier_synced_at INTEGER,
+      supplier_last_checked_at INTEGER,
+      supplier_status TEXT,
+      supplier_status_raw TEXT,
+      supplier_status_normalized TEXT NOT NULL DEFAULT 'unknown',
+      tracking_number TEXT,
+      tracking_url TEXT,
+      carrier TEXT,
+      tracking_first_seen_at INTEGER,
+      tracking_last_checked_at INTEGER,
+      tracking_notification_sent_at INTEGER,
+      out_for_delivery_notification_sent_at INTEGER,
+      delivered_notification_sent_at INTEGER,
+      delivery_attempt_notification_sent_at INTEGER,
+      pickup_point_notification_sent_at INTEGER,
+      pickup_point_info TEXT,
+      supplier_pilot_approved INTEGER NOT NULL DEFAULT 0,
+      supplier_create_phase TEXT NOT NULL DEFAULT 'none',
+      supplier_idempotency_key TEXT,
+      supplier_confirm_idempotency_key TEXT,
+      supplier_delivery_note_status TEXT NOT NULL DEFAULT 'not_present',
       last_error TEXT,
       clarify_count INTEGER NOT NULL DEFAULT 0,
       shopify_tagged INTEGER NOT NULL DEFAULT 0,
@@ -339,7 +415,136 @@ function build() {
     CREATE TABLE IF NOT EXISTS orders (${ORDERS_TABLE_BODY});
     CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(phone, created_at DESC);
+
+    -- Correspondencia explícita producto nuestro ↔ producto del proveedor.
+    -- Sustituye al emparejado por texto: el routing de producción no puede
+    -- depender de que un título contenga cierta palabra.
+    CREATE TABLE IF NOT EXISTS supplier_product_mapping (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      supplier_platform TEXT NOT NULL,
+      shopify_product_id TEXT,
+      shopify_variant_id TEXT,
+      shopify_sku TEXT,
+      shopify_title TEXT,
+      supplier_product_id TEXT,
+      -- Para Dropea es el dato CRÍTICO: variant_id de su catálogo.
+      supplier_variant_id TEXT NOT NULL,
+      supplier_unit_price REAL,
+      active INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_mapping_sku
+      ON supplier_product_mapping(supplier_platform, shopify_sku);
+    CREATE INDEX IF NOT EXISTS idx_mapping_title
+      ON supplier_product_mapping(supplier_platform, shopify_title);
+
+    -- Eventos de webhook ya procesados: deduplicación por event_id, que es
+    -- lo que exige el contrato de Dropea ("store it for idempotent processing").
+    CREATE TABLE IF NOT EXISTS supplier_webhook_events (
+      event_id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      topic TEXT,
+      resource_id TEXT,
+      received_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_webhook_events_time
+      ON supplier_webhook_events(received_at);
+
+    -- ====== Observabilidad (Control Center) ======
+    -- Una fila por servicio vigilado (whatsapp, shopify, dropea…), upsert.
+    -- Sin secretos ni PII: metadata_json pasa por el sanitizador antes de entrar.
+    CREATE TABLE IF NOT EXISTS service_health (
+      service TEXT PRIMARY KEY,
+      status TEXT NOT NULL CHECK(status IN ('healthy','warning','critical','disabled','unknown')),
+      last_success_at INTEGER,
+      last_error_at INTEGER,
+      last_error_message TEXT,
+      last_checked_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      metadata_json TEXT
+    );
+
+    -- Ejecuciones de schedulers. Los ticks sin trabajo NO se guardan (el
+    -- outbox corre cada 2s y llenaría la tabla); su latido va a service_health.
+    CREATE TABLE IF NOT EXISTS scheduler_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scheduler_name TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      status TEXT NOT NULL CHECK(status IN ('ok','error')),
+      processed_count INTEGER NOT NULL DEFAULT 0,
+      error_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_scheduler_runs
+      ON scheduler_runs(scheduler_name, started_at);
+
+    -- Feed técnico de eventos. message SIEMPRE sanitizado (sin teléfonos,
+    -- direcciones, tokens ni payloads); la referencia al pedido es el número.
+    CREATE TABLE IF NOT EXISTS integration_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      integration TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      severity TEXT NOT NULL CHECK(severity IN ('info','warning','critical')),
+      order_ref TEXT,
+      message TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_events
+      ON integration_events(created_at);
+    CREATE INDEX IF NOT EXISTS idx_integration_events_sev
+      ON integration_events(severity, created_at);
+
+    -- ====== Fase A · Histórico de estados de envío ======
+    -- Una fila por TRANSICIÓN REAL del estado normalizado de un envío.
+    -- Es la fuente de la tasa de entrega: nunca se estima, se cuenta aquí.
+    -- Dedupe: por event_id cuando el proveedor lo manda (índice único parcial)
+    -- y, sin event_id, por (pedido, de, a, raw) dentro de la misma ventana.
+    CREATE TABLE IF NOT EXISTS order_status_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      shopify_order_id TEXT NOT NULL,
+      supplier_platform TEXT,
+      carrier TEXT,
+      previous_status TEXT NOT NULL,
+      new_status TEXT NOT NULL,
+      raw_status TEXT,
+      raw_sub_status TEXT,
+      source TEXT NOT NULL CHECK(source IN ('webhook','polling','manual','reconciliation')),
+      event_id TEXT,
+      occurred_at INTEGER NOT NULL,
+      recorded_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_osh_event_id
+      ON order_status_history(event_id) WHERE event_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_osh_order ON order_status_history(order_id, occurred_at);
+    CREATE INDEX IF NOT EXISTS idx_osh_status ON order_status_history(new_status, occurred_at);
+
+    -- ====== Fase A · Unit economics (entrada manual, sin inventar) ======
+    -- Coste por SKU. Si un SKU no está aquí, la economía sale "incompleta".
+    CREATE TABLE IF NOT EXISTS product_costs (
+      sku TEXT PRIMARY KEY,
+      title TEXT,
+      product_cost REAL,
+      shipping_cost REAL,
+      cod_fee REAL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    -- Gasto en publicidad por día (YYYY-MM-DD). Manual hasta que exista fuente.
+    CREATE TABLE IF NOT EXISTS daily_ad_spend (
+      day TEXT PRIMARY KEY,
+      amount REAL NOT NULL,
+      source TEXT NOT NULL DEFAULT 'manual',
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
   `);
+
+  // Versión de esquema: hasta ahora no se estampaba (user_version=0). Las
+  // migraciones siguen siendo idempotentes por sí mismas; esto solo da un
+  // número legible en el Control Center. Subir en 1 con cada cambio de schema.
+  if ((db.pragma("user_version", { simple: true }) as number) < SCHEMA_VERSION) {
+    db.pragma(`user_version = ${SCHEMA_VERSION}`);
+  }
 
   // Migración: columna `jid` en conversations. Guarda la dirección completa del contacto
   // (p.ej. <numero>@s.whatsapp.net o <lid>@lid) para poder responderle por el dominio correcto.
@@ -403,6 +608,69 @@ function build() {
     // piloto. El loop del outbox la usa al revalidar los safety gates.
     db.exec("ALTER TABLE outbox ADD COLUMN authorized INTEGER NOT NULL DEFAULT 0");
   }
+  if (!obCols.some((c) => c.name === "sent_at")) {
+    // Cuándo se envió de verdad (created_at solo dice cuándo se encoló).
+    // Lo usa el Control Center para "último envío" y "enviados recientes".
+    db.exec("ALTER TABLE outbox ADD COLUMN sent_at INTEGER");
+  }
+
+  // Migración fase 2 (proveedores Dropi/Dropea). Columnas nuevas sin CHECK,
+  // así que basta ALTER TABLE: no destructivo y sin reconstruir la tabla.
+  // Los valores se validan en TypeScript (SUPPLIER_SYNC_STATUSES).
+  const supplierCols: Array<[string, string]> = [
+    ["final_address_source", "TEXT"],
+    ["supplier_platform", "TEXT"],
+    ["supplier_sync_status", "TEXT NOT NULL DEFAULT 'not_ready'"],
+    ["supplier_external_order_id", "TEXT"],
+    ["supplier_reference", "TEXT"],
+    ["supplier_sync_attempts", "INTEGER NOT NULL DEFAULT 0"],
+    ["supplier_last_error", "TEXT"],
+    ["supplier_synced_at", "INTEGER"],
+    ["supplier_last_checked_at", "INTEGER"],
+    ["supplier_status", "TEXT"],
+    ["tracking_number", "TEXT"],
+    ["tracking_url", "TEXT"],
+    ["carrier", "TEXT"],
+    // --- Fase 3: tracking y avisos de postventa ---
+    // Estado tal cual lo manda el proveedor (sin tocar) y su equivalente
+    // normalizado a nuestra máquina de estados (TrackingStatus).
+    ["supplier_status_raw", "TEXT"],
+    ["supplier_status_normalized", "TEXT NOT NULL DEFAULT 'unknown'"],
+    ["tracking_first_seen_at", "INTEGER"],
+    ["tracking_last_checked_at", "INTEGER"],
+    // Sellos de "ya avisado": su presencia impide repetir el WhatsApp.
+    ["tracking_notification_sent_at", "INTEGER"],
+    ["out_for_delivery_notification_sent_at", "INTEGER"],
+    ["delivered_notification_sent_at", "INTEGER"],
+    // Fase A: avisos nuevos (intento fallido, punto de recogida) y el dato
+    // del punto de recogida tal cual lo cuenta el proveedor (sin PII nuestra).
+    ["delivery_attempt_notification_sent_at", "INTEGER"],
+    ["pickup_point_notification_sent_at", "INTEGER"],
+    ["pickup_point_info", "TEXT"],
+    // Autorización POR PEDIDO para el piloto de proveedores (distinta de la
+    // allowlist de teléfonos de WhatsApp: aquí decide Pedro pedido a pedido).
+    ["supplier_pilot_approved", "INTEGER NOT NULL DEFAULT 0"],
+    // Fase de creación en el proveedor: crear y confirmar son dos pasos
+    // distintos y hay que sobrevivir a un reinicio entre ambos.
+    ["supplier_create_phase", "TEXT NOT NULL DEFAULT 'none'"],
+    // Clave de idempotencia YA USADA: se persiste para no regenerarla nunca
+    // en un reintento (regenerarla crearía un pedido duplicado).
+    ["supplier_idempotency_key", "TEXT"],
+    ["supplier_confirm_idempotency_key", "TEXT"],
+    // Qué ha pasado con la nota del repartidor en este proveedor.
+    ["supplier_delivery_note_status", "TEXT NOT NULL DEFAULT 'not_present'"],
+  ];
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of supplierCols) {
+    if (!currentCols.has(name)) {
+      db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+    }
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders(supplier_sync_status, status)"
+  );
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -483,7 +751,9 @@ function build() {
   const stmtGetPendingOutbox = db.prepare<[number], OutboxItem>(
     "SELECT * FROM outbox WHERE sent = 0 ORDER BY created_at ASC LIMIT ?"
   );
-  const stmtMarkOutboxSent = db.prepare("UPDATE outbox SET sent = 1 WHERE id = ?");
+  const stmtMarkOutboxSent = db.prepare(
+    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ?"
+  );
 
   // --- Borrado de conversaciones (atómico) ---
   const stmtDeleteMessages = db.prepare(
@@ -562,6 +832,23 @@ function ctx(): ReturnType<typeof build> {
     _ctx = build();
   }
   return _ctx;
+}
+
+/** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
+export const SCHEMA_VERSION = 3;
+
+/**
+ * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
+ * que mantiene sus consultas en su propio repository en vez de engordar este
+ * archivo. SOLO para ese módulo: el resto del código usa las funciones de aquí.
+ */
+export function systemDbHandle(): Database.Database {
+  return ctx().db;
+}
+
+/** Ruta del fichero .db (para medir tamaños; nunca para servirlo por HTTP). */
+export function dbFilePath(): string {
+  return DB_PATH;
 }
 
 // ============================================================
@@ -730,7 +1017,7 @@ export function markOutboxSent(id: number): void {
  * así un fallo blando se reintenta sin que un crash pueda duplicar el envío.
  */
 export function revertOutboxSent(id: number): void {
-  ctx().db.prepare("UPDATE outbox SET sent = 0 WHERE id = ?").run(id);
+  ctx().db.prepare("UPDATE outbox SET sent = 0, sent_at = NULL WHERE id = ?").run(id);
 }
 
 // ============================================================
@@ -1316,6 +1603,578 @@ export function deferOrderUntil(id: number, until: number): boolean {
 
 export function setOrderShopifyTagged(id: number): void {
   ctx().db.prepare(`UPDATE orders SET shopify_tagged = 1, ${TOUCH} WHERE id = ?`).run(id);
+}
+
+// --- Proveedores (Dropi/Dropea) — fase 2, hoy solo simulación ---
+
+/** Pedidos confirmados cuya evaluación de proveedor conviene refrescar. */
+export function getOrdersForSupplierEvaluation(limit = 50): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE status = 'confirmed' AND supplier_external_order_id IS NULL
+         AND supplier_sync_status NOT IN ('synced','cancelled','syncing')
+       ORDER BY confirmed_at ASC LIMIT ?`
+    )
+    .all(limit) as OrderRow[];
+}
+
+/**
+ * Guarda el resultado de evaluar un pedido (plataforma + estado + motivo).
+ * No dispara nada externo: es solo el "qué haríamos" persistido.
+ */
+export function setOrderSupplierEvaluation(
+  id: number,
+  platform: string | null,
+  syncStatus: string,
+  reason: string | null
+): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_platform = ?, supplier_sync_status = ?,
+        supplier_last_error = ?, supplier_reference = COALESCE(supplier_reference, shopify_order_id),
+        supplier_last_checked_at = unixepoch(), ${TOUCH}
+       WHERE id = ? AND supplier_external_order_id IS NULL`
+    )
+    .run(platform, syncStatus, reason?.slice(0, 300) ?? null, id);
+}
+
+/** Tipos de aviso de postventa (cada uno con su sello anti-duplicado). */
+export type TrackingNotificationKind =
+  | "tracking"
+  | "out_for_delivery"
+  | "delivered"
+  | "delivery_attempt"
+  | "pickup_point";
+
+const COLUMNA_SELLO: Record<TrackingNotificationKind, string> = {
+  tracking: "tracking_notification_sent_at",
+  out_for_delivery: "out_for_delivery_notification_sent_at",
+  delivered: "delivered_notification_sent_at",
+  delivery_attempt: "delivery_attempt_notification_sent_at",
+  pickup_point: "pickup_point_notification_sent_at",
+};
+
+/**
+ * RECLAMA el derecho a enviar un aviso, de forma atómica. Devuelve true solo
+ * la primera vez: el UPDATE condicionado a `IS NULL` garantiza que, aunque
+ * dos procesos vean la misma transición a la vez, únicamente uno gane.
+ */
+export function claimTrackingNotification(id: number, kind: TrackingNotificationKind): boolean {
+  const col = COLUMNA_SELLO[kind];
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET ${col} = unixepoch(), ${TOUCH} WHERE id = ? AND ${col} IS NULL`
+    )
+    .run(id);
+  return info.changes > 0;
+}
+
+/** Devuelve el sello (solo para tests o si el envío se descarta después). */
+export function releaseTrackingNotification(id: number, kind: TrackingNotificationKind): void {
+  ctx().db.prepare(`UPDATE orders SET ${COLUMNA_SELLO[kind]} = NULL WHERE id = ?`).run(id);
+}
+
+/** Guarda lo que el proveedor nos contó del envío (estado y tracking). */
+export function updateOrderTracking(
+  id: number,
+  data: {
+    rawStatus: string | null;
+    normalizedStatus: string;
+    trackingNumber?: string | null;
+    trackingUrl?: string | null;
+    carrier?: string | null;
+    pickupPointInfo?: string | null;
+    firstTracking: boolean;
+  }
+): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET
+        supplier_status_raw = COALESCE(?, supplier_status_raw),
+        supplier_status_normalized = ?,
+        tracking_number = COALESCE(?, tracking_number),
+        tracking_url = COALESCE(?, tracking_url),
+        carrier = COALESCE(?, carrier),
+        pickup_point_info = COALESCE(?, pickup_point_info),
+        tracking_first_seen_at = CASE WHEN ? THEN COALESCE(tracking_first_seen_at, unixepoch()) ELSE tracking_first_seen_at END,
+        tracking_last_checked_at = unixepoch(),
+        ${TOUCH}
+       WHERE id = ?`
+    )
+    .run(
+      data.rawStatus,
+      data.normalizedStatus,
+      data.trackingNumber ?? null,
+      data.trackingUrl ?? null,
+      data.carrier ?? null,
+      data.pickupPointInfo ?? null,
+      data.firstTracking ? 1 : 0,
+      id
+    );
+}
+
+/**
+ * Liga un pedido a un proveedor y a su id externo. Se usa cuando el propio
+ * proveedor nos avisa de un pedido que ya existe en su sistema: adoptamos su
+ * id en vez de crear otro. Solo actúa si aún NO teníamos id externo, para no
+ * pisar jamás una referencia existente.
+ */
+export function setOrderSupplierPlatformAndExternalId(
+  id: number,
+  platform: string,
+  externalOrderId: string
+): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_platform = ?, supplier_external_order_id = ?,
+        supplier_sync_status = 'synced', supplier_synced_at = COALESCE(supplier_synced_at, unixepoch()),
+        supplier_reference = COALESCE(supplier_reference, shopify_order_id), ${TOUCH}
+       WHERE id = ? AND supplier_external_order_id IS NULL`
+    )
+    .run(platform, externalOrderId, id);
+  return info.changes > 0;
+}
+
+
+// --- Fase A · Histórico de estados de envío ---
+
+export type StatusHistorySource = "webhook" | "polling" | "manual" | "reconciliation";
+
+export interface OrderStatusHistoryRow {
+  id: number;
+  order_id: number;
+  shopify_order_id: string;
+  supplier_platform: string | null;
+  carrier: string | null;
+  previous_status: string;
+  new_status: string;
+  raw_status: string | null;
+  raw_sub_status: string | null;
+  source: StatusHistorySource;
+  event_id: string | null;
+  occurred_at: number;
+  recorded_at: number;
+}
+
+export interface StatusHistoryInput {
+  orderId: number;
+  shopifyOrderId: string;
+  supplierPlatform: string | null;
+  carrier: string | null;
+  previousStatus: string;
+  newStatus: string;
+  rawStatus: string | null;
+  rawSubStatus?: string | null;
+  source: StatusHistorySource;
+  eventId?: string | null;
+  /** Epoch segundos. Si no se conoce, ahora. */
+  occurredAt?: number | null;
+}
+
+/**
+ * Persiste UNA transición. Devuelve el id de la fila nueva o null si era un
+ * duplicado. Reglas de dedupe:
+ *   1. Con event_id: el índice único manda (un webhook reintentado no repite).
+ *   2. Sin event_id: misma (pedido, de, a, raw) en los últimos 10 minutos
+ *      se considera el mismo hecho (dos pollings seguidos, un reintento).
+ */
+export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
+  const db = ctx().db;
+  const occurredAt = h.occurredAt ?? Math.floor(Date.now() / 1000);
+  const eventId = (h.eventId ?? "").trim() || null;
+  if (eventId) {
+    const dup = db.prepare("SELECT 1 FROM order_status_history WHERE event_id = ?").get(eventId);
+    if (dup) return null;
+  } else {
+    const dup = db
+      .prepare(
+        `SELECT 1 FROM order_status_history
+         WHERE order_id = ? AND previous_status = ? AND new_status = ?
+           AND IFNULL(raw_status,'') = IFNULL(?, '')
+           AND occurred_at >= ?`
+      )
+      .get(h.orderId, h.previousStatus, h.newStatus, h.rawStatus ?? null, occurredAt - 600);
+    if (dup) return null;
+  }
+  const info = db
+    .prepare(
+      `INSERT INTO order_status_history
+        (order_id, shopify_order_id, supplier_platform, carrier, previous_status, new_status,
+         raw_status, raw_sub_status, source, event_id, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      h.orderId,
+      h.shopifyOrderId,
+      h.supplierPlatform ?? null,
+      h.carrier ?? null,
+      h.previousStatus,
+      h.newStatus,
+      h.rawStatus ?? null,
+      h.rawSubStatus ?? null,
+      h.source,
+      eventId,
+      occurredAt
+    );
+  return Number(info.lastInsertRowid);
+}
+
+export function listOrderStatusHistory(orderId: number): OrderStatusHistoryRow[] {
+  return ctx()
+    .db.prepare("SELECT * FROM order_status_history WHERE order_id = ? ORDER BY occurred_at, id")
+    .all(orderId) as OrderStatusHistoryRow[];
+}
+
+// --- Fase A · Costes (unit economics, entrada manual) ---
+
+export interface ProductCostRow {
+  sku: string;
+  title: string | null;
+  product_cost: number | null;
+  shipping_cost: number | null;
+  cod_fee: number | null;
+  updated_at: number;
+}
+
+export function listProductCosts(): ProductCostRow[] {
+  return ctx().db.prepare("SELECT * FROM product_costs ORDER BY sku").all() as ProductCostRow[];
+}
+
+export function upsertProductCost(c: {
+  sku: string;
+  title?: string | null;
+  product_cost?: number | null;
+  shipping_cost?: number | null;
+  cod_fee?: number | null;
+}): void {
+  const sku = c.sku.trim();
+  if (!sku) throw new Error("sku vacío");
+  ctx()
+    .db.prepare(
+      `INSERT INTO product_costs (sku, title, product_cost, shipping_cost, cod_fee, updated_at)
+       VALUES (?, ?, ?, ?, ?, unixepoch())
+       ON CONFLICT(sku) DO UPDATE SET
+         title = COALESCE(excluded.title, product_costs.title),
+         product_cost = COALESCE(excluded.product_cost, product_costs.product_cost),
+         shipping_cost = COALESCE(excluded.shipping_cost, product_costs.shipping_cost),
+         cod_fee = COALESCE(excluded.cod_fee, product_costs.cod_fee),
+         updated_at = unixepoch()`
+    )
+    .run(sku, c.title ?? null, c.product_cost ?? null, c.shipping_cost ?? null, c.cod_fee ?? null);
+}
+
+export function deleteProductCost(sku: string): void {
+  ctx().db.prepare("DELETE FROM product_costs WHERE sku = ?").run(sku);
+}
+
+export interface DailyAdSpendRow {
+  day: string;
+  amount: number;
+  source: string;
+  updated_at: number;
+}
+
+export function listDailyAdSpend(fromDay?: string, toDay?: string): DailyAdSpendRow[] {
+  const db = ctx().db;
+  if (fromDay && toDay) {
+    return db
+      .prepare("SELECT * FROM daily_ad_spend WHERE day >= ? AND day <= ? ORDER BY day")
+      .all(fromDay, toDay) as DailyAdSpendRow[];
+  }
+  return db.prepare("SELECT * FROM daily_ad_spend ORDER BY day DESC LIMIT 90").all() as DailyAdSpendRow[];
+}
+
+export function upsertDailyAdSpend(day: string, amount: number, source = "manual"): void {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("día inválido (YYYY-MM-DD)");
+  if (!Number.isFinite(amount) || amount < 0) throw new Error("importe inválido");
+  ctx()
+    .db.prepare(
+      `INSERT INTO daily_ad_spend (day, amount, source, updated_at) VALUES (?, ?, ?, unixepoch())
+       ON CONFLICT(day) DO UPDATE SET amount = excluded.amount, source = excluded.source, updated_at = unixepoch()`
+    )
+    .run(day, amount, source);
+}
+
+// --- Correspondencia de productos con el proveedor ---
+
+export interface SupplierProductMapping {
+  id: number;
+  supplier_platform: string;
+  shopify_product_id: string | null;
+  shopify_variant_id: string | null;
+  shopify_sku: string | null;
+  shopify_title: string | null;
+  supplier_product_id: string | null;
+  supplier_variant_id: string;
+  supplier_unit_price: number | null;
+  active: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export function listSupplierProductMappings(platform?: string): SupplierProductMapping[] {
+  const db = ctx().db;
+  if (platform) {
+    return db
+      .prepare(
+        "SELECT * FROM supplier_product_mapping WHERE supplier_platform = ? ORDER BY shopify_title, id"
+      )
+      .all(platform) as SupplierProductMapping[];
+  }
+  return db
+    .prepare("SELECT * FROM supplier_product_mapping ORDER BY supplier_platform, shopify_title")
+    .all() as SupplierProductMapping[];
+}
+
+/**
+ * Alta o actualización de una correspondencia. La identidad es
+ * (plataforma + SKU) cuando hay SKU, y (plataforma + título) si no.
+ */
+export function upsertSupplierProductMapping(m: {
+  supplier_platform: string;
+  shopify_product_id?: string | null;
+  shopify_variant_id?: string | null;
+  shopify_sku?: string | null;
+  shopify_title?: string | null;
+  supplier_product_id?: string | null;
+  supplier_variant_id: string;
+  supplier_unit_price?: number | null;
+  active?: boolean;
+}): number {
+  const db = ctx().db;
+  const existente = (
+    m.shopify_sku
+      ? db
+          .prepare(
+            "SELECT id FROM supplier_product_mapping WHERE supplier_platform = ? AND shopify_sku = ?"
+          )
+          .get(m.supplier_platform, m.shopify_sku)
+      : db
+          .prepare(
+            "SELECT id FROM supplier_product_mapping WHERE supplier_platform = ? AND shopify_title = ?"
+          )
+          .get(m.supplier_platform, m.shopify_title ?? "")
+  ) as { id: number } | undefined;
+
+  if (existente) {
+    db.prepare(
+      `UPDATE supplier_product_mapping SET
+        shopify_product_id = COALESCE(?, shopify_product_id),
+        shopify_variant_id = COALESCE(?, shopify_variant_id),
+        shopify_title = COALESCE(?, shopify_title),
+        supplier_product_id = COALESCE(?, supplier_product_id),
+        supplier_variant_id = ?,
+        supplier_unit_price = COALESCE(?, supplier_unit_price),
+        active = ?, updated_at = unixepoch()
+       WHERE id = ?`
+    ).run(
+      m.shopify_product_id ?? null,
+      m.shopify_variant_id ?? null,
+      m.shopify_title ?? null,
+      m.supplier_product_id ?? null,
+      m.supplier_variant_id,
+      m.supplier_unit_price ?? null,
+      m.active === false ? 0 : 1,
+      existente.id
+    );
+    return existente.id;
+  }
+
+  const info = db
+    .prepare(
+      `INSERT INTO supplier_product_mapping
+        (supplier_platform, shopify_product_id, shopify_variant_id, shopify_sku, shopify_title,
+         supplier_product_id, supplier_variant_id, supplier_unit_price, active)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      m.supplier_platform,
+      m.shopify_product_id ?? null,
+      m.shopify_variant_id ?? null,
+      m.shopify_sku ?? null,
+      m.shopify_title ?? null,
+      m.supplier_product_id ?? null,
+      m.supplier_variant_id,
+      m.supplier_unit_price ?? null,
+      m.active === false ? 0 : 1
+    );
+  return info.lastInsertRowid as number;
+}
+
+export function deleteSupplierProductMapping(id: number): void {
+  ctx().db.prepare("DELETE FROM supplier_product_mapping WHERE id = ?").run(id);
+}
+
+// --- Deduplicación de webhooks por event_id ---
+
+/**
+ * Registra un evento de webhook. Devuelve true si es NUEVO (hay que
+ * procesarlo) y false si ya se había recibido: el INSERT OR IGNORE sobre la
+ * clave primaria hace la comprobación atómica.
+ */
+export function claimWebhookEvent(
+  eventId: string,
+  platform: string,
+  topic?: string | null,
+  resourceId?: string | null
+): boolean {
+  const info = ctx()
+    .db.prepare(
+      `INSERT OR IGNORE INTO supplier_webhook_events (event_id, platform, topic, resource_id)
+       VALUES (?, ?, ?, ?)`
+    )
+    .run(eventId, platform, topic ?? null, resourceId ?? null);
+  return info.changes > 0;
+}
+
+/** Limpia eventos antiguos (por defecto, más de 30 días). */
+export function pruneWebhookEvents(olderThanDays = 30): number {
+  const info = ctx()
+    .db.prepare("DELETE FROM supplier_webhook_events WHERE received_at < unixepoch() - ? * 86400")
+    .run(olderThanDays);
+  return info.changes;
+}
+
+// --- Fase de creación en el proveedor (create → confirm) ---
+
+export type SupplierCreatePhase =
+  | "none"
+  | "creating"
+  | "created"
+  | "confirming"
+  | "confirmed"
+  | "failed";
+
+/**
+ * Reclama el paso de CREACIÓN de forma atómica y deja persistida la clave de
+ * idempotencia. Devuelve false si otro proceso ya lo reclamó o si el pedido
+ * ya pasó de fase: así un reinicio a mitad NUNCA provoca un segundo create.
+ */
+export function claimSupplierCreate(id: number, idempotencyKey: string): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_create_phase = 'creating',
+        supplier_idempotency_key = COALESCE(supplier_idempotency_key, ?),
+        supplier_sync_status = 'syncing', ${TOUCH}
+       WHERE id = ? AND supplier_create_phase IN ('none','failed')
+         AND supplier_external_order_id IS NULL`
+    )
+    .run(idempotencyKey, id);
+  return info.changes > 0;
+}
+
+/** Marca la creación como terminada, guardando el id del proveedor. */
+export function markSupplierCreated(id: number, platform: string, externalOrderId: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_create_phase = 'created', supplier_platform = ?,
+        supplier_external_order_id = ?, supplier_synced_at = COALESCE(supplier_synced_at, unixepoch()),
+        supplier_sync_status = 'synced', ${TOUCH}
+       WHERE id = ?`
+    )
+    .run(platform, externalOrderId, id);
+}
+
+/** Reclama el paso de CONFIRMACIÓN (solo tras un create completado). */
+export function claimSupplierConfirm(id: number, idempotencyKey: string): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_create_phase = 'confirming',
+        supplier_confirm_idempotency_key = COALESCE(supplier_confirm_idempotency_key, ?), ${TOUCH}
+       WHERE id = ? AND supplier_create_phase = 'created' AND supplier_external_order_id IS NOT NULL`
+    )
+    .run(idempotencyKey, id);
+  return info.changes > 0;
+}
+
+export function markSupplierConfirmed(id: number): void {
+  ctx()
+    .db.prepare(`UPDATE orders SET supplier_create_phase = 'confirmed', ${TOUCH} WHERE id = ?`)
+    .run(id);
+}
+
+/** Registra un fallo de creación sin perder la clave de idempotencia. */
+export function markSupplierCreateFailed(id: number, error: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_create_phase = 'failed', supplier_sync_status = 'failed',
+        supplier_last_error = ?, supplier_sync_attempts = supplier_sync_attempts + 1, ${TOUCH}
+       WHERE id = ?`
+    )
+    .run(error.slice(0, 300), id);
+}
+
+/** Estado de la nota del repartidor frente al proveedor. */
+export function setOrderDeliveryNoteStatus(id: number, status: string): void {
+  ctx()
+    .db.prepare(`UPDATE orders SET supplier_delivery_note_status = ?, ${TOUCH} WHERE id = ?`)
+    .run(status, id);
+}
+
+/** Busca un pedido por su número de seguimiento (vía de último recurso). */
+export function getOrderByTrackingNumber(trackingNumber: string): OrderRow | null {
+  return (
+    (ctx()
+      .db.prepare("SELECT * FROM orders WHERE tracking_number = ?")
+      .get(trackingNumber) as OrderRow | undefined) ?? null
+  );
+}
+
+/** Busca un pedido por su id en el proveedor (para procesar sus webhooks). */
+export function getOrderBySupplierExternalId(externalId: string): OrderRow | null {
+  return (
+    (ctx()
+      .db.prepare("SELECT * FROM orders WHERE supplier_external_order_id = ?")
+      .get(externalId) as OrderRow | undefined) ?? null
+  );
+}
+
+/** Autoriza (o retira) este pedido concreto para el piloto de proveedores. */
+export function setOrderSupplierPilotApproval(id: number, approved: boolean): boolean {
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET supplier_pilot_approved = ?, ${TOUCH} WHERE id = ?`)
+    .run(approved ? 1 : 0, id);
+  return info.changes > 0;
+}
+
+/**
+ * Pedidos ya sincronizados cuyo envío sigue vivo: candidatos a consultar
+ * estado. Excluye los terminales (entregado, devuelto, cancelado) para no
+ * preguntar eternamente por algo que ya acabó.
+ */
+export function getOrdersForTrackingPolling(checkedBefore: number, limit = 25): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE supplier_external_order_id IS NOT NULL
+         AND supplier_status_normalized NOT IN ('delivered','returned','cancelled')
+         AND (tracking_last_checked_at IS NULL OR tracking_last_checked_at <= ?)
+       ORDER BY COALESCE(tracking_last_checked_at, 0) ASC LIMIT ?`
+    )
+    .all(checkedBefore, limit) as OrderRow[];
+}
+
+/**
+ * Manda un pedido a revisión de proveedor SIN la guarda de idempotencia:
+ * hace falta para pedidos YA sincronizados que sufren una incidencia o una
+ * devolución (setOrderSupplierEvaluation no los toca a propósito).
+ */
+export function setOrderSupplierReview(id: number, reason: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE orders SET supplier_sync_status = 'manual_review', supplier_last_error = ?,
+        supplier_last_checked_at = unixepoch(), ${TOUCH} WHERE id = ?`
+    )
+    .run(reason.slice(0, 300), id);
+}
+
+/** Decide qué dirección se usará con el proveedor ('original' | 'proposed'). */
+export function setOrderFinalAddressSource(id: number, source: "original" | "proposed"): boolean {
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET final_address_source = ?, ${TOUCH} WHERE id = ?`)
+    .run(source, id);
+  return info.changes > 0;
 }
 
 /** Marca updated_at sin cambiar nada más (backoff natural de reintentos). */

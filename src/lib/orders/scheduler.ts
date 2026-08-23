@@ -47,7 +47,9 @@ import {
   logOnce,
   maskPhone,
 } from "../safety";
-import { deferOrderUntil } from "../db";
+import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvaluation } from "../db";
+import { evaluateOrderForSupplier } from "../suppliers/service";
+import { runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -184,6 +186,24 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
     }
   }
 
+  // 3.5) Proveedores (Dropi/Dropea): SOLO evaluación, sin ningún efecto
+  //      externo. Deja escrito en cada pedido confirmado qué proveedor le
+  //      tocaría y si algo lo bloquea (dirección inválida, falta routing),
+  //      para que Pedro lo vea en el panel. La sincronización real llegará
+  //      cuando exista el handoff de las APIs.
+  for (const order of getOrdersForSupplierEvaluation()) {
+    const evaluation = evaluateOrderForSupplier(order);
+    if (
+      order.supplier_sync_status !== evaluation.status ||
+      order.supplier_platform !== evaluation.platform
+    ) {
+      logger.info(
+        `[SUPPLIER] #${order.shopify_order_number} routing → ${evaluation.platform} | ${evaluation.status}: ${evaluation.reason}`
+      );
+    }
+    setOrderSupplierEvaluation(order.id, evaluation.platform, evaluation.status, evaluation.reason);
+  }
+
   // 4) Tags pendientes en Shopify. Gate central primero: en safe/test-sin-flag
   //    no se toca la tienda (y al abrir el flag, se taggea retroactivamente).
   if (canWriteToShopify() && shopifyAdminConfigured()) {
@@ -210,7 +230,12 @@ export function startOrderScheduler(): void {
   timer = setInterval(() => {
     if (ticking) return; // nunca solapar ticks
     ticking = true;
-    void runSchedulerTick()
+    // Instrumentación best-effort: latido + fila en scheduler_runs si hubo
+    // trabajo. Si registrar falla, el tick sigue funcionando igual.
+    void runInstrumented("scheduler:orders", "orders", async () => {
+      const s = await runSchedulerTick();
+      return { processed: s.sent + s.reminders + s.escalated, errors: 0 };
+    })
       .catch((err) =>
         logger.error({ err: err instanceof Error ? err.message : String(err) }, "[scheduler] tick falló")
       )

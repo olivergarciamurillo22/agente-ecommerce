@@ -9,6 +9,7 @@
 // ============================================================
 
 import pino from "pino";
+import { logIntegrationEvent, recordServiceCheck } from "../system/repo";
 import { canWriteToShopify, logOnce } from "../safety";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -160,9 +161,11 @@ export async function tagOrderConfirmed(shopifyOrderId: string): Promise<boolean
         logger.warn(
           `[SHOPIFY] tagsAdd 401 (credencial inválida o caducada) para ${shopifyOrderId} — se reintentará`
         );
+        recordServiceCheck("shopify", { status: "critical", ok: false, error: "tagsAdd 401: credencial inválida o caducada" });
         return false;
       }
       logger.warn(`[SHOPIFY] tagsAdd HTTP ${res.status} para pedido ${shopifyOrderId}`);
+      recordServiceCheck("shopify", { status: "warning", ok: false, error: `tagsAdd HTTP ${res.status}` });
       return false;
     }
     const json = (await res.json()) as GraphQLResponse;
@@ -170,15 +173,25 @@ export async function tagOrderConfirmed(shopifyOrderId: string): Promise<boolean
     if (json.errors?.length || userErrors.length) {
       const msg = [...(json.errors ?? []), ...userErrors].map((e) => e.message).join("; ");
       logger.warn(`[SHOPIFY] tagsAdd rechazado para pedido ${shopifyOrderId}: ${msg}`);
+      recordServiceCheck("shopify", { status: "warning", ok: false, error: `tagsAdd rechazado: ${msg}` });
       return false;
     }
     logger.info(`[SHOPIFY] Tag ${CONFIRMED_TAG} añadido al pedido ${shopifyOrderId}`);
+    // Observabilidad: la ÚNICA mutación del sistema queda registrada (sin PII:
+    // el id del pedido de Shopify no identifica a la persona).
+    recordServiceCheck("shopify", {
+      status: "healthy",
+      ok: true,
+      metadata: { lastTagWriteAt: Math.floor(Date.now() / 1000) },
+    });
+    logIntegrationEvent("shopify", "tag_written", "info", `tag ${CONFIRMED_TAG} escrito`, shopifyOrderId);
     return true;
   } catch (err) {
     logger.warn(
       { err: err instanceof Error ? err.message : String(err) },
       `[SHOPIFY] error añadiendo tag al pedido ${shopifyOrderId}`
     );
+    recordServiceCheck("shopify", { status: "warning", ok: false, error: err instanceof Error ? err.message : "error de red" });
     return false;
   }
 }

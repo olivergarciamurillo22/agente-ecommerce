@@ -27,6 +27,21 @@ export interface OrderItem {
   customer_note: string | null;
   pilot_authorized: number;
   deferred_until: number | null;
+  supplier_platform: string | null;
+  supplier_sync_status: string;
+  supplier_external_order_id: string | null;
+  supplier_last_error: string | null;
+  supplier_status_normalized: string;
+  tracking_number: string | null;
+  tracking_url: string | null;
+  carrier: string | null;
+  tracking_last_checked_at: number | null;
+  tracking_notification_sent_at: number | null;
+  out_for_delivery_notification_sent_at: number | null;
+  delivered_notification_sent_at: number | null;
+  supplier_pilot_approved: number;
+  supplier_create_phase: string;
+  supplier_delivery_note_status: string;
   last_error: string | null;
   shopify_tagged: number;
   whatsapp_sent_at: number | null;
@@ -114,6 +129,48 @@ function fmtMoney(amount: string, currency: string): string {
   } catch {
     return `${value.toFixed(2)} ${code}`;
   }
+}
+
+// Estado de la sincronización con el proveedor (Dropi/Dropea).
+// Hoy todo es simulación: no hay ninguna acción de escritura en el panel.
+/** Estado del ENVÍO (distinto del estado de sincronización). */
+const ENVIO_META: Record<string, string> = {
+  unknown: "sin información",
+  created: "creado",
+  processing: "preparando",
+  shipped: "enviado",
+  in_transit: "en tránsito",
+  out_for_delivery: "EN REPARTO",
+  delivered: "entregado",
+  incident: "INCIDENCIA",
+  returned: "devuelto",
+  cancelled: "cancelado",
+};
+
+const SUPPLIER_META: Record<string, { label: string; cls: string }> = {
+  not_ready: { label: "—", cls: "text-brand-muted" },
+  manual_review: { label: "REVISIÓN MANUAL", cls: "text-amber-300" },
+  blocked_address: { label: "BLOQUEADO DIRECCIÓN", cls: "text-red-300" },
+  ready: { label: "LISTO", cls: "text-sky-300" },
+  simulated: { label: "SIMULADO", cls: "text-violet-300" },
+  syncing: { label: "SINCRONIZANDO", cls: "text-amber-300" },
+  synced: { label: "SINCRONIZADO", cls: "text-emerald-300" },
+  failed: { label: "ERROR", cls: "text-red-300" },
+  cancelled: { label: "CANCELADO", cls: "text-zinc-400" },
+};
+
+function supplierLabel(o: OrderItem): { label: string; cls: string; title: string } {
+  const meta = SUPPLIER_META[o.supplier_sync_status] ?? {
+    label: o.supplier_sync_status.toUpperCase(),
+    cls: "text-brand-muted",
+  };
+  const plataforma =
+    o.supplier_platform && o.supplier_platform !== "unknown" ? o.supplier_platform : null;
+  return {
+    label: plataforma ? `${plataforma} · ${meta.label}` : meta.label,
+    cls: meta.cls,
+    title: o.supplier_last_error ?? meta.label,
+  };
 }
 
 function StatusPill({ status }: { status: string }) {
@@ -278,6 +335,7 @@ export default function OrdersPanel() {
                 <th className="px-3 py-3">Total</th>
                 <th className="px-3 py-3">Dirección</th>
                 <th className="px-3 py-3">Nota repartidor</th>
+                <th className="px-3 py-3">Proveedor</th>
                 <th className="px-3 py-3">Estado</th>
                 <th className="px-3 py-3">Hora</th>
                 <th className="px-3 py-3 text-right">Acciones</th>
@@ -286,7 +344,7 @@ export default function OrdersPanel() {
             <tbody>
               {visible.length === 0 && (
                 <tr>
-                  <td colSpan={10} className="px-3 py-10 text-center text-brand-muted">
+                  <td colSpan={11} className="px-3 py-10 text-center text-brand-muted">
                     {orders.length === 0
                       ? "Sin pedidos todavía. Cuando llegue un pedido COD de Shopify aparecerá aquí."
                       : "Ningún pedido en este filtro."}
@@ -331,6 +389,14 @@ export default function OrdersPanel() {
                   </td>
                   <td className="px-3 py-3 max-w-[150px] truncate text-brand-muted" title={o.delivery_note ?? ""}>
                     {o.delivery_note ? `📝 ${o.delivery_note.replace(/\n/g, " ")}` : "—"}
+                  </td>
+                  <td className="px-3 py-3 max-w-[170px] truncate text-xs" title={supplierLabel(o).title}>
+                    <span className={supplierLabel(o).cls}>{supplierLabel(o).label}</span>
+                    {o.tracking_number && (
+                      <span className="block text-[10px] text-brand-muted font-mono">
+                        📦 {o.tracking_number}
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-3">
                     <StatusPill status={o.status} />
@@ -499,6 +565,73 @@ export default function OrdersPanel() {
             {detail.last_error && (
               <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 mb-4 text-sm text-red-300">
                 ⚠️ {detail.last_error}
+              </div>
+            )}
+
+            {detail.status === "confirmed" && (
+              <div className="rounded-xl border border-brand-border bg-brand-bg p-3 mb-4 text-sm">
+                <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">
+                  Proveedor (simulación — todavía no se envía nada)
+                </div>
+                <div className={supplierLabel(detail).cls}>{supplierLabel(detail).label}</div>
+                {detail.supplier_last_error && (
+                  <div className="text-xs text-brand-muted mt-1">{detail.supplier_last_error}</div>
+                )}
+                <div className="text-xs text-brand-muted mt-1">
+                  Fase de creación: {detail.supplier_create_phase}
+                  {detail.supplier_pilot_approved === 1 && (
+                    <span className="text-violet-300"> · piloto aprobado 🔓</span>
+                  )}
+                </div>
+                {detail.supplier_delivery_note_status === "unsupported" && (
+                  <div className="text-xs text-amber-300 mt-1">
+                    ⚠️ La nota del repartidor no se puede enviar a este proveedor: hay que
+                    comunicarla a mano.
+                  </div>
+                )}
+                {detail.supplier_external_order_id && (
+                  <div className="text-xs mt-1">
+                    Id en el proveedor:{" "}
+                    <span className="font-mono">{detail.supplier_external_order_id}</span>
+                  </div>
+                )}
+                <div className="text-xs text-brand-muted mt-1">
+                  Envío: <span className="text-brand-text">{ENVIO_META[detail.supplier_status_normalized] ?? detail.supplier_status_normalized}</span>
+                  {detail.tracking_last_checked_at && (
+                    <> · última consulta {fmtTime(detail.tracking_last_checked_at)}</>
+                  )}
+                </div>
+                <div className="text-xs mt-2 flex flex-wrap gap-3">
+                  <span title="Confirmación del pedido">
+                    {detail.confirmed_at ? "✓" : "○"} Confirmación
+                  </span>
+                  <span title="Aviso de número de seguimiento">
+                    {detail.tracking_notification_sent_at ? "✓" : "○"} Tracking
+                  </span>
+                  <span title="Aviso de que está en reparto">
+                    {detail.out_for_delivery_notification_sent_at ? "✓" : "○"} En reparto
+                  </span>
+                  <span title="Aviso de entrega">
+                    {detail.delivered_notification_sent_at ? "✓" : "○"} Entregado
+                  </span>
+                </div>
+                {detail.tracking_number && (
+                  <div className="text-xs mt-1">
+                    📦 {detail.carrier ? `${detail.carrier} · ` : ""}
+                    {detail.tracking_url ? (
+                      <a
+                        href={detail.tracking_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="underline text-sky-300"
+                      >
+                        {detail.tracking_number}
+                      </a>
+                    ) : (
+                      <span className="font-mono">{detail.tracking_number}</span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 

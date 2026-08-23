@@ -8,6 +8,7 @@ import AmbientBackground from "./AmbientBackground";
 import OrdersPanel from "./OrdersPanel";
 import SafetyBanner from "./SafetyBanner";
 import SettingsPanel from "./SettingsPanel";
+import SystemPanel from "./SystemPanel";
 
 interface DashboardProps {
   phone: string | null;
@@ -26,7 +27,7 @@ export default function Dashboard({ phone }: DashboardProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // La vista principal del MVP de Pedro son los PEDIDOS, no los chats.
-  const [view, setView] = useState<"orders" | "chats" | "settings">("orders");
+  const [view, setView] = useState<"orders" | "chats" | "system" | "settings">("orders");
 
   async function refresh() {
     try {
@@ -74,6 +75,10 @@ export default function Dashboard({ phone }: DashboardProps) {
             onRefresh={refresh}
           />
           <ConversationPanel conversation={selected} onRefresh={refresh} />
+        </div>
+      ) : view === "system" ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <SystemPanel />
         </div>
       ) : (
         <div className="flex-1 min-h-0 overflow-hidden">
