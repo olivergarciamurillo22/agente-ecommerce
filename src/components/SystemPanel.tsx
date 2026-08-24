@@ -513,7 +513,7 @@ interface CallsData {
     allowlist: string[];
     triggerMinutes: number;
     maxContacts: number;
-    retryDelaysMinutes: number[];
+    firstRetryMinutes: number;
     retellApiKey: "configured" | "missing";
     retellFromNumber: "configured" | "missing";
     retellAgentId: "configured" | "missing";
@@ -611,7 +611,8 @@ function CallsPanel() {
           <Row k="RETELL_AGENT_ID" v={c.retellAgentId === "configured" ? "configurado" : <span className="text-brand-muted">opcional</span>} />
           <Row k="Disparo tras WhatsApp sin respuesta" v={`${c.triggerMinutes} min`} />
           <Row k="Contactos máximos" v={c.maxContacts} />
-          <Row k="Cadencia de reintentos (min)" v={c.retryDelaysMinutes.join(", ")} />
+          <Row k="1er reintento (min)" v={c.firstRetryMinutes} />
+          <Row k="Cadencia 2º–5º contacto" v="día siguiente (mañana + tarde) → día después (mañana)" />
         </Section>
         <Section title="Cola">
           <Row k="En cola" v={data.summary.planned} />

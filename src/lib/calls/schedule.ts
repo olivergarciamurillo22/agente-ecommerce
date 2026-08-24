@@ -118,3 +118,36 @@ export function nextCallSlot(from: Date, isHoliday: HolidayCalendar = defaultHol
   }
   throw new Error("nextCallSlot: sin franja legal en 60 días (¿calendario roto?)");
 }
+
+/**
+ * El primer día CALLABLE (no domingo, no festivo) ESTRICTAMENTE posterior al
+ * día de Madrid que contiene `from` — avanza al menos un día siempre, a
+ * diferencia de `nextCallSlot` que puede devolver el mismo día. Solo
+ * devuelve la fecha del día: quien llama decide con qué franja combinarlo
+ * (ver `windowStart`). Usado por la cadencia de reintentos (E7), que ancla
+ * los contactos 3/4/5 a días de calendario, no a un delta de minutos.
+ */
+export function nextCallableDayAfter(
+  from: Date,
+  isHoliday: HolidayCalendar = defaultHolidayCalendar
+): { year: number; month: number; day: number } {
+  const p = madridParts(from);
+  let cursor = madridDate(p.year, p.month, p.day, 0, 5);
+  for (let i = 0; i < 60; i++) {
+    const c = madridParts(cursor);
+    const next = new Date(Date.UTC(c.year, c.month - 1, c.day + 1));
+    cursor = madridDate(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), 0, 5);
+    const q = madridParts(cursor);
+    if (isCallableDay(q, isHoliday)) return { year: q.year, month: q.month, day: q.day };
+  }
+  throw new Error("nextCallableDayAfter: sin día legal en 60 días (¿calendario roto?)");
+}
+
+/** Instante de inicio de una franja concreta, en un día de calendario ya decidido. */
+export function windowStart(
+  day: { year: number; month: number; day: number },
+  window: "morning" | "afternoon"
+): Date {
+  const w = window === "morning" ? CALL_WINDOWS[0] : CALL_WINDOWS[1];
+  return madridDate(day.year, day.month, day.day, w.startH, w.startM);
+}
