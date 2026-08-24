@@ -110,10 +110,11 @@ export function nextCallSlot(from: Date, isHoliday: HolidayCalendar = defaultHol
         if (mins < w.endH * 60 + w.endM) return cursor; // dentro (solo pasa en la primera vuelta)
       }
     }
-    // Siguiente día a las 00:05 de Madrid.
-    const siguiente = new Date(madridDate(p.year, p.month, p.day, 0, 5).getTime() + 24 * 3600_000);
-    const ps = madridParts(siguiente);
-    cursor = madridDate(ps.year, ps.month, ps.day, 0, 5);
+    // Siguiente día CIVIL a las 00:05 de Madrid. Ojo: sumar 24 h no vale --
+    // el día del cambio horario de octubre dura 25 h y quedaría el mismo día
+    // (bucle infinito). Se avanza por calendario, no por horas.
+    const next = new Date(Date.UTC(p.year, p.month - 1, p.day + 1));
+    cursor = madridDate(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), 0, 5);
   }
   throw new Error("nextCallSlot: sin franja legal en 60 días (¿calendario roto?)");
 }

@@ -20,6 +20,7 @@
 import pino from "pino";
 import {
   addDncPhone,
+  hasManualReviewCallAttempt,
   claimCallAttempt,
   countCallsStartedSince,
   countConsumedContacts,
@@ -131,6 +132,10 @@ export function enqueueDueOrders(deps: Required<Pick<CallTickDeps, "now" | "isHo
     if (!elig.eligible) continue;
     if (isDncPhone(order.phone)) continue;
     if (getActiveCallAttemptForOrder(order.id)) continue;
+    // Un intento en revisión manual BLOQUEA el re-encolado automático: hasta
+    // que un humano resuelva (datos corregidos, estado en Retell verificado,
+    // cupo agotado revisado), el sistema no vuelve a llamar solo.
+    if (hasManualReviewCallAttempt(order.id)) continue;
 
     const consumidos = countConsumedContacts(order.id);
     if (consumidos >= callMaxContacts()) continue; // ya agotado (habrá review)
@@ -152,7 +157,10 @@ export function enqueueDueOrders(deps: Required<Pick<CallTickDeps, "now" | "isHo
 // ------------------------------------------------------------
 
 function toManualReview(attempt: CallAttemptRow, reason: string): void {
-  transitionCallAttempt(attempt.id, ["planned", "reserved", "dialing", "in_flight"], "manual_review", { reason });
+  // "completed" incluido: agotar el cupo o un resultado que exige gestión
+  // humana convierten el último intento (ya completado) en el marcador de
+  // revisión que ve el panel — y que BLOQUEA el re-encolado automático.
+  transitionCallAttempt(attempt.id, ["planned", "reserved", "dialing", "in_flight", "completed"], "manual_review", { reason });
   logIntegrationEvent("system", "call_manual_review", "warning", `llamada a revisión: ${reason}`, orderRef(attempt));
 }
 
@@ -181,7 +189,7 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
 
   const capDiario = callsDailyCap();
 
-  for (const attempt of listDueCallAttempts(nowS)) {
+  for (const attempt of listDueCallAttempts(nowS, 500)) {
     const order = getOrderById(attempt.order_id);
     if (!order) {
       toManualReview(attempt, "pedido inexistente");

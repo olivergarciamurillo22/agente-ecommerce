@@ -2609,6 +2609,13 @@ export function countCallsStartedSince(sinceS: number): number {
   return r.n;
 }
 
+/** ¿Tiene el pedido algún intento pendiente de revisión humana? */
+export function hasManualReviewCallAttempt(orderId: number): boolean {
+  return Boolean(
+    ctx().db.prepare("SELECT 1 FROM call_attempts WHERE order_id = ? AND state = 'manual_review'").get(orderId)
+  );
+}
+
 export interface CallQueueSummary {
   planned: number;
   inFlight: number;

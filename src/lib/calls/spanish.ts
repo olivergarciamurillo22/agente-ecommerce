@@ -47,10 +47,12 @@ export function importeEnPalabras(importe: string | number, currency = "EUR"): s
   if (!Number.isFinite(num)) return String(importe);
   const enteros = Math.floor(num);
   const centimos = Math.round((num - enteros) * 100);
+  // Apócope: "uno euro" → "un euro" (y "veintiuno" → "veintiún").
+  const apocopa = (palabras: string) => palabras.replace(/(^|[ ])uno$/, "$1un").replace(/veintiuno$/, "veintiún");
   const unidad = currency === "EUR" ? (enteros === 1 ? "euro" : "euros") : currency;
-  const cabeza = `${numeroACardinal(enteros)} ${unidad}`;
+  const cabeza = `${apocopa(numeroACardinal(enteros))} ${unidad}`;
   if (centimos === 0) return cabeza;
-  return `${cabeza} con ${numeroACardinal(centimos)} ${centimos === 1 ? "céntimo" : "céntimos"}`;
+  return `${cabeza} con ${apocopa(numeroACardinal(centimos))} ${centimos === 1 ? "céntimo" : "céntimos"}`;
 }
 
 /** "2x Cortaúñas" → "dos unidades". 1 → "una unidad". */

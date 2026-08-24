@@ -4455,6 +4455,841 @@ async function main(): Promise<void> {
     assert.equal(db.getSetting("shopify_backfill_cursor"), "", "al terminar, el checkpoint se limpia");
   });
 
+
+  // ============ 40 · FASE FINAL — elegibilidad, reconciliación, scopes ============
+  console.log("\n— Fase final: elegibilidad + reconciliación + scopes —");
+
+  const { isConfirmationEligible } = await import("../src/lib/orders/eligibility");
+  const reconcile = await import("../src/lib/shopify/reconcile");
+
+  await test("F1 elegibilidad: cada bloqueo de dominio con su motivo; el hallazgo 4/5/1 no puede repetirse", () => {
+    const base = mkSent("996001", "4001");
+    assert.equal(isConfirmationEligible(db.getOrderById(base.id)!).eligible, true);
+
+    // Shopify cancela → fuera, aunque el status operativo siga vivo.
+    assert.ok(db.setOrderClosure(base.id, "cancelled", "shopify", 1_800_000_000));
+    const tras = isConfirmationEligible(db.getOrderById(base.id)!);
+    assert.equal(tras.eligible, false);
+    assert.equal(tras.reason, "closure_cancelled");
+
+    // Fulfillment en marcha → fuera (fulfilled NUNCA es delivered, pero SÍ
+    // saca al pedido de la confirmación).
+    const f = mkSent("996002", "4002");
+    assert.ok(db.setOrderClosure(f.id, "in_progress", "shopify", 1_800_000_000));
+    assert.equal(isConfirmationEligible(db.getOrderById(f.id)!).reason, "fulfillment_in_progress");
+
+    // Confirmado, histórico y sin teléfono.
+    const c = mkSent("996003", "4003");
+    db.markOrderConfirmed(c.id, true);
+    assert.equal(isConfirmationEligible(db.getOrderById(c.id)!).reason, "already_confirmed");
+    const h = db.insertOrderIfNew({
+      shopify_order_id: "996004", shopify_order_number: "4004", customer_name: "H", phone: "34600114004",
+      email: null, product_summary: "1x Cosa", total_price: "10.00", currency: "EUR",
+      address_line1: "Calle 1", address_line2: null, city: "Madrid", province: null,
+      postal_code: "28001", country: "España", status: "ignored_old",
+    }).order;
+    assert.equal(isConfirmationEligible(h).reason, "historical_import");
+  });
+
+  await test("F1 scheduler: un pedido con cierre cancelado NO manda confirmación inicial ni escala a needs_call", async () => {
+    const o = db.insertOrderIfNew({
+      shopify_order_id: "996010", shopify_order_number: "4010", customer_name: "F Uno",
+      phone: "34600114010", email: null, product_summary: "1x Cosa", total_price: "19.90",
+      currency: "EUR", address_line1: "Calle 3", address_line2: null, city: "Madrid",
+      province: null, postal_code: "28001", country: "España", status: "pending_send",
+    }).order;
+    db.setOrderClosure(o.id, "cancelled", "shopify", 1_800_000_000);
+    const delPedido = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = delPedido();
+    await runSchedulerTick();
+    assert.equal(delPedido(), antes, "ni un WhatsApp a un pedido cancelado");
+    assert.equal(db.getOrderById(o.id)!.status, "pending_send", "tampoco transiciona");
+  });
+
+  await test("F1 snapshot: needs_call solo cuenta candidatos reales (cierre desconocido y con teléfono)", () => {
+    const a = mkSent("996020", "4020");
+    const b = mkSent("996021", "4021");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE orders SET status='needs_call', needs_call_at=unixepoch() WHERE id IN (?,?)").run(a.id, b.id);
+    raw.close();
+    const antes = businessAlerts.readBusinessSnapshot().needsCallTotal;
+    db.setOrderClosure(b.id, "cancelled", "shopify", 1_800_000_000);
+    const despues = businessAlerts.readBusinessSnapshot().needsCallTotal;
+    assert.equal(despues, antes - 1, "el cancelado en Shopify deja de contar");
+  });
+
+  await test("F2 scopes: sin read_all_orders → coverage last_60_days_only; sin poder comprobar → unverified; nunca se afirma histórico completo", async () => {
+    const paginaVacia = async () => ({ orders: [], nextCursor: null });
+    const r1 = await backfill.runShopifyBackfill({
+      dryRun: true, pageFetcher: paginaVacia,
+      scopeFetcher: async () => ["read_orders", "write_orders"],
+    });
+    assert.equal(r1.coverage, "last_60_days_only");
+    assert.equal(r1.scopeCheck.hasReadAllOrders, false);
+    const r2 = await backfill.runShopifyBackfill({
+      dryRun: true, pageFetcher: paginaVacia,
+      scopeFetcher: async () => { throw new Error("sin credenciales"); },
+    });
+    assert.equal(r2.coverage, "unverified");
+    assert.match(r2.scopeCheck.error ?? "", /credenciales/);
+    const r3 = await backfill.runShopifyBackfill({
+      dryRun: true, pageFetcher: paginaVacia,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+    });
+    assert.equal(r3.coverage, "full");
+  });
+
+  await test("F3 reconciliación: repara un webhook perdido, no pisa terminales, y detecta creates perdidos", async () => {
+    // Pedido local abierto; Shopify dice que se canceló hace 1 h (webhook perdido).
+    const o = mkSent("996030", "4030");
+    const remoto = (id: number, extra: Record<string, unknown> = {}) => ({
+      ...codPayload({ id, order_number: 4030 }),
+      cancelled_at: "2026-08-24T08:00:00Z",
+      ...extra,
+    });
+    const r = await reconcile.runShopifyReconcile({
+      fetcher: async () => [remoto(996030) as never],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r.repaired, 1);
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.closure_status, "cancelled");
+    assert.equal(fila.closure_source, "shopify");
+    assert.equal(fila.closure_at, Math.floor(Date.parse("2026-08-24T08:00:00Z") / 1000), "fecha del evento, no now()");
+
+    // Segunda pasada idéntica: idempotente, nada que reparar.
+    const r2 = await reconcile.runShopifyReconcile({
+      fetcher: async () => [remoto(996030) as never],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r2.repaired, 0);
+
+    // Conflicto: local dice delivered (Dropea), Shopify dice cancelled más nuevo → NO se pisa.
+    const d = mkSent("996031", "4031");
+    db.setOrderClosure(d.id, "delivered", "dropea", Math.floor(Date.parse("2026-08-24T07:00:00Z") / 1000));
+    const r3 = await reconcile.runShopifyReconcile({
+      fetcher: async () => [remoto(996031, { order_number: 4031 }) as never],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r3.conflicts, 1);
+    assert.equal(db.getOrderById(d.id)!.closure_status, "delivered", "el terminal autoritativo se queda");
+
+    // Create perdido: existe en Shopify, no localmente → ignored_old + aviso, sin WhatsApp.
+    const antes = db.getPendingOutbox(999).length;
+    const r4 = await reconcile.runShopifyReconcile({
+      fetcher: async () => [remoto(996032, { order_number: 4032 }) as never],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r4.insertedMissing, 1);
+    const importado = db.getOrderByShopifyId("996032")!;
+    assert.equal(importado.status, "ignored_old");
+    assert.equal(importado.closure_status, "cancelled");
+    assert.equal(db.getPendingOutbox(999).length, antes, "cero mensajes");
+  });
+
+  await test("F3 reconciliación: salvaguarda estructural — sin imports de WhatsApp/Baileys/proveedores", () => {
+    const src = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "shopify", "reconcile.ts"), "utf8");
+    for (const pat of [/from\s+["'].*\/whatsapp["']/, /from\s+["'].*\/baileys/, /from\s+["'].*\/suppliers\//, /from\s+["'].*\/calls\//]) {
+      assert.ok(!pat.test(src), `import prohibido en reconcile.ts: ${pat}`);
+    }
+  });
+
+  // ============ 41 · E7 — franjas, calendario y textos ============
+  console.log("· E7 — franjas horarias, festivos y formatos");
+
+  const sched = await import("../src/lib/calls/schedule");
+  const calendar = await import("../src/lib/calls/calendar");
+  const spanish = await import("../src/lib/calls/spanish");
+  const sinFestivos = () => false;
+  /** Date en hora de Madrid (construida con la utilidad real, testeada aparte). */
+  const md = (y: number, mo: number, d: number, h: number, mi: number) => sched.madridDate(y, mo, d, h, mi);
+
+  await test("E7 franjas: los 6 casos obligatorios + domingo + festivo", () => {
+    const slot = (d: Date) => sched.nextCallSlot(d, sinFestivos);
+    // martes 01-09-2026, laborable
+    assert.equal(slot(md(2026, 9, 1, 15, 0)).getTime(), md(2026, 9, 1, 17, 0).getTime(), "15:00 → 17:00");
+    assert.equal(slot(md(2026, 9, 1, 1, 0)).getTime(), md(2026, 9, 1, 9, 0).getTime(), "01:00 → 09:00");
+    assert.equal(slot(md(2026, 9, 1, 10, 0)).getTime(), md(2026, 9, 1, 10, 0).getTime(), "10:00 ya es legal (el +15 se aplica antes)");
+    assert.equal(slot(md(2026, 9, 1, 13, 10)).getTime(), md(2026, 9, 1, 17, 0).getTime(), "12:55+15 → 13:10 → 17:00");
+    assert.equal(slot(md(2026, 9, 1, 20, 10)).getTime(), md(2026, 9, 2, 9, 0).getTime(), "19:55+cadencia → día siguiente 09:00");
+    // sábado 05-09-2026 19:50+ → lunes 07-09 09:00
+    assert.equal(slot(md(2026, 9, 5, 20, 5)).getTime(), md(2026, 9, 7, 9, 0).getTime(), "sábado noche → lunes 09:00");
+    // domingo 06-09 → lunes
+    assert.equal(slot(md(2026, 9, 6, 11, 0)).getTime(), md(2026, 9, 7, 9, 0).getTime(), "domingo jamás");
+    // festivo lunes 12-10-2026 (Fiesta Nacional) con calendario real → martes 13
+    assert.equal(
+      sched.nextCallSlot(md(2026, 10, 12, 11, 0), calendar.defaultHolidayCalendar).getTime(),
+      md(2026, 10, 13, 9, 0).getTime(),
+      "festivo nacional en lunes → martes 09:00"
+    );
+  });
+
+  await test("E7 franjas: cambio horario de marzo y de octubre (DST real, sin offset fijo)", () => {
+    // Sábado 28-03-2026 20:30 → lunes 30-03 09:00 CEST (UTC+2 → 07:00Z)
+    const marzo = sched.nextCallSlot(md(2026, 3, 28, 20, 30), sinFestivos);
+    assert.equal(marzo.toISOString(), "2026-03-30T07:00:00.000Z");
+    // Sábado 24-10-2026 20:30 → lunes 26-10 09:00 CET (UTC+1 → 08:00Z)
+    const octubre = sched.nextCallSlot(md(2026, 10, 24, 20, 30), sinFestivos);
+    assert.equal(octubre.toISOString(), "2026-10-26T08:00:00.000Z");
+    // insideCallWindow coherente en ambos regímenes
+    assert.equal(sched.insideCallWindow(new Date("2026-03-30T07:30:00Z"), sinFestivos), true);
+    assert.equal(sched.insideCallWindow(new Date("2026-10-26T07:30:00Z"), sinFestivos), false, "07:30Z en invierno = 08:30 Madrid, fuera");
+  });
+
+  await test("E7 calendario: festivos nacionales CALCULADOS para cualquier año (no caducan) + extras por config", () => {
+    const h26 = calendar.spanishNationalHolidays(2026);
+    assert.ok(h26.includes("2026-12-25") && h26.includes("2026-10-12"));
+    assert.ok(h26.includes("2026-04-03"), "Viernes Santo 2026 calculado (Pascua 05-04)");
+    const h27 = calendar.spanishNationalHolidays(2027);
+    assert.ok(h27.includes("2027-03-26"), "Viernes Santo 2027 calculado (Pascua 28-03)");
+    db.setSetting("call_holidays_extra", "2026-09-08");
+    assert.equal(calendar.defaultHolidayCalendar("2026-09-08"), true, "festivo extra configurado sin tocar código");
+    db.setSetting("call_holidays_extra", "");
+  });
+
+  await test("E7 textos: importe en palabras, unidades y fecha relativa deterministas", () => {
+    assert.equal(spanish.importeEnPalabras("29.95"), "veintinueve euros con noventa y cinco céntimos");
+    assert.equal(spanish.importeEnPalabras("1.01"), "un euro con un céntimo");
+    assert.equal(spanish.importeEnPalabras("100"), "cien euros");
+    assert.equal(spanish.importeEnPalabras("134.50"), "ciento treinta y cuatro euros con cincuenta céntimos");
+    assert.equal(spanish.unidadesEnTexto(1), "una unidad");
+    assert.equal(spanish.unidadesEnTexto(2), "dos unidades");
+    const ahora = md(2026, 9, 3, 10, 0);
+    const ayer = Math.floor(md(2026, 9, 2, 22, 0).getTime() / 1000);
+    assert.equal(spanish.fechaPedidoRelativa(ayer, ahora), "ayer");
+    assert.equal(spanish.fechaPedidoRelativa(Math.floor(md(2026, 9, 3, 1, 0).getTime() / 1000), ahora), "hoy");
+    assert.equal(spanish.fechaPedidoRelativa(Math.floor(md(2026, 8, 29, 12, 0).getTime() / 1000), ahora), "hace cinco días");
+    assert.ok(spanish.currentDatetimeMadrid(ahora).includes("septiembre"));
+  });
+
+  // ============ 42 · E7 — orquestador: cola, marcación, resultados ============
+  console.log("· E7 — orquestador de llamadas");
+
+  const calls = await import("../src/lib/calls/scheduler");
+  const callsCfg = await import("../src/lib/calls/config");
+  const { RESULT_OUTCOMES, CALL_RESULTS, parseCallResult } = await import("../src/lib/calls/results");
+  const { buildCallPayload, toE164 } = await import("../src/lib/calls/payload");
+  const { retellProvider } = await import("../src/lib/calls/retell");
+  const providerMod = await import("../src/lib/calls/provider");
+
+  /** Proveedor de mentira: cuenta llamadas y permite forzar fallos. */
+  let mockCallSeq = 0; // ids ÚNICOS entre todos los mocks (índice único global en DB)
+  function mkProvider(opts: { fail?: boolean } = {}) {
+    const created: Array<{ toNumber: string; variables: Record<string, string>; metadata: Record<string, string> }> = [];
+    const provider: import("../src/lib/calls/provider").CallProvider = {
+      name: "mock",
+      isConfigured: () => true,
+      async createOutboundCall(req) {
+        if (opts.fail) throw new providerMod.ProviderRequestError("mock: rechazado", 500);
+        created.push({ toNumber: req.toNumber, variables: req.dynamicVariables, metadata: req.metadata });
+        return { providerCallId: `mock-call-${++mockCallSeq}` };
+      },
+      verifyWebhook: () => true,
+      parseEvent: () => null,
+    };
+    return { provider, created };
+  }
+
+  // Instante fijo DENTRO de franja: martes 01-09-2026 10:30 Madrid.
+  const enFranja = md(2026, 9, 1, 10, 30);
+
+  /** Pedido listo para llamar: WhatsApp enviado hace 30 min (RELATIVO al
+   *  instante fijo de los tests, no al reloj real), sin respuesta. */
+  const mkCallable = (shopifyId: string, num: string, phone: string, sentAgoMin = 30) => {
+    const o = db.insertOrderIfNew({
+      shopify_order_id: shopifyId, shopify_order_number: num, customer_name: "Cliente Llamada",
+      phone, email: null, product_summary: "1x Cortaúñas Eléctrico 3 en 1",
+      total_price: "29.95", currency: "EUR", address_line1: "Calle Mayor 5", address_line2: null,
+      city: "Almería", province: "Almería", postal_code: "04001", country: "España",
+      status: "pending_send",
+      raw_payload: JSON.stringify({ line_items: [{ title: "Cortaúñas Eléctrico 3 en 1", quantity: 1, price: "29.95", sku: "10428" }] }),
+    }).order;
+    db.claimOrderInitialSend(o.id, Math.floor(enFranja.getTime() / 1000) - sentAgoMin * 60);
+    return db.getOrderById(o.id)!;
+  };
+
+  const noHoliday = () => false;
+
+  /** Deja la config de llamadas en un estado conocido. */
+  const resetCallCfg = () => {
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_daily_cap", "30");
+    db.setSetting("calls_allowlist", "");
+  };
+  resetCallCfg();
+
+  await test("E7 defaults seguros: kill switch OFF y shadow ON tras el deploy", () => {
+    db.setSetting("ai_calls_enabled", "");
+    db.setSetting("calls_shadow_mode", "");
+    assert.equal(callsCfg.aiCallsEnabled(), false, "AI_CALLS_ENABLED off por defecto");
+    assert.equal(callsCfg.callsShadowMode(), true, "shadow on por defecto");
+    resetCallCfg();
+  });
+
+  await test("E7 encolar: WhatsApp sin respuesta ≥15 min entra; el que respondió no; prioriza importe", () => {
+    const a = mkCallable("997001", "4101", "34600117001", 30);
+    const contestado = mkCallable("997002", "4102", "34600117002", 30);
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE orders SET customer_replied_at = unixepoch() WHERE id = ?").run(contestado.id);
+    raw.close();
+    const reciente = mkCallable("997003", "4103", "34600117003", 5); // solo 5 min
+
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    assert.ok(db.getActiveCallAttemptForOrder(a.id), "30 min sin respuesta → en cola");
+    assert.equal(db.getActiveCallAttemptForOrder(contestado.id), null, "respondió → jamás");
+    assert.equal(db.getActiveCallAttemptForOrder(reciente.id), null, "5 min → todavía no");
+    const attempt = db.getActiveCallAttemptForOrder(a.id)!;
+    assert.equal(attempt.contact_number, 1);
+    // Programado dentro de franja legal.
+    assert.ok(sched.insideCallWindow(new Date(attempt.scheduled_at * 1000), noHoliday));
+  });
+
+  await test("E7 encolar (disparador B): envío inicial que no salió en 60 min → entra ya; DNC no entra", () => {
+    const sinWa = db.insertOrderIfNew({
+      shopify_order_id: "997010", shopify_order_number: "4110", customer_name: "Sin WhatsApp",
+      phone: "34600117010", email: null, product_summary: "1x Cortaúñas", total_price: "29.95",
+      currency: "EUR", address_line1: "Calle 2", address_line2: null, city: "Almería",
+      province: null, postal_code: "04001", country: "España", status: "pending_send",
+    }).order;
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE orders SET created_at = ? WHERE id = ?").run(Math.floor(enFranja.getTime() / 1000) - 3700, sinWa.id);
+    raw.close();
+    const bloqueado = mkCallable("997011", "4111", "34600117011", 30);
+    db.addDncPhone("34600117011", "test", { reason: "prueba" });
+
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    assert.ok(db.getActiveCallAttemptForOrder(sinWa.id), "envío que nunca salió → cola de llamadas");
+    assert.equal(db.getActiveCallAttemptForOrder(bloqueado.id), null, "DNC no entra ni en la cola");
+  });
+
+  await test("E7 shadow: calcula candidato y payload, lo registra UNA vez, y NO contacta al proveedor", async () => {
+    resetCallCfg(); // shadow ON, calls OFF
+    const o = mkCallable("997020", "4120", "34600117020", 30);
+    db.setSetting("calls_allowlist", "34600117020"); // aísla el test del resto de la cola
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    const { provider, created } = mkProvider();
+    const r1 = await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 0, "shadow: cero llamadas reales");
+    assert.ok(r1.shadowLogged >= 1);
+    const attempt = db.getActiveCallAttemptForOrder(o.id)!;
+    assert.equal(attempt.state, "planned");
+    assert.ok(attempt.shadow_logged_at, "candidato registrado");
+    const r2 = await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(r2.shadowLogged, 0, "no se re-registra en cada tick");
+    resetCallCfg();
+  });
+
+  await test("E7 kill switch: OFF y sin shadow → ni una llamada; ON → marca de verdad con payload mínimo exacto", async () => {
+    const o = mkCallable("997021", "4121", "34600117021", 30);
+    db.setSetting("calls_allowlist", "34600117021");
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    const { provider, created } = mkProvider();
+
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "0");
+    await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 0, "kill switch cerrado: nada");
+
+    db.setSetting("ai_calls_enabled", "1");
+    const r = await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(r.dialed, 1);
+    assert.equal(created.length, 1);
+    assert.equal(created[0].toNumber, "+34600117021");
+    const vars = created[0].variables;
+    assert.deepEqual(Object.keys(vars).sort(), [
+      "codigo_postal", "current_datetime", "direccion", "fecha_pedido", "importe_total",
+      "localidad", "nombre_cliente", "numero_pedido", "producto", "telefono", "unidades",
+    ], "EXACTAMENTE las variables acordadas, ni una más");
+    assert.equal(vars.importe_total, "veintinueve euros con noventa y cinco céntimos");
+    assert.equal(vars.unidades, "una unidad");
+    const attempt = db.getActiveCallAttemptForOrder(o.id)!;
+    assert.equal(attempt.state, "in_flight");
+    assert.ok(attempt.provider_call_id?.startsWith("mock-call-"));
+    resetCallCfg();
+  });
+
+  await test("E7 validación previa: cada campo obligatorio ausente → NO se llama y va a revisión con missing_data", async () => {
+    const casos: Array<[string, Record<string, unknown>]> = [
+      ["nombre_cliente", { customer_name: null }],
+      ["producto", { product_summary: "" }],
+      ["importe_total", { total_price: "no-num" }],
+      ["direccion", { address_line1: null }],
+      ["localidad", { city: "-" }],
+    ];
+    let n = 30;
+    for (const [campo, override] of casos) {
+      n++;
+      const tel = `346001171${String(n).padStart(2, "0")}`;
+      const o = mkCallable(`9970${n}`, `41${n}`, tel, 30);
+      const Database = require("better-sqlite3");
+      const raw = new Database(path.join(tmpDir, "messages.db"));
+      for (const [k, v] of Object.entries(override)) {
+        raw.prepare(`UPDATE orders SET ${k} = ? WHERE id = ?`).run(v as never, o.id);
+      }
+      raw.close();
+      const fila = db.getOrderById(o.id)!;
+      const payload = buildCallPayload(fila, enFranja);
+      assert.equal(payload.ok, false);
+      assert.ok(payload.missing.includes(campo), `falta ${campo}`);
+
+      db.setSetting("calls_allowlist", tel);
+      db.setSetting("calls_shadow_mode", "0");
+      db.setSetting("ai_calls_enabled", "1");
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      const { provider, created } = mkProvider();
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+      assert.equal(created.length, 0, `con ${campo} ausente el proveedor recibe CERO llamadas`);
+      const attempts = db.listCallAttemptsForOrder(o.id);
+      assert.equal(attempts[attempts.length - 1].state, "manual_review");
+      assert.match(attempts[attempts.length - 1].reason ?? "", /missing_data/);
+    }
+    // teléfono inválido
+    assert.equal(toE164("12"), null);
+    assert.equal(toE164("34600117001"), "+34600117001");
+    resetCallCfg();
+  });
+
+  await test("E7 carreras: confirmación WhatsApp / cancelación Shopify / fulfillment / DNC justo antes de marcar → NO CALL", async () => {
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    const escenarios: Array<[string, (o: import("../src/lib/db").OrderRow) => void]> = [
+      ["confirma por WhatsApp", (o) => db.markOrderConfirmed(o.id, true)],
+      ["Shopify cancela", (o) => void db.setOrderClosure(o.id, "cancelled", "shopify", 1_800_000_000)],
+      ["Shopify despacha (fulfillment)", (o) => void db.setOrderClosure(o.id, "in_progress", "shopify", 1_800_000_000)],
+      ["entra en DNC", (o) => db.addDncPhone(o.phone, "test")],
+    ];
+    let n = 40;
+    for (const [nombre, sabotea] of escenarios) {
+      n++;
+      const tel = `346001172${String(n).padStart(2, "0")}`;
+      const o = mkCallable(`9971${n}`, `42${n}`, tel, 30);
+      db.setSetting("calls_allowlist", tel);
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      assert.ok(db.getActiveCallAttemptForOrder(o.id), `${nombre}: estaba en cola`);
+      sabotea(db.getOrderById(o.id)!); // ← ocurre DESPUÉS de planificar
+      const { provider, created } = mkProvider();
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+      assert.equal(created.length, 0, `${nombre}: NO se llama`);
+      const activo = db.getActiveCallAttemptForOrder(o.id);
+      assert.equal(activo, null, `${nombre}: el intento quedó cancelado`);
+    }
+    resetCallCfg();
+  });
+
+  await test("E7 concurrencia: dos workers sobre el mismo intento → una sola llamada; y jamás dos intentos vivos por pedido", async () => {
+    const tel = "34600117300";
+    const o = mkCallable("997300", "4300", tel, 30);
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    const attempt = db.getActiveCallAttemptForOrder(o.id)!;
+    // Claim atómico: solo el primero gana.
+    assert.equal(db.claimCallAttempt(attempt.id), true);
+    assert.equal(db.claimCallAttempt(attempt.id), false, "el segundo worker no puede reclamarlo");
+    // Y el índice único impide un segundo intento vivo del mismo pedido.
+    assert.equal(db.insertCallAttempt(o.id, 2, attempt.scheduled_at), null);
+    // devolver a planned para no dejar basura
+    db.transitionCallAttempt(attempt.id, ["reserved"], "cancelled", { reason: "test" });
+    resetCallCfg();
+  });
+
+  await test("E7 crash al marcar: fila en 'dialing' NUNCA se re-marca sola → revisión provider_unknown_state", async () => {
+    const tel = "34600117301";
+    const o = mkCallable("997301", "4301", tel, 30);
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    const attempt = db.getActiveCallAttemptForOrder(o.id)!;
+    // Simula el crash: reclamado y en 'dialing', el proceso muere sin guardar call_id.
+    db.claimCallAttempt(attempt.id);
+    db.transitionCallAttempt(attempt.id, ["reserved"], "dialing");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE call_attempts SET updated_at = unixepoch() - 900 WHERE id = ?").run(attempt.id);
+    raw.close();
+
+    const { provider, created } = mkProvider();
+    await calls.runCallOrchestratorTick({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 0, "cero llamadas nuevas para ese pedido");
+    assert.equal(db.getCallAttempt(attempt.id)!.state, "manual_review");
+    assert.match(db.getCallAttempt(attempt.id)!.reason ?? "", /provider_unknown_state/);
+    resetCallCfg();
+  });
+
+  await test("E7 tope diario: al llegar al cap se dejan de marcar llamadas y queda evento", async () => {
+    // Día distinto para no contar llamadas de otros tests: miércoles 02-09.
+    const dia2 = md(2026, 9, 2, 10, 30);
+    const t1 = "34600117310";
+    const t2 = "34600117311";
+    const o1 = mkCallable("997310", "4310", t1, 30);
+    const o2 = mkCallable("997311", "4311", t2, 30);
+    db.setSetting("calls_allowlist", `${t1},${t2}`);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_daily_cap", "1");
+    calls.enqueueDueOrders({ now: dia2, isHoliday: noHoliday });
+    const { provider, created } = mkProvider();
+    const antes = sysRepo.countIntegrationEvents("system", "call_daily_cap_reached", 0);
+    await calls.dialDueAttempts({ now: dia2, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 1, "solo una llamada: el cap corta la segunda");
+    const enVuelo = [o1, o2].filter((o) => db.getActiveCallAttemptForOrder(o.id)?.state === "in_flight");
+    assert.equal(enVuelo.length, 1, "exactamente una en vuelo; la otra sigue en cola");
+    // Segundo tick del mismo día: cap ya alcanzado → ninguna más y evento registrado.
+    await calls.dialDueAttempts({ now: dia2, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 1);
+    assert.ok(sysRepo.countIntegrationEvents("system", "call_daily_cap_reached", 0) > antes);
+    resetCallCfg();
+  });
+
+  // ============ 43 · E7 — resultados, reintentos, DNC, webhook ============
+  console.log("· E7 — resultados y webhook");
+
+  /** Marca una llamada real con el mock y devuelve el intento in_flight. */
+  async function dialOne(shopifyId: string, num: string, tel: string, when = enFranja) {
+    const o = mkCallable(shopifyId, num, tel, 30);
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_daily_cap", "500");
+    calls.enqueueDueOrders({ now: when, isHoliday: noHoliday });
+    const { provider, created } = mkProvider();
+    await calls.dialDueAttempts({ now: when, provider, isHoliday: noHoliday });
+    assert.equal(created.length, 1, "la llamada salió");
+    const attempt = db.getActiveCallAttemptForOrder(o.id)!;
+    assert.equal(attempt.state, "in_flight");
+    return { order: db.getOrderById(o.id)!, attempt };
+  }
+
+  /** Evento call_analyzed parseado, como lo guardaría el webhook. */
+  const analyzedEvent = (callId: string, analysis: Record<string, unknown>, atS = Math.floor(enFranja.getTime() / 1000)) => ({
+    type: "call_analyzed" as const,
+    providerCallId: callId,
+    eventAt: atS,
+    providerStatus: "ended",
+    disconnectionReason: null,
+    durationMs: 42_000,
+    analysis,
+  });
+
+  await test("E7 tabla de resultados: cada enum tiene su fila y coincide con la especificación", () => {
+    assert.equal(CALL_RESULTS.length, 12);
+    const esperado: Record<string, { retry: boolean; consume: boolean }> = {
+      confirmado: { retry: false, consume: true },
+      confirmado_con_correccion: { retry: false, consume: true },
+      cancelado: { retry: false, consume: true },
+      no_reconoce_pedido: { retry: false, consume: true },
+      numero_equivocado: { retry: false, consume: true },
+      no_volver_a_llamar: { retry: false, consume: true },
+      incidencia_precio: { retry: false, consume: true },
+      no_disponible: { retry: false, consume: true },
+      rellamar: { retry: true, consume: false },
+      no_contesta: { retry: true, consume: true },
+      buzon_de_voz: { retry: true, consume: true },
+      fallo_tecnico: { retry: true, consume: false },
+    };
+    for (const r of CALL_RESULTS) {
+      assert.equal(RESULT_OUTCOMES[r].retry, esperado[r].retry, `${r}.retry`);
+      assert.equal(RESULT_OUTCOMES[r].consume, esperado[r].consume, `${r}.consume`);
+    }
+    assert.equal(RESULT_OUTCOMES.confirmado.confirm, true);
+    assert.equal(RESULT_OUTCOMES.cancelado.closeCancelled, true);
+    assert.equal(RESULT_OUTCOMES.no_reconoce_pedido.closeCancelled, true);
+    assert.equal(RESULT_OUTCOMES.no_volver_a_llamar.dnc, true);
+    assert.equal(RESULT_OUTCOMES.incidencia_precio.review, true);
+    assert.equal(parseCallResult(" Confirmado "), "confirmado");
+    assert.equal(parseCallResult("algo_rarisimo"), null);
+    assert.equal(parseCallResult(42), null);
+  });
+
+  await test("E7 confirmado por llamada: marca confirmación, NUNCA delivered; el cierre sigue unknown", async () => {
+    const { order, attempt } = await dialOne("997400", "4400", "34600117400");
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "confirmado" }), enFranja, noHoliday);
+    const fila = db.getOrderById(order.id)!;
+    assert.equal(fila.status, "confirmed");
+    assert.equal(fila.closure_status, "unknown", "confirmar NO cierra: la entrega la dirá el proveedor");
+    assert.equal(db.getCallAttempt(attempt.id)!.state, "completed");
+    assert.equal(db.getActiveCallAttemptForOrder(order.id), null, "sin reintentos tras confirmar");
+    resetCallCfg();
+  });
+
+  await test("E7 cancelado por llamada: closure cancelled/llamada_ia con fecha del evento; conflicto con terminal NO pisa", async () => {
+    const { order, attempt } = await dialOne("997401", "4401", "34600117401");
+    const ts = Math.floor(enFranja.getTime() / 1000);
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "cancelado" }, ts), enFranja, noHoliday);
+    const fila = db.getOrderById(order.id)!;
+    assert.equal(fila.closure_status, "cancelled");
+    assert.equal(fila.closure_source, "llamada_ia");
+    assert.equal(fila.closure_at, ts);
+    assert.equal(fila.status, "cancelled", "también el eje operativo");
+
+    // Conflicto: Dropea ya dijo delivered → la llamada NO lo pisa.
+    const { order: o2, attempt: a2 } = await dialOne("997402", "4402", "34600117402");
+    db.setOrderClosure(o2.id, "delivered", "dropea", ts - 100);
+    const antes = sysRepo.countIntegrationEvents("system", "call_closure_conflict", 0);
+    calls.applyCallAnalysis(a2, analyzedEvent(a2.provider_call_id!, { resultado: "no_reconoce_pedido" }, ts), enFranja, noHoliday);
+    assert.equal(db.getOrderById(o2.id)!.closure_status, "delivered", "el terminal autoritativo se queda");
+    assert.ok(sysRepo.countIntegrationEvents("system", "call_closure_conflict", 0) > antes, "conflicto registrado");
+    resetCallCfg();
+  });
+
+  await test("E7 correcciones: vacío no hace nada, igual no hace nada, distinto actualiza con auditoría", async () => {
+    const { order, attempt } = await dialOne("997403", "4403", "34600117403");
+    calls.applyCallAnalysis(
+      attempt,
+      analyzedEvent(attempt.provider_call_id!, {
+        resultado: "confirmado_con_correccion",
+        direccion_corregida: "  Avenida Nueva 7, 2ºB  ",
+        localidad_corregida: "Almería", // igual que la actual → no cambia
+        codigo_postal_corregido: "",    // vacío → no borra
+        telefono_alternativo: "",
+      }),
+      enFranja,
+      noHoliday
+    );
+    const fila = db.getOrderById(order.id)!;
+    assert.equal(fila.address_line1, "Avenida Nueva 7, 2ºB");
+    assert.equal(fila.city, "Almería");
+    assert.equal(fila.postal_code, "04001", "vacío jamás borra un dato");
+    const audit = db.listOrderDataAudit(order.id);
+    assert.equal(audit.length, 1, "solo el cambio real se audita");
+    assert.equal(audit[0].field, "address_line1");
+    assert.equal(audit[0].old_value, "Calle Mayor 5");
+    assert.equal(audit[0].source, "llamada_ia");
+    assert.equal(audit[0].provider_call_id, attempt.provider_call_id);
+    resetCallCfg();
+  });
+
+  await test("E7 DNC: pidió no llamar → teléfono bloqueado GLOBALMENTE, también para pedidos futuros", async () => {
+    const tel = "34600117404";
+    const { order, attempt } = await dialOne("997404", "4404", tel);
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "no_volver_a_llamar" }), enFranja, noHoliday);
+    assert.equal(db.isDncPhone(tel), true);
+    assert.equal(db.getActiveCallAttemptForOrder(order.id), null, "sin reintentos");
+    // Pedido FUTURO con el mismo teléfono normalizado: no entra ni en cola.
+    const futuro = mkCallable("997405", "4405", tel, 30);
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    assert.equal(db.getActiveCallAttemptForOrder(futuro.id), null, "DNC global por teléfono");
+    resetCallCfg();
+  });
+
+  await test("E7 rellamar: no consume contacto y respeta momento_rellamada (encajado en franja legal); timestamps absurdos → siguiente franja", async () => {
+    const { order, attempt } = await dialOne("997406", "4406", "34600117406");
+    // Rellamar el mismo día a las 18:00 (franja de tarde, válido).
+    const objetivo = Math.floor(md(2026, 9, 1, 18, 0).getTime() / 1000);
+    calls.applyCallAnalysis(
+      attempt,
+      analyzedEvent(attempt.provider_call_id!, { resultado: "rellamar", momento_rellamada: objetivo }),
+      enFranja,
+      noHoliday
+    );
+    const siguiente = db.getActiveCallAttemptForOrder(order.id)!;
+    assert.equal(siguiente.contact_number, attempt.contact_number, "rellamar NO consume contacto");
+    assert.equal(siguiente.scheduled_at, objetivo, "respeta el momento pedido (ya es legal)");
+    assert.equal(db.countConsumedContacts(order.id), 0);
+
+    // Timestamp absurdo (en el pasado remoto) → se ignora y va a la siguiente franja.
+    const { order: o2, attempt: a2 } = await dialOne("997407", "4407", "34600117407");
+    calls.applyCallAnalysis(
+      a2,
+      analyzedEvent(a2.provider_call_id!, { resultado: "rellamar", momento_rellamada: 1_000_000 }),
+      enFranja,
+      noHoliday
+    );
+    const s2 = db.getActiveCallAttemptForOrder(o2.id)!;
+    assert.ok(s2.scheduled_at >= Math.floor(enFranja.getTime() / 1000), "jamás en el pasado");
+    assert.ok(sched.insideCallWindow(new Date(s2.scheduled_at * 1000), noHoliday));
+    resetCallCfg();
+  });
+
+  await test("E7 plan de reintentos completo: intento + 4 retries en franja legal → agotado → revisión manual y fuera de cola", async () => {
+    const tel = "34600117410";
+    let { order, attempt } = await dialOne("997410", "4410", tel);
+    let now = enFranja;
+    for (let contacto = 1; contacto <= 5; contacto++) {
+      calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "no_contesta" }, Math.floor(now.getTime() / 1000)), now, noHoliday);
+      assert.equal(db.countConsumedContacts(order.id), contacto);
+      const siguiente = db.getActiveCallAttemptForOrder(order.id);
+      if (contacto < 5) {
+        assert.ok(siguiente, `tras el contacto ${contacto} hay reintento planificado`);
+        assert.equal(siguiente!.contact_number, contacto + 1);
+        assert.ok(siguiente!.scheduled_at > Math.floor(now.getTime() / 1000), "siempre hacia delante");
+        assert.ok(sched.insideCallWindow(new Date(siguiente!.scheduled_at * 1000), noHoliday), "siempre en franja legal");
+        // "Marca" el siguiente: lo pasamos a in_flight a mano (sin proveedor).
+        now = new Date(siguiente!.scheduled_at * 1000);
+        db.claimCallAttempt(siguiente!.id);
+        db.transitionCallAttempt(siguiente!.id, ["reserved"], "dialing");
+        db.transitionCallAttempt(siguiente!.id, ["dialing"], "in_flight", { provider_call_id: `mock-seq-${contacto}`, started_at: Math.floor(now.getTime() / 1000) });
+        attempt = db.getCallAttempt(siguiente!.id)!;
+      } else {
+        assert.equal(siguiente, null, "quinto contacto sin resolución: fuera de cola");
+        const todos = db.listCallAttemptsForOrder(order.id);
+        assert.equal(todos[todos.length - 1].state, "manual_review");
+        assert.match(todos[todos.length - 1].reason ?? "", /attempts_exhausted/);
+      }
+    }
+    resetCallCfg();
+  });
+
+  await test("E7 fallo técnico: reintenta SIN consumir cupo, y 3 seguidos → provider_error_exhausted", async () => {
+    const tel = "34600117420";
+    const o = mkCallable("997420", "4420", tel, 30);
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_daily_cap", "500");
+    const { provider } = mkProvider({ fail: true });
+    for (let i = 0; i < 3; i++) {
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      const activo = db.getActiveCallAttemptForOrder(o.id);
+      if (activo) {
+        const Database = require("better-sqlite3");
+        const raw = new Database(path.join(tmpDir, "messages.db"));
+        raw.prepare("UPDATE call_attempts SET scheduled_at = ? WHERE id = ?").run(Math.floor(enFranja.getTime() / 1000) - 1, activo.id);
+        raw.close();
+      }
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+    }
+    assert.equal(db.countConsumedContacts(o.id), 0, "los fallos técnicos no castigan el cupo del cliente");
+    const todos = db.listCallAttemptsForOrder(o.id);
+    const ultimo = todos[todos.length - 1];
+    assert.equal(ultimo.state, "manual_review");
+    assert.match(ultimo.reason ?? "", /provider_error_exhausted/);
+    resetCallCfg();
+  });
+
+  await test("E7 webhook: firma inválida rechazada; válida (v=ts,d=hex) aceptada; caducada rechazada", async () => {
+    await withEnv({ RETELL_API_KEY: "retell-key-test" }, () => {
+      const body = JSON.stringify({ event: "call_ended", call: { call_id: "call-x" } });
+      const ts = String(Date.now());
+      const d = crypto.createHmac("sha256", "retell-key-test").update(body + ts).digest("hex");
+      assert.equal(retellProvider.verifyWebhook(body, `v=${ts},d=${d}`), true);
+      assert.equal(retellProvider.verifyWebhook(body, `v=${ts},d=${"0".repeat(64)}`), false);
+      assert.equal(retellProvider.verifyWebhook(body, null), false);
+      const viejo = String(Date.now() - 10 * 60_000);
+      const dViejo = crypto.createHmac("sha256", "retell-key-test").update(body + viejo).digest("hex");
+      assert.equal(retellProvider.verifyWebhook(body, `v=${viejo},d=${dViejo}`), false, "timestamp caducado (anti-replay)");
+      // Fallback: firma simple del cuerpo.
+      const simple = crypto.createHmac("sha256", "retell-key-test").update(body).digest("hex");
+      assert.equal(retellProvider.verifyWebhook(body, simple), true);
+      // Parser estricto de eventos.
+      assert.equal(retellProvider.parseEvent("{no json"), null);
+      assert.equal(retellProvider.parseEvent(JSON.stringify({ event: "otra_cosa", call: { call_id: "x" } })), null);
+      assert.equal(retellProvider.parseEvent(JSON.stringify({ event: "call_ended", call: {} })), null, "sin call_id → null");
+    });
+  });
+
+  await test("E7 inbox: evento duplicado UN solo efecto; call_analyzed repetido no revierte; call_id desconocido seguro", async () => {
+    const { order, attempt } = await dialOne("997430", "4430", "34600117430");
+    const callId = attempt.provider_call_id!;
+    const ev = analyzedEvent(callId, { resultado: "confirmado" });
+    // Mismo dedupe_key dos veces → el segundo no entra ni en el inbox.
+    assert.equal(db.insertCallEvent({ dedupeKey: `${callId}:call_analyzed:${ev.eventAt}`, providerCallId: callId, eventType: "call_analyzed", eventAt: ev.eventAt, payloadJson: JSON.stringify(ev) }), true);
+    assert.equal(db.insertCallEvent({ dedupeKey: `${callId}:call_analyzed:${ev.eventAt}`, providerCallId: callId, eventType: "call_analyzed", eventAt: ev.eventAt, payloadJson: JSON.stringify(ev) }), false);
+    calls.processCallEvents(enFranja, noHoliday);
+    assert.equal(db.getOrderById(order.id)!.status, "confirmed");
+    assert.equal(db.getCallAttempt(attempt.id)!.result, "confirmado");
+
+    // Un call_analyzed VIEJO/repetido con otro resultado no revierte el estado.
+    const ev2 = analyzedEvent(callId, { resultado: "cancelado" }, ev.eventAt! - 60);
+    db.insertCallEvent({ dedupeKey: `${callId}:call_analyzed:${ev2.eventAt}`, providerCallId: callId, eventType: "call_analyzed", eventAt: ev2.eventAt, payloadJson: JSON.stringify(ev2) });
+    calls.processCallEvents(enFranja, noHoliday);
+    assert.equal(db.getCallAttempt(attempt.id)!.result, "confirmado", "el estado más nuevo se queda");
+    assert.equal(db.getOrderById(order.id)!.closure_status, "unknown");
+
+    // call_id desconocido: se marca procesado con error, sin efectos ni excepción.
+    db.insertCallEvent({ dedupeKey: "fantasma:call_ended:1", providerCallId: "fantasma", eventType: "call_ended", eventAt: 1, payloadJson: null });
+    calls.processCallEvents(enFranja, noHoliday);
+    assert.equal(db.listUnprocessedCallEvents().length, 0, "todo el inbox drenado");
+
+    // Resultado desconocido → manual review, nunca se interpreta.
+    const { attempt: a3 } = await dialOne("997431", "4431", "34600117431");
+    calls.applyCallAnalysis(a3, analyzedEvent(a3.provider_call_id!, { resultado: "quizas_luego" }), enFranja, noHoliday);
+    assert.equal(db.getCallAttempt(a3.id)!.state, "manual_review");
+    assert.match(db.getCallAttempt(a3.id)!.reason ?? "", /unknown_retell_result/);
+    resetCallCfg();
+  });
+
+  await test("E7 frontera de código: el módulo calls no importa WhatsApp/Baileys/proveedores; backfill tampoco crea llamadas", async () => {
+    const dirCalls = path.join(__dirname, "..", "src", "lib", "calls");
+    for (const f of fs.readdirSync(dirCalls)) {
+      const src = fs.readFileSync(path.join(dirCalls, f), "utf8");
+      for (const pat of [/from\s+["'].*\/whatsapp["']/, /from\s+["'].*\/baileys/, /from\s+["'].*\/suppliers\//, /from\s+["'].*\/orders\/messages["']/]) {
+        assert.ok(!pat.test(src), `import prohibido en calls/${f}: ${pat}`);
+      }
+    }
+    // Backfill: cero llamadas además de cero WhatsApps (ya probado).
+    const attemptsAntes = (db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM call_attempts").get() as { n: number }).n;
+    await backfill.runShopifyBackfill({
+      dryRun: false,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      pageFetcher: async () => ({
+        orders: [backfillOrder({ id: 997500, order_number: 4500, cancelled_at: "2026-08-20T10:00:00Z" })],
+        nextCursor: null,
+      }),
+    });
+    const attemptsDespues = (db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM call_attempts").get() as { n: number }).n;
+    assert.equal(attemptsDespues, attemptsAntes, "el backfill no crea NINGUNA llamada");
+    assert.equal(db.getOrderByShopifyId("997500")!.status, "ignored_old");
+  });
+
+
+
+  // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
+  console.log("· Prueba de realidad — ciclo de vida completo");
+
+  await test("REALIDAD: pedido COD → WhatsApp → 15 min → llamada → no contesta → retry → confirma por WhatsApp → retry cancelado → fulfillment → cero contactos más", async () => {
+    const tel = "34600117900";
+    // 1. Pedido nuevo, WhatsApp de confirmación enviado hace 20 min sin respuesta.
+    const o = mkCallable("997900", "4900", tel, 20);
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_daily_cap", "500");
+
+    // 2. Tick dentro de franja: entra en cola y Retell (mock) marca.
+    const { provider, created } = mkProvider();
+    await calls.runCallOrchestratorTick({ now: enFranja, provider, isHoliday: noHoliday });
+    assert.equal(created.filter((c) => c.toNumber === "+" + tel).length, 1, "una llamada real");
+    const a1 = db.getActiveCallAttemptForOrder(o.id)!;
+    assert.equal(a1.state, "in_flight");
+
+    // 3. No contesta → retry planificado en franja legal, contacto 2.
+    calls.applyCallAnalysis(a1, analyzedEvent(a1.provider_call_id!, { resultado: "no_contesta" }), enFranja, noHoliday);
+    const a2 = db.getActiveCallAttemptForOrder(o.id)!;
+    assert.equal(a2.contact_number, 2);
+    assert.ok(sched.insideCallWindow(new Date(a2.scheduled_at * 1000), noHoliday));
+
+    // 4. ANTES del retry, el cliente confirma por WhatsApp (carrera §58).
+    db.markOrderConfirmed(o.id, true);
+    const cuandoToca = new Date(a2.scheduled_at * 1000);
+    const antes = created.length;
+    await calls.runCallOrchestratorTick({ now: cuandoToca, provider, isHoliday: noHoliday });
+    assert.equal(created.length, antes, "el retry NO llama: reevaluó elegibilidad justo antes");
+    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "retry cancelado");
+
+    // 5. El ciclo de proveedor sigue; Shopify marca fulfillment (E2):
+    //    closure in_progress — JAMÁS delivered — y cero contactos más.
+    assert.ok(db.setOrderClosure(o.id, "in_progress", "shopify", Math.floor(cuandoToca.getTime() / 1000) + 60));
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.closure_status, "in_progress");
+    assert.notEqual(fila.closure_status, "delivered", "fulfilled nunca es delivered");
+    await calls.runCallOrchestratorTick({ now: new Date(cuandoToca.getTime() + 3600_000), provider, isHoliday: noHoliday });
+    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "ningún contacto nuevo tras fulfillment");
+    assert.equal(created.length, antes);
+
+    // 6. La entrega real la dictará la fuente autoritativa (Dropea) y el
+    //    terminal no podrá ser pisado por nadie (ya probado en E1/E7).
+    assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", Math.floor(cuandoToca.getTime() / 1000) + 7200));
+    assert.equal(db.setOrderClosure(o.id, "cancelled", "llamada_ia", Math.floor(cuandoToca.getTime() / 1000) + 9000), false);
+    resetCallCfg();
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
