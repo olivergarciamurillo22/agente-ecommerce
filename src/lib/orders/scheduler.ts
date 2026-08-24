@@ -49,6 +49,7 @@ import {
 } from "../safety";
 import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvaluation } from "../db";
 import { evaluateOrderForSupplier } from "../suppliers/service";
+import { isConfirmationEligible } from "./eligibility";
 import { runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -91,6 +92,17 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
   //    Solo pedidos elegibles: fuera de allowlist = "no operativo" en TEST_MODE.
   const needsCallCutoff = now - Math.round(needsCallMin() * 60);
   for (const order of getOrdersDueNeedsCall(needsCallCutoff)) {
+    // Elegibilidad ANTES que nada: un pedido ya cancelado en Shopify o con
+    // fulfillment en marcha no debe escalar jamás a needs_call (el hallazgo
+    // 4/5/1 del 23-08 era exactamente esto).
+    const elig = isConfirmationEligible(order);
+    if (!elig.eligible) {
+      logOnce(
+        `inelig-nc-${order.id}-${elig.reason}`,
+        `[ELIGIBILITY] #${order.shopify_order_number} no escala a needs_call: ${elig.detail}`
+      );
+      continue;
+    }
     if (!orderActionAllowed(order)) {
       logOnce(
         `test-skip-${order.id}`,
@@ -109,6 +121,14 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
   if (whatsappReady()) {
     // 2) Confirmaciones iniciales en cola.
     for (const order of getOrdersDueInitialSend()) {
+      const elig = isConfirmationEligible(order);
+      if (!elig.eligible) {
+        logOnce(
+          `inelig-init-${order.id}-${elig.reason}`,
+          `[ELIGIBILITY] #${order.shopify_order_number} sin confirmación inicial: ${elig.detail}`
+        );
+        continue;
+      }
       if (!orderActionAllowed(order)) {
         logOnce(
           `test-skip-${order.id}`,
@@ -163,6 +183,14 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
     // También respetan la ventana horaria: nada de recordar a las 3 de la mañana.
     const reminderCutoff = now - Math.round(firstReminderMin() * 60);
     for (const order of ventanaAbierta ? getOrdersDueReminder(reminderCutoff) : []) {
+      const elig = isConfirmationEligible(order);
+      if (!elig.eligible) {
+        logOnce(
+          `inelig-rem-${order.id}-${elig.reason}`,
+          `[ELIGIBILITY] #${order.shopify_order_number} sin recordatorio: ${elig.detail}`
+        );
+        continue;
+      }
       if (!orderActionAllowed(order)) {
         logOnce(
           `test-skip-rem-${order.id}`,

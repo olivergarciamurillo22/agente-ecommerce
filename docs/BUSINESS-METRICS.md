@@ -94,12 +94,13 @@ Categoría **operativa**:
 | Incidencias abiertas | ≥ 1 envío en `incident` | warning | `OPEN_INCIDENTS_WARN` |
 | Fallos de proveedor | ≥ 3 eventos `order_create_failed`/`api_error` en 24 h | warning | `SUPPLIER_FAILURES_WARN` |
 | Envíos sin noticias | activos sin comprobación > `TRACKING_STALE_HOURS` | warning | — |
-| Avisos de envío fallidos | > 5 eventos `notification_blocked` en 24 h | warning | `TRACKING_NOTIFY_FAIL_WARN` |
+| Avisos de envío fallidos | > 5 eventos `notification_failed` en 24 h | warning | `TRACKING_NOTIFY_FAIL_WARN` |
 
 Nota: en el NAS con `TEST_MODE=1`, los avisos a teléfonos fuera de la
-allowlist se bloquean **por diseño** y cuentan como `notification_blocked`.
-Si la alerta salta en modo piloto, es la prueba de que el gate funciona, no
-un fallo.
+allowlist se bloquean **por diseño** y se registran como
+`notification_skipped_by_gate` — se guardan para trazabilidad pero NO
+cuentan para esta alerta. Solo un fallo real al encolar (excepción, error de
+envío) genera `notification_failed` y cuenta para el umbral.
 
 El peor nivel de estas alertas es la tarjeta **Negocio** del resumen y
 arrastra el `overall` como cualquier otra tarjeta.

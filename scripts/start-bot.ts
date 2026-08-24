@@ -9,6 +9,8 @@ import pino from "pino";
 import { start, watchRestartFlag } from "../src/lib/baileys/client";
 import { startOrderScheduler } from "../src/lib/orders/scheduler";
 import { startTrackingScheduler } from "../src/lib/tracking/scheduler";
+import { startReconcileScheduler } from "../src/lib/shopify/reconcile";
+import { startCallOrchestrator } from "../src/lib/calls/scheduler";
 import { printSafetyStatus } from "../src/lib/safety";
 import { getPendingOutbox } from "../src/lib/db";
 
@@ -81,6 +83,8 @@ async function main(): Promise<void> {
     // Polling de estado de envíos. Con SUPPLIER_SYNC_ENABLED=0 (por defecto)
     // no consulta nada: es la red de seguridad de los webhooks de proveedor.
     startTrackingScheduler();
+    startReconcileScheduler();
+  startCallOrchestrator();
     logger.info("[bot] esperando QR scan en el dashboard (localhost:3000)...");
   } catch (err) {
     logger.error({ err }, "[bot] error fatal al arrancar");

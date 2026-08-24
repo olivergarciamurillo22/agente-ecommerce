@@ -2,7 +2,7 @@
 
 Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo está configurado y qué se ha medido sobre datos reales. Se actualiza en cada sesión de operación.
 
-**Última actualización: 23-08-2026.**
+**Última actualización: 24-08-2026** (cierre de fase: ciclo de vida Shopify + orquestador de llamadas — pendiente de desplegar en el NAS, ver § 9).
 
 ---
 
@@ -125,6 +125,41 @@ Después de eso: agente de llamadas (cubre el ~46% que no responde al WhatsApp),
 Y la API key de Dropea **sin permisos de escritura**, que es la capa que protege aunque el software falle.
 
 ---
+
+## 9 · Preparado para desplegar (24-08-2026, aún NO en el NAS)
+
+En `main` tras el merge de la fase final (esquema **5**, 260 tests):
+
+- **E1** eje de cierre (`closure_status/source/at`; terminales imborrables).
+- **E2** webhooks `orders/cancelled` / `orders/fulfilled` / `orders/updated`
+  en `/api/webhooks/shopify/orders-events` (HMAC + dedupe por webhook-id +
+  protección fuera de orden). `fulfilled` → `in_progress`, jamás `delivered`.
+- **E3** backfill del histórico con verificación de scopes: sin
+  `read_all_orders` verificado, el informe dice `last_60_days_only` /
+  `unverified` y NUNCA afirma histórico completo.
+- **E5** reconciliación cada 6 h (repara webhooks perdidos; creates
+  perdidos → `ignored_old` + aviso; conflictos → evento, sin pisar).
+- **Elegibilidad central** (`isConfirmationEligible`): scheduler, panel,
+  alertas y llamadas comparten la misma verdad — el hallazgo 4/5/1 queda
+  estructuralmente impedido.
+- **E7** orquestador de llamadas Retell: kill switch OFF y shadow ON por
+  defecto → desplegar NO llama a nadie. Ver `docs/RUNBOOK-LLAMADAS.md`.
+- `npm run shopify:webhooks` para auditar/crear las 4 suscripciones.
+
+**Orden de despliegue seguro** (fuera de 10:00–21:00):
+1. `git pull --ff-only origin main && docker compose build && docker compose up -d`
+   (migración v5 aditiva; backup previo con el procedimiento habitual).
+2. Panel → Sistema: esquema 5, tarjetas sanas, WhatsApp reconecta sin QR.
+3. `npm run shopify:webhooks -- --ensure` (alta de los 3 topics nuevos).
+4. `npm run shopify:backfill` (dry-run) → revisar cobertura de scopes y el
+   desglose → `-- --apply`.
+5. Comparar panel: `needs_call` debe quedarse solo con candidatos reales
+   (hallazgo esperado: 4 cancelados y 5 en fulfillment fuera; ~1 real).
+6. E7 en shadow unos días → validar candidatos → allowlist → llamadas.
+
+**Verificación pendiente que SOLO puede hacerse con el token del NAS:**
+el scope `read_all_orders` (paso 4 lo enseña). Sin él, pedir el scope en la
+app de Shopify antes de dar el histórico por completo.
 
 ## 8 · Deuda técnica anotada
 

@@ -494,6 +494,172 @@ function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: A
   );
 }
 
+interface CallAttemptView {
+  id: number;
+  order: string;
+  phone?: string;
+  contact: number;
+  state: string;
+  scheduledAt?: number;
+  result: string | null;
+  reason: string | null;
+  shadowLogged?: boolean;
+}
+interface CallsData {
+  config: {
+    aiCallsEnabled: boolean;
+    shadowMode: boolean;
+    dailyCap: number;
+    allowlist: string[];
+    triggerMinutes: number;
+    maxContacts: number;
+    retryDelaysMinutes: number[];
+    retellApiKey: "configured" | "missing";
+    retellFromNumber: "configured" | "missing";
+    retellAgentId: "configured" | "missing";
+  };
+  summary: { planned: number; inFlight: number; completedToday: number; manualReview: number; shadowPending: number };
+  pending: CallAttemptView[];
+  inFlight: CallAttemptView[];
+  manualReview: CallAttemptView[];
+  recentCompleted: Array<{ id: number; order: string; contact: number; result: string | null; endedAt: number | null; retryConsumed: boolean }>;
+}
+
+function CallsPanel() {
+  const [data, setData] = useState<CallsData | null>(null);
+  const [allowlistDraft, setAllowlistDraft] = useState<string>("");
+  const [capDraft, setCapDraft] = useState<string>("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch("/api/calls", { cache: "no-store" });
+      if (res.ok) {
+        const d = (await res.json()) as CallsData;
+        setData(d);
+        setAllowlistDraft((prev) => (prev === "" ? d.config.allowlist.join(",") : prev));
+        setCapDraft((prev) => (prev === "" ? String(d.config.dailyCap) : prev));
+      }
+    } catch {
+      /* siguiente intento */
+    }
+  }, []);
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 15_000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  const setCfg = async (key: string, value: string) => {
+    setMsg(null);
+    const res = await fetch("/api/calls", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ key, value }),
+    });
+    if (res.ok) {
+      setMsg("Guardado.");
+      await load();
+    } else setMsg("No se pudo guardar.");
+  };
+
+  if (!data) return <div className="text-sm text-brand-muted">Cargando llamadas…</div>;
+  const c = data.config;
+  const btn = (active: boolean) =>
+    `px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${active ? "bg-brand-gold text-black border-brand-gold" : "border-brand-border text-brand-muted hover:text-brand-text"}`;
+  const input = "bg-brand-bg border border-brand-border rounded-lg px-2 py-1 text-xs w-full";
+
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+        <Section title="Interruptores">
+          <Row
+            k="Llamadas reales (kill switch)"
+            v={
+              <span>
+                <button className={btn(!c.aiCallsEnabled)} onClick={() => setCfg("ai_calls_enabled", "0")}>OFF</button>{" "}
+                <button className={btn(c.aiCallsEnabled)} onClick={() => setCfg("ai_calls_enabled", "1")}>ON</button>
+              </span>
+            }
+          />
+          <Row
+            k="Shadow mode (calcula sin llamar)"
+            v={
+              <span>
+                <button className={btn(!c.shadowMode)} onClick={() => setCfg("calls_shadow_mode", "0")}>off</button>{" "}
+                <button className={btn(c.shadowMode)} onClick={() => setCfg("calls_shadow_mode", "1")}>ON</button>
+              </span>
+            }
+          />
+          <div className="mt-2 grid grid-cols-3 gap-2 items-center">
+            <span className="text-xs text-brand-muted col-span-1">Tope diario</span>
+            <input className={input} value={capDraft} onChange={(e) => setCapDraft(e.target.value)} />
+            <button className={btn(true)} onClick={() => setCfg("calls_daily_cap", capDraft)}>Guardar</button>
+          </div>
+          <div className="mt-2">
+            <div className="text-xs text-brand-muted mb-1">Allowlist (teléfonos, coma; vacío = sin restricción)</div>
+            <div className="flex gap-2">
+              <input className={input} value={allowlistDraft} onChange={(e) => setAllowlistDraft(e.target.value)} />
+              <button className={btn(true)} onClick={() => setCfg("calls_allowlist", allowlistDraft)}>Guardar</button>
+            </div>
+          </div>
+          {msg && <div className="mt-2 text-[11px] text-brand-muted">{msg}</div>}
+        </Section>
+        <Section title="Credenciales (solo estado)">
+          <Row k="RETELL_API_KEY" v={c.retellApiKey === "configured" ? "configurada" : <span className="text-amber-300">falta</span>} />
+          <Row k="RETELL_FROM_NUMBER" v={c.retellFromNumber === "configured" ? "configurado" : <span className="text-amber-300">falta</span>} />
+          <Row k="RETELL_AGENT_ID" v={c.retellAgentId === "configured" ? "configurado" : <span className="text-brand-muted">opcional</span>} />
+          <Row k="Disparo tras WhatsApp sin respuesta" v={`${c.triggerMinutes} min`} />
+          <Row k="Contactos máximos" v={c.maxContacts} />
+          <Row k="Cadencia de reintentos (min)" v={c.retryDelaysMinutes.join(", ")} />
+        </Section>
+        <Section title="Cola">
+          <Row k="En cola" v={data.summary.planned} />
+          <Row k="En curso" v={data.summary.inFlight} />
+          <Row k="Completadas hoy" v={data.summary.completedToday} />
+          <Row k="Revisión manual" v={data.summary.manualReview > 0 ? <span className="text-amber-300">{data.summary.manualReview}</span> : 0} />
+          <Row k="Candidatas shadow registradas" v={data.summary.shadowPending} />
+        </Section>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+        <Section title="Próximas llamadas">
+          {data.pending.length === 0 ? (
+            <div className="text-sm text-brand-muted">Nada en cola.</div>
+          ) : (
+            data.pending.map((a) => (
+              <Row
+                key={a.id}
+                k={`#${a.order} · contacto ${a.contact} · ${a.phone ?? ""}${a.shadowLogged ? " · shadow" : ""}`}
+                v={a.scheduledAt ? fecha(a.scheduledAt) : "—"}
+              />
+            ))
+          )}
+        </Section>
+        <Section title="Revisión manual">
+          {data.manualReview.length === 0 ? (
+            <div className="text-sm text-brand-muted">Sin casos pendientes.</div>
+          ) : (
+            data.manualReview.map((a) => (
+              <Row key={a.id} k={`#${a.order} · contacto ${a.contact}`} v={<span className="text-amber-300 text-xs">{a.reason ?? "revisar"}</span>} />
+            ))
+          )}
+        </Section>
+      </div>
+
+      <Section title="Últimos resultados">
+        {data.recentCompleted.length === 0 ? (
+          <div className="text-sm text-brand-muted">Ninguna llamada completada todavía.</div>
+        ) : (
+          data.recentCompleted.map((a) => (
+            <Row key={a.id} k={`#${a.order} · contacto ${a.contact}`} v={`${a.result ?? "?"}${a.retryConsumed ? "" : " (no consume)"} · ${a.endedAt ? fecha(a.endedAt) : ""}`} />
+          ))
+        )}
+      </Section>
+    </div>
+  );
+}
+
 const TABS = [
   ["overview", "Resumen"],
   ["integrations", "Integraciones"],
@@ -503,6 +669,7 @@ const TABS = [
   ["outbox", "Cola de envíos"],
   ["tracking", "Envíos"],
   ["business", "Negocio"],
+  ["calls", "Llamadas"],
   ["events", "Eventos"],
 ] as const;
 type Tab = (typeof TABS)[number][0];
@@ -950,6 +1117,8 @@ export default function SystemPanel() {
           <CostsEditor onSaved={refresh} suggested={data.business.economics.skusWithoutCost} />
         </div>
       )}
+
+      {tab === "calls" && <CallsPanel />}
 
       {tab === "events" && (
         <Section title="Eventos técnicos (sanitizados)">

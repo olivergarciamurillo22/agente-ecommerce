@@ -116,6 +116,186 @@ export const ORDER_ACTIVE_STATUSES: OrderStatus[] = [
   "needs_correction",
 ];
 
+// --- Eje de CIERRE (E1: espejo de Shopify) ---
+//
+// Independiente de `status` (la máquina de confirmación por WhatsApp: pending
+// → sent → confirmed → needs_call → ...). `status` no se toca aquí: mezclar
+// los dos ejes en una sola columna rompería el scheduler, que ya razona sobre
+// `status` en todas partes.
+//
+// Este eje refleja qué ha pasado con el pedido en el mundo real (Shopify o el
+// proveedor de fulfillment), para poder sacarlo de las colas operativas y de
+// las métricas (E1 solo define el modelo; quién lo lee y actúa es E2+).
+//
+//   unknown     → no se sabe todavía. Valor de arranque: todo pedido nuevo, y
+//                 todo pedido existente al migrar, empieza aquí. NUNCA se
+//                 infiere desde datos locales — eso lo hará E3 leyendo Shopify.
+//   in_progress → sigue vivo: ni entregado, ni rechazado, ni cancelado.
+//   delivered   → entregado. TERMINAL.
+//   refused     → rechazado por el cliente o devuelto. TERMINAL.
+//   cancelled   → cancelado (en Shopify o a mano). TERMINAL.
+export type ClosureStatus = "unknown" | "in_progress" | "delivered" | "refused" | "cancelled";
+
+export const CLOSURE_STATUSES: ClosureStatus[] = [
+  "unknown",
+  "in_progress",
+  "delivered",
+  "refused",
+  "cancelled",
+];
+
+/** Una vez aquí, un pedido no se mueve a un cierre distinto (ver canTransitionClosure). */
+export const CLOSURE_TERMINAL_STATUSES: ClosureStatus[] = ["delivered", "refused", "cancelled"];
+
+/** Quién dijo la última palabra sobre el cierre de este pedido.
+ *  Precedencia: canTransitionClosure impide que CUALQUIER fuente (incluida
+ *  llamada_ia) abandone un terminal ya fijado — Shopify/Dropea escriben
+ *  primero y la llamada nunca los pisa. */
+export type ClosureSource = "shopify" | "dropea" | "manual" | "llamada_ia";
+
+export const CLOSURE_SOURCES: ClosureSource[] = ["shopify", "dropea", "manual", "llamada_ia"];
+
+/**
+ * ¿Se puede pasar de `from` a `to` en el eje de cierre?
+ *
+ * Repetir el mismo valor siempre está permitido (un reintento o un webhook
+ * duplicado no debe fallar). Fuera de eso, un estado TERMINAL no se abandona:
+ * ningún evento tardío o duplicado puede "reabrir" un pedido ya entregado,
+ * rechazado o cancelado. Desde `unknown` o `in_progress` se puede ir a
+ * cualquier sitio.
+ */
+export function canTransitionClosure(from: ClosureStatus, to: ClosureStatus): boolean {
+  if (from === to) return true;
+  return !CLOSURE_TERMINAL_STATUSES.includes(from);
+}
+
+/**
+ * Migración E1 (SCHEMA_VERSION 4): añade el eje de cierre a `orders` si no
+ * existe todavía. Mismo patrón que las columnas de proveedor: comprobar si
+ * la columna existe antes de añadirla (para que correr esto dos veces sea un
+ * no-op), envuelto además en try/catch como red de seguridad extra — la DB
+ * de producción tiene datos reales y esto tiene que poder ejecutarse
+ * repetidas veces sin romper nada, la haya aplicado ya o no.
+ *
+ * Exportada y parametrizada por la conexión (en vez de vivir inline dentro
+ * de `build()`) para poder probarla directamente contra cualquier DB —vacía
+ * o con filas de un esquema anterior a E1— sin pasar por el singleton
+ * perezoso del módulo.
+ */
+export function migrateClosureAxis(db: Database.Database): void {
+  const closureCols: Array<[string, string]> = [
+    ["closure_status", "TEXT NOT NULL DEFAULT 'unknown'"],
+    ["closure_source", "TEXT"],
+    ["closure_at", "INTEGER"],
+  ];
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of closureCols) {
+    if (!currentCols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        // No debe pasar (ya comprobamos que no existía), pero si otro proceso
+        // la añadió justo entre medias, no es un fallo real: seguimos.
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure ON orders(closure_status)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
+ * Migración E7 (SCHEMA_VERSION 5): orquestador de llamadas de confirmación.
+ * Aditiva e idempotente (CREATE TABLE IF NOT EXISTS + ADD COLUMN comprobado).
+ * Parametrizada por conexión, igual que migrateClosureAxis.
+ */
+export function migrateCallOrchestrator(db: Database.Database): void {
+  db.exec(`
+    -- Un intento de llamada = una fila. NUNCA en JSON dentro de orders.
+    -- state:
+    --   planned   → en cola, con su scheduled_at
+    --   reserved  → un worker lo reclamó (transitorio, dentro de un tick)
+    --   dialing   → vamos a llamar YA: se persiste ANTES de tocar al
+    --               proveedor. Si el proceso muere aquí, la fila queda en
+    --               dialing y JAMÁS se re-marca sola (→ manual_review).
+    --   in_flight → el proveedor aceptó (tenemos provider_call_id)
+    --   completed → terminó, con result
+    --   cancelled → descartado antes de marcar (inelegible, DNC, etc.)
+    --   manual_review → necesita un humano (reason dice por qué)
+    CREATE TABLE IF NOT EXISTS call_attempts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      contact_number INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'planned'
+        CHECK(state IN ('planned','reserved','dialing','in_flight','completed','cancelled','manual_review')),
+      scheduled_at INTEGER NOT NULL,
+      shadow_logged_at INTEGER,
+      started_at INTEGER,
+      ended_at INTEGER,
+      provider_call_id TEXT,
+      provider_status TEXT,
+      result TEXT,
+      retry_consumed INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    -- Idempotencia dura: (a) un provider_call_id solo puede existir una vez;
+    -- (b) un pedido solo puede tener UN intento vivo a la vez.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_provider_id
+      ON call_attempts(provider_call_id) WHERE provider_call_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_call_one_active
+      ON call_attempts(order_id) WHERE state IN ('planned','reserved','dialing','in_flight');
+    CREATE INDEX IF NOT EXISTS idx_call_due ON call_attempts(state, scheduled_at);
+
+    -- "No volver a llamar": por TELÉFONO normalizado, global, no por pedido.
+    CREATE TABLE IF NOT EXISTS call_dnc (
+      phone TEXT PRIMARY KEY,
+      source TEXT NOT NULL,
+      reason TEXT,
+      order_id INTEGER,
+      provider_call_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    -- INBOX de eventos del proveedor de voz: el webhook solo guarda y
+    -- responde 200; el worker procesa después. Dedupe por dedupe_key.
+    CREATE TABLE IF NOT EXISTS call_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      provider_call_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      event_at INTEGER,
+      received_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      payload_json TEXT,
+      processed_at INTEGER,
+      processing_error TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_events_pending
+      ON call_events(processed_at, received_at);
+
+    -- Auditoría de correcciones de datos dictadas por una llamada.
+    CREATE TABLE IF NOT EXISTS order_data_audit (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      field TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      source TEXT NOT NULL,
+      provider_call_id TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_order ON order_data_audit(order_id);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -205,6 +385,11 @@ export interface OrderRow {
   raw_payload: string | null;
   created_at: number;
   updated_at: number;
+
+  // --- Eje de cierre (E1) — ver ClosureStatus más arriba ---
+  closure_status: ClosureStatus;
+  closure_source: ClosureSource | null;
+  closure_at: number | null;
 }
 
 export interface NewOrderInput {
@@ -297,7 +482,12 @@ const ORDERS_TABLE_BODY = `
       needs_call_at INTEGER,
       raw_payload TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      -- Eje de cierre (E1): independiente de status. Ver ClosureStatus.
+      -- Arranca en 'unknown' siempre -- nunca se infiere, ni al crear ni al migrar.
+      closure_status TEXT NOT NULL DEFAULT 'unknown',
+      closure_source TEXT,
+      closure_at INTEGER
 `;
 
 // ============================================================
@@ -672,6 +862,9 @@ function build() {
     "CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders(supplier_sync_status, status)"
   );
 
+  migrateClosureAxis(db);
+  migrateCallOrchestrator(db);
+
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
     "SELECT * FROM conversations WHERE phone = ?"
@@ -835,7 +1028,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -2177,6 +2370,31 @@ export function setOrderFinalAddressSource(id: number, source: "original" | "pro
   return info.changes > 0;
 }
 
+/**
+ * Registra el cierre de un pedido (eje independiente de `status`, ver
+ * ClosureStatus). Devuelve false SIN TOCAR NADA si la transición no está
+ * permitida (el pedido ya está en un cierre terminal distinto) o si el
+ * pedido no existe — así un evento tardío o duplicado nunca "reabre" un
+ * pedido ya entregado, rechazado o cancelado.
+ */
+export function setOrderClosure(
+  id: number,
+  status: ClosureStatus,
+  source: ClosureSource,
+  at: number = Math.floor(Date.now() / 1000)
+): boolean {
+  const row = ctx().db.prepare("SELECT closure_status FROM orders WHERE id = ?").get(id) as
+    | { closure_status: ClosureStatus }
+    | undefined;
+  if (!row) return false;
+  if (!canTransitionClosure(row.closure_status, status)) return false;
+
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET closure_status = ?, closure_source = ?, closure_at = ?, ${TOUCH} WHERE id = ?`)
+    .run(status, source, at, id);
+  return info.changes > 0;
+}
+
 /** Marca updated_at sin cambiar nada más (backoff natural de reintentos). */
 export function touchOrder(id: number): void {
   ctx().db.prepare(`UPDATE orders SET ${TOUCH} WHERE id = ?`).run(id);
@@ -2224,4 +2442,332 @@ export function getUserMessagesSince(sinceTs: number, limit = 300): string[] {
       )
       .all(sinceTs, limit) as Array<{ content: string }>
   ).map((r) => r.content);
+}
+
+// ============================================================
+// E7 · Orquestador de llamadas — helpers de persistencia
+// ============================================================
+
+export type CallAttemptState =
+  | "planned"
+  | "reserved"
+  | "dialing"
+  | "in_flight"
+  | "completed"
+  | "cancelled"
+  | "manual_review";
+
+export interface CallAttemptRow {
+  id: number;
+  order_id: number;
+  contact_number: number;
+  state: CallAttemptState;
+  scheduled_at: number;
+  shadow_logged_at: number | null;
+  started_at: number | null;
+  ended_at: number | null;
+  provider_call_id: string | null;
+  provider_status: string | null;
+  result: string | null;
+  retry_consumed: number;
+  reason: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+/** Crea un intento en cola. Devuelve null si el pedido YA tiene un intento
+ *  vivo (el índice único parcial lo impide — jamás dos llamadas en vuelo). */
+export function insertCallAttempt(orderId: number, contactNumber: number, scheduledAt: number): number | null {
+  try {
+    const info = ctx()
+      .db.prepare(
+        "INSERT INTO call_attempts (order_id, contact_number, scheduled_at) VALUES (?, ?, ?)"
+      )
+      .run(orderId, contactNumber, scheduledAt);
+    return Number(info.lastInsertRowid);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE constraint failed/i.test(msg)) return null;
+    throw err;
+  }
+}
+
+export function getCallAttempt(id: number): CallAttemptRow | null {
+  return (ctx().db.prepare("SELECT * FROM call_attempts WHERE id = ?").get(id) as CallAttemptRow) ?? null;
+}
+
+export function getCallAttemptByProviderId(providerCallId: string): CallAttemptRow | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM call_attempts WHERE provider_call_id = ?").get(providerCallId) as CallAttemptRow) ??
+    null
+  );
+}
+
+export function getActiveCallAttemptForOrder(orderId: number): CallAttemptRow | null {
+  return (
+    (ctx()
+      .db.prepare(
+        "SELECT * FROM call_attempts WHERE order_id = ? AND state IN ('planned','reserved','dialing','in_flight')"
+      )
+      .get(orderId) as CallAttemptRow) ?? null
+  );
+}
+
+export function listCallAttemptsForOrder(orderId: number): CallAttemptRow[] {
+  return ctx()
+    .db.prepare("SELECT * FROM call_attempts WHERE order_id = ? ORDER BY id")
+    .all(orderId) as CallAttemptRow[];
+}
+
+export function listCallAttemptsByState(state: CallAttemptState, limit = 100): CallAttemptRow[] {
+  return ctx()
+    .db.prepare("SELECT * FROM call_attempts WHERE state = ? ORDER BY scheduled_at LIMIT ?")
+    .all(state, limit) as CallAttemptRow[];
+}
+
+/** Intentos en cola cuyo momento ya llegó. */
+export function listDueCallAttempts(nowS: number, limit = 20): CallAttemptRow[] {
+  return ctx()
+    .db.prepare(
+      "SELECT * FROM call_attempts WHERE state = 'planned' AND scheduled_at <= ? ORDER BY scheduled_at LIMIT ?"
+    )
+    .all(nowS, limit) as CallAttemptRow[];
+}
+
+/** Reclamo atómico planned → reserved. true solo para UN worker. */
+export function claimCallAttempt(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE call_attempts SET state = 'reserved', updated_at = unixepoch() WHERE id = ? AND state = 'planned'`
+    )
+    .run(id);
+  return info.changes > 0;
+}
+
+/** Transición de estado con guardia sobre el estado actual (compare-and-set). */
+export function transitionCallAttempt(
+  id: number,
+  fromStates: CallAttemptState[],
+  to: CallAttemptState,
+  patch: Partial<{
+    scheduled_at: number;
+    shadow_logged_at: number | null;
+    started_at: number;
+    ended_at: number;
+    provider_call_id: string;
+    provider_status: string;
+    result: string;
+    retry_consumed: number;
+    reason: string;
+  }> = {}
+): boolean {
+  const sets: string[] = ["state = ?", "updated_at = unixepoch()"];
+  const vals: unknown[] = [to];
+  for (const [k, v] of Object.entries(patch)) {
+    sets.push(`${k} = ?`);
+    vals.push(v);
+  }
+  const ph = fromStates.map(() => "?").join(",");
+  const info = ctx()
+    .db.prepare(`UPDATE call_attempts SET ${sets.join(", ")} WHERE id = ? AND state IN (${ph})`)
+    .run(...vals, id, ...fromStates);
+  return info.changes > 0;
+}
+
+/** Contactos ya CONSUMIDOS de un pedido (intentos completados que gastaron cupo). */
+export function countConsumedContacts(orderId: number): number {
+  const r = ctx()
+    .db.prepare(
+      "SELECT COUNT(*) AS n FROM call_attempts WHERE order_id = ? AND retry_consumed = 1"
+    )
+    .get(orderId) as { n: number };
+  return r.n;
+}
+
+/** Fallos técnicos seguidos (para el tope de provider_error_exhausted). */
+export function countRecentTechFailures(orderId: number): number {
+  const rows = ctx()
+    .db.prepare(
+      "SELECT result FROM call_attempts WHERE order_id = ? AND state = 'completed' ORDER BY id DESC LIMIT 5"
+    )
+    .all(orderId) as Array<{ result: string | null }>;
+  let n = 0;
+  for (const r of rows) {
+    if (r.result === "fallo_tecnico") n++;
+    else break;
+  }
+  return n;
+}
+
+/** Llamadas REALES arrancadas desde un timestamp (para el tope diario). */
+export function countCallsStartedSince(sinceS: number): number {
+  const r = ctx()
+    .db.prepare(
+      "SELECT COUNT(*) AS n FROM call_attempts WHERE started_at IS NOT NULL AND started_at >= ?"
+    )
+    .get(sinceS) as { n: number };
+  return r.n;
+}
+
+/** ¿Tiene el pedido algún intento pendiente de revisión humana? */
+export function hasManualReviewCallAttempt(orderId: number): boolean {
+  return Boolean(
+    ctx().db.prepare("SELECT 1 FROM call_attempts WHERE order_id = ? AND state = 'manual_review'").get(orderId)
+  );
+}
+
+export interface CallQueueSummary {
+  planned: number;
+  inFlight: number;
+  completedToday: number;
+  manualReview: number;
+  shadowPending: number;
+}
+
+export function getCallQueueSummary(startOfDayS: number): CallQueueSummary {
+  const db = ctx().db;
+  const c = (sql: string, ...args: unknown[]) => (db.prepare(sql).get(...args) as { n: number }).n;
+  return {
+    planned: c("SELECT COUNT(*) AS n FROM call_attempts WHERE state IN ('planned','reserved','dialing')"),
+    inFlight: c("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'in_flight'"),
+    completedToday: c("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'completed' AND ended_at >= ?", startOfDayS),
+    manualReview: c("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'manual_review'"),
+    shadowPending: c("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'planned' AND shadow_logged_at IS NOT NULL"),
+  };
+}
+
+// --- DNC (no volver a llamar) ---
+
+export function addDncPhone(phone: string, source: string, opts: { reason?: string; orderId?: number; providerCallId?: string } = {}): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO call_dnc (phone, source, reason, order_id, provider_call_id) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(phone) DO NOTHING`
+    )
+    .run(phone, source, opts.reason ?? null, opts.orderId ?? null, opts.providerCallId ?? null);
+}
+
+export function isDncPhone(phone: string): boolean {
+  return Boolean(ctx().db.prepare("SELECT 1 FROM call_dnc WHERE phone = ?").get(phone));
+}
+
+// --- Inbox de eventos del proveedor de voz ---
+
+export interface CallEventRow {
+  id: number;
+  dedupe_key: string;
+  provider_call_id: string;
+  event_type: string;
+  event_at: number | null;
+  received_at: number;
+  payload_json: string | null;
+  processed_at: number | null;
+  processing_error: string | null;
+}
+
+/** Guarda un evento entrante. false = duplicado (dedupe_key ya visto). */
+export function insertCallEvent(e: {
+  dedupeKey: string;
+  providerCallId: string;
+  eventType: string;
+  eventAt: number | null;
+  payloadJson: string | null;
+}): boolean {
+  try {
+    ctx()
+      .db.prepare(
+        `INSERT INTO call_events (dedupe_key, provider_call_id, event_type, event_at, payload_json)
+         VALUES (?, ?, ?, ?, ?)`
+      )
+      .run(e.dedupeKey, e.providerCallId, e.eventType, e.eventAt, e.payloadJson);
+    return true;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/UNIQUE constraint failed/i.test(msg)) return false;
+    throw err;
+  }
+}
+
+export function listUnprocessedCallEvents(limit = 50): CallEventRow[] {
+  return ctx()
+    .db.prepare(
+      "SELECT * FROM call_events WHERE processed_at IS NULL ORDER BY received_at, id LIMIT ?"
+    )
+    .all(limit) as CallEventRow[];
+}
+
+export function markCallEventProcessed(id: number, error: string | null = null): void {
+  ctx()
+    .db.prepare("UPDATE call_events SET processed_at = unixepoch(), processing_error = ? WHERE id = ?")
+    .run(error, id);
+}
+
+// --- Auditoría de correcciones dictadas por llamada ---
+
+export function insertOrderDataAudit(a: {
+  orderId: number;
+  field: string;
+  oldValue: string | null;
+  newValue: string | null;
+  source: string;
+  providerCallId?: string | null;
+}): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO order_data_audit (order_id, field, old_value, new_value, source, provider_call_id)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(a.orderId, a.field, a.oldValue, a.newValue, a.source, a.providerCallId ?? null);
+}
+
+export function listOrderDataAudit(orderId: number): Array<{
+  id: number;
+  order_id: number;
+  field: string;
+  old_value: string | null;
+  new_value: string | null;
+  source: string;
+  provider_call_id: string | null;
+  created_at: number;
+}> {
+  return ctx().db.prepare("SELECT * FROM order_data_audit WHERE order_id = ? ORDER BY id").all(orderId) as never;
+}
+
+/** Aplica una corrección de dirección/teléfono dictada por una llamada,
+ *  con auditoría. Solo escribe si el valor nuevo es no-vacío y distinto. */
+export function applyOrderCorrection(
+  orderId: number,
+  field: "address_line1" | "city" | "postal_code" | "phone",
+  newValue: string,
+  providerCallId: string | null
+): boolean {
+  const valor = newValue.trim();
+  if (!valor) return false;
+  const row = ctx().db.prepare(`SELECT ${field} AS v FROM orders WHERE id = ?`).get(orderId) as
+    | { v: string | null }
+    | undefined;
+  if (!row) return false;
+  if ((row.v ?? "").trim() === valor) return false;
+  ctx().db.prepare(`UPDATE orders SET ${field} = ?, ${TOUCH} WHERE id = ?`).run(valor, orderId);
+  insertOrderDataAudit({
+    orderId,
+    field,
+    oldValue: row.v,
+    newValue: valor,
+    source: "llamada_ia",
+    providerCallId,
+  });
+  return true;
+}
+
+/** Cancela el pedido en el eje OPERATIVO por resultado de llamada, solo
+ *  desde estados vivos (nunca pisa confirmed/cancelled previos). */
+export function markOrderCancelledByCall(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET status = 'cancelled', ${TOUCH}
+       WHERE id = ? AND status IN ('pending_send','awaiting_reply','reminder_sent','awaiting_delivery_note','needs_correction','needs_call')`
+    )
+    .run(id);
+  return info.changes > 0;
 }

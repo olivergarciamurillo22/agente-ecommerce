@@ -151,17 +151,20 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 **En producción:** Fase A desplegada (commit `a2e4e83`, esquema **3**). Dropea conectada de punta a punta con 6 webhooks activos. Bug de la ciudad del formulario Releasit resuelto.
 
-**Abierto, sin mergear:**
-- **PR #2 — E1** eje de cierre (`feat/e1-estados-cierre` → `main`) · esquema 3→4 · 211 tests
-- **PR #3 — E2** webhooks de Shopify (→ `feat/e1-estados-cierre`, retargetear a `main` tras mergear E1) · 219 tests
-- **PR #4 — E3** backfill del histórico (rama hermana de E2) · 218 tests
+**Integrado en `main` (24-08-2026, esquema 5, 260 tests):** E1 + E2 + E3 +
+fix de alertas + E5 (reconciliación cada 6 h) + elegibilidad central
+(`src/lib/orders/eligibility.ts` — TODO consumidor pregunta ahí) + **E7**
+(orquestador de llamadas Retell: `src/lib/calls/`, kill switch OFF y shadow
+ON por defecto; ver `docs/RUNBOOK-LLAMADAS.md`). El backfill verifica el
+scope `read_all_orders` y reporta `coverage`; `npm run shopify:webhooks`
+audita/crea las suscripciones. `closure_source` admite `llamada_ia` (nunca
+pisa terminales de Shopify/Dropea).
 
-**Pendientes que bloquean:**
-1. Verificar el scope **`read_all_orders`** antes de fiarse del dry-run del backfill.
-2. ~~Confirmar que `status='ignored_old'` está permitido por el CHECK de `status`~~ — **verificado**: el test de E3 que aplica el backfill (`--apply`) inserta de verdad una fila con `status='ignored_old'` contra la tabla real, con su CHECK activo; si ese valor no estuviera permitido el INSERT habría fallado con `SQLITE_CONSTRAINT` y el test (parte de los 218 en verde) habría reventado. No bloquea.
-3. Suscribir los tres topics de Shopify al endpoint (paso de despliegue, no de código).
+**Pendiente (solo despliegue, no código):** pasos de rollout en
+`docs/ESTADO-PRODUCCION.md` § 9 — pull en el NAS, `--ensure` de webhooks,
+backfill con verificación real de scopes, shadow de llamadas.
 
-**Siguiente:** E4 (enlace con Dropea vía el tag `dropea_id:NNNNNNN`) y E5 — desde `main` limpio, después de mergear E1.
+**Siguiente:** E4 (enlace Dropea vía tag `dropea_id:NNNNNNN`).
 
 ---
 

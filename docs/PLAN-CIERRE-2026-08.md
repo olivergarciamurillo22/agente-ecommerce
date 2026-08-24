@@ -225,6 +225,6 @@ Cada bloque termina con `npm test`, `npm run typecheck`, `npm run build` en verd
 ### Riesgos residuales
 - **Mapping vacío en producción** = 100 % de pedidos a revisión manual (comportamiento seguro, pero ruidoso) hasta que Pedro lo rellene.
 - La tasa de entrega solo es fiable con webhooks de Dropea activos y muestra ≥ 10 resueltos; Dropi no aporta datos hasta tener su mapa de estados.
-- `notification_blocked` cuenta como "aviso fallido" también cuando lo bloquea `TEST_MODE` a propósito: en piloto la alerta puede saltar sin que haya fallo.
+- ~~`notification_blocked` cuenta como "aviso fallido" también cuando lo bloquea `TEST_MODE` a propósito~~ — corregido: el evento se separó en `notification_skipped_by_gate` (bloqueo deliberado, no cuenta) y `notification_failed` (fallo real, sí cuenta). Ver `fix/alertas-notificacion`.
 - `at_pickup_point` no lo reporta ningún proveedor: el aviso existe pero no se disparará hasta que un mapa de estados lo produzca.
 - El desfase horario del panel (pendiente del smoke test) afecta a la ventana "hoy" de las métricas si el NAS no está en Europe/Madrid.
