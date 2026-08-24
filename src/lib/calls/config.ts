@@ -64,15 +64,19 @@ export function callMaxContacts(): number {
   return Number.isFinite(v) && v > 0 ? v : 5;
 }
 
-/** Cadencia de reintentos en minutos, tras cada contacto consumido sin
- *  resolución (después se encaja en la siguiente franja legal). */
-export function callRetryDelaysMinutes(): number[] {
-  const raw = cfg("call_retry_delays_minutes", "CALL_RETRY_DELAYS_MINUTES", "120,240,480,1440");
-  const out = raw
-    .split(",")
-    .map((x) => parseInt(x.trim(), 10))
-    .filter((n) => Number.isFinite(n) && n > 0);
-  return out.length ? out : [120, 240, 480, 1440];
+/**
+ * Cadencia de reintentos (decisión de negocio, 24-08-2026): el primer
+ * reintento es "pronto" (mínimo estos minutos después, encajado en la
+ * franja legal — normalmente el mismo día). Del segundo al cuarto
+ * reintento la cadencia es por DÍA DE CALENDARIO, no por delta de minutos
+ * — mañana y tarde del día siguiente al primer reintento, y mañana del día
+ * después de ese — y vive fija en `planNextAfterResult` (scheduler.ts): no
+ * es un ajuste de panel, es la secuencia legal acordada, igual que las
+ * franjas horarias.
+ */
+export function callFirstRetryMinutes(): number {
+  const v = parseInt(cfg("call_first_retry_minutes", "CALL_FIRST_RETRY_MINUTES", "120"), 10);
+  return Number.isFinite(v) && v > 0 ? v : 120;
 }
 
 /** Los ajustes que el panel puede leer y escribir (nunca secretos). */
@@ -83,7 +87,7 @@ export const PANEL_EDITABLE_KEYS = [
   "calls_allowlist",
   "call_trigger_minutes",
   "call_max_contacts",
-  "call_retry_delays_minutes",
+  "call_first_retry_minutes",
 ] as const;
 
 export type PanelCallKey = (typeof PANEL_EDITABLE_KEYS)[number];
@@ -100,7 +104,7 @@ export interface CallConfigView {
   allowlist: string[];
   triggerMinutes: number;
   maxContacts: number;
-  retryDelaysMinutes: number[];
+  firstRetryMinutes: number;
   /** Solo configured/missing — jamás el valor. */
   retellApiKey: "configured" | "missing";
   retellFromNumber: "configured" | "missing";
@@ -115,7 +119,7 @@ export function getCallConfigView(): CallConfigView {
     allowlist: callsAllowlist(),
     triggerMinutes: callTriggerMinutes(),
     maxContacts: callMaxContacts(),
-    retryDelaysMinutes: callRetryDelaysMinutes(),
+    firstRetryMinutes: callFirstRetryMinutes(),
     retellApiKey: (process.env.RETELL_API_KEY ?? "").trim() ? "configured" : "missing",
     retellFromNumber: (process.env.RETELL_FROM_NUMBER ?? "").trim() ? "configured" : "missing",
     retellAgentId: (process.env.RETELL_AGENT_ID ?? "").trim() ? "configured" : "missing",

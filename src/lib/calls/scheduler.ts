@@ -50,8 +50,8 @@ import { defaultHolidayCalendar, type HolidayCalendar } from "./calendar";
 import {
   aiCallsEnabled,
   callAllowedByAllowlist,
+  callFirstRetryMinutes,
   callMaxContacts,
-  callRetryDelaysMinutes,
   callTriggerMinutes,
   callsDailyCap,
   callsShadowMode,
@@ -59,7 +59,7 @@ import {
 import { buildCallPayload } from "./payload";
 import { ProviderRequestError, type CallProvider, type ParsedCallEvent } from "./provider";
 import { retellProvider } from "./retell";
-import { insideCallWindow, madridDate, madridParts, nextCallSlot } from "./schedule";
+import { insideCallWindow, madridDate, madridParts, nextCallableDayAfter, nextCallSlot, windowStart } from "./schedule";
 import { parseCallResult, RESULT_OUTCOMES, type CallResult } from "./results";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -387,18 +387,37 @@ export function planNextAfterResult(
     return;
   }
 
-  let baseline: Date;
+  let slot: Date;
   if (outcome.reschedule && momentoRellamada !== null) {
     // rellamar: valida el timestamp (futuro razonable, < 30 días).
     const nowS = toS(now);
     const valido = momentoRellamada > nowS - 300 && momentoRellamada < nowS + 30 * 86400;
-    baseline = valido ? new Date(momentoRellamada * 1000) : now;
+    const baseline = valido ? new Date(momentoRellamada * 1000) : now;
+    slot = nextCallSlot(baseline, isHoliday);
   } else {
-    const delays = callRetryDelaysMinutes();
-    const idx = Math.min(Math.max(consumidos - 1, 0), delays.length - 1);
-    baseline = new Date(now.getTime() + delays[idx] * 60_000);
+    // Cadencia legal acordada (24-08-2026), anclada a DÍAS DE CALENDARIO, no
+    // a un delta fijo de minutos — así el 3º/4º contacto caen siempre en el
+    // día siguiente (mañana y tarde) y el 5º en la mañana del día después,
+    // sea cual sea la hora exacta a la que terminó el contacto anterior.
+    //   consumidos=1 → 2º contacto: pronto, normalmente el mismo día.
+    //   consumidos=2 → 3º contacto: mañana del día siguiente.
+    //   consumidos=3 → 4º contacto: tarde de ESE MISMO día (el siguiente).
+    //   consumidos=4 → 5º contacto (último): mañana del día después de ese.
+    if (consumidos === 1) {
+      slot = nextCallSlot(new Date(now.getTime() + callFirstRetryMinutes() * 60_000), isHoliday);
+    } else if (consumidos === 3) {
+      const hoy = madridParts(now);
+      const tarde = windowStart({ year: hoy.year, month: hoy.month, day: hoy.day }, "afternoon");
+      // Red de seguridad: en operación normal `now` cae en la mañana de ese
+      // mismo día (lo programó el paso anterior). Si por lo que sea no es
+      // así, no se inventa una tarde ya pasada: se busca la franja legal real.
+      slot = tarde.getTime() > now.getTime() ? tarde : nextCallSlot(now, isHoliday);
+    } else {
+      // consumidos === 2 (mañana del día siguiente) o 4 (mañana del día
+      // después de la tarde anterior): mismo cálculo en ambos casos.
+      slot = windowStart(nextCallableDayAfter(now, isHoliday), "morning");
+    }
   }
-  const slot = nextCallSlot(baseline, isHoliday);
   const nextContact = outcome.consume ? consumidos + 1 : attempt.contact_number;
   insertCallAttempt(order.id, nextContact, toS(slot));
 }
