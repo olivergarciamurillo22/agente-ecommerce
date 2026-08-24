@@ -116,6 +116,98 @@ export const ORDER_ACTIVE_STATUSES: OrderStatus[] = [
   "needs_correction",
 ];
 
+// --- Eje de CIERRE (E1: espejo de Shopify) ---
+//
+// Independiente de `status` (la máquina de confirmación por WhatsApp: pending
+// → sent → confirmed → needs_call → ...). `status` no se toca aquí: mezclar
+// los dos ejes en una sola columna rompería el scheduler, que ya razona sobre
+// `status` en todas partes.
+//
+// Este eje refleja qué ha pasado con el pedido en el mundo real (Shopify o el
+// proveedor de fulfillment), para poder sacarlo de las colas operativas y de
+// las métricas (E1 solo define el modelo; quién lo lee y actúa es E2+).
+//
+//   unknown     → no se sabe todavía. Valor de arranque: todo pedido nuevo, y
+//                 todo pedido existente al migrar, empieza aquí. NUNCA se
+//                 infiere desde datos locales — eso lo hará E3 leyendo Shopify.
+//   in_progress → sigue vivo: ni entregado, ni rechazado, ni cancelado.
+//   delivered   → entregado. TERMINAL.
+//   refused     → rechazado por el cliente o devuelto. TERMINAL.
+//   cancelled   → cancelado (en Shopify o a mano). TERMINAL.
+export type ClosureStatus = "unknown" | "in_progress" | "delivered" | "refused" | "cancelled";
+
+export const CLOSURE_STATUSES: ClosureStatus[] = [
+  "unknown",
+  "in_progress",
+  "delivered",
+  "refused",
+  "cancelled",
+];
+
+/** Una vez aquí, un pedido no se mueve a un cierre distinto (ver canTransitionClosure). */
+export const CLOSURE_TERMINAL_STATUSES: ClosureStatus[] = ["delivered", "refused", "cancelled"];
+
+/** Quién dijo la última palabra sobre el cierre de este pedido. */
+export type ClosureSource = "shopify" | "dropea" | "manual";
+
+export const CLOSURE_SOURCES: ClosureSource[] = ["shopify", "dropea", "manual"];
+
+/**
+ * ¿Se puede pasar de `from` a `to` en el eje de cierre?
+ *
+ * Repetir el mismo valor siempre está permitido (un reintento o un webhook
+ * duplicado no debe fallar). Fuera de eso, un estado TERMINAL no se abandona:
+ * ningún evento tardío o duplicado puede "reabrir" un pedido ya entregado,
+ * rechazado o cancelado. Desde `unknown` o `in_progress` se puede ir a
+ * cualquier sitio.
+ */
+export function canTransitionClosure(from: ClosureStatus, to: ClosureStatus): boolean {
+  if (from === to) return true;
+  return !CLOSURE_TERMINAL_STATUSES.includes(from);
+}
+
+/**
+ * Migración E1 (SCHEMA_VERSION 4): añade el eje de cierre a `orders` si no
+ * existe todavía. Mismo patrón que las columnas de proveedor: comprobar si
+ * la columna existe antes de añadirla (para que correr esto dos veces sea un
+ * no-op), envuelto además en try/catch como red de seguridad extra — la DB
+ * de producción tiene datos reales y esto tiene que poder ejecutarse
+ * repetidas veces sin romper nada, la haya aplicado ya o no.
+ *
+ * Exportada y parametrizada por la conexión (en vez de vivir inline dentro
+ * de `build()`) para poder probarla directamente contra cualquier DB —vacía
+ * o con filas de un esquema anterior a E1— sin pasar por el singleton
+ * perezoso del módulo.
+ */
+export function migrateClosureAxis(db: Database.Database): void {
+  const closureCols: Array<[string, string]> = [
+    ["closure_status", "TEXT NOT NULL DEFAULT 'unknown'"],
+    ["closure_source", "TEXT"],
+    ["closure_at", "INTEGER"],
+  ];
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of closureCols) {
+    if (!currentCols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        // No debe pasar (ya comprobamos que no existía), pero si otro proceso
+        // la añadió justo entre medias, no es un fallo real: seguimos.
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure ON orders(closure_status)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -205,6 +297,11 @@ export interface OrderRow {
   raw_payload: string | null;
   created_at: number;
   updated_at: number;
+
+  // --- Eje de cierre (E1) — ver ClosureStatus más arriba ---
+  closure_status: ClosureStatus;
+  closure_source: ClosureSource | null;
+  closure_at: number | null;
 }
 
 export interface NewOrderInput {
@@ -297,7 +394,12 @@ const ORDERS_TABLE_BODY = `
       needs_call_at INTEGER,
       raw_payload TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      -- Eje de cierre (E1): independiente de status. Ver ClosureStatus.
+      -- Arranca en 'unknown' siempre -- nunca se infiere, ni al crear ni al migrar.
+      closure_status TEXT NOT NULL DEFAULT 'unknown',
+      closure_source TEXT,
+      closure_at INTEGER
 `;
 
 // ============================================================
@@ -672,6 +774,8 @@ function build() {
     "CREATE INDEX IF NOT EXISTS idx_orders_supplier ON orders(supplier_sync_status, status)"
   );
 
+  migrateClosureAxis(db);
+
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
     "SELECT * FROM conversations WHERE phone = ?"
@@ -835,7 +939,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -2174,6 +2278,31 @@ export function setOrderFinalAddressSource(id: number, source: "original" | "pro
   const info = ctx()
     .db.prepare(`UPDATE orders SET final_address_source = ?, ${TOUCH} WHERE id = ?`)
     .run(source, id);
+  return info.changes > 0;
+}
+
+/**
+ * Registra el cierre de un pedido (eje independiente de `status`, ver
+ * ClosureStatus). Devuelve false SIN TOCAR NADA si la transición no está
+ * permitida (el pedido ya está en un cierre terminal distinto) o si el
+ * pedido no existe — así un evento tardío o duplicado nunca "reabre" un
+ * pedido ya entregado, rechazado o cancelado.
+ */
+export function setOrderClosure(
+  id: number,
+  status: ClosureStatus,
+  source: ClosureSource,
+  at: number = Math.floor(Date.now() / 1000)
+): boolean {
+  const row = ctx().db.prepare("SELECT closure_status FROM orders WHERE id = ?").get(id) as
+    | { closure_status: ClosureStatus }
+    | undefined;
+  if (!row) return false;
+  if (!canTransitionClosure(row.closure_status, status)) return false;
+
+  const info = ctx()
+    .db.prepare(`UPDATE orders SET closure_status = ?, closure_source = ?, closure_at = ?, ${TOUCH} WHERE id = ?`)
+    .run(status, source, at, id);
   return info.changes > 0;
 }
 
