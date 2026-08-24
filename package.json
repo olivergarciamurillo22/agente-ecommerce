@@ -30,7 +30,8 @@
     "dropea:doctor": "tsx scripts/dropea-doctor.ts",
     "dropea:mapping:inspect": "tsx scripts/dropea-mapping-inspect.ts",
     "shopify:backfill": "tsx scripts/shopify-backfill.ts",
-    "shopify:webhooks": "tsx scripts/shopify-webhooks.ts"
+    "shopify:webhooks": "tsx scripts/shopify-webhooks.ts",
+    "dropea:reconcile": "tsx scripts/dropea-reconcile.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

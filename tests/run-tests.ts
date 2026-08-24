@@ -147,6 +147,7 @@ async function main(): Promise<void> {
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
+  const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
@@ -5824,6 +5825,230 @@ async function main(): Promise<void> {
     assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", Math.floor(cuandoToca.getTime() / 1000) + 7200));
     assert.equal(db.setOrderClosure(o.id, "cancelled", "llamada_ia", Math.floor(cuandoToca.getTime() / 1000) + 9000), false);
     resetCallCfg();
+  });
+
+  // ============ E8 · Reconciliador de Dropea por API ============
+  console.log("· E8 — reconciliador de Dropea");
+
+  const dropeaOrderFixture = (overrides: Record<string, unknown> = {}) => ({
+    id: 0,
+    status: "SHIPPING",
+    sub_status: "SHIPPED", // in_progress: envío en curso, no resuelto
+    external_order_id: null,
+    updated_at: "2026-08-24T10:00:00Z",
+    created_at: "2026-08-20T09:00:00Z",
+    ...overrides,
+  }) as import("../src/lib/suppliers/dropea/types").DropeaOrder;
+
+  await test("E8 salvaguarda estructural: el módulo de reconciliación no importa WhatsApp/Baileys ni ninguna escritura de Dropea", () => {
+    const src = fs.readFileSync(path.join(process.cwd(), "src/lib/suppliers/dropea/reconcile.ts"), "utf8");
+    for (const pat of [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+      /createDropeaOrderForOrder/,
+      /confirmDropeaOrder/,
+      /dropeaProvider\.createOrder/,
+      /dropeaProvider\.cancelOrder/,
+    ]) {
+      assert.ok(!pat.test(src), `import/uso prohibido en reconcile.ts: ${pat}`);
+    }
+  });
+
+  await test("E8 decideLink: sin external_order_id, sin correspondencia, y ya enlazado al mismo id", () => {
+    const o = mkOrder("920100", "8100", "34600120100");
+    const orden = db.getOrderById(o.id)!;
+
+    assert.equal(dropeaReconcile.decideLink(null, null, null, null).outcome, "no_external_order_id");
+    assert.equal(dropeaReconcile.decideLink("", null, null, null).outcome, "no_external_order_id");
+    assert.equal(dropeaReconcile.decideLink("920999", null, null, null).outcome, "no_local_match");
+
+    const yaEnlazado = dropeaReconcile.decideLink("88800100", orden, null, null);
+    assert.equal(yaEnlazado.outcome, "already_linked_same");
+    assert.equal(yaEnlazado.localOrderId, o.id);
+  });
+
+  await test("E8 decideLink: casa por shopify_order_id o por shopify_order_number, y lo dice explícitamente", () => {
+    const o = mkOrder("920101", "8101", "34600120101");
+    const orden = db.getOrderById(o.id)!;
+
+    const porId = dropeaReconcile.decideLink("920101", null, orden, null);
+    assert.equal(porId.outcome, "linked_by_shopify_order_id");
+    assert.equal(porId.matchedVia, "shopify_order_id");
+    assert.equal(porId.localOrderId, o.id);
+
+    const porNumero = dropeaReconcile.decideLink("8101", null, null, orden);
+    assert.equal(porNumero.outcome, "linked_by_shopify_order_number");
+    assert.equal(porNumero.matchedVia, "shopify_order_number");
+
+    // Coincide con el mismo pedido por las dos vías a la vez: no es ambiguo
+    // (es un único candidato), gana la vía por shopify_order_id.
+    const porAmbas = dropeaReconcile.decideLink("920101", null, orden, orden);
+    assert.equal(porAmbas.outcome, "linked_by_shopify_order_id");
+  });
+
+  await test("E8 decideLink: ambiguo (dos pedidos locales distintos) y conflicto (ya enlazado a OTRO id)", () => {
+    const oAmbiguoA = mkOrder("920102", "8102", "34600120102");
+    const oAmbiguoB = mkOrder("920103", "8102b", "34600120103"); // su NÚMERO coincide con el ID del anterior... no, ver abajo
+    // Construcción real del caso ambiguo: el ID de un pedido coincide con el
+    // NÚMERO de otro pedido distinto — el mismo external_order_id de Dropea
+    // "casa" con dos pedidos locales por vías distintas.
+    void oAmbiguoB;
+    const oNumeroIgualAlIdAnterior = mkOrder("920104", "920102", "34600120104");
+    const ordenA = db.getOrderById(oAmbiguoA.id)!;
+    const ordenB = db.getOrderById(oNumeroIgualAlIdAnterior.id)!;
+    const ambiguo = dropeaReconcile.decideLink("920102", null, ordenA, ordenB);
+    assert.equal(ambiguo.outcome, "ambiguous_multiple_matches");
+    assert.equal(ambiguo.localOrderId, null);
+
+    const oConflicto = mkOrder("920105", "8105", "34600120105");
+    db.setOrderSupplierPlatformAndExternalId(oConflicto.id, "dropea", "77700000"); // ya enlazado a OTRO id
+    const ordenConflicto = db.getOrderById(oConflicto.id)!;
+    const conflicto = dropeaReconcile.decideLink("920105", null, ordenConflicto, null);
+    assert.equal(conflicto.outcome, "already_linked_conflict");
+    assert.equal(conflicto.localOrderId, oConflicto.id);
+  });
+
+  await test("E8 planClosureFromDropeaOrder: delivered/refused/cancelled correctos, fulfilled NUNCA delivered, sin fecha → no se escribe", () => {
+    const entregado = dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ sub_status: "DELIVERED", updated_at: "2026-08-24T12:00:00Z" }))!;
+    assert.equal(entregado.status, "delivered");
+    assert.equal(entregado.at, Math.floor(Date.parse("2026-08-24T12:00:00Z") / 1000));
+
+    const rechazado = dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ sub_status: "REFUSED" }))!;
+    assert.equal(rechazado.status, "refused");
+
+    const cancelado = dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ sub_status: "CANCELLED" }))!;
+    assert.equal(cancelado.status, "cancelled");
+
+    // "En camino" (SHIPPED) es in_progress, jamás delivered.
+    const enCurso = dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ sub_status: "SHIPPED" }))!;
+    assert.equal(enCurso.status, "in_progress");
+    assert.notEqual(enCurso.status, "delivered");
+
+    // Par de estados que no reconocemos: no se adivina, no se escribe nada.
+    assert.equal(dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ status: "RARO", sub_status: "RARISIMO" })), null);
+
+    // Estado conocido pero SIN fecha alguna: tampoco se escribe (nunca now()).
+    assert.equal(
+      dropeaReconcile.planClosureFromDropeaOrder(dropeaOrderFixture({ sub_status: "DELIVERED", updated_at: undefined, created_at: undefined })),
+      null
+    );
+  });
+
+  await test("E8 runDropeaReconcile (dry-run): decide todo, no escribe NADA, ni el enlace ni el cierre", async () => {
+    const o = mkOrder("920200", "8200", "34600120200");
+    db.claimWebhookEvent("e8-dry-1", "dropea", "order.status.changed", "88800200");
+    const antes = JSON.stringify(db.getOrderById(o.id));
+
+    const fetcher: import("../src/lib/suppliers/dropea/reconcile").DropeaOrderFetcher = async (id) =>
+      id === "88800200"
+        ? dropeaOrderFixture({ id: 88800200, external_order_id: "920200", sub_status: "DELIVERED" })
+        : dropeaOrderFixture({ external_order_id: null }); // cualquier otro pedido de la suite: sin señal
+
+    const report = await dropeaReconcile.runDropeaReconcile({ dryRun: true, fetcher });
+    const item = report.items.find((i) => i.resourceId === "88800200")!;
+    assert.equal(item.outcome, "linked_by_shopify_order_id");
+    assert.equal(item.closureStatus, "delivered");
+    assert.equal(item.closureApplied, false, "dry-run nunca aplica, aunque informe qué haría");
+    assert.equal(JSON.stringify(db.getOrderById(o.id)), antes, "cero escritura en dry-run");
+  });
+
+  await test("E8 runDropeaReconcile (--apply): enlaza, rellena el eje de cierre, y NUNCA pisa un enlace o un terminal existente", async () => {
+    const oPorId = mkOrder("920201", "8201", "34600120201");
+    const oPorNumero = mkOrder("920202", "8202", "34600120202");
+    const oYaEnlazado = mkOrder("920203", "8203", "34600120203");
+    db.setOrderSupplierPlatformAndExternalId(oYaEnlazado.id, "dropea", "88800203");
+    const oConflicto = mkOrder("920204", "8204", "34600120204");
+    db.setOrderSupplierPlatformAndExternalId(oConflicto.id, "dropea", "77711204"); // enlace previo a OTRO id
+    const oTerminal = mkOrder("920205", "8205", "34600120205");
+    db.setOrderClosure(oTerminal.id, "cancelled", "shopify", 1000); // terminal ya fijado por Shopify
+
+    db.claimWebhookEvent("e8-ap-1", "dropea", "order.status.changed", "88800201");
+    db.claimWebhookEvent("e8-ap-2", "dropea", "order.status.changed", "88800202");
+    db.claimWebhookEvent("e8-ap-3", "dropea", "order.status.changed", "88800203");
+    db.claimWebhookEvent("e8-ap-4", "dropea", "order.status.changed", "88800204");
+    db.claimWebhookEvent("e8-ap-5", "dropea", "order.status.changed", "88800205");
+
+    const respuestas: Record<string, ReturnType<typeof dropeaOrderFixture>> = {
+      "88800201": dropeaOrderFixture({ id: 88800201, external_order_id: "920201", sub_status: "DELIVERED" }),
+      "88800202": dropeaOrderFixture({ id: 88800202, external_order_id: "8202", sub_status: "REFUSED" }),
+      "88800203": dropeaOrderFixture({ id: 88800203, external_order_id: "920203", sub_status: "SHIPPED" }),
+      "88800204": dropeaOrderFixture({ id: 88800204, external_order_id: "920204", sub_status: "DELIVERED" }),
+      "88800205": dropeaOrderFixture({ id: 88800205, external_order_id: "920205", sub_status: "SHIPPED" }), // in_progress: no debe pisar el cancelled
+    };
+    const fetcher: import("../src/lib/suppliers/dropea/reconcile").DropeaOrderFetcher = async (id) => respuestas[id] ?? dropeaOrderFixture({ external_order_id: null });
+
+    const report = await dropeaReconcile.runDropeaReconcile({ dryRun: false, fetcher });
+    const porId = (rid: string) => report.items.find((i) => i.resourceId === rid)!;
+
+    assert.equal(porId("88800201").outcome, "linked_by_shopify_order_id");
+    assert.equal(db.getOrderById(oPorId.id)!.supplier_external_order_id, "88800201");
+    assert.equal(db.getOrderById(oPorId.id)!.closure_status, "delivered");
+
+    assert.equal(porId("88800202").outcome, "linked_by_shopify_order_number");
+    assert.equal(db.getOrderById(oPorNumero.id)!.supplier_external_order_id, "88800202");
+    assert.equal(db.getOrderById(oPorNumero.id)!.closure_status, "refused");
+
+    assert.equal(porId("88800203").outcome, "already_linked_same", "ya estaba enlazado: no se re-enlaza, solo se rellena el cierre");
+    assert.equal(db.getOrderById(oYaEnlazado.id)!.closure_status, "in_progress");
+
+    assert.equal(porId("88800204").outcome, "already_linked_conflict");
+    assert.equal(db.getOrderById(oConflicto.id)!.supplier_external_order_id, "77711204", "el enlace previo NUNCA se pisa");
+    assert.equal(db.getOrderById(oConflicto.id)!.closure_status, "unknown", "conflicto de enlace: tampoco se toca el cierre");
+
+    // oTerminal no estaba enlazado todavía: el enlace en sí SÍ se hace (es
+    // nuevo, no pisa nada) — lo que se bloquea es el CIERRE, porque ya tenía
+    // un terminal fijado por Shopify. Enlazar y cerrar son ejes independientes.
+    assert.equal(porId("88800205").outcome, "linked_by_shopify_order_id");
+    assert.equal(db.getOrderById(oTerminal.id)!.supplier_external_order_id, "88800205", "el enlace en sí sí se hace: no había uno previo");
+    assert.equal(porId("88800205").closureApplied, false, "bloqueado por el terminal ya fijado");
+    assert.equal(db.getOrderById(oTerminal.id)!.closure_status, "cancelled", "Dropea no pisa un terminal de Shopify");
+    assert.equal(db.getOrderById(oTerminal.id)!.closure_source, "shopify");
+  });
+
+  await test("E8 runDropeaReconcile: un fallo de red en un pedido no bloquea el resto, y queda marcado", async () => {
+    db.claimWebhookEvent("e8-fail-1", "dropea", "order.status.changed", "88800300");
+    const fetcher: import("../src/lib/suppliers/dropea/reconcile").DropeaOrderFetcher = async (id) => {
+      if (id === "88800300") throw new Error("network boom");
+      return dropeaOrderFixture({ external_order_id: null });
+    };
+    const report = await dropeaReconcile.runDropeaReconcile({ dryRun: true, fetcher });
+    const item = report.items.find((i) => i.resourceId === "88800300")!;
+    assert.equal(item.outcome, "fetch_failed");
+    assert.match(item.error ?? "", /network boom/);
+  });
+
+  await test("E8 checkpoint: reanuda sin repetir pedidos ya procesados, y se limpia al terminar", async () => {
+    db.claimWebhookEvent("e8-cp-1", "dropea", "order.status.changed", "88800401");
+    db.claimWebhookEvent("e8-cp-2", "dropea", "order.status.changed", "88800402");
+    db.claimWebhookEvent("e8-cp-3", "dropea", "order.status.changed", "88800403");
+
+    const totalPendiente = db.listOrderWebhookResourceIds("dropea").length;
+    const vistos: string[] = [];
+    const fetcher: import("../src/lib/suppliers/dropea/reconcile").DropeaOrderFetcher = async (id) => {
+      vistos.push(id);
+      return dropeaOrderFixture({ external_order_id: null });
+    };
+
+    const primerLote = Math.max(1, totalPendiente - 1);
+    const r1 = await dropeaReconcile.runDropeaReconcile({ dryRun: false, fetcher, resetCheckpoint: true, maxItems: primerLote });
+    assert.equal(r1.processed, primerLote);
+    assert.equal(r1.done, false, "queda al menos 1 por procesar");
+    const checkpoint1 = db.getSetting("dropea_reconcile_last_resource_id");
+    assert.ok(checkpoint1, "checkpoint guardado tras la primera pasada");
+    const vistosEnPrimera = [...vistos];
+    vistos.length = 0;
+
+    const r2 = await dropeaReconcile.runDropeaReconcile({ dryRun: false, fetcher }); // sin reset: retoma
+    assert.equal(r2.done, true);
+    assert.equal(r2.processed, totalPendiente - primerLote);
+    for (const id of vistosEnPrimera) {
+      assert.ok(!vistos.includes(id), `${id} no se vuelve a pedir en la segunda pasada`);
+    }
+    assert.equal(db.getSetting("dropea_reconcile_last_resource_id"), "", "checkpoint limpio al terminar el recorrido completo");
   });
 
   // ============ Resumen ============
