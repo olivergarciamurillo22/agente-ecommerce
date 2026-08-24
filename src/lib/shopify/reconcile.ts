@@ -17,6 +17,11 @@
 //     excepcional y lo tiene que ver un humano.
 //  3. Conflicto (Shopify dice un terminal distinto del guardado) → evento
 //     'closure_conflict' para revisión; NUNCA se pisa el terminal local.
+//  4. (E4) Enlace con Dropea por el tag `dropea_id:NNNNNNN` del propio
+//     payload: rellena supplier_external_order_id si está vacío. Es un
+//     latch de un solo sentido y sin red — el parser vive en
+//     `orders/supplier-tags.ts` justamente para no importar `suppliers/*`
+//     aquí (lo vigila el test de salvaguarda estructural).
 // ============================================================
 
 import pino from "pino";
@@ -26,6 +31,7 @@ import {
   setOrderClosure,
 } from "../db";
 import { isCodOrder, normalizeOrder } from "../orders/normalize";
+import { linkDropeaFromShopifyTags } from "../orders/supplier-tags";
 import { getAdminAccessToken, shopifyAdminConfigured } from "./admin";
 import {
   planClosureFromShopify,
@@ -70,6 +76,8 @@ export interface ReconcileReport {
   insertedMissing: number;
   conflicts: number;
   skipped: number;
+  /** E4: pedidos enganchados a Dropea leyendo el tag `dropea_id:` de Shopify. */
+  linkedDropea: number;
 }
 
 /**
@@ -87,7 +95,14 @@ export async function runShopifyReconcile(opts: {
   const nowMs = opts.nowMs ?? Date.now();
   const sinceIso = new Date(nowMs - lookback * 3600_000).toISOString();
 
-  const report: ReconcileReport = { seen: 0, repaired: 0, insertedMissing: 0, conflicts: 0, skipped: 0 };
+  const report: ReconcileReport = {
+    seen: 0,
+    repaired: 0,
+    insertedMissing: 0,
+    conflicts: 0,
+    skipped: 0,
+    linkedDropea: 0,
+  };
   const orders = await fetcher(sinceIso);
 
   for (const remote of orders) {
@@ -132,8 +147,21 @@ export async function runShopifyReconcile(opts: {
           n.orderNumber
         );
         if (signal) setOrderClosure(fila.id, signal.status, "shopify", signal.at);
+        // E4: si Shopify ya sabe a qué pedido de Dropea corresponde, se
+        // aprovecha ahora — el pedido es historial, pero el enlace sirve
+        // para el seguimiento y para no volver a preguntárselo a nadie.
+        if (linkDropeaFromShopifyTags(fila, remote, "reconcile (create perdido)").linked) {
+          report.linkedDropea++;
+        }
       }
       continue;
+    }
+
+    // E4: el enlace con Dropea no depende de que haya señal de cierre — un
+    // pedido en curso es justo el que más falta hace enganchar. Va antes de
+    // cualquier salida temprana.
+    if (linkDropeaFromShopifyTags(local, remote, "reconcile").linked) {
+      report.linkedDropea++;
     }
 
     if (!signal) {
@@ -195,9 +223,9 @@ export function startReconcileScheduler(): void {
     ticking = true;
     runShopifyReconcile()
       .then((r) => {
-        if (r.repaired || r.insertedMissing || r.conflicts) {
+        if (r.repaired || r.insertedMissing || r.conflicts || r.linkedDropea) {
           logger.info(
-            `[RECONCILE] vistos=${r.seen} reparados=${r.repaired} importados=${r.insertedMissing} conflictos=${r.conflicts}`
+            `[RECONCILE] vistos=${r.seen} reparados=${r.repaired} importados=${r.insertedMissing} conflictos=${r.conflicts} enlazados_dropea=${r.linkedDropea}`
           );
         }
       })

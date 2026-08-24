@@ -4291,7 +4291,7 @@ async function main(): Promise<void> {
     assert.equal(actual.closure_source, "shopify");
   });
 
-  await test("E2 orders/updated: nunca escribe closure_status ni ningún otro campo; solo deja rastro en integration_events", () => {
+  await test("E2 orders/updated (sin tag dropea_id): nunca escribe closure_status ni ningún otro campo; solo deja rastro en integration_events", () => {
     const o = mkOrder("990806", "3806", "34600119806");
     const antes = db.getOrderById(o.id)!;
     const raw = JSON.stringify(closurePayload({ id: 990806, updated_at: "2026-08-23T16:00:00Z" }));
@@ -4592,6 +4592,414 @@ async function main(): Promise<void> {
     const src = fs.readFileSync(path.join(__dirname, "..", "src", "lib", "shopify", "reconcile.ts"), "utf8");
     for (const pat of [/from\s+["'].*\/whatsapp["']/, /from\s+["'].*\/baileys/, /from\s+["'].*\/suppliers\//, /from\s+["'].*\/calls\//]) {
       assert.ok(!pat.test(src), `import prohibido en reconcile.ts: ${pat}`);
+    }
+  });
+
+  // ============ E4 · Enlace con Dropea por el tag de Shopify ============
+  console.log("\n— E4: enlace con Dropea vía tag dropea_id —");
+
+  const tags = await import("../src/lib/orders/supplier-tags");
+
+  /** Payload COD con los tags que se le pidan. */
+  const taggedPayload = (id: number, tagStr: string, extra: Record<string, unknown> = {}) =>
+    codPayload({ id, order_number: id % 10000, tags: tagStr, ...extra });
+
+  /** ¿Existe un evento de este tipo para este pedido? */
+  const hayEvento = (tipo: string, ref: string) =>
+    sysRepo
+      .listIntegrationEvents({ integration: "dropea", limit: 500 })
+      .some((e) => e.event_type === tipo && e.order_ref === ref);
+
+  // --- Capa 1: el parser, puro ---
+
+  await test("E4 parser: saca el id de entre los demás tags y no confunde `dropea_error`", () => {
+    assert.deepEqual(
+      tags.extractDropeaIdFromTags(["releasit_cod_form", "dropea_id:1366919", "dropea_error"]),
+      { kind: "found", dropeaId: "1366919" }
+    );
+    // orderTags() ya normaliza a minúsculas/sin espacios sobrantes; el
+    // parser además tolera espacios alrededor de los dos puntos.
+    assert.deepEqual(tags.extractDropeaIdFromTags(["dropea_id : 1366919"]), {
+      kind: "found",
+      dropeaId: "1366919",
+    });
+    // Ceros a la izquierda: se recortan para casar con el id que manda su
+    // webhook (String(resource_id), sin relleno).
+    assert.deepEqual(tags.extractDropeaIdFromTags(["dropea_id:0001366919"]), {
+      kind: "found",
+      dropeaId: "1366919",
+    });
+    // Repetido con el MISMO valor no es ambigüedad.
+    assert.deepEqual(tags.extractDropeaIdFromTags(["dropea_id:77", "dropea_id:77"]), {
+      kind: "found",
+      dropeaId: "77",
+    });
+    // `dropea_error` solo, sin id, no es candidato a nada.
+    assert.deepEqual(tags.extractDropeaIdFromTags(["dropea_error", "sync error - dropi pro"]), {
+      kind: "absent",
+    });
+  });
+
+  await test("E4 parser: sin tag → absent; dos ids distintos → ambiguous; valor no numérico o 0 → malformed", () => {
+    assert.deepEqual(tags.extractDropeaIdFromTags([]), { kind: "absent" });
+    assert.deepEqual(tags.extractDropeaIdFromTags(["releasit_cod_form"]), { kind: "absent" });
+
+    const amb = tags.extractDropeaIdFromTags(["dropea_id:100", "dropea_id:200"]);
+    assert.equal(amb.kind, "ambiguous");
+    assert.deepEqual(amb.kind === "ambiguous" ? amb.ids : [], ["100", "200"]);
+
+    // Si su app cambiara el formato, E4 dejaría de enlazar EN SILENCIO. Por
+    // eso un valor que no son dígitos se declara roto, no "ausente".
+    assert.equal(tags.extractDropeaIdFromTags(["dropea_id:abc"]).kind, "malformed");
+    assert.equal(tags.extractDropeaIdFromTags(["dropea_id:"]).kind, "malformed");
+    assert.equal(tags.extractDropeaIdFromTags(["dropea_id:0"]).kind, "malformed");
+    // Un roto entre válidos tampoco se ignora a la ligera.
+    assert.equal(tags.extractDropeaIdFromTags(["dropea_id:55", "dropea_id:x"]).kind, "malformed");
+  });
+
+  await test("E4 parser: lee los tags del payload tal cual los manda Shopify (string con comas)", () => {
+    assert.deepEqual(
+      tags.extractDropeaIdFromPayload(
+        taggedPayload(997700, "releasit_cod_form, dropea_id:1366919") as never
+      ),
+      { kind: "found", dropeaId: "1366919" }
+    );
+  });
+
+  // --- Capa 2: la escritura ---
+
+  await test("E4 enlace: rellena supplier_external_order_id + platform dropea, y repetirlo no cambia nada", () => {
+    const o = mkOrder("997701", "7701", "34600197701");
+    const payload = taggedPayload(997701, "releasit_cod_form, dropea_id:1366919") as never;
+
+    const r1 = tags.linkDropeaFromShopifyTags(db.getOrderById(o.id)!, payload, "test");
+    assert.equal(r1.linked, true);
+    assert.equal(r1.reason, "linked");
+    assert.equal(r1.dropeaId, "1366919");
+
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.supplier_external_order_id, "1366919");
+    assert.equal(fila.supplier_platform, "dropea");
+    assert.equal(fila.supplier_sync_status, "synced");
+    assert.ok(hayEvento("order_linked_by_tag", "7701"));
+
+    // Idempotente: segunda pasada no reescribe ni marca linked.
+    const r2 = tags.linkDropeaFromShopifyTags(db.getOrderById(o.id)!, payload, "test");
+    assert.equal(r2.linked, false);
+    assert.equal(r2.reason, "already_linked");
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "1366919");
+  });
+
+  await test("E4 enlace: nunca pisa un id externo ya guardado; si el tag dice otro, avisa y no toca", () => {
+    const o = mkOrder("997702", "7702", "34600197702");
+    db.setOrderSupplierPlatformAndExternalId(o.id, "dropea", "999111");
+    const r = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(o.id)!,
+      taggedPayload(997702, "dropea_id:222333") as never,
+      "test"
+    );
+    assert.equal(r.linked, false);
+    assert.equal(r.reason, "already_linked");
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "999111", "el id guardado manda");
+    assert.ok(hayEvento("dropea_link_mismatch", "7702"), "la discrepancia queda registrada para un humano");
+  });
+
+  await test("E4 enlace: un dropea_id que ya es de OTRO pedido no se reasigna", () => {
+    const dueno = mkOrder("997703", "7703", "34600197703");
+    db.setOrderSupplierPlatformAndExternalId(dueno.id, "dropea", "555000");
+    const otro = mkOrder("997704", "7704", "34600197704");
+
+    const r = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(otro.id)!,
+      taggedPayload(997704, "dropea_id:555000") as never,
+      "test"
+    );
+    assert.equal(r.linked, false);
+    assert.equal(r.reason, "id_taken_by_other_order");
+    assert.equal(db.getOrderById(otro.id)!.supplier_external_order_id, null, "no se inventa un enlace");
+    assert.equal(db.getOrderById(dueno.id)!.supplier_external_order_id, "555000", "el dueño no pierde el suyo");
+    assert.ok(hayEvento("dropea_link_duplicate", "7704"));
+  });
+
+  await test("E4 enlace: tag ambiguo o roto no escribe NADA y deja aviso (capas distintas, avisos distintos)", () => {
+    const amb = mkOrder("997705", "7705", "34600197705");
+    const rAmb = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(amb.id)!,
+      taggedPayload(997705, "dropea_id:100, dropea_id:200") as never,
+      "test"
+    );
+    assert.equal(rAmb.reason, "ambiguous_tag");
+    assert.equal(db.getOrderById(amb.id)!.supplier_external_order_id, null);
+    assert.ok(hayEvento("dropea_tag_ambiguous", "7705"));
+
+    const roto = mkOrder("997706", "7706", "34600197706");
+    const rRoto = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(roto.id)!,
+      taggedPayload(997706, "dropea_id:NNNNNNN") as never,
+      "test"
+    );
+    assert.equal(rRoto.reason, "malformed_tag");
+    assert.equal(db.getOrderById(roto.id)!.supplier_external_order_id, null);
+    assert.ok(hayEvento("dropea_tag_malformed", "7706"));
+
+    const sinTag = mkOrder("997707", "7707", "34600197707");
+    const rSin = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(sinTag.id)!,
+      taggedPayload(997707, "releasit_cod_form") as never,
+      "test"
+    );
+    assert.equal(rSin.reason, "no_tag");
+    assert.equal(db.getOrderById(sinTag.id)!.supplier_platform, null, "sin tag no se toca ni la plataforma");
+  });
+
+  await test("E4 enlace: el routing decía dropi, pero el tag es un HECHO — manda el tag y queda constancia", () => {
+    const o = mkOrder("997708", "7708", "34600197708");
+    db.setOrderSupplierEvaluation(o.id, "dropi", "pending", "sin mapping de Dropea");
+    assert.equal(db.getOrderById(o.id)!.supplier_platform, "dropi");
+
+    const r = tags.linkDropeaFromShopifyTags(
+      db.getOrderById(o.id)!,
+      taggedPayload(997708, "dropea_id:424242") as never,
+      "test"
+    );
+    assert.equal(r.linked, true);
+    assert.equal(db.getOrderById(o.id)!.supplier_platform, "dropea", "el pedido YA existe en Dropea");
+    assert.ok(hayEvento("dropea_link_platform_override", "7708"));
+  });
+
+  // --- Capa 3: canal `orders/updated` (espejo acordado de UN solo campo) ---
+
+  await test("E4 orders/updated: enlaza por tag y NO toca el eje de cierre (capas separadas)", () => {
+    const o = mkOrder("997710", "7710", "34600197710");
+    const antes = db.getOrderById(o.id)!;
+    const raw = JSON.stringify(
+      taggedPayload(997710, "releasit_cod_form, dropea_id:1366920", { updated_at: "2026-08-24T10:00:00Z" })
+    );
+    const res = processOrdersEventWebhook(
+      raw,
+      shopifyHeaders(raw, { topic: "orders/updated", webhookId: "wh-e4-upd-1" })
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.dropea_linked, true);
+    assert.equal(res.body.dropea_id, "1366920");
+
+    const despues = db.getOrderById(o.id)!;
+    assert.equal(despues.supplier_external_order_id, "1366920");
+    assert.equal(despues.closure_status, antes.closure_status, "el eje de cierre sigue intacto");
+    assert.equal(despues.closure_source, antes.closure_source);
+    assert.equal(despues.closure_at, antes.closure_at);
+  });
+
+  await test("E4 orders/updated SIN tag: sigue siendo cero escritura, ni siquiera updated_at", () => {
+    const o = mkOrder("997711", "7711", "34600197711");
+    const antes = db.getOrderById(o.id)!;
+    const raw = JSON.stringify(taggedPayload(997711, "releasit_cod_form"));
+    const res = processOrdersEventWebhook(
+      raw,
+      shopifyHeaders(raw, { topic: "orders/updated", webhookId: "wh-e4-upd-2" })
+    );
+    assert.equal(res.status, 200);
+    assert.equal(res.body.dropea_linked, false);
+    const despues = db.getOrderById(o.id)!;
+    assert.equal(despues.supplier_external_order_id, null);
+    assert.equal(despues.updated_at, antes.updated_at, "sin tag, el espejo no escribe nada");
+  });
+
+  await test("E4 orders/updated: el dedupe por webhook-id sigue delante del espejo", () => {
+    const o = mkOrder("997712", "7712", "34600197712");
+    const raw1 = JSON.stringify(taggedPayload(997712, "dropea_id:700001"));
+    processOrdersEventWebhook(raw1, shopifyHeaders(raw1, { topic: "orders/updated", webhookId: "wh-e4-dup" }));
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "700001");
+
+    // Reentrega con el MISMO webhook-id y payload distinto: ni se mira el tag.
+    const raw2 = JSON.stringify(taggedPayload(997712, "dropea_id:700002"));
+    const res2 = processOrdersEventWebhook(
+      raw2,
+      shopifyHeaders(raw2, { topic: "orders/updated", webhookId: "wh-e4-dup" })
+    );
+    assert.equal(res2.body.duplicate, true);
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "700001");
+  });
+
+  // --- Capa 4: canal reconciliación ---
+
+  await test("E4 reconciliación: enlaza aunque el pedido no traiga señal de cierre", async () => {
+    const o = mkOrder("997720", "7720", "34600197720");
+    const r = await reconcile.runShopifyReconcile({
+      // Sin cancelled_at ni fulfillment_status: cero señal de cierre.
+      fetcher: async () => [taggedPayload(997720, "releasit_cod_form, dropea_id:810001") as never],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r.linkedDropea, 1);
+    assert.equal(r.repaired, 0, "el eje de cierre no se toca");
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.supplier_external_order_id, "810001");
+    assert.equal(fila.closure_status, "unknown");
+
+    // Segunda pasada: idempotente.
+    const r2 = await reconcile.runShopifyReconcile({
+      fetcher: async () => [taggedPayload(997720, "releasit_cod_form, dropea_id:810001") as never],
+      nowMs: Date.parse("2026-08-24T11:00:00Z"),
+    });
+    assert.equal(r2.linkedDropea, 0);
+  });
+
+  await test("E4 reconciliación: el create perdido que se importa también queda enlazado", async () => {
+    const r = await reconcile.runShopifyReconcile({
+      fetcher: async () => [
+        taggedPayload(997721, "releasit_cod_form, dropea_id:810002", {
+          cancelled_at: "2026-08-24T08:00:00Z",
+        }) as never,
+      ],
+      nowMs: Date.parse("2026-08-24T10:00:00Z"),
+    });
+    assert.equal(r.insertedMissing, 1);
+    assert.equal(r.linkedDropea, 1);
+    const importado = db.getOrderByShopifyId("997721")!;
+    assert.equal(importado.status, "ignored_old", "sigue sin entrar en ninguna cola");
+    assert.equal(importado.supplier_external_order_id, "810002");
+    assert.equal(importado.closure_status, "cancelled");
+  });
+
+  // --- Capa 5: canal backfill ---
+
+  await test("E4 backfill decideDropeaLink: decisión pura, sin DB ni red", () => {
+    const conTag = taggedPayload(997730, "dropea_id:900001") as never;
+    const sinTag = taggedPayload(997731, "releasit_cod_form") as never;
+    const noCod = codPayload({
+      id: 997732,
+      tags: "dropea_id:900002",
+      gateway: "Tarjeta",
+      payment_gateway_names: ["Tarjeta"],
+      financial_status: "paid",
+    }) as never;
+
+    assert.equal(backfill.decideDropeaLink(null, conTag, true), "link");
+    assert.equal(backfill.decideDropeaLink(null, conTag, false), "no_local_order");
+    assert.equal(backfill.decideDropeaLink(null, sinTag, true), "no_tag");
+    assert.equal(backfill.decideDropeaLink(null, noCod, true), "not_cod");
+    assert.equal(
+      backfill.decideDropeaLink(
+        { supplier_external_order_id: "ya-tengo" } as never,
+        conTag,
+        false
+      ),
+      "already_linked"
+    );
+    assert.equal(
+      backfill.decideDropeaLink(null, taggedPayload(997733, "dropea_id:a, dropea_id:b") as never, true),
+      "tag_unusable"
+    );
+  });
+
+  await test("E4 backfill dry-run: cuenta lo que enlazaría y NO escribe nada", async () => {
+    const o = mkOrder("997740", "7740", "34600197740");
+    const pagina = async () => ({
+      orders: [taggedPayload(997740, "releasit_cod_form, dropea_id:910001") as never],
+      nextCursor: null,
+    });
+    const r = await backfill.runShopifyBackfill({
+      dryRun: true,
+      pageFetcher: pagina,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      resetCheckpoint: true,
+    });
+    assert.equal(r.dropeaLink.link, 1, "el dry-run desglosa el enlace, no solo un contador plano");
+    assert.equal(r.dropeaLinked, 0, "en dry-run no se escribe ni un enlace");
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, null);
+  });
+
+  await test("E4 backfill --apply: enlaza el pedido existente y el que importa en la misma pasada", async () => {
+    const o = mkOrder("997741", "7741", "34600197741");
+    const pagina = async () => ({
+      orders: [
+        taggedPayload(997741, "releasit_cod_form, dropea_id:910002") as never,
+        // Este no existe localmente y trae señal de cierre → se inserta y se
+        // enlaza en la misma pasada (el enlace se aplica tras el INSERT).
+        taggedPayload(997742, "releasit_cod_form, dropea_id:910003", {
+          cancelled_at: "2026-08-24T08:00:00Z",
+        }) as never,
+        // Sin tag: no cuenta en el eje de enlace.
+        taggedPayload(997743, "releasit_cod_form") as never,
+      ],
+      nextCursor: null,
+    });
+    const antesOutbox = db.getPendingOutbox(999).length;
+    const r = await backfill.runShopifyBackfill({
+      dryRun: false,
+      pageFetcher: pagina,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      resetCheckpoint: true,
+    });
+    assert.equal(r.dropeaLink.link, 2);
+    assert.equal(r.dropeaLinked, 2);
+    assert.equal(r.dropeaLink.no_tag, 1);
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "910002");
+    const importado = db.getOrderByShopifyId("997742")!;
+    assert.equal(importado.supplier_external_order_id, "910003");
+    assert.equal(importado.status, "ignored_old");
+    assert.equal(db.getPendingOutbox(999).length, antesOutbox, "cero mensajes: el backfill no habla con nadie");
+  });
+
+  // --- Consecuencia de E4 sobre postventa: el histórico enlazado no escribe ---
+
+  await test("E4 · gate ignored_old: un pedido de historial enlazado y con tracking NO le escribe al cliente", () => {
+    // Cadena real que abre E4: el backfill importa un pedido antiguo como
+    // ignored_old → lo enlaza por tag → queda en el polling de tracking →
+    // el proveedor responde "shipped". Antes de este gate, eso encolaba un
+    // "tu pedido ya está en camino" a un cliente de hace dos meses.
+    const o = mkOrder("997750", "7750", "34600197750");
+    assert.equal(db.markOrderIgnoredOld(o.id, "backfilled_from_shopify"), true);
+    tags.linkDropeaFromShopifyTags(
+      db.getOrderById(o.id)!,
+      taggedPayload(997750, "releasit_cod_form, dropea_id:920001") as never,
+      "test"
+    );
+    assert.equal(db.getOrderById(o.id)!.supplier_external_order_id, "920001");
+
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, {
+      rawStatus: "shipped",
+      trackingNumber: "TRK-HIST",
+      trackingUrl: "https://track.example/TRK-HIST",
+      source: "polling",
+    });
+    assert.ok(r.events.includes("TRACKING_AVAILABLE"), "el evento SÍ ocurre: la trazabilidad no se pierde");
+    assert.deepEqual(r.notified, [], "pero no se avisa a nadie");
+    assert.equal(
+      db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length,
+      antes,
+      "cero mensajes encolados"
+    );
+    assert.equal(
+      db.getOrderById(o.id)!.tracking_notification_sent_at,
+      null,
+      "ni siquiera se gasta el sello: si algún día se reactiva a mano, el aviso sigue disponible"
+    );
+    assert.equal(db.getOrderById(o.id)!.tracking_number, "TRK-HIST", "el estado de envío sí se guarda");
+  });
+
+  // --- Salvaguarda estructural del módulo nuevo ---
+
+  await test("E4 salvaguarda estructural: supplier-tags.ts no importa WhatsApp/Baileys/proveedores", () => {
+    // Lo consumen el backfill y la reconciliación, que tienen prohibido
+    // arrastrar WhatsApp o clientes de proveedor. Si este módulo importara
+    // uno, el test de aquellos pasaría igual (solo miran SU fichero) y la
+    // salvaguarda se habría roto en silencio. Por eso también se mira aquí.
+    const src = fs.readFileSync(
+      path.join(__dirname, "..", "src", "lib", "orders", "supplier-tags.ts"),
+      "utf8"
+    );
+    for (const pat of [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/suppliers\//,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+    ]) {
+      assert.ok(!pat.test(src), `import prohibido en supplier-tags.ts: ${pat}`);
     }
   });
 

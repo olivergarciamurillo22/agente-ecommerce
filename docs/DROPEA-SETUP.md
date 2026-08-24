@@ -20,6 +20,34 @@ Son dos llaves separadas a propósito: aunque alguien cambiara el modo, la
 segunda seguiría bloqueando la creación. Si creásemos pedidos mientras su app
 también lo hace, **cada compra se enviaría dos veces al cliente**.
 
+### Cómo sabemos qué pedido de Dropea es cuál (sin preguntárselo a Dropea)
+
+Cuando su app crea el pedido, **deja una etiqueta en el pedido de Shopify**:
+
+```
+dropea_id:1366919
+```
+
+Eso ya es la correspondencia entre tu pedido y el suyo, así que el sistema
+simplemente **la lee** y la guarda en el pedido local. No hace falta ninguna
+llamada a la API de Dropea para averiguarlo. A partir de ahí el panel enseña
+el id de Dropea en la ficha del pedido y el seguimiento del envío puede
+funcionar.
+
+Se lee por tres vías, y cualquiera de las tres vale:
+
+| Vía | Cuándo |
+|---|---|
+| Webhook `orders/updated` | en cuanto su app etiqueta el pedido (segundos) |
+| Reconciliación | como red de seguridad, cada 6 h |
+| `npm run shopify:backfill` | para los pedidos antiguos, de una pasada |
+
+**Nunca se pisa un enlace ya guardado.** Si la etiqueta dijera un id distinto
+del que ya teníamos, o hubiera dos etiquetas con ids distintos, o el formato
+cambiara, el sistema **no elige a ojo**: no toca nada y deja un aviso en
+Sistema → Eventos para que lo mires. Si algún día ves ahí `dropea_tag_...`,
+es que su app cambió el formato de la etiqueta.
+
 ---
 
 ## Configuración completa del `.env` del NAS

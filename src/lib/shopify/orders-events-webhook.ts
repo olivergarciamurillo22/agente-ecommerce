@@ -12,7 +12,23 @@
 //   orders/cancelled → closure_status = 'cancelled', source 'shopify'
 //   orders/fulfilled → closure_status = 'in_progress', source 'shopify'
 //   orders/updated   → NUNCA toca el eje de cierre. Solo trazabilidad
-//                       (integration_event) para saber que llegó.
+//                       (integration_event) + el espejo de E4 (abajo).
+//
+// ESPEJO DE `orders/updated` — LISTA ACORDADA (E4, 24-08-2026, con Óliver).
+// Hasta E4 este topic no escribía NADA en `orders`, a propósito: es el
+// webhook más ruidoso de Shopify y un espejo "de lo que parezca" corrompe
+// datos. La lista acordada tiene UN solo campo:
+//
+//   supplier_external_order_id  ←  tag `dropea_id:NNNNNNN`
+//
+// y con estas condiciones, que lo hacen inofensivo frente al ruido:
+//   - solo escribe si el campo está VACÍO (latch de un solo sentido: el
+//     UPDATE lleva `WHERE supplier_external_order_id IS NULL`);
+//   - por eso NO necesita la protección de orden cronológico: da igual en
+//     qué orden lleguen los `orders/updated`, el primero que traiga el tag
+//     gana y los demás no pueden cambiarlo;
+//   - nada más de `orders/updated` se refleja. Ampliar esta lista es otra
+//     decisión, no un efecto colateral de un refactor.
 //
 // `delivered`/`refused` quedan reservados para Dropea o marcado manual.
 // canTransitionClosure() ya impide que un webhook de Shopify pise un
@@ -40,6 +56,7 @@ import {
 } from "../db";
 import { verifyShopifyHmac } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
+import { linkDropeaFromShopifyTags } from "../orders/supplier-tags";
 import type { ShopifyOrderPayload } from "../orders/normalize";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -139,16 +156,30 @@ export function processOrdersEventWebhook(
   }
 
   if (topic === "orders/updated") {
-    // Deliberadamente SIN efectos en `orders`: ni closure_status ni ningún
-    // otro campo. Solo trazabilidad de que Shopify tocó el pedido.
+    // Cero efectos en el eje de cierre — eso no cambia con E4. El ÚNICO
+    // campo del espejo acordado es supplier_external_order_id, y solo
+    // cuando el pedido trae el tag `dropea_id:` y aún no estaba enlazado
+    // (ver la lista acordada en la cabecera de este fichero).
+    const enlace = linkDropeaFromShopifyTags(order, payload, "webhook orders/updated");
     logIntegrationEvent(
       "shopify",
       "order_updated_received",
       "info",
-      "orders/updated recibido: sin escritura en el eje de cierre ni en el espejo (fuera de alcance de E2)",
+      enlace.linked
+        ? `orders/updated recibido: sin tocar el eje de cierre; enlazado a Dropea ${enlace.dropeaId} por tag (E4)`
+        : "orders/updated recibido: sin escritura en el eje de cierre ni en el espejo",
       order.shopify_order_number
     );
-    return { status: 200, body: { ok: true, order: order.shopify_order_number, noted: true } };
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        order: order.shopify_order_number,
+        noted: true,
+        dropea_linked: enlace.linked,
+        dropea_id: enlace.dropeaId,
+      },
+    };
   }
 
   const closureStatus = TOPIC_TO_CLOSURE[topic]!;
