@@ -59,10 +59,21 @@ async function main(): Promise<void> {
   console.log(`    · no es COD            : ${report.counts.skip_not_cod}`);
   console.log(`    · sin señal de cierre  : ${report.counts.skip_no_signal}`);
   console.log(`    · ya tenía fuente propia (webhook) : ${report.counts.skip_has_own_source}`);
+  console.log("\n──────── Cobertura ────────");
+  if (report.coverage === "full") {
+    console.log("  ✓ Scope read_all_orders verificado: la API enseña TODO el histórico.");
+  } else if (report.coverage === "last_60_days_only") {
+    console.log("  ⚠️  FALTA el scope read_all_orders: la API solo devuelve los ÚLTIMOS 60 DÍAS,");
+    console.log("      en silencio. Este recorrido NO es el histórico completo. Pide el scope");
+    console.log("      en la app de Shopify y vuelve a ejecutar con --reset-checkpoint.");
+  } else {
+    console.log(`  ⚠️  No se pudieron comprobar los scopes (${report.scopeCheck.error}).`);
+    console.log("      No se puede afirmar cobertura completa de este recorrido.");
+  }
   console.log("\n──────── Resumen ────────");
   console.log(`  Páginas procesadas : ${report.pagesProcessed}`);
   console.log(`  Pedidos vistos     : ${report.ordersSeen}`);
-  console.log(`  Estado             : ${report.done ? "COMPLETO (todo el histórico recorrido)" : `PENDIENTE (quedan páginas — vuelve a ejecutar${apply ? "" : " con --apply"} para continuar)`}`);
+  console.log(`  Estado             : ${report.done ? (report.coverage === "full" ? "COMPLETO (todo el histórico recorrido)" : "recorrido lo accesible (ver Cobertura)") : `PENDIENTE (quedan páginas — vuelve a ejecutar${apply ? "" : " con --apply"} para continuar)`}`);
   if (!apply) {
     console.log("\n  Esto ha sido un dry-run: NADA se ha escrito ni el checkpoint se ha movido.");
     console.log("  Repite con --apply cuando el desglose de arriba coincida con lo esperado.\n");

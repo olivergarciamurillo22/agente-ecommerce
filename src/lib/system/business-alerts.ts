@@ -182,11 +182,16 @@ export interface BusinessSnapshot {
 export function readBusinessSnapshot(nowS = Math.floor(Date.now() / 1000), staleHoursNeedsCall = businessThresholds().needsCallStaleHours): BusinessSnapshot {
   const db = systemDbHandle();
   const limite = nowS - staleHoursNeedsCall * 3600;
+  // Solo CANDIDATOS REALES: el eje de cierre manda. Un pedido cancelado en
+  // Shopify o ya en fulfillment (closure != 'unknown') no cuenta como
+  // "pendiente de llamada" aunque su status operativo diga needs_call.
+  // (Espejo SQL de isConfirmationEligible; el predicado completo vive en
+  // src/lib/orders/eligibility.ts y hay un test que exige que coincidan.)
   const needsCall = db
     .prepare(
       `SELECT COUNT(*) AS total,
               SUM(CASE WHEN COALESCE(needs_call_at, updated_at) < ? THEN 1 ELSE 0 END) AS stale
-       FROM orders WHERE status = 'needs_call'`
+       FROM orders WHERE status = 'needs_call' AND closure_status = 'unknown' AND phone != ''`
     )
     .get(limite) as { total: number; stale: number | null };
   const incidencias = db

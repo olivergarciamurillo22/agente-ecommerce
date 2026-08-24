@@ -54,6 +54,58 @@ const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?
 const CHECKPOINT_KEY = "shopify_backfill_cursor";
 const LAST_RUN_KEY = "shopify_backfill_last_run_at";
 
+// ============================================================
+// Verificación de SCOPES (trampa conocida de Shopify): sin `read_all_orders`
+// la API devuelve SOLO los últimos 60 días — en silencio, con 200 OK. Un
+// backfill que termina "completo" sin ese scope NO ha visto el histórico.
+// Por eso el informe lleva `coverage`, y nunca se afirma cobertura total
+// sin haber comprobado el scope de verdad.
+// ============================================================
+
+export type BackfillCoverage = "full" | "last_60_days_only" | "unverified";
+
+export interface ScopeCheck {
+  /** true si se pudo consultar access_scopes.json. */
+  verified: boolean;
+  hasReadAllOrders: boolean;
+  scopes: string[];
+  error: string | null;
+}
+
+export type ScopeFetcher = () => Promise<string[]>;
+
+/** Consulta real: GET /admin/oauth/access_scopes.json con el token. */
+export const fetchShopifyAccessScopes: ScopeFetcher = async () => {
+  const token = await getAdminAccessToken();
+  if (!token) throw new Error("sin token de acceso de Shopify");
+  const res = await fetch(`https://${storeDomain()}/admin/oauth/access_scopes.json`, {
+    headers: { "X-Shopify-Access-Token": token },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) throw new Error(`access_scopes.json HTTP ${res.status}`);
+  const json = (await res.json()) as { access_scopes?: Array<{ handle?: string }> };
+  return (json.access_scopes ?? []).map((s) => s.handle ?? "").filter(Boolean);
+};
+
+export async function checkBackfillScopes(fetcher: ScopeFetcher = fetchShopifyAccessScopes): Promise<ScopeCheck> {
+  try {
+    const scopes = await fetcher();
+    return {
+      verified: true,
+      hasReadAllOrders: scopes.includes("read_all_orders"),
+      scopes,
+      error: null,
+    };
+  } catch (err) {
+    return {
+      verified: false,
+      hasReadAllOrders: false,
+      scopes: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 function apiVersion(): string {
   return process.env.SHOPIFY_API_VERSION || "2026-07";
 }
@@ -270,8 +322,16 @@ export interface BackfillReport {
   counts: Record<BackfillActionKind, number>;
   /** Resumen de 3 líneas que pidió Pedro: lo que aplicaría/aplicó, y lo que no cambia. */
   summary: { toCancelled: number; toInProgress: number; unchanged: number };
+  /** true = se recorrió todo lo que la API nos deja ver. NO implica el
+   *  histórico completo: eso lo dice `coverage`. */
   done: boolean;
   nextCursor: string | null;
+  /** Resultado de la comprobación de scopes (read_all_orders). */
+  scopeCheck: ScopeCheck;
+  /** full = scope verificado con read_all_orders. last_60_days_only = scope
+   *  verificado SIN read_all_orders (la API solo enseña 60 días).
+   *  unverified = no se pudo comprobar: NO se puede afirmar cobertura. */
+  coverage: BackfillCoverage;
 }
 
 function emptyCounts(): Record<BackfillActionKind, number> {
@@ -291,6 +351,8 @@ export interface RunBackfillOptions {
   dryRun?: boolean;
   /** Para tests: fuente de páginas inyectada, en vez del fetch real a Shopify. */
   pageFetcher?: PageFetcher;
+  /** Para tests: fuente de scopes inyectada, en vez del fetch real. */
+  scopeFetcher?: ScopeFetcher;
   /** Tope de páginas en esta ejecución (por si se quiere trocear a mano). */
   maxPages?: number;
   /** Ignora el checkpoint guardado y empieza desde el principio. */
@@ -308,6 +370,22 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
   const dryRun = opts.dryRun !== false; // por defecto SIEMPRE dry-run
   const fetchPage = opts.pageFetcher ?? fetchShopifyOrdersPage;
   const maxPages = opts.maxPages ?? Infinity;
+
+  // Scope ANTES de recorrer nada: define qué puede afirmar el informe.
+  const scopeCheck = await checkBackfillScopes(opts.scopeFetcher);
+  const coverage: BackfillCoverage = !scopeCheck.verified
+    ? "unverified"
+    : scopeCheck.hasReadAllOrders
+      ? "full"
+      : "last_60_days_only";
+  if (coverage !== "full") {
+    logger.warn(
+      `[SHOPIFY BACKFILL] cobertura ${coverage}: ` +
+        (coverage === "unverified"
+          ? `no se pudieron comprobar los scopes (${scopeCheck.error})`
+          : "falta el scope read_all_orders — la API solo devuelve los últimos 60 días, EN SILENCIO")
+    );
+  }
 
   let cursor = opts.resetCheckpoint ? null : getSetting(CHECKPOINT_KEY) || null;
   const counts = emptyCounts();
@@ -345,8 +423,9 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
     logIntegrationEvent(
       "shopify",
       "backfill_completed",
-      "info",
-      `backfill completo: ${ordersSeen} pedido(s) vistos, ${counts.insert_cancelled + counts.update_cancelled} → cancelled, ${counts.insert_in_progress + counts.update_in_progress} → in_progress`
+      coverage === "full" ? "info" : "warning",
+      `backfill recorrido (cobertura: ${coverage}): ${ordersSeen} pedido(s) vistos, ${counts.insert_cancelled + counts.update_cancelled} → cancelled, ${counts.insert_in_progress + counts.update_in_progress} → in_progress` +
+        (coverage === "full" ? "" : " — SIN read_all_orders verificado: NO se puede afirmar histórico completo")
     );
   }
 
@@ -361,5 +440,7 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
     },
     done,
     nextCursor: cursor,
+    scopeCheck,
+    coverage,
   };
 }
