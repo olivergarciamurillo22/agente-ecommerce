@@ -5594,6 +5594,60 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("E7 cadencia: el anclaje sigue el día REAL de cada contacto, no el día del disparo original", async () => {
+    // Inicial a las 19:30 (última franja del día: 17:00-20:00). El +2h del
+    // 1er reintento (21:30) cae FUERA de ventana, así que se reprograma a la
+    // mañana siguiente — el propio 1er reintento ya "salta" un día. Si el
+    // resto de la cadencia se anclara al día del disparo original (martes)
+    // en vez de al día real del contacto anterior, el contacto 3 caería el
+    // mismo día que el 2 (solape). No debe pasar.
+    const tel = "34600117413";
+    let { order, attempt } = await dialOne("997413", "4413", tel, md(2026, 9, 1, 19, 30));
+    let now = md(2026, 9, 1, 19, 30);
+
+    const resolver = () => {
+      calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "no_contesta" }, Math.floor(now.getTime() / 1000)), now, noHoliday);
+      const siguiente = db.getActiveCallAttemptForOrder(order.id);
+      assert.ok(siguiente, "debe haber siguiente contacto planificado");
+      now = new Date(siguiente!.scheduled_at * 1000);
+      db.claimCallAttempt(siguiente!.id);
+      db.transitionCallAttempt(siguiente!.id, ["reserved"], "dialing");
+      db.transitionCallAttempt(siguiente!.id, ["dialing"], "in_flight", { provider_call_id: `mock-tarde-${siguiente!.contact_number}`, started_at: Math.floor(now.getTime() / 1000) });
+      attempt = db.getCallAttempt(siguiente!.id)!;
+      return now;
+    };
+
+    // Contacto 2 (1er reintento): 19:30+2h=21:30 fuera de ventana → salta a
+    // la mañana del día siguiente (miércoles 02-09), NO al mismo martes.
+    const c2 = resolver();
+    assert.equal(c2.getTime(), md(2026, 9, 2, 9, 0).getTime(), "1er reintento: fuera de ventana → mañana del día siguiente");
+
+    // Contacto 3 (2º reintento): mañana del día siguiente AL CONTACTO 2 real
+    // (miércoles), es decir jueves 03-09 — NUNCA el mismo día que el 2.
+    const c3 = resolver();
+    assert.equal(c3.getTime(), md(2026, 9, 3, 9, 0).getTime(), "2º reintento: día siguiente al contacto 2 real, no al disparo original");
+    assert.notEqual(c3.toDateString(), c2.toDateString(), "el contacto 3 NUNCA cae el mismo día que el 2 — ahí estaría el solape");
+
+    // Contacto 4 (3er reintento): tarde de ESE MISMO día (jueves 03-09).
+    const c4 = resolver();
+    assert.equal(c4.getTime(), md(2026, 9, 3, 17, 0).getTime(), "3er reintento: tarde del mismo día que el 2º reintento");
+
+    // Contacto 5 (4º y último): mañana del día después (viernes 04-09).
+    const c5 = resolver();
+    assert.equal(c5.getTime(), md(2026, 9, 4, 9, 0).getTime(), "4º reintento: mañana del día después");
+
+    // Secuencia completa coherente: 5 contactos, siempre hacia delante, y
+    // agotado sin más reintentos.
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado: "no_contesta" }, Math.floor(now.getTime() / 1000)), now, noHoliday);
+    assert.equal(db.getActiveCallAttemptForOrder(order.id), null, "5 contactos: fuera de cola");
+    const todos = db.listCallAttemptsForOrder(order.id);
+    assert.equal(todos.length, 5);
+    const horas = todos.map((t) => t.scheduled_at);
+    for (let i = 1; i < horas.length; i++) assert.ok(horas[i] > horas[i - 1], "siempre hacia delante, sin solapes");
+    assert.equal(todos[todos.length - 1].state, "manual_review");
+    resetCallCfg();
+  });
+
   await test("E7 fallo técnico: reintenta SIN consumir cupo, y 3 seguidos → provider_error_exhausted", async () => {
     const tel = "34600117420";
     const o = mkCallable("997420", "4420", tel, 30);
