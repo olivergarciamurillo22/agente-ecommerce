@@ -5240,6 +5240,30 @@ async function main(): Promise<void> {
 
 
 
+  await test("E2 suscripciones: planWebhookEnsure detecta faltantes, no duplica y avisa de URLs cambiadas", async () => {
+    const { planWebhookEnsure } = await import("../src/lib/shopify/webhook-subscriptions");
+    const deseadas = [
+      { topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+      { topic: "orders/cancelled", address: "https://x.example/api/webhooks/shopify/orders-events" },
+    ];
+    const plan = planWebhookEnsure(
+      [
+        { id: 1, topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+        { id: 2, topic: "orders/paid", address: "https://otro.example/x" },
+      ],
+      deseadas
+    );
+    assert.deepEqual(plan.toCreate.map((x) => x.topic), ["orders/cancelled"], "solo crea lo que falta");
+    assert.equal(plan.ok.length, 1, "lo existente no se duplica");
+    assert.equal(plan.extra[0].topic, "orders/paid");
+    const plan2 = planWebhookEnsure(
+      [{ id: 1, topic: "orders/create", address: "https://OTRA.example/hook" }],
+      deseadas
+    );
+    assert.equal(plan2.mismatched.length, 1, "misma suscripción con otra URL: aviso, no duplicado");
+    assert.equal(plan2.toCreate.some((x) => x.topic === "orders/create"), false);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
