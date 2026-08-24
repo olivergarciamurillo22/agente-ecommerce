@@ -157,37 +157,33 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**En producción:** Fase A desplegada (commit `a2e4e83`, esquema **3**). Dropea conectada de punta a punta con 6 webhooks activos. Bug de la ciudad del formulario Releasit resuelto.
+**En producción, desplegado en el NAS la noche del 24-08-2026:** commit
+`635d169`, esquema **5**. E1 (eje de cierre) + E2 (webhooks de cierre) + E3
+(backfill, corrido con `read_all_orders` verificado: 93 pedidos, cobertura
+completa) + E4 (enlace con Dropea por tag) + E5 (reconciliación cada 6 h) +
+elegibilidad central (`src/lib/orders/eligibility.ts`) + **E7** (orquestador
+de llamadas Retell, desplegado y **apagado**: kill switch OFF, shadow ON) +
+la cadencia de reintentos de llamadas anclada a días de calendario (PR #5,
+mergeado). Contenedor *healthy*, WhatsApp reconectó sin QR. Detalle completo
+del despliegue y del diagnóstico posterior en `docs/CONTEXTO-2026-08-24.md`;
+snapshot vivo del estado en `docs/ESTADO-PRODUCCION.md`.
 
-**Integrado en `main` (24-08-2026, esquema 5, 260 tests):** E1 + E2 + E3 +
-fix de alertas + E5 (reconciliación cada 6 h) + elegibilidad central
-(`src/lib/orders/eligibility.ts` — TODO consumidor pregunta ahí) + **E7**
-(orquestador de llamadas Retell: `src/lib/calls/`, kill switch OFF y shadow
-ON por defecto; ver `docs/RUNBOOK-LLAMADAS.md`). El backfill verifica el
-scope `read_all_orders` y reporta `coverage`; `npm run shopify:webhooks`
-audita/crea las suscripciones. `closure_source` admite `llamada_ia` (nunca
-pisa terminales de Shopify/Dropea).
+**Hallazgo del mismo despliegue, sin resolver:** Dropea está procesando 21
+pedidos y avisando de cada cambio de estado, pero solo 3 están enlazados
+localmente — 18 huérfanos, porque el enlace por tag (E4) no cubre pedidos sin
+`dropea_id`. Consecuencia: el eje de cierre todavía no tiene ni una entrega
+ni un rehúse reales de Dropea. Ver `docs/CONTEXTO-2026-08-24.md` §4.
 
-**E4 integrado (24-08-2026, sin cambio de esquema, 278 tests):** enlace con
-Dropea leyendo el tag `dropea_id:NNNNNNN` de Shopify, sin llamar a su API.
-Parser y escritura en `src/lib/orders/supplier-tags.ts` — vive en `orders/` y
-no en `suppliers/` porque lo consumen el backfill y la reconciliación, a los
-que un test les prohíbe importar `suppliers/*`. Entra por tres canales:
-`orders/updated` (tiempo real), reconciliación (≤6 h) y backfill (histórico,
-con su desglose en el dry-run). Nunca pisa un id externo ya guardado; tag
-ambiguo, roto o ya usado por otro pedido → `integration_event` y cero
-escritura. **Efecto derivado, cerrado en el mismo cambio:** un pedido
-`ignored_old` enlazado entraría en el polling de tracking, así que
-`notifyTrackingEvent` ahora corta cualquier aviso a `ignored_old` (el estado
-de envío sí se guarda; lo que no sale es el WhatsApp).
+**Siguiente: E8 — reconciliador de Dropea por API.** Traer pedidos por su
+API (la lectura ya funciona), emparejar con los locales por la clave que
+traiga su payload (número de pedido de Shopify, referencia externa o
+teléfono — *averiguar primero cuál*), escribir `supplier_external_order_id`
+solo donde no exista ya. `--dry-run` por defecto. Especificación completa en
+`docs/CONTEXTO-2026-08-24.md` §5.
 
-**Pendiente (solo despliegue, no código):** pasos de rollout en
-`docs/ESTADO-PRODUCCION.md` § 9 — pull en el NAS, `--ensure` de webhooks,
-backfill con verificación real de scopes, shadow de llamadas.
-
-**Siguiente:** sin épica asignada. Candidatos por orden del plan de cierre:
-Fase B (WhatsApp Cloud API) y el job que refresque `supplier_product_mapping`
-leyendo el metafield `dropea.product_id`.
+**TEST_MODE sigue ON** (decisión de Pedro): mientras dure, `needs_call` y la
+tasa de respuesta no miden nada real — los pedidos de clientes reales se
+ignoran, no es que no respondan.
 
 ---
 

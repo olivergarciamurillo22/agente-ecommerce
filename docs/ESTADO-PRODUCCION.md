@@ -2,7 +2,9 @@
 
 Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo está configurado y qué se ha medido sobre datos reales. Se actualiza en cada sesión de operación.
 
-**Última actualización: 24-08-2026** (cierre de fase: ciclo de vida Shopify + orquestador de llamadas + E4 enlace Dropea por tag — pendiente de desplegar en el NAS, ver § 9).
+Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
+
+**Última actualización: 24-08-2026** (desplegado en el NAS esa misma noche — ver `docs/CONTEXTO-2026-08-24.md` para el detalle completo del despliegue y el diagnóstico posterior).
 
 ---
 
@@ -10,13 +12,16 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 | | |
 |---|---|
-| Commit desplegado | **`a2e4e83`** (rama `main`, Fase A integrada) |
-| Esquema SQLite | `user_version = 3` |
+| Commit desplegado | **`635d169`** (rama `main`) |
+| Esquema SQLite | `user_version = 5` |
 | Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
 | NAS | UGREEN DXP2800, `192.168.2.109`, UGOS 1.18.1.0098 |
 | Acceso público | `https://agente.casamable.es` (VPS Hetzner → Caddy → WireGuard → NAS:3000) |
 | WhatsApp | Baileys, `+34 641 308 254`, reconecta sin QR |
-| Modo | `TEST_MODE=1` con allowlist de 2 teléfonos — **pero se autorizan pedidos reales a mano** (`pilot_authorized=1`), así que el sistema **sí está sirviendo a clientes reales** |
+| Modo | `TEST_MODE=1` a propósito (decisión de Pedro, hasta que el sistema esté funcional) — solo escribe a la allowlist de 2 teléfonos; los pedidos de clientes reales se ignoran. **Mientras siga así, `needs_call` no mide nada real.** |
+| Llamadas (E7) | Desplegado y **APAGADO**: `ai_calls_enabled=0`, `calls_shadow_mode=1` por defecto. Ver `docs/RUNBOOK-LLAMADAS.md`. |
+
+Tareas desplegadas esta sesión: **E1** (eje de cierre) · **E2** (webhooks `orders/cancelled`/`fulfilled`/`updated`) · **E3** (backfill del histórico) · **E4** (enlace con Dropea por tag) · **E5** (reconciliación periódica) · **E7** (orquestador de llamadas Retell, apagado) · PR #5 (cadencia de reintentos de llamadas anclada a días de calendario).
 
 ---
 
@@ -24,18 +29,25 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 ### Shopify
 - Tienda `qmbr1z-vf.myshopify.com` (alias antiguo `pedroshop-9968.myshopify.com`, **misma tienda**).
-- Webhook activo: **solo `orders/create`** — `https://agente.casamable.es/api/webhooks/shopify/orders-create`.
-- Escrituras habilitadas (tag `WA_CONFIRMED`).
-- ⚠️ **No hay webhooks de cancelación ni de fulfillment.** Es la causa del problema descrito en § 4.
+- **4 webhooks, todos en propiedad de la app** (migrados el 24-08; antes eran 2 manuales, uno apuntando a un túnel de Cloudflare muerto):
 
-### Dropea — conectada de punta a punta (23-08-2026)
+  | Topic | Endpoint |
+  |---|---|
+  | `orders/create` | `/api/webhooks/shopify/orders-create` |
+  | `orders/cancelled` | `/api/webhooks/shopify/orders-events` |
+  | `orders/fulfilled` | `/api/webhooks/shopify/orders-events` |
+  | `orders/updated` | `/api/webhooks/shopify/orders-events` |
+
+- Escrituras habilitadas (tag `WA_CONFIRMED`).
+- Scope **`read_all_orders`** concedido (24-08): el backfill corre con cobertura completa del histórico, no solo los últimos 60 días.
+
+### Dropea — conectada de punta a punta, pero con un hueco medido (24-08-2026)
 - API key `casamable-nas` con **permisos mínimos**: `issues:read`, `orders:read`, `products:read`, `stores:read`, `users:read`, `webhooks:read`, `webhooks:write`.
   **Deliberadamente SIN `orders:create` / `confirm` / `cancel` / `update`**: es la red de seguridad contra duplicados a nivel de credencial, no solo de código.
 - `store_id = 18307`, cuenta `45468`, mercado `es`, base `https://es.public-api.dropea.com`.
 - Flags: `DROPEA_API_ENABLED=1` (lectura), `DROPEA_WRITE_ENABLED=0`, `DROPEA_CREATE_MODE=external_app`, `DROPEA_LEGACY_CREATE_ACTIVE=1`.
-- **6 webhooks suscritos y activos** — `https://agente.casamable.es/api/webhooks/dropea`
-  (`order.created`, `order.status.changed`, `order.cancelled`, `issue.created`, `issue.status.changed`, `issue.resolved`).
-- `DROPEA_WEBHOOK_SECRET` configurado. Verificado: petición sin firma → **401**, no 503.
+- **6 webhooks suscritos y activos**, firma verificándose correctamente (cero rechazos desde que se puso el secreto).
+- ⚠️ **Pero solo 3 de 21 pedidos con actividad de Dropea están enlazados localmente — 18 huérfanos.** No es un problema de firma ni de pedidos perdidos: Dropea sí los procesa, la base local no sabe emparejarlos. Consecuencia: el eje de cierre no tiene ni una entrega ni un rehúse reales todavía. Detalle completo y la tarea derivada (**E8**, reconciliador por API) en `docs/CONTEXTO-2026-08-24.md` §4-5.
 
 ### Mapping de producto
 Una fila en `supplier_product_mapping`:
@@ -44,58 +56,49 @@ Una fila en `supplier_product_mapping`:
 |---|---|
 | SKU `10428` · product `15964094660938` · variant `62950185173322` | `variant_id = 15896` · 7,70 € |
 
-El SKU coincide en ambos sistemas, pero **el emparejado automático no lo encontraba**: el script recorre 10 páginas (500 productos) y el catálogo de Dropea tiene **4.142**. El producto estaba en la página 46. *Mejora pendiente: paginar hasta el final o filtrar por SKU en la consulta.*
+El emparejado automático no lo encontraba: el script recorre 10 páginas (500 productos) y el catálogo de Dropea tiene 4.142; el producto estaba en la página 46. *Mejora pendiente: paginar hasta el final o filtrar por SKU en la consulta.*
 
 Nota: el metafield `dropea.product_id` de Shopify (`a3f618c76fb450ce890e7189`) **no es** el `variant_id` de Dropea. No sirve para mapear.
 
 ### Dropi PRO — congelado
-Su app de Shopify está **rota** (`Application Error` en "Sincronizar pedidos pendientes" e "Importar productos"). Su sincronización automática se ha **desactivado** para evitar que, al arreglarla, despache de golpe la cola acumulada.
+Su app de Shopify está **rota** (`Application Error` en "Sincronizar pedidos pendientes" e "Importar productos"), y su API sigue sin documentar. Su sincronización automática se ha **desactivado** para evitar que, al arreglarla, despache de golpe la cola acumulada.
 
-Decisión estratégica: **Dropi y Dropea son proveedores de transición**. El destino es fulfillment propio (Beeping → Lopi). No se invierte más esfuerzo en la API de Dropi.
+Decisión estratégica: **Dropi y Dropea son proveedores de transición**. El destino es fulfillment propio (Beeping → Lopi). No se invierte más esfuerzo en su API — salvo que entren 300 unidades nuevas con alta manual, lo que hace urgente conseguir su documentación (pendiente de soporte).
 
 ---
 
-## 3 · Enrutado real (Fase A1, funcionando)
+## 3 · Enrutado real (funcionando)
 
-La regla ya no es por palabras clave sino por `supplier_product_mapping`:
+La regla es por `supplier_product_mapping`, nunca por palabras clave:
 
 ```
 [SUPPLIER] #1067 routing → dropea | blocked_address: localidad vacía o inválida
 ```
 
-Doble validación operativa: primero identifica proveedor, después frena si la dirección no es válida. Los pedidos antiguos (anteriores a que Releasit capturara "Localidad") se bloquean correctamente; los nuevos llegan con ciudad real (`Almería`, `Mérida`, `Mutxamel`) y pasan.
+Doble validación operativa: primero identifica proveedor, después frena si la dirección no es válida. Los pedidos antiguos (anteriores a que Releasit capturara "Localidad") se bloquean correctamente; los nuevos llegan con ciudad real y pasan. **3 pedidos siguen bloqueados por ciudad `"-"` hoy** — pendiente comprobar si son anteriores al arreglo del formulario o si ha vuelto a fallar (ver `docs/CONTEXTO-2026-08-24.md` §6).
 
 ---
 
-## 4 · ⚠️ Hallazgo crítico: la base local no refleja la realidad
+## 4 · El eje de cierre — E1 a E5, desplegado y con datos reales
 
-**Medido el 23-08-2026 contra la API de Shopify.**
+**El problema original (medido el 23-08-2026) ya está resuelto por el código:** el agente solo escuchaba `orders/create` y quedaba ciego después — el panel decía 10 "pendientes de llamada" cuando la realidad eran 4 anulados, 5 en curso y 1 de verdad pendiente. E1 (eje `closure_status`/`closure_source`/`closure_at`, independiente de la máquina de confirmación) + E2 (webhooks de cierre) + E3 (backfill) + E5 (reconciliación periódica) cierran ese hueco estructuralmente.
 
-El panel muestra **10 pedidos "pendientes de llamada"** (`needs_call`). Estado real de esos mismos 10 en Shopify:
+**Backfill aplicado el 24-08 con cobertura completa** (`read_all_orders` verificado): de 93 pedidos, 6 pasaron a `cancelled`, 0 a `in_progress`, 87 sin cambios (69 sin señal de cierre todavía, 18 ya tenían fuente propia de un webhook). Detalle en `docs/CONTEXTO-2026-08-24.md` §3.
 
-| Estado real | Cuántos |
-|---|---|
-| Anulados | **4** |
-| En curso de fulfillment | **5** |
-| Realmente pendientes | **1** |
+**Pero el dato de entrega real sigue en cero** — no por el eje de cierre, sino por el hueco de enlace con Dropea descrito en §2. Hasta que **E8** cierre eso, ni la tasa de entrega ni el coste real por pedido tienen datos fiables.
 
-**Causa:** el agente solo escucha `orders/create`. Se entera de que un pedido nace y después queda ciego — no sabe si se anuló, se preparó o salió a envío.
-
-**Consecuencias medidas:**
-- El agente conoce **20 pedidos**; la tienda tiene **84**.
-- La tasa de respuesta calculada era **41%** (7 de 17). Excluyendo anulados es **54%** — un 30% mejor.
-- Cuando la tasa de entrega tenga datos, estará contaminada por la misma causa.
-
-**Principio de diseño afectado:** un panel que dice 10 cuando la realidad es 1 enseña a ignorarlo, y entonces tampoco se cree el día que dice algo verdadero. Es el mismo criterio de "alertas limpias" aplicado a los datos.
+Dos huecos adicionales medidos el 24-08, sin explicar todavía:
+- **~14 cancelaciones que el backfill no recoge** (hay ~20 anulados en Shopify, solo 6 transicionaron): están detrás de los 24 "ya tenía fuente propia" — no se sabe qué escribió esa fuente.
+- **`in_progress` en cero** pese a haber pedidos "En curso"/con seguimiento añadido en Shopify (`#35010824`, `#35010814`) — verificar si la detección de fulfillment coge el caso real.
 
 ---
 
-## 5 · Métricas reales medidas (23-08-2026)
+## 5 · Métricas reales medidas (23-08-2026, antes del despliegue de E1-E5)
 
 | Métrica | Valor | Fiabilidad |
 |---|---|---|
-| Tasa de respuesta al WhatsApp | **54%** (excluyendo anulados) | Muestra de 13. Orientativa |
-| Tasa de entrega | Sin datos | El histórico `order_status_history` se creó hoy. Fiable en ~1 semana |
+| Tasa de respuesta al WhatsApp | **54%** (excluyendo anulados) | Muestra de 13. Orientativa, y contaminada por `TEST_MODE` (ver §1) |
+| Tasa de entrega | Sin datos fiables | Bloqueada por el hueco de enlace con Dropea (§2, §4) |
 | Coste producto (Cortaúñas) | 7,70 € + 1,00 € fulfillment | Confirmado en ficha de Dropea |
 | Coste de un rehusado en Dropea | 1,00 € de fulfillment + envío | Confirmado |
 
@@ -105,83 +108,35 @@ Contexto de negocio (contabilidad real de agosto, 2 días): margen **6,24%**, RO
 
 ## 6 · Lo que viene
 
-**Objetivo: que la base local sea un espejo del histórico de Shopify**, no solo de lo creado desde el despliegue. Sin eso, ni las métricas son fiables ni el futuro agente de llamadas puede funcionar (llamaría a clientes cuyo pedido ya está anulado o en camino).
+**Prioridad 1 — E8: reconciliador de Dropea por API.** El enlace por tag (E4) no sirve para el 97% de los pedidos (no llevan `dropea_id`). Sin esto, el eje de cierre nunca tendrá entregas/rehúses reales de Dropea. Especificación completa en `docs/CONTEXTO-2026-08-24.md` §5.
 
-1. **Estados de cierre** — `cancelled` y `fulfilled`; salen de todas las colas operativas y no cuentan en las métricas.
-2. **Webhooks de Shopify** — `orders/cancelled`, `orders/fulfilled`, `orders/updated`.
-3. **Backfill del histórico** — `npm run shopify:backfill`, con el mismo normalizador que el webhook, idempotente por `shopify_order_id`, `--dry-run` por defecto.
-   ⚠️ **Salvaguarda innegociable: no puede enviar ni un WhatsApp.** Importar 84 pedidos como `awaiting_reply` dispararía 84 mensajes a clientes reales.
-4. **Enlace con Dropea vía tag** — ✓ hecho (E4). Los pedidos creados por su app llevan `dropea_id:NNNNNNN` en los tags de Shopify (verificado: `#35010814` → `dropea_id:1366919`). La correspondencia pedido↔proveedor **ya está escrita**; se lee para rellenar `supplier_external_order_id` sin llamar a su API.
-5. **Reconciliación periódica** — job que sincroniza con Shopify los pedidos abiertos. Cubre webhooks perdidos: el sistema estuvo caído durante los despliegues.
+**Resto abierto** (detalle y contexto en `docs/CONTEXTO-2026-08-24.md` §6):
+1. ~13 pedidos anulados de 0,00 € con clientes reales — comprobar si son duplicados de Releasit o ventas perdidas.
+2. 3 pedidos bloqueados por ciudad `"-"`.
+3. ~14 cancelaciones que el backfill no recoge (§4 arriba).
+4. `in_progress` en cero pese a fulfillments reales (§4 arriba).
+5. Lista de pedidos del panel sin ordenar por fecha de llegada.
+6. `.env.example` desactualizado: `CALL_RETRY_DELAYS_MINUTES` → `CALL_FIRST_RETRY_MINUTES` (PR #5).
 
-Después de eso: agente de llamadas (cubre el ~46% que no responde al WhatsApp), API oficial de WhatsApp, y Beeping cuando el ROAS se estabilice.
+**Bloqueado por terceros:**
+- Número de Twilio en revisión regulatoria — sin él, E7 no puede hacer ninguna llamada real aunque se active.
+- Dropi PRO: app rota + API sin documentar, soporte pendiente de responder.
+
+Después de E8: desactivar `TEST_MODE`, activar E7 (shadow → allowlist → real), API oficial de WhatsApp, y Beeping cuando el ROAS se estabilice.
 
 ---
 
 ## 7 · Lo que no se toca
 
-`DROPEA_CREATE_MODE=external_app` · `DROPEA_WRITE_ENABLED=0` · `DROPIPRO_WEBHOOK_ENABLED=0` · `LEGACY_SUPPLIER_INTEGRATIONS_DISABLED=0` · defaults fail-closed · safety gates en toda ruta nueva.
+`DROPEA_CREATE_MODE=external_app` · `DROPEA_WRITE_ENABLED=0` · `DROPIPRO_WEBHOOK_ENABLED=0` · `LEGACY_SUPPLIER_INTEGRATIONS_DISABLED=0` · defaults fail-closed · safety gates en toda ruta nueva · `ai_calls_enabled=0` hasta el estreno controlado de E7.
 
 Y la API key de Dropea **sin permisos de escritura**, que es la capa que protege aunque el software falle.
 
 ---
 
-## 9 · Preparado para desplegar (24-08-2026, aún NO en el NAS)
-
-En `main` tras el merge de la fase final (esquema **5**, 260 tests):
-
-- **E1** eje de cierre (`closure_status/source/at`; terminales imborrables).
-- **E2** webhooks `orders/cancelled` / `orders/fulfilled` / `orders/updated`
-  en `/api/webhooks/shopify/orders-events` (HMAC + dedupe por webhook-id +
-  protección fuera de orden). `fulfilled` → `in_progress`, jamás `delivered`.
-- **E3** backfill del histórico con verificación de scopes: sin
-  `read_all_orders` verificado, el informe dice `last_60_days_only` /
-  `unverified` y NUNCA afirma histórico completo.
-- **E5** reconciliación cada 6 h (repara webhooks perdidos; creates
-  perdidos → `ignored_old` + aviso; conflictos → evento, sin pisar).
-- **Elegibilidad central** (`isConfirmationEligible`): scheduler, panel,
-  alertas y llamadas comparten la misma verdad — el hallazgo 4/5/1 queda
-  estructuralmente impedido.
-- **E7** orquestador de llamadas Retell: kill switch OFF y shadow ON por
-  defecto → desplegar NO llama a nadie. Ver `docs/RUNBOOK-LLAMADAS.md`.
-- **E4** enlace con Dropea leyendo el tag `dropea_id:NNNNNNN` de Shopify, sin
-  tocar su API. Rellena `supplier_external_order_id` (+ `supplier_platform`)
-  **solo si está vacío** — nunca pisa un id ya guardado. Tres canales:
-  `orders/updated` en tiempo real (único campo del espejo acordado),
-  reconciliación cada 6 h y el backfill del histórico. Tag ambiguo, con
-  formato roto o ya usado por otro pedido → `integration_event` de aviso y
-  cero escritura: si su app cambiara el formato del tag, se ve, no falla en
-  silencio.
-- **Gate nuevo derivado de E4:** un pedido `ignored_old` (historial) puede
-  quedar enlazado y, por tanto, entrar en el polling de tracking. Para que
-  eso no se convierta en un WhatsApp a un cliente de hace dos meses,
-  `notifyTrackingEvent` corta **todo** aviso a pedidos `ignored_old`. El
-  estado de envío sí se guarda; lo que no sale es el mensaje.
-- `npm run shopify:webhooks` para auditar/crear las 4 suscripciones.
-
-**Orden de despliegue seguro** (fuera de 10:00–21:00):
-1. `git pull --ff-only origin main && docker compose build && docker compose up -d`
-   (migración v5 aditiva; backup previo con el procedimiento habitual).
-2. Panel → Sistema: esquema 5, tarjetas sanas, WhatsApp reconecta sin QR.
-3. `npm run shopify:webhooks -- --ensure` (alta de los 3 topics nuevos).
-4. `npm run shopify:backfill` (dry-run) → revisar cobertura de scopes y **los
-   dos desgloses**: el del eje de cierre y el de "Enlace con Dropea (E4)".
-   Cuadrar a mano contra Shopify → `-- --apply`.
-   El desglose de E4 tiene que verse razonable: "sin tag dropea_id" alto es
-   lo normal (esos pedidos son de Dropi PRO); "tag ambiguo o roto" > 0 es una
-   señal de que hay que mirar `integration_events` ANTES de aplicar.
-5. Comparar panel: `needs_call` debe quedarse solo con candidatos reales
-   (hallazgo esperado: 4 cancelados y 5 en fulfillment fuera; ~1 real). En la
-   ficha de un pedido de Dropea debe aparecer ya su id externo.
-6. E7 en shadow unos días → validar candidatos → allowlist → llamadas.
-
-**Verificación pendiente que SOLO puede hacerse con el token del NAS:**
-el scope `read_all_orders` (paso 4 lo enseña). Sin él, pedir el scope en la
-app de Shopify antes de dar el histórico por completo.
-
 ## 8 · Deuda técnica anotada
 
 - `scripts/dropea-doctor.ts` línea 115 lee las suscripciones en `hooks.items`, pero la API las devuelve en **`data.webhooks`**. Resultado: dice "(ninguno suscrito)" con 6 activas. Solo diagnóstico.
 - `dropea:mapping:inspect` recorre 10 páginas de 500 productos sobre un catálogo de 4.142.
-- La alerta `tracking_notify_failures` cuenta bloqueos deliberados de `TEST_MODE` como fallos (PR `fix/alertas-notificacion` en marcha).
 - El WAL de SQLite no se compacta al reiniciar (comportamiento normal; umbral ya bajado a 2 MB).
+- Las franjas horarias de llamadas (`CALL_WINDOWS`) están hardcodeadas; deberían acabar en `settings` como el resto de ajustes de llamadas, para poder probar franjas distintas sin desplegar (anotado en la revisión del PR #5).
