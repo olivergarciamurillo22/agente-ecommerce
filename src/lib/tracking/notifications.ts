@@ -9,6 +9,13 @@
 //  - NUNCA se llama a Baileys desde aquí: todo va por el outbox, que ya
 //    tiene reintentos y revalida los safety gates antes de entregar.
 //  - Las incidencias NO generan mensaje automático: van a revisión humana.
+//  - Un pedido en `ignored_old` NUNCA recibe un aviso. Ese estado significa
+//    literalmente "historial, no actuar jamás": lo usan el backfill (E3), la
+//    reconciliación (E5) y el guardia de antigüedad. Desde E4 el histórico
+//    puede quedar ENLAZADO a Dropea (y por tanto entrar en el polling de
+//    tracking), así que este gate es lo que impide que un pedido de hace dos
+//    meses le escriba a su cliente. El estado de envío sí se guarda: lo que
+//    se corta es el mensaje, no la trazabilidad.
 // ============================================================
 
 import pino from "pino";
@@ -166,6 +173,22 @@ function aRevision(order: OrderRow, motivo: string): void {
  * transición a la vez, únicamente uno manda el WhatsApp.
  */
 export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): boolean {
+  // Historial: jamás se le escribe a nadie. Va lo PRIMERO, delante de
+  // cualquier otro gate, para que ningún camino nuevo lo esquive.
+  if (order.status === "ignored_old") {
+    logger.info(
+      `[TRACKING] #${order.shopify_order_number} ${event}: pedido ignored_old (historial), sin aviso al cliente`
+    );
+    logIntegrationEvent(
+      "tracking",
+      "notification_skipped_by_gate",
+      "info",
+      `aviso ${event} omitido: el pedido está en ignored_old (historial, nunca accionable)`,
+      order.shopify_order_number
+    );
+    return false;
+  }
+
   // Las incidencias y devoluciones no avisan al cliente: revisión humana.
   if (event === "INCIDENT" || event === "RETURNED") {
     logger.info(

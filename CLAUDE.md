@@ -90,9 +90,17 @@ Cualquier endpoint que reciba webhooks **debe** implementar las tres, cada una c
 |---|---|
 | `orders/cancelled` | `closure_status = cancelled`, `source = shopify` |
 | `orders/fulfilled` | `closure_status = in_progress`, `source = shopify` |
-| `orders/updated` | **cero escritura en `orders`** — solo un `integration_event` informativo |
+| `orders/updated` | **no toca el eje de cierre**; único espejo permitido: el de E4 (abajo) |
 
-`orders/updated` es el webhook más ruidoso de Shopify (salta con cualquier cambio de tag, nota o dirección). Hoy no existe ningún campo de espejo que refrescar, así que **no escribe**. Cuando se defina un espejo, será con una **lista explícita y acordada de campos** — no "sincronizar lo que parezca".
+`orders/updated` es el webhook más ruidoso de Shopify (salta con cualquier cambio de tag, nota o dirección), así que su espejo es una **lista explícita y acordada de campos**, nunca "sincronizar lo que parezca".
+
+**Lista acordada del espejo (24-08-2026) — un solo campo:**
+
+| Campo | Origen | Condición |
+|---|---|---|
+| `supplier_external_order_id` | tag `dropea_id:NNNNNNN` | solo si está `NULL` |
+
+Es un **latch de un solo sentido**: el `UPDATE` lleva `WHERE supplier_external_order_id IS NULL`, así que el ruido de `orders/updated` no puede corromper nada y **no hace falta la protección de orden cronológico** en este campo (el primero que traiga el tag gana; los demás no pueden cambiarlo). Ampliar esta lista es una decisión aparte, no el efecto colateral de un refactor.
 
 ---
 
@@ -160,11 +168,26 @@ scope `read_all_orders` y reporta `coverage`; `npm run shopify:webhooks`
 audita/crea las suscripciones. `closure_source` admite `llamada_ia` (nunca
 pisa terminales de Shopify/Dropea).
 
+**E4 integrado (24-08-2026, sin cambio de esquema, 278 tests):** enlace con
+Dropea leyendo el tag `dropea_id:NNNNNNN` de Shopify, sin llamar a su API.
+Parser y escritura en `src/lib/orders/supplier-tags.ts` — vive en `orders/` y
+no en `suppliers/` porque lo consumen el backfill y la reconciliación, a los
+que un test les prohíbe importar `suppliers/*`. Entra por tres canales:
+`orders/updated` (tiempo real), reconciliación (≤6 h) y backfill (histórico,
+con su desglose en el dry-run). Nunca pisa un id externo ya guardado; tag
+ambiguo, roto o ya usado por otro pedido → `integration_event` y cero
+escritura. **Efecto derivado, cerrado en el mismo cambio:** un pedido
+`ignored_old` enlazado entraría en el polling de tracking, así que
+`notifyTrackingEvent` ahora corta cualquier aviso a `ignored_old` (el estado
+de envío sí se guarda; lo que no sale es el WhatsApp).
+
 **Pendiente (solo despliegue, no código):** pasos de rollout en
 `docs/ESTADO-PRODUCCION.md` § 9 — pull en el NAS, `--ensure` de webhooks,
 backfill con verificación real de scopes, shadow de llamadas.
 
-**Siguiente:** E4 (enlace Dropea vía tag `dropea_id:NNNNNNN`).
+**Siguiente:** sin épica asignada. Candidatos por orden del plan de cierre:
+Fase B (WhatsApp Cloud API) y el job que refresque `supplier_product_mapping`
+leyendo el metafield `dropea.product_id`.
 
 ---
 

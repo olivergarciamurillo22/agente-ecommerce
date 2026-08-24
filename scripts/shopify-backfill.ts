@@ -1,5 +1,6 @@
 // ============================================================
-// Backfill del histórico de Shopify → eje de cierre local (E3).
+// Backfill del histórico de Shopify → eje de cierre local (E3) y enlace con
+// Dropea por el tag `dropea_id:NNNNNNN` (E4).
 //
 //   npm run shopify:backfill                    # dry-run (no escribe nada)
 //   npm run shopify:backfill -- --apply         # escribe de verdad
@@ -59,6 +60,18 @@ async function main(): Promise<void> {
   console.log(`    · no es COD            : ${report.counts.skip_not_cod}`);
   console.log(`    · sin señal de cierre  : ${report.counts.skip_no_signal}`);
   console.log(`    · ya tenía fuente propia (webhook) : ${report.counts.skip_has_own_source}`);
+  console.log("\n──────── Enlace con Dropea (E4, eje independiente) ────────");
+  console.log(`  ${apply ? "enlazados" : "se enlazarían"} por tag dropea_id : ${apply ? report.dropeaLinked : report.dropeaLink.link}`);
+  if (apply && report.dropeaLinked !== report.dropeaLink.link) {
+    console.log(`    ⚠️  planificados ${report.dropeaLink.link} pero escritos ${report.dropeaLinked}:`);
+    console.log("        el id ya era de otro pedido o alguien enlazó antes. Mira integration_events.");
+  }
+  console.log(`  sin enlace              : ${report.dropeaLink.already_linked + report.dropeaLink.no_tag + report.dropeaLink.tag_unusable + report.dropeaLink.no_local_order + report.dropeaLink.not_cod}`);
+  console.log(`    · ya estaba enlazado    : ${report.dropeaLink.already_linked}`);
+  console.log(`    · sin tag dropea_id     : ${report.dropeaLink.no_tag}   (lo normal: son de Dropi PRO)`);
+  console.log(`    · tag ambiguo o roto    : ${report.dropeaLink.tag_unusable}${report.dropeaLink.tag_unusable > 0 ? "   ⚠️  revisa integration_events" : ""}`);
+  console.log(`    · no existe en local    : ${report.dropeaLink.no_local_order}`);
+  console.log(`    · no es COD             : ${report.dropeaLink.not_cod}`);
   console.log("\n──────── Cobertura ────────");
   if (report.coverage === "full") {
     console.log("  ✓ Scope read_all_orders verificado: la API enseña TODO el histórico.");

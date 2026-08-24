@@ -2,7 +2,7 @@
 
 Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo está configurado y qué se ha medido sobre datos reales. Se actualiza en cada sesión de operación.
 
-**Última actualización: 24-08-2026** (cierre de fase: ciclo de vida Shopify + orquestador de llamadas — pendiente de desplegar en el NAS, ver § 9).
+**Última actualización: 24-08-2026** (cierre de fase: ciclo de vida Shopify + orquestador de llamadas + E4 enlace Dropea por tag — pendiente de desplegar en el NAS, ver § 9).
 
 ---
 
@@ -111,7 +111,7 @@ Contexto de negocio (contabilidad real de agosto, 2 días): margen **6,24%**, RO
 2. **Webhooks de Shopify** — `orders/cancelled`, `orders/fulfilled`, `orders/updated`.
 3. **Backfill del histórico** — `npm run shopify:backfill`, con el mismo normalizador que el webhook, idempotente por `shopify_order_id`, `--dry-run` por defecto.
    ⚠️ **Salvaguarda innegociable: no puede enviar ni un WhatsApp.** Importar 84 pedidos como `awaiting_reply` dispararía 84 mensajes a clientes reales.
-4. **Enlace con Dropea vía tag** — los pedidos creados por su app llevan `dropea_id:NNNNNNN` en los tags de Shopify (verificado: `#35010814` → `dropea_id:1366919`). La correspondencia pedido↔proveedor **ya está escrita**; basta leerla para rellenar `supplier_external_order_id` sin llamar a su API.
+4. **Enlace con Dropea vía tag** — ✓ hecho (E4). Los pedidos creados por su app llevan `dropea_id:NNNNNNN` en los tags de Shopify (verificado: `#35010814` → `dropea_id:1366919`). La correspondencia pedido↔proveedor **ya está escrita**; se lee para rellenar `supplier_external_order_id` sin llamar a su API.
 5. **Reconciliación periódica** — job que sincroniza con Shopify los pedidos abiertos. Cubre webhooks perdidos: el sistema estuvo caído durante los despliegues.
 
 Después de eso: agente de llamadas (cubre el ~46% que no responde al WhatsApp), API oficial de WhatsApp, y Beeping cuando el ROAS se estabilice.
@@ -144,6 +144,19 @@ En `main` tras el merge de la fase final (esquema **5**, 260 tests):
   estructuralmente impedido.
 - **E7** orquestador de llamadas Retell: kill switch OFF y shadow ON por
   defecto → desplegar NO llama a nadie. Ver `docs/RUNBOOK-LLAMADAS.md`.
+- **E4** enlace con Dropea leyendo el tag `dropea_id:NNNNNNN` de Shopify, sin
+  tocar su API. Rellena `supplier_external_order_id` (+ `supplier_platform`)
+  **solo si está vacío** — nunca pisa un id ya guardado. Tres canales:
+  `orders/updated` en tiempo real (único campo del espejo acordado),
+  reconciliación cada 6 h y el backfill del histórico. Tag ambiguo, con
+  formato roto o ya usado por otro pedido → `integration_event` de aviso y
+  cero escritura: si su app cambiara el formato del tag, se ve, no falla en
+  silencio.
+- **Gate nuevo derivado de E4:** un pedido `ignored_old` (historial) puede
+  quedar enlazado y, por tanto, entrar en el polling de tracking. Para que
+  eso no se convierta en un WhatsApp a un cliente de hace dos meses,
+  `notifyTrackingEvent` corta **todo** aviso a pedidos `ignored_old`. El
+  estado de envío sí se guarda; lo que no sale es el mensaje.
 - `npm run shopify:webhooks` para auditar/crear las 4 suscripciones.
 
 **Orden de despliegue seguro** (fuera de 10:00–21:00):
@@ -151,10 +164,15 @@ En `main` tras el merge de la fase final (esquema **5**, 260 tests):
    (migración v5 aditiva; backup previo con el procedimiento habitual).
 2. Panel → Sistema: esquema 5, tarjetas sanas, WhatsApp reconecta sin QR.
 3. `npm run shopify:webhooks -- --ensure` (alta de los 3 topics nuevos).
-4. `npm run shopify:backfill` (dry-run) → revisar cobertura de scopes y el
-   desglose → `-- --apply`.
+4. `npm run shopify:backfill` (dry-run) → revisar cobertura de scopes y **los
+   dos desgloses**: el del eje de cierre y el de "Enlace con Dropea (E4)".
+   Cuadrar a mano contra Shopify → `-- --apply`.
+   El desglose de E4 tiene que verse razonable: "sin tag dropea_id" alto es
+   lo normal (esos pedidos son de Dropi PRO); "tag ambiguo o roto" > 0 es una
+   señal de que hay que mirar `integration_events` ANTES de aplicar.
 5. Comparar panel: `needs_call` debe quedarse solo con candidatos reales
-   (hallazgo esperado: 4 cancelados y 5 en fulfillment fuera; ~1 real).
+   (hallazgo esperado: 4 cancelados y 5 en fulfillment fuera; ~1 real). En la
+   ficha de un pedido de Dropea debe aparecer ya su id externo.
 6. E7 en shadow unos días → validar candidatos → allowlist → llamadas.
 
 **Verificación pendiente que SOLO puede hacerse con el token del NAS:**

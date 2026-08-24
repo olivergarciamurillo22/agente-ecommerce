@@ -33,6 +33,12 @@
 //  5. `fulfilled` en Shopify → closure_status 'in_progress', NUNCA
 //     'delivered' (misma decisión que E2: la entrega real solo la sabe el
 //     proveedor).
+//  6. (E4) De paso, el mismo recorrido enlaza con Dropea leyendo el tag
+//     `dropea_id:NNNNNNN` que su app deja en el pedido de Shopify. Es un
+//     eje INDEPENDIENTE del de cierre: se decide y se cuenta aparte, y el
+//     dry-run lo desglosa igual que las transiciones. Solo se considera el
+//     mismo universo que el resto del backfill (pedidos COD), y solo se
+//     escribe si `supplier_external_order_id` está vacío.
 // ============================================================
 
 import pino from "pino";
@@ -46,6 +52,10 @@ import {
   type OrderRow,
 } from "../db";
 import { isCodOrder, normalizeOrder, type ShopifyOrderPayload } from "../orders/normalize";
+import {
+  extractDropeaIdFromPayload,
+  linkDropeaFromShopifyTags,
+} from "../orders/supplier-tags";
 import { getAdminAccessToken, shopifyAdminConfigured } from "./admin";
 import { logIntegrationEvent } from "../system/repo";
 
@@ -279,6 +289,40 @@ export function decideBackfillAction(existing: OrderRow | null, order: ShopifyBa
   return { kind: signal.status === "cancelled" ? "insert_cancelled" : "insert_in_progress", signal };
 }
 
+// --- E4 · Eje independiente: enlace con Dropea por tag ---
+
+export type DropeaLinkPlan =
+  /** Se enlazaría ahora: hay tag válido y el pedido queda sin id externo. */
+  | "link"
+  /** Ya tenía id externo: no se pisa jamás. */
+  | "already_linked"
+  /** El pedido no lleva ningún `dropea_id:` (lo normal en los de Dropi). */
+  | "no_tag"
+  /** Lleva tag pero ambiguo o con formato roto: no se adivina nada. */
+  | "tag_unusable"
+  /** No existe localmente y este backfill tampoco lo va a insertar. */
+  | "no_local_order"
+  /** Fuera del universo del backfill. */
+  | "not_cod";
+
+/**
+ * Decisión PURA del enlace E4: ni DB ni red. `willExistLocally` es true
+ * cuando la acción de cierre va a insertar el pedido en esta misma pasada.
+ */
+export function decideDropeaLink(
+  existing: OrderRow | null,
+  order: ShopifyBackfillOrder,
+  willExistLocally: boolean
+): DropeaLinkPlan {
+  if (!isCodOrder(order)) return "not_cod";
+  const outcome = extractDropeaIdFromPayload(order);
+  if (outcome.kind === "absent") return "no_tag";
+  if (outcome.kind !== "found") return "tag_unusable";
+  if (existing?.supplier_external_order_id) return "already_linked";
+  if (!existing && !willExistLocally) return "no_local_order";
+  return "link";
+}
+
 /** Aplica la acción (INSERT/UPDATE de verdad). Solo se llama fuera de dry-run. */
 function applyBackfillAction(action: BackfillAction, order: ShopifyBackfillOrder, rawBody: string): void {
   if (!action.signal) return; // skip_* — nada que aplicar.
@@ -322,6 +366,11 @@ export interface BackfillReport {
   counts: Record<BackfillActionKind, number>;
   /** Resumen de 3 líneas que pidió Pedro: lo que aplicaría/aplicó, y lo que no cambia. */
   summary: { toCancelled: number; toInProgress: number; unchanged: number };
+  /** E4: desglose del eje de enlace con Dropea (independiente del cierre). */
+  dropeaLink: Record<DropeaLinkPlan, number>;
+  /** E4: enlaces escritos DE VERDAD (siempre 0 en dry-run). Puede ser menor
+   *  que `dropeaLink.link` si el id ya lo tenía otro pedido o hubo carrera. */
+  dropeaLinked: number;
   /** true = se recorrió todo lo que la API nos deja ver. NO implica el
    *  histórico completo: eso lo dice `coverage`. */
   done: boolean;
@@ -332,6 +381,17 @@ export interface BackfillReport {
    *  verificado SIN read_all_orders (la API solo enseña 60 días).
    *  unverified = no se pudo comprobar: NO se puede afirmar cobertura. */
   coverage: BackfillCoverage;
+}
+
+function emptyLinkCounts(): Record<DropeaLinkPlan, number> {
+  return {
+    link: 0,
+    already_linked: 0,
+    no_tag: 0,
+    tag_unusable: 0,
+    no_local_order: 0,
+    not_cod: 0,
+  };
 }
 
 function emptyCounts(): Record<BackfillActionKind, number> {
@@ -389,6 +449,8 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
 
   let cursor = opts.resetCheckpoint ? null : getSetting(CHECKPOINT_KEY) || null;
   const counts = emptyCounts();
+  const dropeaLink = emptyLinkCounts();
+  let dropeaLinked = 0;
   let pagesProcessed = 0;
   let ordersSeen = 0;
   let done = false;
@@ -403,7 +465,22 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
       const existing = order.id ? getOrderByShopifyId(String(order.id)) : null;
       const action = decideBackfillAction(existing, order);
       counts[action.kind]++;
-      if (!dryRun) applyBackfillAction(action, order, JSON.stringify(order));
+
+      // E4 va aparte del eje de cierre a propósito: un pedido sin señal de
+      // cierre ("skip_no_signal") puede tener perfectamente su dropea_id.
+      const insertara = action.kind === "insert_cancelled" || action.kind === "insert_in_progress";
+      const plan = decideDropeaLink(existing, order, insertara);
+      dropeaLink[plan]++;
+
+      if (!dryRun) {
+        applyBackfillAction(action, order, JSON.stringify(order));
+        if (plan === "link" && order.id) {
+          // Se relee: si la acción de cierre acaba de insertarlo, la fila
+          // existe ahora y no antes.
+          const fila = getOrderByShopifyId(String(order.id));
+          if (fila && linkDropeaFromShopifyTags(fila, order, "backfill").linked) dropeaLinked++;
+        }
+      }
     }
 
     cursor = page.nextCursor;
@@ -424,7 +501,7 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
       "shopify",
       "backfill_completed",
       coverage === "full" ? "info" : "warning",
-      `backfill recorrido (cobertura: ${coverage}): ${ordersSeen} pedido(s) vistos, ${counts.insert_cancelled + counts.update_cancelled} → cancelled, ${counts.insert_in_progress + counts.update_in_progress} → in_progress` +
+      `backfill recorrido (cobertura: ${coverage}): ${ordersSeen} pedido(s) vistos, ${counts.insert_cancelled + counts.update_cancelled} → cancelled, ${counts.insert_in_progress + counts.update_in_progress} → in_progress, ${dropeaLinked} enlazado(s) con Dropea por tag` +
         (coverage === "full" ? "" : " — SIN read_all_orders verificado: NO se puede afirmar histórico completo")
     );
   }
@@ -438,6 +515,8 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
       toInProgress: counts.insert_in_progress + counts.update_in_progress,
       unchanged: counts.skip_not_cod + counts.skip_no_signal + counts.skip_has_own_source,
     },
+    dropeaLink,
+    dropeaLinked,
     done,
     nextCursor: cursor,
     scopeCheck,
