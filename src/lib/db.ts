@@ -1506,6 +1506,20 @@ export function getOrderByShopifyId(shopifyOrderId: string): OrderRow | null {
   );
 }
 
+/**
+ * Busca por el NÚMERO de pedido (el corto, "1063", no el id largo de
+ * Shopify). Usado por el reconciliador de Dropea (E8): su `external_order_id`
+ * puede corresponder a cualquiera de los dos, y no se asume cuál sin mirar
+ * datos reales.
+ */
+export function getOrderByShopifyOrderNumber(orderNumber: string): OrderRow | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM orders WHERE shopify_order_number = ?").get(orderNumber) as
+      | OrderRow
+      | undefined) ?? null
+  );
+}
+
 /** Lista pedidos, opcionalmente filtrados por estado, más recientes primero. */
 export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
   const db = ctx().db;
@@ -2219,6 +2233,30 @@ export function claimWebhookEvent(
     )
     .run(eventId, platform, topic ?? null, resourceId ?? null);
   return info.changes > 0;
+}
+
+/**
+ * Ids de pedido (resource_id) distintos vistos en webhooks de PEDIDO (nunca
+ * de incidencia) de una plataforma — la población exacta que el
+ * reconciliador de Dropea (E8) tiene que emparejar. Orden ascendente y
+ * numérico cuando el id lo permite, para que un checkpoint por "último
+ * procesado" tenga sentido entre ejecuciones.
+ */
+export function listOrderWebhookResourceIds(platform: string): string[] {
+  const rows = ctx()
+    .db.prepare(
+      `SELECT DISTINCT resource_id FROM supplier_webhook_events
+       WHERE platform = ? AND topic LIKE 'order.%' AND resource_id IS NOT NULL`
+    )
+    .all(platform) as Array<{ resource_id: string }>;
+  return rows
+    .map((r) => r.resource_id)
+    .sort((a, b) => {
+      const na = Number(a);
+      const nb = Number(b);
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return a.localeCompare(b);
+    });
 }
 
 /** Limpia eventos antiguos (por defecto, más de 30 días). */
