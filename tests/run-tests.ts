@@ -145,6 +145,7 @@ async function main(): Promise<void> {
   );
   const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
+  const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
@@ -4173,6 +4174,148 @@ async function main(): Promise<void> {
 
     // Pedido inexistente: no revienta, simplemente no hace nada.
     assert.equal(db.setOrderClosure(999999999, "delivered", "shopify"), false);
+  });
+
+  // ============ E2 · Webhooks Shopify: cancelled / fulfilled / updated ============
+  console.log("· E2 — webhooks Shopify (cierre)");
+
+  const closurePayload = (overrides: Record<string, unknown> = {}) => ({
+    id: 990800,
+    updated_at: "2026-08-23T10:00:00Z",
+    ...overrides,
+  });
+
+  await test("E2: HMAC inválido → 401; sin SHOPIFY_WEBHOOK_SECRET → 500; ningún efecto en la DB", () => {
+    const o = mkOrder("990800", "3800", "34600119800");
+    const raw = JSON.stringify(closurePayload({ id: 990800 }));
+    const resBadHmac = processOrdersEventWebhook(
+      raw,
+      shopifyHeaders(raw, { topic: "orders/cancelled", hmac: sign("manipulado"), webhookId: "wh-e2-badhmac" })
+    );
+    assert.equal(resBadHmac.status, 401);
+    assert.equal(db.getOrderById(o.id)!.closure_status, "unknown");
+
+    const backup = process.env.SHOPIFY_WEBHOOK_SECRET;
+    delete process.env.SHOPIFY_WEBHOOK_SECRET;
+    try {
+      const res = processOrdersEventWebhook(raw, shopifyHeaders(raw, { topic: "orders/cancelled", webhookId: "wh-e2-nosecret" }));
+      assert.equal(res.status, 500);
+    } finally {
+      process.env.SHOPIFY_WEBHOOK_SECRET = backup;
+    }
+    assert.equal(db.getOrderById(o.id)!.closure_status, "unknown");
+  });
+
+  await test("E2 orders/cancelled: closure_status → cancelled, source shopify, closure_at = cancelled_at del payload", () => {
+    const o = mkOrder("990801", "3801", "34600119801");
+    const raw = JSON.stringify(
+      closurePayload({ id: 990801, cancelled_at: "2026-08-23T09:00:00Z", updated_at: "2026-08-23T09:00:00Z" })
+    );
+    const res = processOrdersEventWebhook(raw, shopifyHeaders(raw, { topic: "orders/cancelled", webhookId: "wh-e2-cancel-1" }));
+    assert.equal(res.status, 200);
+    const actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "cancelled");
+    assert.equal(actual.closure_source, "shopify");
+    assert.equal(actual.closure_at, Math.floor(Date.parse("2026-08-23T09:00:00Z") / 1000));
+  });
+
+  await test("E2 orders/fulfilled: closure_status → in_progress (NUNCA delivered), source shopify", () => {
+    const o = mkOrder("990802", "3802", "34600119802");
+    const raw = JSON.stringify(closurePayload({ id: 990802, updated_at: "2026-08-23T11:00:00Z" }));
+    const res = processOrdersEventWebhook(raw, shopifyHeaders(raw, { topic: "orders/fulfilled", webhookId: "wh-e2-fulfilled-1" }));
+    assert.equal(res.status, 200);
+    const actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "in_progress");
+    assert.notEqual(actual.closure_status, "delivered");
+    assert.equal(actual.closure_source, "shopify");
+  });
+
+  await test("E2 idempotencia por X-Shopify-Webhook-Id: mismo id de entrega, payload DISTINTO → un solo efecto", () => {
+    const o = mkOrder("990803", "3803", "34600119803");
+    const raw1 = JSON.stringify(closurePayload({ id: 990803, updated_at: "2026-08-23T12:00:00Z" }));
+    const res1 = processOrdersEventWebhook(raw1, shopifyHeaders(raw1, { topic: "orders/fulfilled", webhookId: "wh-e2-dup" }));
+    assert.equal(res1.status, 200);
+    assert.equal(res1.body.duplicate, undefined);
+
+    // Mismo webhook-id, payload DISTINTO (timestamp más nuevo): si
+    // deduplicáramos por contenido no lo detectaríamos como repetido; por
+    // webhook-id, sí — que es justo lo que se pedía verificar.
+    const raw2 = JSON.stringify(closurePayload({ id: 990803, updated_at: "2026-08-23T13:00:00Z" }));
+    const res2 = processOrdersEventWebhook(raw2, shopifyHeaders(raw2, { topic: "orders/fulfilled", webhookId: "wh-e2-dup" }));
+    assert.equal(res2.status, 200);
+    assert.equal(res2.body.duplicate, true);
+
+    const actual = db.getOrderById(o.id)!;
+    assert.equal(
+      actual.closure_at,
+      Math.floor(Date.parse("2026-08-23T12:00:00Z") / 1000),
+      "el segundo (duplicado por webhook-id) no se llegó a aplicar"
+    );
+  });
+
+  await test("E2 fuera de orden: un evento más antiguo que el cierre ya guardado se descarta, aunque la transición sería válida", () => {
+    const o = mkOrder("990804", "3804", "34600119804");
+    const rawNuevo = JSON.stringify(closurePayload({ id: 990804, updated_at: "2026-08-23T15:00:00Z" }));
+    const res1 = processOrdersEventWebhook(rawNuevo, shopifyHeaders(rawNuevo, { topic: "orders/fulfilled", webhookId: "wh-e2-orden-1" }));
+    assert.equal(res1.status, 200);
+    assert.equal(db.getOrderById(o.id)!.closure_at, Math.floor(Date.parse("2026-08-23T15:00:00Z") / 1000));
+
+    // Llega DESPUÉS en el tiempo real, pero con fecha de EVENTO anterior
+    // (retraso de entrega de Shopify). in_progress → in_progress sería una
+    // transición válida por sí sola, pero debe descartarse por ser más viejo
+    // que lo que ya hay guardado.
+    const rawViejo = JSON.stringify(closurePayload({ id: 990804, updated_at: "2026-08-23T14:00:00Z" }));
+    const res2 = processOrdersEventWebhook(rawViejo, shopifyHeaders(rawViejo, { topic: "orders/fulfilled", webhookId: "wh-e2-orden-2" }));
+    assert.equal(res2.status, 200);
+    assert.equal(res2.body.ignored, "stale_event");
+    assert.equal(
+      db.getOrderById(o.id)!.closure_at,
+      Math.floor(Date.parse("2026-08-23T15:00:00Z") / 1000),
+      "el evento más viejo no pisa el más reciente"
+    );
+  });
+
+  await test("E2 terminal ya fijado: cancelled no se pisa por un fulfilled posterior (ni con fecha más nueva)", () => {
+    const o = mkOrder("990805", "3805", "34600119805");
+    const rawCancel = JSON.stringify(closurePayload({ id: 990805, cancelled_at: "2026-08-23T09:00:00Z" }));
+    processOrdersEventWebhook(rawCancel, shopifyHeaders(rawCancel, { topic: "orders/cancelled", webhookId: "wh-e2-terminal-1" }));
+    assert.equal(db.getOrderById(o.id)!.closure_status, "cancelled");
+
+    const rawFulfilled = JSON.stringify(closurePayload({ id: 990805, updated_at: "2026-08-23T20:00:00Z" }));
+    const res = processOrdersEventWebhook(rawFulfilled, shopifyHeaders(rawFulfilled, { topic: "orders/fulfilled", webhookId: "wh-e2-terminal-2" }));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.applied, false, "el gate de canTransitionClosure lo bloquea");
+    const actual = db.getOrderById(o.id)!;
+    assert.equal(actual.closure_status, "cancelled", "sigue cancelado: Shopify no pisa un terminal");
+    assert.equal(actual.closure_source, "shopify");
+  });
+
+  await test("E2 orders/updated: nunca escribe closure_status ni ningún otro campo; solo deja rastro en integration_events", () => {
+    const o = mkOrder("990806", "3806", "34600119806");
+    const antes = db.getOrderById(o.id)!;
+    const raw = JSON.stringify(closurePayload({ id: 990806, updated_at: "2026-08-23T16:00:00Z" }));
+    const res = processOrdersEventWebhook(raw, shopifyHeaders(raw, { topic: "orders/updated", webhookId: "wh-e2-updated-1" }));
+    assert.equal(res.status, 200);
+    const despues = db.getOrderById(o.id)!;
+    assert.equal(despues.closure_status, antes.closure_status);
+    assert.equal(despues.closure_source, antes.closure_source);
+    assert.equal(despues.closure_at, antes.closure_at);
+    assert.equal(despues.updated_at, antes.updated_at, "orders/updated no toca ni siquiera updated_at: cero escritura");
+  });
+
+  await test("E2: pedido desconocido y JSON inválido → 200 sin efectos", () => {
+    const rawDesconocido = JSON.stringify(closurePayload({ id: 999999999 }));
+    const resDesconocido = processOrdersEventWebhook(
+      rawDesconocido,
+      shopifyHeaders(rawDesconocido, { topic: "orders/cancelled", webhookId: "wh-e2-unknown" })
+    );
+    assert.equal(resDesconocido.status, 200);
+    assert.equal(resDesconocido.body.ignored, "pedido desconocido");
+
+    const rawMalo = "{no es json";
+    const resMalo = processOrdersEventWebhook(rawMalo, shopifyHeaders(rawMalo, { topic: "orders/cancelled", webhookId: "wh-e2-badjson" }));
+    assert.equal(resMalo.status, 200);
+    assert.equal(resMalo.body.ignored, "json inválido");
   });
 
   // ============ Resumen ============

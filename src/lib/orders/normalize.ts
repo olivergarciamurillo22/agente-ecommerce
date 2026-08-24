@@ -44,6 +44,8 @@ export interface ShopifyOrderPayload {
   phone?: string | null;
   note?: string | null;
   created_at?: string | null; // ISO 8601 (lo manda Shopify en cada pedido)
+  updated_at?: string | null; // ISO 8601 — última vez que Shopify tocó el pedido
+  cancelled_at?: string | null; // ISO 8601, solo presente si está cancelado
   currency?: string | null;
   total_price?: string | null;
   financial_status?: string | null;
