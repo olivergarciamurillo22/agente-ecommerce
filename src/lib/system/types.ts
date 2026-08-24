@@ -18,7 +18,9 @@ export type ServiceName =
   | "scheduler:orders"
   | "scheduler:tracking"
   | "scheduler:outbox"
-  | "scheduler:watchdog";
+  | "scheduler:watchdog"
+  | "scheduler:reconcile"
+  | "scheduler:calls";
 
 export type EventIntegration =
   | "system"
