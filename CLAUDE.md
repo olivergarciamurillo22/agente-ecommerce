@@ -194,6 +194,18 @@ entregas y rehúses reales — que era el objetivo. Hasta pegar esa salida en
 `docs/ESTADO-PRODUCCION.md`, la tasa de entrega **sigue sin poder darse por
 fiable**.
 
+**Tanda de fidelidad (25-08), en `main` y pendiente de desplegar:** tres cosas
+que hacían que el sistema contara mal. (1) `fulfillment_status = "partial"`
+ahora cuenta como `in_progress` — los pedidos llevan una línea `Seguro de
+Envío` que el proveedor nunca despacha, así que Shopify los deja en `partial`
+para siempre y nunca llegan a `fulfilled`; es la causa probable del
+`in_progress = 0` medido. `restocked` sigue sin contar. (2) La lista del panel
+ordena por `shopify_order_number` y no por `created_at`, que era la hora de
+insertar la fila: el backfill metió 93 pedidos en el mismo instante y no había
+orden real. Sin migración. (3) `dropea-doctor` y `dropea:mapping:inspect`
+dejaban de mentir: el primero distingue "no lo sé" de "no hay ninguno", el
+segundo recorre el catálogo entero y avisa si topa.
+
 **Abierto, sin tocar desde el 24-08** (detalle en `docs/CONTEXTO-2026-08-24.md`
 §6): qué significa el tag `dropea_error` en 90 de 93 pedidos · ~13 anulados de
 0,00 € con clientes reales · 3 pedidos bloqueados por ciudad `"-"` · ~14
