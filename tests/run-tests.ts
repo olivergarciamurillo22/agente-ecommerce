@@ -6298,6 +6298,87 @@ async function main(): Promise<void> {
     assert.equal(fila.closure_at, Math.floor(Date.parse("2026-08-25T09:00:00Z") / 1000));
   });
 
+  // ============ 47 · Leases de scheduler (dos procesos compitiendo) ============
+  console.log("\n— Leases: un solo proceso ejecuta efectos externos —");
+
+  const leases = await import("../src/lib/system/leases");
+
+  await test("LEASE · dos dueños compiten por el mismo scheduler: solo uno gana", () => {
+    const now = 1_700_000_000;
+    assert.equal(leases.acquireLease("test-a", 60, { owner: "proc-1", nowSec: now }), true);
+    assert.equal(
+      leases.acquireLease("test-a", 60, { owner: "proc-2", nowSec: now }),
+      false,
+      "el segundo proceso NO puede ejecutar mientras el lease sea del primero"
+    );
+    assert.equal(leases.holdsLease("test-a", { owner: "proc-1", nowSec: now }), true);
+    assert.equal(leases.holdsLease("test-a", { owner: "proc-2", nowSec: now }), false);
+  });
+
+  await test("LEASE · el dueño renueva sin perderlo, y renovar no cuenta como adquisición nueva", () => {
+    const now = 1_700_001_000;
+    leases.acquireLease("test-b", 60, { owner: "proc-1", nowSec: now });
+    const tras1 = leases.getLease("test-b")!;
+    assert.equal(leases.acquireLease("test-b", 60, { owner: "proc-1", nowSec: now + 10 }), true);
+    const tras2 = leases.getLease("test-b")!;
+    assert.equal(tras2.acquire_count, tras1.acquire_count, "renovar no es adquirir de nuevo");
+    assert.ok(tras2.lease_until > tras1.lease_until, "pero sí extiende el derecho");
+    assert.equal(tras2.last_acquired_at, tras1.last_acquired_at, "la fecha de adquisición no se mueve");
+  });
+
+  await test("LEASE · recuperación tras crash: al caducar, otro proceso lo roba (sin deadlock)", () => {
+    const now = 1_700_002_000;
+    // proc-1 lo coge y se muere sin soltarlo.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-1", nowSec: now }), true);
+    // Antes de caducar, nadie más puede.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-2", nowSec: now + 29 }), false);
+    // Justo al caducar, sí: un proceso muerto NO bloquea el sistema para siempre.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-2", nowSec: now + 30 }), true);
+    assert.equal(leases.getLease("test-c")!.owner_id, "proc-2");
+    assert.equal(leases.getLease("test-c")!.acquire_count, 2, "cambio de dueño sí cuenta");
+  });
+
+  await test("LEASE · soltar limpiamente cede el turno al instante, y solo puede soltarlo su dueño", () => {
+    const now = 1_700_003_000;
+    leases.acquireLease("test-d", 3600, { owner: "proc-1", nowSec: now });
+    assert.equal(
+      leases.releaseLease("test-d", { owner: "proc-2", nowSec: now }),
+      false,
+      "un proceso no puede soltar el lease de otro"
+    );
+    assert.equal(leases.releaseLease("test-d", { owner: "proc-1", nowSec: now }), true);
+    // Sin esperar la hora de TTL, otro lo coge ya.
+    assert.equal(leases.acquireLease("test-d", 60, { owner: "proc-2", nowSec: now + 1 }), true);
+    assert.ok(leases.getLease("test-d")!.last_released_at !== null);
+  });
+
+  await test("LEASE · withLease no ejecuta NADA si no se tiene el turno", async () => {
+    const now = 1_700_004_000;
+    leases.acquireLease("test-e", 600, { owner: "proc-1", nowSec: now });
+    let ejecutado = 0;
+    const r = await leases.withLease("test-e", 600, () => { ejecutado++; return "hecho"; }, { owner: "proc-2", nowSec: now });
+    assert.equal(r, null, "null = no me tocaba (distinto de 'corrí y no hice nada')");
+    assert.equal(ejecutado, 0, "el efecto externo NO se ejecutó");
+
+    const r2 = await leases.withLease("test-e", 600, () => { ejecutado++; return "hecho"; }, { owner: "proc-1", nowSec: now });
+    assert.equal(r2, "hecho");
+    assert.equal(ejecutado, 1);
+  });
+
+  await test("LEASE · cada scheduler tiene el suyo: uno ocupado no bloquea a los demás", () => {
+    const now = 1_700_005_000;
+    for (const n of [leases.LEASE_ORDERS, leases.LEASE_TRACKING, leases.LEASE_RECONCILE, leases.LEASE_CALLS, leases.LEASE_OUTBOX, leases.LEASE_WATCHDOG]) {
+      assert.equal(leases.acquireLease(n, 60, { owner: "proc-1", nowSec: now }), true, n);
+    }
+    // proc-2 no puede con ninguno...
+    for (const n of [leases.LEASE_ORDERS, leases.LEASE_CALLS]) {
+      assert.equal(leases.acquireLease(n, 60, { owner: "proc-2", nowSec: now }), false, n);
+    }
+    // ...pero un scheduler nuevo sigue libre.
+    assert.equal(leases.acquireLease("otro-distinto", 60, { owner: "proc-2", nowSec: now }), true);
+    assert.ok(leases.listLeases().length >= 6);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

@@ -19,6 +19,7 @@
 // ============================================================
 
 import pino from "pino";
+import { acquireLease, LEASE_ORDERS } from "../system/leases";
 import {
   getOrdersDueInitialSend,
   getOrdersDueReminder,
@@ -258,6 +259,14 @@ export function startOrderScheduler(): void {
   timer = setInterval(() => {
     if (ticking) return; // nunca solapar ticks
     ticking = true;
+    // LEASE: sin él, no se ejecuta. La guarda `ticking` de arriba solo
+    // protege dentro de ESTE proceso; el lease protege contra un SEGUNDO
+    // proceso (dos contenedores, reinicio solapado, un `start:bot` a mano).
+    // Lo que duplicarían no son lecturas: son efectos externos.
+    if (!acquireLease(LEASE_ORDERS, Math.max(120, pollSeconds() * 4))) {
+      ticking = false;
+      return;
+    }
     // Instrumentación best-effort: latido + fila en scheduler_runs si hubo
     // trabajo. Si registrar falla, el tick sigue funcionando igual.
     void runInstrumented("scheduler:orders", "orders", async () => {

@@ -212,6 +212,40 @@ export function migrateClosureAxis(db: Database.Database): void {
 }
 
 /**
+ * Migración (SCHEMA_VERSION 7): LEASES de schedulers.
+ *
+ * Los cinco schedulers (confirmaciones, tracking, reconciliación, llamadas,
+ * outbox) se protegían con `if (timer) return` + un flag `ticking`. Eso es
+ * una guarda EN MEMORIA: sirve dentro de un proceso y no sirve para nada si
+ * arrancan dos. Hoy solo el bot los arranca y hay un contenedor, así que no
+ * duplican — pero eso es una propiedad del despliegue, no del código: un
+ * segundo contenedor, o un reinicio solapado con el anterior aún drenando,
+ * duplicaría efectos externos (WhatsApp, llamadas).
+ *
+ * El lease vive en SQLite porque SQLite ya es el punto de sincronización de
+ * todo el sistema: no hace falta Redis ni infraestructura nueva.
+ *
+ * Aditiva e idempotente. La tabla nace vacía: sin lease, nadie ejecuta hasta
+ * que alguien lo adquiera, que es el comportamiento correcto.
+ */
+export function migrateSchedulerLeases(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduler_leases (
+      name TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      -- Epoch segundos hasta cuando este dueño tiene derecho a ejecutar.
+      -- Pasado ese instante, cualquiera puede robarlo: es lo que hace que un
+      -- proceso muerto no bloquee el sistema para siempre.
+      lease_until INTEGER NOT NULL,
+      last_acquired_at INTEGER,
+      last_released_at INTEGER,
+      heartbeat_at INTEGER,
+      acquire_count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+}
+
+/**
  * Migración (SCHEMA_VERSION 6): `status_axis` en `order_status_history`.
  *
  * La tabla mezclaba transiciones de ejes distintos en las mismas columnas
@@ -912,6 +946,7 @@ function build() {
   migrateClosureAxis(db);
   migrateCallOrchestrator(db);
   migrateStatusAxis(db);
+  migrateSchedulerLeases(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1081,7 +1116,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),

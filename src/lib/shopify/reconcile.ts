@@ -25,6 +25,7 @@
 // ============================================================
 
 import pino from "pino";
+import { acquireLease, LEASE_RECONCILE } from "../system/leases";
 import {
   getOrderByShopifyId,
   insertOrderIfNew,
@@ -221,6 +222,13 @@ export function startReconcileScheduler(): void {
     if (ticking) return;
     if (!shopifyAdminConfigured()) return;
     ticking = true;
+    // LEASE: dos procesos reconciliando a la vez no duplicarían mensajes,
+    // pero sí trabajo y llamadas a la API de Shopify (rate limit), y podrían
+    // insertar el mismo pedido perdido dos veces por carrera.
+    if (!acquireLease(LEASE_RECONCILE, Math.max(300, horas * 3600))) {
+      ticking = false;
+      return;
+    }
     runShopifyReconcile()
       .then((r) => {
         if (r.repaired || r.insertedMissing || r.conflicts || r.linkedDropea) {

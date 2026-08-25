@@ -10,6 +10,15 @@ import { start, watchRestartFlag } from "../src/lib/baileys/client";
 import { startOrderScheduler } from "../src/lib/orders/scheduler";
 import { startTrackingScheduler } from "../src/lib/tracking/scheduler";
 import { startReconcileScheduler } from "../src/lib/shopify/reconcile";
+import {
+  releaseLease,
+  LEASE_ORDERS,
+  LEASE_TRACKING,
+  LEASE_RECONCILE,
+  LEASE_CALLS,
+  LEASE_OUTBOX,
+  LEASE_WATCHDOG,
+} from "../src/lib/system/leases";
 import { startCallOrchestrator } from "../src/lib/calls/scheduler";
 import { printSafetyStatus } from "../src/lib/safety";
 import { getPendingOutbox } from "../src/lib/db";
@@ -98,12 +107,29 @@ main().catch((err) => {
 });
 
 // Graceful shutdown
+//
+// Soltar los leases al salir NO es imprescindible (caducan solos), pero
+// ahorra al siguiente proceso esperar el TTL entero antes de poder trabajar.
+// En un redespliegue eso es la diferencia entre reanudar en segundos o
+// quedarse minutos sin mandar confirmaciones.
+function soltarLeases(): void {
+  for (const n of [LEASE_ORDERS, LEASE_TRACKING, LEASE_RECONCILE, LEASE_CALLS, LEASE_OUTBOX, LEASE_WATCHDOG]) {
+    try {
+      releaseLease(n);
+    } catch {
+      // Mejor esfuerzo: si la DB ya está cerrada, el lease caduca solo.
+    }
+  }
+}
+
 process.on("SIGINT", () => {
   logger.info("[bot] SIGINT recibido, cerrando...");
+  soltarLeases();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   logger.info("[bot] SIGTERM recibido, cerrando...");
+  soltarLeases();
   process.exit(0);
 });
