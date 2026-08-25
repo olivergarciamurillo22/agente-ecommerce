@@ -32,7 +32,9 @@ import {
   setOrderShopifyTagged,
   touchOrder,
 } from "../db";
-import { sendWhatsAppMessage, whatsappReady } from "../whatsapp";
+import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
+import { whatsappProviderName } from "../whatsapp/provider";
+import { buildConfirmationInteractive } from "../whatsapp/interactive";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
 import {
@@ -163,7 +165,13 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         }
         continue;
       }
-      const message = buildConfirmationMessage(order);
+      // Botones de verdad SOLO en cloud_api: Baileys no los tiene, y el
+      // texto de fallback de buildConfirmationInteractive() es justo el
+      // flujo 1/2/3 de siempre, así que Baileys sigue mandando lo mismo que
+      // manda hoy. El proveedor se resuelve UNA vez aquí; el resto del
+      // bloque (gates, claim, log) no sabe ni le importa cuál es.
+      const interactive = whatsappProviderName() === "cloud_api" ? buildConfirmationInteractive(order) : null;
+      const message = interactive ? interactive.fallbackText : buildConfirmationMessage(order);
       const autorizado = order.pilot_authorized === 1;
       if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         // Simulación (safe mode / flags cerrados): NO transicionar estado.
@@ -172,10 +180,17 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
       // Claim atómico ANTES de encolar: jamás dos mensajes iniciales.
       if (!claimOrderInitialSend(order.id, now)) continue;
-      sendWhatsAppMessage(order.phone, message, {
-        name: order.customer_name ?? undefined,
-        orderAuthorized: autorizado,
-      });
+      if (interactive) {
+        sendWhatsAppInteractive(order.phone, interactive, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      } else {
+        sendWhatsAppMessage(order.phone, message, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      }
       summary.sent++;
       logger.info(`[WHATSAPP] Confirmation sent #${order.shopify_order_number}`);
     }
