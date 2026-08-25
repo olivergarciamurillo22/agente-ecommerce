@@ -56,9 +56,10 @@ docker compose exec casamable-agent npm run backup
 git pull --ff-only origin main
 docker compose up -d --build
 ```
-- **Escribe:** sí. La migración lleva el esquema de **5** a **7**:
-  `status_axis` en el histórico (v6), tabla `scheduler_leases` (v7) y dos
-  índices. Es **aditiva**: no borra ni transforma ninguna fila existente.
+- **Escribe:** sí. La migración lleva el esquema de **5** a **8**:
+  `status_axis` en el histórico (v6), tabla `scheduler_leases` (v7) y el
+  contexto de conversación multi-pedido + marcas de duplicado/cancelación
+  (v8). Es **aditiva**: no borra ni transforma ninguna fila existente.
 - **Riesgo:** bajo, pero es el paso irreversible sin restaurar backup.
 
 ### B3 · Comprobar que todo arrancó
@@ -68,7 +69,7 @@ docker compose exec casamable-agent npm run db:health
 ```
 - **Escribe:** no.
 - **Copia:** la salida entera de `db:health`.
-- **Debe decir:** esquema **7**, integridad `ok`, contenedor *healthy*.
+- **Debe decir:** esquema **8**, integridad `ok`, contenedor *healthy*.
 - **PARA SI:** WhatsApp pide QR, o el esquema no sube. No sigas.
 
 ### B4 · Mirar el panel
@@ -130,6 +131,17 @@ docker compose exec casamable-agent npm run dropea:doctor
 - **Nota:** antes decía *"(ninguno suscrito)"* con 6 activos — era un bug del
   script, ya corregido. Si ahora dijera *"respuesta con una forma que este
   script no reconoce"*, pégame la respuesta cruda que imprime.
+
+### C4b · Insignias nuevas en la lista de pedidos
+- **Dónde:** panel → Pedidos.
+- Verás dos insignias nuevas cuando toquen:
+  - **POSIBLE DUPLICADO** (ámbar): dos pedidos del mismo cliente con el mismo
+    producto, importe y dirección. El bot NO cancela ninguno: lo marca y pasa
+    los dos a "pendiente de llamada" para que decidas tú cuál va.
+  - **PIDE CANCELAR** (rojo): el cliente pidió cancelar por WhatsApp y lo
+    confirmó. Tampoco se toca nada en Shopify: el pedido queda en "pendiente
+    de llamada" esperándote.
+- **Copia:** si aparece alguna, el número de pedido y qué decides hacer.
 
 ### C5 · Mapping de productos
 - **Dónde:** panel → Sistema → **Productos** (pestaña nueva).

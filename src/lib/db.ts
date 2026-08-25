@@ -218,6 +218,60 @@ export function migrateClosureAxis(db: Database.Database): void {
 }
 
 /**
+ * Migración (SCHEMA_VERSION 8): contexto de conversación multi-pedido.
+ *
+ * Nace de un bug REAL de producción (25-08-2026): un cliente con dos pedidos
+ * escribió "1097" para elegir uno y el bot contestó "Responde 1, 2 o 3";
+ * después escribió "Todo correcto" y el bot volvió a enseñar el selector.
+ * El flujo no tenía MEMORIA: cada mensaje re-resolvía la ambigüedad desde
+ * cero contra getActiveOrdersByPhone(), así que elegir un pedido no servía
+ * de nada en el mensaje siguiente.
+ *
+ * La tabla guarda, POR TELÉFONO: qué pedido está seleccionado (con su fecha,
+ * para caducarlo), qué tipo de mensaje mandamos por última vez y cuántas
+ * veces seguidas (anti-bucle: el mismo selector no se repite eternamente), y
+ * si hay una cancelación pendiente de confirmar.
+ *
+ * En `orders`, dos columnas de señal para Pedro:
+ *   - possible_duplicate: pedidos que parecen el mismo (mismo teléfono,
+ *     producto, importe y dirección en una ventana corta). NUNCA se cancela
+ *     nada automáticamente: solo se marca para que lo vea un humano.
+ *   - cancellation_requested_at: el cliente pidió cancelar. Tampoco se toca
+ *     Shopify: el pedido pasa a needs_call y lo decide Pedro.
+ *
+ * Aditiva e idempotente, como todas.
+ */
+export function migrateConversationOrderContext(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_order_context (
+      phone TEXT PRIMARY KEY,
+      selected_order_id INTEGER,
+      selected_at INTEGER,
+      last_prompt_type TEXT,
+      same_prompt_count INTEGER NOT NULL DEFAULT 0,
+      pending_cancel_order_id INTEGER,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["possible_duplicate", "INTEGER NOT NULL DEFAULT 0"],
+    ["cancellation_requested_at", "INTEGER"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+}
+
+/**
  * Migración (SCHEMA_VERSION 7): LEASES de schedulers.
  *
  * Los cinco schedulers (confirmaciones, tracking, reconciliación, llamadas,
@@ -422,6 +476,8 @@ export interface OrderRow {
   supplier_sync_status: string;
   /** Id del pedido en el proveedor. Su presencia BLOQUEA recrearlo (idempotencia). */
   supplier_external_order_id: string | null;
+  possible_duplicate: number;
+  cancellation_requested_at: number | null;
   /** Referencia estable que enviamos al proveedor (nuestro shopify_order_id). */
   supplier_reference: string | null;
   supplier_sync_attempts: number;
@@ -957,6 +1013,7 @@ function build() {
   migrateCallOrchestrator(db);
   migrateStatusAxis(db);
   migrateSchedulerLeases(db);
+  migrateConversationOrderContext(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1126,7 +1183,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1697,6 +1754,125 @@ export function getActiveOrdersByPhone(phone: string): OrderRow[] {
        ORDER BY created_at DESC, id DESC`
     )
     .all(phone) as OrderRow[];
+}
+
+
+// --- Contexto de conversación multi-pedido (bug real del 25-08-2026) ---
+
+export interface ConversationOrderContext {
+  phone: string;
+  selected_order_id: number | null;
+  selected_at: number | null;
+  last_prompt_type: string | null;
+  same_prompt_count: number;
+  pending_cancel_order_id: number | null;
+  updated_at: number;
+}
+
+export function getConversationOrderContext(phone: string): ConversationOrderContext | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM conversation_order_context WHERE phone = ?").get(phone) as
+      | ConversationOrderContext
+      | undefined) ?? null
+  );
+}
+
+/** Guarda qué pedido eligió el cliente. Sobrescribe la selección anterior. */
+export function setSelectedOrderContext(phone: string, orderId: number, nowSec?: number): void {
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  ctx()
+    .db.prepare(
+      `INSERT INTO conversation_order_context (phone, selected_order_id, selected_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(phone) DO UPDATE SET
+         selected_order_id = excluded.selected_order_id,
+         selected_at = excluded.selected_at,
+         updated_at = excluded.updated_at`
+    )
+    .run(phone, orderId, now, now);
+}
+
+/** Borra la selección (el pedido se resolvió, caducó, o llegó uno nuevo). */
+export function clearSelectedOrderContext(phone: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE conversation_order_context
+       SET selected_order_id = NULL, selected_at = NULL, pending_cancel_order_id = NULL,
+           updated_at = unixepoch()
+       WHERE phone = ?`
+    )
+    .run(phone);
+}
+
+/**
+ * Registra el TIPO de mensaje que estamos a punto de mandar y devuelve
+ * cuántas veces SEGUIDAS hemos mandado ese mismo tipo (contando esta).
+ *
+ * Es el anti-bucle: si el selector de pedidos va a salir por tercera vez
+ * idéntico, quien llama puede cambiar de estrategia en vez de repetirlo.
+ * Mandar un tipo distinto resetea la cuenta.
+ */
+export function recordConversationPrompt(phone: string, promptType: string): number {
+  const db = ctx().db;
+  db.prepare(
+    `INSERT INTO conversation_order_context (phone, last_prompt_type, same_prompt_count, updated_at)
+     VALUES (?, ?, 1, unixepoch())
+     ON CONFLICT(phone) DO UPDATE SET
+       same_prompt_count = CASE WHEN conversation_order_context.last_prompt_type = excluded.last_prompt_type
+                                THEN conversation_order_context.same_prompt_count + 1 ELSE 1 END,
+       last_prompt_type = excluded.last_prompt_type,
+       updated_at = unixepoch()`
+  ).run(phone, promptType);
+  const row = db
+    .prepare("SELECT same_prompt_count FROM conversation_order_context WHERE phone = ?")
+    .get(phone) as { same_prompt_count: number };
+  return row.same_prompt_count;
+}
+
+/** La conversación avanzó: el próximo selector volvería a contar desde 1. */
+export function resetConversationPrompt(phone: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE conversation_order_context
+       SET last_prompt_type = NULL, same_prompt_count = 0, updated_at = unixepoch()
+       WHERE phone = ?`
+    )
+    .run(phone);
+}
+
+/** Deja armada una cancelación pendiente de confirmación explícita. */
+export function setPendingCancelContext(phone: string, orderId: number | null): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO conversation_order_context (phone, pending_cancel_order_id, updated_at)
+       VALUES (?, ?, unixepoch())
+       ON CONFLICT(phone) DO UPDATE SET
+         pending_cancel_order_id = excluded.pending_cancel_order_id,
+         updated_at = unixepoch()`
+    )
+    .run(phone, orderId);
+}
+
+/** Marca un pedido como posible duplicado (señal para Pedro; nunca cancela). */
+export function markOrderPossibleDuplicate(id: number): void {
+  ctx().db.prepare(`UPDATE orders SET possible_duplicate = 1, ${TOUCH} WHERE id = ?`).run(id);
+}
+
+/**
+ * El cliente pidió cancelar y lo CONFIRMÓ. No se toca Shopify ni el
+ * proveedor: se estampa la petición y el pedido pasa a needs_call para que
+ * Pedro decida. La cancelación real es una acción humana.
+ */
+export function requestOrderCancellation(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET cancellation_requested_at = COALESCE(cancellation_requested_at, unixepoch()), ${TOUCH}
+       WHERE id = ? AND status NOT IN ('confirmed','cancelled','ignored_old')`
+    )
+    .run(id);
+  if (info.changes === 0) return false;
+  markOrderNeedsCall(id);
+  return true;
 }
 
 // --- Colas del scheduler (todo se deriva de la DB: sobrevive reinicios) ---

@@ -8,6 +8,7 @@
 // ============================================================
 
 import type { OrderRow } from "../db";
+import { shortProductLine } from "./multi-order";
 import { formatAddressForMessage } from "./normalize";
 
 /** Nombre comercial en los mensajes (configurable por si cambia la marca). */
@@ -123,16 +124,77 @@ export const MSG_CLARIFY =
 export const MSG_WILL_CALL =
   "Sin problema, te llamamos nosotros para confirmarlo por teléfono 👍";
 
-/** Varios pedidos activos del mismo teléfono: pedimos el número de pedido. */
+/**
+ * Varios pedidos activos del mismo teléfono: pedimos el número de pedido.
+ *
+ * Copy reescrito tras el caso real del 25-08-2026: el selector antiguo solo
+ * enseñaba números e importes iguales ("#1097 (29,99 €)" dos veces) — el
+ * cliente no podía distinguirlos ni entender por qué había dos. Ahora cada
+ * línea lleva el producto, y se le abre la puerta a decir "solo hice uno"
+ * en vez de obligarle a manejar números internos.
+ */
 export function buildDisambiguationMessage(orders: OrderRow[]): string {
   const lista = orders
     .slice(0, 5)
-    .map((o) => `- Pedido #${o.shopify_order_number} (${money(o)})`)
+    .map((o) => `#${o.shopify_order_number} · ${shortProductLine(o)} · ${money(o)}`)
     .join("\n");
   const ejemplo = orders[0]?.shopify_order_number ?? "1001";
   return (
-    `Tienes varios pedidos pendientes de confirmar:\n\n${lista}\n\n` +
-    `Dime a cuál te refieres escribiendo el número de pedido y tu respuesta.\n` +
-    `Por ejemplo: "${ejemplo} 1" para confirmarlo, "${ejemplo} 2" para cambiar su dirección o "${ejemplo} 3" para dejar una nota al repartidor.`
+    `Veo que tienes ${orders.length === 2 ? "dos" : String(orders.length)} pedidos pendientes:\n\n${lista}\n\n` +
+    `Dime el número del que quieres gestionar (por ejemplo "${ejemplo}").\n` +
+    `Si solo hiciste uno, dímelo y lo revisamos.`
   );
 }
+
+/** El cliente eligió un pedido: menú de acciones SOBRE ese pedido. */
+export function buildOrderActionMenu(order: OrderRow): string {
+  return (
+    `Perfecto, el pedido #${order.shopify_order_number} · ${shortProductLine(order)} · ${money(order)}.\n\n` +
+    `¿Qué quieres hacer con él?\n` +
+    `1 — Confirmarlo\n` +
+    `2 — Cambiar la dirección\n` +
+    `3 — Dejar una nota al repartidor\n\n` +
+    `Si quieres cancelarlo, escribe CANCELAR ${order.shopify_order_number}.`
+  );
+}
+
+/** Anti-bucle: el mismo selector ya salió 2 veces sin resolverse. */
+export const MSG_ESCALATE_TO_HUMAN =
+  "Creo que te estoy liando con los números 🙏\n\n" +
+  "Dejo tus pedidos anotados para revisarlos nosotros y te contactamos para confirmar cuál quieres. " +
+  "No tienes que hacer nada más.";
+
+/** Posible duplicado detectado y el cliente dice que solo hizo un pedido. */
+export function buildDuplicateReviewMessage(orders: OrderRow[]): string {
+  const nums = orders.map((o) => `#${o.shopify_order_number}`).join(" y ");
+  return (
+    `Tienes razón: veo dos pedidos iguales (${nums}) y parece que se ha generado un duplicado.\n\n` +
+    `Lo dejo marcado para que lo revisemos y no recibas el pedido dos veces. ` +
+    `Te confirmamos en cuanto esté resuelto — no tienes que hacer nada más 👍`
+  );
+}
+
+/** Cancelación: se exige confirmación explícita, jamás por frase ambigua. */
+export function buildCancelConfirmPrompt(order: OrderRow): string {
+  return (
+    `¿Quieres cancelar el pedido #${order.shopify_order_number} · ${shortProductLine(order)} · ${money(order)}?\n\n` +
+    `Para confirmarlo, responde: CANCELAR ${order.shopify_order_number}\n` +
+    `Si prefieres quedártelo, responde 1 y lo confirmamos.`
+  );
+}
+
+/** Cancelación con varios pedidos: ¿ambos o solo uno? */
+export function buildCancelMultiPrompt(orders: OrderRow[]): string {
+  const nums = orders.map((o) => `#${o.shopify_order_number}`).join(" y ");
+  const ejemplo = orders[0]?.shopify_order_number ?? "1001";
+  return (
+    `Veo que tienes los pedidos ${nums}. ¿Quieres cancelar ambos o solo uno?\n\n` +
+    `— Para cancelar uno: CANCELAR ${ejemplo}\n` +
+    `— Para cancelar todos: responde AMBOS`
+  );
+}
+
+/** La petición de cancelar quedó registrada (no se toca nada automáticamente). */
+export const MSG_CANCEL_RECEIVED =
+  "Anotado ✅ Dejamos tu pedido marcado para cancelar y te contactamos para confirmarlo. " +
+  "Mientras tanto no se te enviará nada.";

@@ -7067,6 +7067,243 @@ async function main(): Promise<void> {
     assert.equal(db.getSupplierProductMapping(id)!.active, 1);
   });
 
+  // ============ 56 · BUG REAL de producción: multi-pedido pierde la selección ============
+  console.log("\n— BUG multi-pedido: '1097' + 'Todo correcto' —");
+
+  /** Pedido ya en awaiting_reply (como si el WhatsApp inicial hubiera salido). */
+  const mkMulti = (
+    shopifyId: string,
+    num: string,
+    tel: string,
+    extra: Partial<{ product_summary: string; total_price: string }> = {}
+  ) =>
+    db.insertOrderIfNew({
+      shopify_order_id: shopifyId,
+      shopify_order_number: num,
+      customer_name: "Cliente Multi",
+      phone: tel,
+      email: null,
+      product_summary: extra.product_summary ?? "Limpiador Ultrasónico Multiusos",
+      total_price: extra.total_price ?? "29.99",
+      currency: "EUR",
+      address_line1: "Calle Real 10",
+      address_line2: null,
+      city: "Vigo",
+      province: "Pontevedra",
+      postal_code: "36201",
+      country: "España",
+      status: "awaiting_reply",
+    }).order;
+
+  await test("BUG REAL · '1097' selecciona el pedido y 'Todo correcto' confirma ESE pedido", () => {
+    // Transcripción real (anonimizada) del 25-08-2026: el cliente escribió
+    // "1097" y el bot contestó "Responde 1, 2 o 3"; después "Todo correcto"
+    // y el bot volvió a enseñar el selector de pedidos. Bucle infinito.
+    const tel = "34600000090";
+    mkMulti("920096", "1096", tel);
+    mkMulti("920097", "1097", tel);
+
+    const r1 = handleOrderReply(tel, "1097");
+    assert.equal(r1.handled, true);
+    // Elegir un pedido por su número JAMÁS puede ser "no te he entendido".
+    assert.notEqual(r1.reply, msgs.MSG_CLARIFY, "'1097' no puede caer en 'Responde 1, 2 o 3'");
+    assert.match(r1.reply ?? "", /1097/, "debe reconocer el pedido elegido");
+
+    const r2 = handleOrderReply(tel, "Todo correcto");
+    assert.equal(r2.handled, true);
+    assert.equal(
+      db.getOrderByShopifyId("920097")!.status,
+      "confirmed",
+      "'Todo correcto' tras elegir 1097 confirma EL 1097, no vuelve al selector"
+    );
+    assert.equal(db.getOrderByShopifyId("920096")!.status, "awaiting_reply", "el otro no se toca");
+  });
+
+  await test("CHAT REAL · la conversación completa se resuelve en 3 mensajes, sin bucle", () => {
+    // La transcripción real, con el comportamiento NUEVO esperado: el bot
+    // real repitió el mismo selector 5 veces y nunca resolvió nada.
+    const tel = "34600000091";
+    mkMulti("921096", "2096", tel); // idénticos: mismo producto, importe, dirección
+    mkMulti("921097", "2097", tel);
+
+    // "Todo bien" → intención de confirmar, pero con 2 pedidos es ambiguo.
+    const r1 = handleOrderReply(tel, "Todo bien");
+    assert.match(r1.reply ?? "", /2096/);
+    assert.match(r1.reply ?? "", /Limpiador/, "el selector enseña el PRODUCTO, no solo números");
+    assert.match(r1.reply ?? "", /Si solo hiciste uno/, "se le abre la puerta a decir que hay un duplicado");
+
+    // "Pues ahora mismo no sé cuál es" → segunda (y última) vez del selector.
+    const r2 = handleOrderReply(tel, "Pues ahora mismo no sé cuál es");
+    assert.match(r2.reply ?? "", /2096/);
+
+    // "Yo solo he pedido el limpiador ultrasonido" → AQUÍ se resuelve: los
+    // dos pedidos son idénticos → duplicado probable → revisión humana.
+    const r3 = handleOrderReply(tel, "Yo solo he pedido el limpiador ultrasonido");
+    assert.match(r3.reply ?? "", /duplicado/i, "se le explica lo que pasa, no se le piden más números");
+    assert.doesNotMatch(r3.reply ?? "", /Dime el número/, "NO es el selector otra vez");
+
+    for (const id of ["921096", "921097"]) {
+      const o = db.getOrderByShopifyId(id)!;
+      assert.equal(o.status, "needs_call", `${id} va a revisión humana`);
+      assert.equal(o.possible_duplicate, 1, `${id} queda marcado como posible duplicado`);
+    }
+
+    // La automatización terminó: nada más que el bot pueda liar.
+    const r4 = handleOrderReply(tel, "1097");
+    assert.equal(r4.handled, false, "sin pedidos activos, el flujo ya no interviene: lo lleva Pedro");
+
+    // Y el evento para el panel quedó registrado, sin PII.
+    const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
+    assert.ok(evs.some((e) => e.event_type === "duplicate_suspected" && e.order_ref === "2096"));
+  });
+
+  await test("CANCELAR · 'No quiero ninguno anular pedido' con 2 pedidos: confirmación segura, jamás automática", () => {
+    const tel = "34600000092";
+    mkMulti("922096", "3096", tel);
+    mkMulti("922097", "3097", tel);
+
+    const r1 = handleOrderReply(tel, "No quiero ninguno, anular pedido");
+    assert.match(r1.reply ?? "", /ambos o solo uno/i, "pregunta cuáles, no repite el selector 1/2/3");
+    assert.match(r1.reply ?? "", /AMBOS/);
+    // NADA cancelado todavía.
+    assert.equal(db.getOrderByShopifyId("922096")!.cancellation_requested_at, null);
+
+    const r2 = handleOrderReply(tel, "AMBOS");
+    assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
+    for (const id of ["922096", "922097"]) {
+      const o = db.getOrderByShopifyId(id)!;
+      assert.equal(o.status, "needs_call", "a revisión: la cancelación real la decide Pedro");
+      assert.ok(o.cancellation_requested_at, "petición estampada");
+      assert.equal(o.closure_status, "unknown", "NADA se toca en Shopify ni en el eje de cierre");
+    }
+  });
+
+  await test("CANCELAR · 'cancelar 4096' cancela SOLO ese; el otro sigue su curso", () => {
+    const tel = "34600000093";
+    mkMulti("923096", "4096", tel);
+    mkMulti("923097", "4097", tel);
+
+    const r = handleOrderReply(tel, "cancelar 4096");
+    assert.equal(r.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.ok(db.getOrderByShopifyId("923096")!.cancellation_requested_at);
+    assert.equal(db.getOrderByShopifyId("923097")!.status, "awaiting_reply", "el otro intacto");
+    assert.equal(db.getOrderByShopifyId("923097")!.cancellation_requested_at, null);
+  });
+
+  await test("CANCELAR · con UN pedido: frase ambigua pide confirmación explícita, dos pasos", () => {
+    const tel = "34600000094";
+    mkMulti("924001", "4201", tel);
+
+    const r1 = handleOrderReply(tel, "no lo quiero, quiero cancelar");
+    assert.match(r1.reply ?? "", /CANCELAR 4201/, "exige el formato explícito");
+    assert.equal(db.getOrderByShopifyId("924001")!.cancellation_requested_at, null, "una frase ambigua NO cancela");
+    assert.equal(db.getOrderByShopifyId("924001")!.status, "awaiting_reply");
+
+    const r2 = handleOrderReply(tel, "CANCELAR 4201");
+    assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.ok(db.getOrderByShopifyId("924001")!.cancellation_requested_at);
+    assert.equal(db.getOrderByShopifyId("924001")!.status, "needs_call");
+  });
+
+  await test("PRODUCTO · 'el cortaúñas' identifica el pedido cuando SOLO uno lo lleva", () => {
+    const tel = "34600000095";
+    mkMulti("925001", "4301", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("925002", "4302", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    const r1 = handleOrderReply(tel, "el cortaúñas");
+    assert.match(r1.reply ?? "", /4301/, "lo resuelve al pedido correcto");
+    assert.match(r1.reply ?? "", /Qué quieres hacer/i, "y pregunta la acción");
+
+    const r2 = handleOrderReply(tel, "1");
+    assert.equal(r2.reply, msgs.MSG_CONFIRMED);
+    assert.equal(db.getOrderByShopifyId("925001")!.status, "confirmed");
+    assert.equal(db.getOrderByShopifyId("925002")!.status, "awaiting_reply");
+  });
+
+  await test("ANTI-BUCLE · a la tercera ambigüedad el selector NO se repite: revisión humana", () => {
+    const tel = "34600000096";
+    // Productos DISTINTOS y sin frases de duplicado: ambigüedad pura.
+    mkMulti("926001", "4401", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("926002", "4402", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    const r1 = handleOrderReply(tel, "hola buenas");
+    assert.match(r1.reply ?? "", /4401/, "primer selector");
+    const r2 = handleOrderReply(tel, "sigo sin saberlo");
+    assert.match(r2.reply ?? "", /4401/, "segundo selector (último permitido)");
+    const r3 = handleOrderReply(tel, "esto no hay quien lo entienda");
+    assert.equal(r3.reply, msgs.MSG_ESCALATE_TO_HUMAN, "el tercero YA NO es el selector");
+    for (const id of ["926001", "926002"]) {
+      assert.equal(db.getOrderByShopifyId(id)!.status, "needs_call");
+    }
+    const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
+    assert.ok(evs.some((e) => e.event_type === "conversation_escalated"));
+  });
+
+  await test("TTL · una selección caducada NO decide: 'todo correcto' 46 min después vuelve a preguntar", () => {
+    const tel = "34600000097";
+    mkMulti("927001", "4501", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("927002", "4502", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    handleOrderReply(tel, "4501"); // selecciona
+    // Envejecer la selección más allá del TTL (45 min por defecto).
+    db.systemDbHandle()
+      .prepare("UPDATE conversation_order_context SET selected_at = selected_at - 2800 WHERE phone = ?")
+      .run(tel);
+
+    const r = handleOrderReply(tel, "todo correcto");
+    assert.notEqual(r.reply, msgs.MSG_CONFIRMED, "no se aplica a una selección de hace una hora");
+    assert.equal(db.getOrderByShopifyId("927001")!.status, "awaiting_reply", "nada confirmado en silencio");
+    assert.match(r.reply ?? "", /4501/, "se vuelve a preguntar");
+  });
+
+  await test("PEDIDO NUEVO · si entra otro pedido tras seleccionar, el siguiente mensaje NO se asume del antiguo", () => {
+    const tel = "34600000098";
+    mkMulti("928001", "4601", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("928002", "4602", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    handleOrderReply(tel, "4601"); // selecciona el cortaúñas
+    // Entra un pedido NUEVO del mismo teléfono (compró otra cosa).
+    const nuevo = mkMulti("928003", "4603", tel, { product_summary: "Plancha de Pelo Iónica" });
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = created_at + 10 WHERE id = ?").run(nuevo.id);
+
+    const r = handleOrderReply(tel, "1");
+    assert.notEqual(r.reply, msgs.MSG_CONFIRMED, "un '1' con un pedido recién llegado vuelve a ser ambiguo");
+    assert.equal(db.getOrderByShopifyId("928001")!.status, "awaiting_reply");
+    assert.match(r.reply ?? "", /4603/, "el selector ya incluye el pedido nuevo");
+  });
+
+  await test("SIN DUPLICADO · 'solo pedí uno' con productos DISTINTOS no marca nada: pide concretar", () => {
+    const tel = "34600000099";
+    mkMulti("929001", "4701", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("929002", "4702", tel, { product_summary: "Espejo Retrovisor Panorámico", total_price: "19.99" });
+
+    const r = handleOrderReply(tel, "solo he pedido uno");
+    assert.match(r.reply ?? "", /4701/, "productos distintos: no es un duplicado, se pide concretar");
+    assert.equal(db.getOrderByShopifyId("929001")!.possible_duplicate, 0);
+    assert.equal(db.getOrderByShopifyId("929002")!.possible_duplicate, 0);
+  });
+
+  await test("CONCURRENCIA · dos mensajes rápidos del mismo teléfono se procesan EN ORDEN", async () => {
+    const { runSerializedByPhone } = await import("../src/lib/baileys/handler");
+    const orden: string[] = [];
+    // El primero tarda (como una nota de voz transcribiéndose); el segundo
+    // llega al instante. Sin la puerta, "b" adelantaría a "a".
+    const lento = runSerializedByPhone("34600000100", async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      orden.push("a");
+    });
+    const rapido = runSerializedByPhone("34600000100", async () => {
+      orden.push("b");
+    });
+    // Otro teléfono NO espera al lento.
+    const otro = runSerializedByPhone("34600000101", async () => {
+      orden.push("otro");
+    });
+    await Promise.all([lento, rapido, otro]);
+    assert.equal(orden.indexOf("a") < orden.indexOf("b"), true, "mismo teléfono: en orden de llegada");
+    assert.equal(orden[0], "otro", "teléfonos distintos no se bloquean entre sí");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
