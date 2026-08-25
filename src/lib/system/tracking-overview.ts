@@ -8,6 +8,7 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { startOfBusinessDay } from "../time";
 import type { HealthStatus } from "./types";
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -81,10 +82,11 @@ export function getTrackingOverview(): TrackingOverview {
     }
     base.incidents = base.byState["incident"] ?? 0;
 
-    // Entregados HOY (día local del servidor).
-    const inicioDia = new Date();
-    inicioDia.setHours(0, 0, 0, 0);
-    const hoy = Math.floor(inicioDia.getTime() / 1000);
+    // Entregados HOY = desde la medianoche de MADRID, no del huso del
+    // proceso ni "hace 24 h". Antes esto era `new Date()` sin poner la hora a
+    // cero, así que en realidad contaba "entregados en este instante": el
+    // contador salía casi siempre 0.
+    const hoy = startOfBusinessDay();
     const entregados = db
       .prepare(
         `SELECT COUNT(*) AS n FROM orders

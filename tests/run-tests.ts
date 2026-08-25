@@ -6379,6 +6379,95 @@ async function main(): Promise<void> {
     assert.ok(leases.listLeases().length >= 6);
   });
 
+  // ============ 48 · Timezone: política explícita, no el TZ del proceso ============
+  console.log("\n— Timezone: Europe/Madrid explícito —");
+
+  const tzmod = await import("../src/lib/time");
+
+  await test("TZ · el día de negocio NO depende del huso del proceso", () => {
+    // 23:30 UTC del 24 de agosto: en Madrid (verano, UTC+2) ya es el DÍA 25.
+    // Un `new Date().setHours(0,0,0,0)` en un proceso en UTC diría 24.
+    const nocheVerano = Date.parse("2026-08-24T23:30:00Z");
+    assert.equal(tzmod.businessDay(nocheVerano), "2026-08-25", "de noche en verano ya es el día siguiente en Madrid");
+
+    // 23:30 UTC del 10 de enero: en Madrid (invierno, UTC+1) es el DÍA 11.
+    const nocheInvierno = Date.parse("2026-01-10T23:30:00Z");
+    assert.equal(tzmod.businessDay(nocheInvierno), "2026-01-11");
+
+    // 22:30 UTC en invierno: aún es el mismo día (23:30 en Madrid).
+    assert.equal(tzmod.businessDay(Date.parse("2026-01-10T22:30:00Z")), "2026-01-10");
+  });
+
+  await test("TZ · horario de VERANO: la medianoche de Madrid es 22:00 UTC", () => {
+    const t = Date.parse("2026-08-24T15:00:00Z");
+    const inicio = tzmod.startOfBusinessDay(t);
+    assert.equal(new Date(inicio * 1000).toISOString(), "2026-08-23T22:00:00.000Z");
+    assert.equal(tzmod.businessDay(inicio * 1000), "2026-08-24", "ese instante ya pertenece al día 24");
+  });
+
+  await test("TZ · horario de INVIERNO: la medianoche de Madrid es 23:00 UTC", () => {
+    const t = Date.parse("2026-01-10T15:00:00Z");
+    const inicio = tzmod.startOfBusinessDay(t);
+    assert.equal(new Date(inicio * 1000).toISOString(), "2026-01-09T23:00:00.000Z");
+    assert.equal(tzmod.businessDay(inicio * 1000), "2026-01-10");
+  });
+
+  await test("TZ · los días de CAMBIO de hora duran 23 h y 25 h, y la ventana lo respeta", () => {
+    // Último domingo de marzo 2026 = 29-03: se adelanta el reloj, día de 23 h.
+    const marzo = Date.parse("2026-03-29T12:00:00Z");
+    const dMarzo = tzmod.endOfBusinessDay(marzo) - tzmod.startOfBusinessDay(marzo);
+    assert.equal(dMarzo, 23 * 3600, "el día del cambio de primavera dura 23 h");
+
+    // Último domingo de octubre 2026 = 25-10: se atrasa, día de 25 h.
+    const octubre = Date.parse("2026-10-25T12:00:00Z");
+    const dOctubre = tzmod.endOfBusinessDay(octubre) - tzmod.startOfBusinessDay(octubre);
+    assert.equal(dOctubre, 25 * 3600, "el día del cambio de otoño dura 25 h");
+
+    // Un día normal, 24 h.
+    assert.equal(tzmod.endOfBusinessDay(Date.parse("2026-08-24T12:00:00Z")) - tzmod.startOfBusinessDay(Date.parse("2026-08-24T12:00:00Z")), 24 * 3600);
+  });
+
+  await test("TZ · ventanas hoy/7d/30d alineadas a medianoche de Madrid", () => {
+    const t = Date.parse("2026-08-24T15:00:00Z");
+    const hoy = { from: tzmod.startOfBusinessDay(t), to: tzmod.endOfBusinessDay(t) };
+    const w7 = tzmod.lastBusinessDays(7, t);
+    const w30 = tzmod.lastBusinessDays(30, t);
+
+    // Todas terminan en la misma medianoche: el resultado no depende de a qué
+    // hora se mire el panel.
+    assert.equal(w7.to, hoy.to);
+    assert.equal(w30.to, hoy.to);
+    // 7 días naturales = 7 medianoches hacia atrás (168 h salvo cambio de hora).
+    assert.equal(tzmod.businessDay(w7.from * 1000), "2026-08-18");
+    assert.equal(tzmod.businessDay(w30.from * 1000), "2026-07-26");
+    assert.ok(w30.from < w7.from && w7.from < hoy.from);
+  });
+
+  await test("TZ · madridDate acierta el offset real, también en el día del cambio", () => {
+    // Las 10:00 de Madrid del 29-03-2026 (día del salto) son las 08:00 UTC.
+    assert.equal(tzmod.madridDate(2026, 3, 29, 10, 0).toISOString(), "2026-03-29T08:00:00.000Z");
+    // Las 10:00 del día anterior, aún en invierno, son las 09:00 UTC.
+    assert.equal(tzmod.madridDate(2026, 3, 28, 10, 0).toISOString(), "2026-03-28T09:00:00.000Z");
+  });
+
+  await test("TZ · el chequeo de huso avisa en vez de fallar en silencio", () => {
+    const c = tzmod.checkTimezone();
+    assert.ok(typeof c.processTimezone === "string" && c.processTimezone.length > 0);
+    assert.equal(c.businessTimezone, "Europe/Madrid");
+    assert.ok(c.message.length > 0);
+    // Si el proceso NO está en un huso equivalente, el mensaje tiene que ser
+    // explícito sobre la consecuencia (días mal contados), no un "ok".
+    if (!tzmod.processTimezoneMatchesBusiness()) {
+      assert.match(c.message, /EQUIVOCADO|TZ=/);
+    }
+  });
+
+  await test("TZ · formato de presentación siempre en hora de Madrid", () => {
+    // 22:30 UTC en verano = 00:30 del día siguiente en Madrid.
+    assert.equal(tzmod.formatBusinessDateTime(Math.floor(Date.parse("2026-08-24T22:30:00Z") / 1000)), "25/08/2026 00:30");
+    assert.equal(tzmod.formatBusinessDateTime(Math.floor(Date.parse("2026-01-10T22:30:00Z") / 1000)), "10/01/2026 23:30");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

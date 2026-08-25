@@ -22,6 +22,7 @@
 // ============================================================
 
 import { listDailyAdSpend, listProductCosts, systemDbHandle, type ProductCostRow } from "../db";
+import { madridParts } from "../time";
 import { lineItemsFromPayload } from "../orders/line-items";
 import { startOfLocalDay } from "./delivery-metrics";
 
@@ -87,8 +88,11 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 
 function dayKey(ts: number): string {
   const d = new Date(ts * 1000);
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  // Día de NEGOCIO (Madrid), no del huso del proceso: si no, el gasto en ads
+  // de la noche se imputaría al día siguiente.
+  const p = madridParts(d);
+  const m = String(p.month).padStart(2, "0");
+  const day = String(p.day).padStart(2, "0");
   return `${d.getFullYear()}-${m}-${day}`;
 }
 

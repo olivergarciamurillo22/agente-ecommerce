@@ -23,6 +23,7 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { startOfBusinessDay, endOfBusinessDay, lastBusinessDays } from "../time";
 import { computeClosureDeliveryRate } from "../orders/closure";
 import { lineItemsFromPayload } from "../orders/line-items";
 
@@ -170,11 +171,15 @@ export function deliveryRateMinSample(): number {
   return Number.isFinite(v) && v > 0 ? v : 10;
 }
 
-/** Inicio del día local (epoch s). Inyectable para tests. */
+/**
+ * Inicio del día de NEGOCIO (medianoche de Madrid), epoch s.
+ *
+ * Antes era `new Date().setHours(0,0,0,0)`: medianoche del huso del PROCESO.
+ * Con el host del NAS en Europe/Brussels o un script sin TZ, la ventana "hoy"
+ * se desplazaba y los pedidos de la noche contaban en el día equivocado.
+ */
 export function startOfLocalDay(nowMs = Date.now()): number {
-  const d = new Date(nowMs);
-  d.setHours(0, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
+  return startOfBusinessDay(nowMs);
 }
 
 /** Envíos con su primer estado de envío y (si hay) su entrega. */
@@ -320,13 +325,18 @@ export function getDeliveryWindow(fromTs: number, toTs: number): DeliveryWindow 
 
 export function getDeliveryMetrics(nowMs = Date.now()): DeliveryMetrics {
   const now = Math.floor(nowMs / 1000);
-  const hoy = startOfLocalDay(nowMs);
-  const fin = now + 1;
+  // Ventanas alineadas a MEDIANOCHE DE MADRID, no a "ahora menos N×86400":
+  // así "últimos 7 días" son siete días naturales completos y el resultado no
+  // depende de a qué hora se mire el panel. `lastBusinessDays` sobrevive
+  // además a los días de 23 h y 25 h de los cambios de hora.
+  const hoy = { from: startOfBusinessDay(nowMs), to: endOfBusinessDay(nowMs) };
+  const w7 = lastBusinessDays(7, nowMs);
+  const w30 = lastBusinessDays(30, nowMs);
   return {
     generatedAt: now,
-    today: getDeliveryWindow(hoy, fin),
-    last7d: getDeliveryWindow(now - 7 * 86400, fin),
-    last30d: getDeliveryWindow(now - 30 * 86400, fin),
+    today: getDeliveryWindow(hoy.from, hoy.to),
+    last7d: getDeliveryWindow(w7.from, w7.to),
+    last30d: getDeliveryWindow(w30.from, w30.to),
     minSample: deliveryRateMinSample(),
   };
 }
