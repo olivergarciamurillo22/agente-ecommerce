@@ -4,7 +4,7 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
-**Última actualización: 24-08-2026** (desplegado en el NAS esa misma noche — ver `docs/CONTEXTO-2026-08-24.md` para el detalle completo del despliegue y el diagnóstico posterior).
+**Última actualización: 25-08-2026** (E8 desplegado y `dropea:reconcile --apply` corrido; ver `docs/CONTEXTO-2026-08-24.md` para el despliegue del 24-08 y el diagnóstico que originó E8).
 
 ---
 
@@ -12,7 +12,7 @@ Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decis
 
 | | |
 |---|---|
-| Commit desplegado | **`635d169`** (rama `main`) |
+| Commit desplegado | **`7fa41c8`** (rama `main`, al día) |
 | Esquema SQLite | `user_version = 5` |
 | Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
 | NAS | UGREEN DXP2800, `192.168.2.109`, UGOS 1.18.1.0098 |
@@ -21,7 +21,10 @@ Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decis
 | Modo | `TEST_MODE=1` a propósito (decisión de Pedro, hasta que el sistema esté funcional) — solo escribe a la allowlist de 2 teléfonos; los pedidos de clientes reales se ignoran. **Mientras siga así, `needs_call` no mide nada real.** |
 | Llamadas (E7) | Desplegado y **APAGADO**: `ai_calls_enabled=0`, `calls_shadow_mode=1` por defecto. Ver `docs/RUNBOOK-LLAMADAS.md`. |
 
-Tareas desplegadas esta sesión: **E1** (eje de cierre) · **E2** (webhooks `orders/cancelled`/`fulfilled`/`updated`) · **E3** (backfill del histórico) · **E4** (enlace con Dropea por tag) · **E5** (reconciliación periódica) · **E7** (orquestador de llamadas Retell, apagado) · PR #5 (cadencia de reintentos de llamadas anclada a días de calendario).
+Desplegado en dos tandas:
+
+- **24-08 (noche)** — **E1** (eje de cierre) · **E2** (webhooks `orders/cancelled`/`fulfilled`/`updated`) · **E3** (backfill del histórico) · **E4** (enlace con Dropea por tag) · **E5** (reconciliación periódica) · **E7** (orquestador de llamadas Retell, apagado) · PR #5 (cadencia de reintentos anclada a días de calendario).
+- **25-08** — **E8** (reconciliador de Dropea por API) desplegado y `npm run dropea:reconcile -- --apply` corrido. Sin cambio de esquema: E8 no añade migración, solo dos consultas nuevas en `db.ts`.
 
 ---
 
@@ -41,13 +44,15 @@ Tareas desplegadas esta sesión: **E1** (eje de cierre) · **E2** (webhooks `ord
 - Escrituras habilitadas (tag `WA_CONFIRMED`).
 - Scope **`read_all_orders`** concedido (24-08): el backfill corre con cobertura completa del histórico, no solo los últimos 60 días.
 
-### Dropea — conectada de punta a punta, pero con un hueco medido (24-08-2026)
+### Dropea — conectada de punta a punta; el hueco de enlace, corregido el 25-08
 - API key `casamable-nas` con **permisos mínimos**: `issues:read`, `orders:read`, `products:read`, `stores:read`, `users:read`, `webhooks:read`, `webhooks:write`.
   **Deliberadamente SIN `orders:create` / `confirm` / `cancel` / `update`**: es la red de seguridad contra duplicados a nivel de credencial, no solo de código.
 - `store_id = 18307`, cuenta `45468`, mercado `es`, base `https://es.public-api.dropea.com`.
 - Flags: `DROPEA_API_ENABLED=1` (lectura), `DROPEA_WRITE_ENABLED=0`, `DROPEA_CREATE_MODE=external_app`, `DROPEA_LEGACY_CREATE_ACTIVE=1`.
 - **6 webhooks suscritos y activos**, firma verificándose correctamente (cero rechazos desde que se puso el secreto).
-- ⚠️ **Pero solo 3 de 21 pedidos con actividad de Dropea están enlazados localmente — 18 huérfanos.** No es un problema de firma ni de pedidos perdidos: Dropea sí los procesa, la base local no sabe emparejarlos. Consecuencia: el eje de cierre no tiene ni una entrega ni un rehúse reales todavía. Detalle completo y la tarea derivada (**E8**, reconciliador por API) en `docs/CONTEXTO-2026-08-24.md` §4-5.
+- **El hueco de enlace (24-08): 3 de 21 pedidos con actividad de Dropea estaban enlazados, 18 huérfanos.** No era firma ni pedidos perdidos: Dropea sí los procesaba, la base local no sabía emparejarlos. Diagnóstico completo en `docs/CONTEXTO-2026-08-24.md` §4.
+- **Corregido con E8 (25-08):** `npm run dropea:reconcile -- --apply` empareja por `DropeaOrder.external_order_id` contra las dos claves locales posibles (`shopify_order_id` y `shopify_order_number`) y, tras enlazar, rellena el eje de cierre con el estado actual de Dropea. Nunca pisa un enlace ni un terminal existente; solo lectura de Dropea.
+- 🔲 **PENDIENTE DE REGISTRAR: el desglose real del `--apply`.** Cuántos enlazó por cada clave, cuántos ambiguos y cuántos conflictos. Pegar aquí la salida del comando. **Hasta entonces no se puede afirmar que el eje de cierre ya tenga entregas y rehúses reales**, que era el objetivo de E8.
 
 ### Mapping de producto
 Una fila en `supplier_product_mapping`:
@@ -85,7 +90,7 @@ Doble validación operativa: primero identifica proveedor, después frena si la 
 
 **Backfill aplicado el 24-08 con cobertura completa** (`read_all_orders` verificado): de 93 pedidos, 6 pasaron a `cancelled`, 0 a `in_progress`, 87 sin cambios (69 sin señal de cierre todavía, 18 ya tenían fuente propia de un webhook). Detalle en `docs/CONTEXTO-2026-08-24.md` §3.
 
-**Pero el dato de entrega real sigue en cero** — no por el eje de cierre, sino por el hueco de enlace con Dropea descrito en §2. Hasta que **E8** cierre eso, ni la tasa de entrega ni el coste real por pedido tienen datos fiables.
+**El dato de entrega real estaba en cero** — no por el eje de cierre, sino por el hueco de enlace con Dropea descrito en §2. E8 lo cierra estructuralmente y ya se aplicó el 25-08, pero **mientras no se registre el desglose de esa ejecución, ni la tasa de entrega ni el coste real por pedido pueden darse por fiables**. Es un dato que falta apuntar, no un hueco de código.
 
 Dos huecos adicionales medidos el 24-08, sin explicar todavía:
 - **~14 cancelaciones que el backfill no recoge** (hay ~20 anulados en Shopify, solo 6 transicionaron): están detrás de los 24 "ya tenía fuente propia" — no se sabe qué escribió esa fuente.
@@ -98,7 +103,7 @@ Dos huecos adicionales medidos el 24-08, sin explicar todavía:
 | Métrica | Valor | Fiabilidad |
 |---|---|---|
 | Tasa de respuesta al WhatsApp | **54%** (excluyendo anulados) | Muestra de 13. Orientativa, y contaminada por `TEST_MODE` (ver §1) |
-| Tasa de entrega | Sin datos fiables | Bloqueada por el hueco de enlace con Dropea (§2, §4) |
+| Tasa de entrega | Sin datos fiables **todavía** | El hueco de enlace se cerró con E8 (25-08); falta registrar el resultado del `--apply` para poder medirla (§2) |
 | Coste producto (Cortaúñas) | 7,70 € + 1,00 € fulfillment | Confirmado en ficha de Dropea |
 | Coste de un rehusado en Dropea | 1,00 € de fulfillment + envío | Confirmado |
 
@@ -108,7 +113,9 @@ Contexto de negocio (contabilidad real de agosto, 2 días): margen **6,24%**, RO
 
 ## 6 · Lo que viene
 
-**Prioridad 1 — E8: reconciliador de Dropea por API.** El enlace por tag (E4) no sirve para el 97% de los pedidos (no llevan `dropea_id`). Sin esto, el eje de cierre nunca tendrá entregas/rehúses reales de Dropea. Especificación completa en `docs/CONTEXTO-2026-08-24.md` §5.
+**Prioridad 1 — registrar el resultado de E8.** No es código: es pegar en §2 el desglose del `dropea:reconcile -- --apply` del 25-08 y comprobar en el panel si el eje de cierre ya tiene entregas y rehúses reales. Todo lo económico depende de ese dato.
+
+**Prioridad 2 — qué significa el tag `dropea_error`.** Lo llevan 90 de 93 pedidos y Dropea sí los está procesando, así que **no** significa "no se creó el pedido". Se resuelve abriendo un pedido y leyendo la nota de la app. Es la incógnita más barata de cerrar y la que más cambia la lectura de todo lo demás.
 
 **Resto abierto** (detalle y contexto en `docs/CONTEXTO-2026-08-24.md` §6):
 1. ~13 pedidos anulados de 0,00 € con clientes reales — comprobar si son duplicados de Releasit o ventas perdidas.
@@ -116,13 +123,13 @@ Contexto de negocio (contabilidad real de agosto, 2 días): margen **6,24%**, RO
 3. ~14 cancelaciones que el backfill no recoge (§4 arriba).
 4. `in_progress` en cero pese a fulfillments reales (§4 arriba).
 5. Lista de pedidos del panel sin ordenar por fecha de llegada.
-6. `.env.example` desactualizado: `CALL_RETRY_DELAYS_MINUTES` → `CALL_FIRST_RETRY_MINUTES` (PR #5).
+6. ~~`.env.example` desactualizado~~ — ✓ resuelto el 25-08: `CALL_RETRY_DELAYS_MINUTES` (que no leía nadie) sustituido por `CALL_FIRST_RETRY_MINUTES`, con la nota de que del 2º al 4º reintento la cadencia es por día de calendario y vive fija en el código.
 
 **Bloqueado por terceros:**
 - Número de Twilio en revisión regulatoria — sin él, E7 no puede hacer ninguna llamada real aunque se active.
 - Dropi PRO: app rota + API sin documentar, soporte pendiente de responder.
 
-Después de E8: desactivar `TEST_MODE`, activar E7 (shadow → allowlist → real), API oficial de WhatsApp, y Beeping cuando el ROAS se estabilice.
+Después: desactivar `TEST_MODE`, activar E7 (shadow → allowlist → real), API oficial de WhatsApp, y Beeping cuando el ROAS se estabilice.
 
 ---
 

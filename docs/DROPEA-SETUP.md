@@ -48,6 +48,35 @@ cambiara, el sistema **no elige a ojo**: no toca nada y deja un aviso en
 Sistema → Eventos para que lo mires. Si algún día ves ahí `dropea_tag_...`,
 es que su app cambió el formato de la etiqueta.
 
+### Cuando la etiqueta NO está: `npm run dropea:reconcile`
+
+Medido el 24-08-2026: **90 de 93 pedidos no llevan `dropea_id`**, llevan
+`dropea_error`. Con solo la etiqueta, 18 pedidos que Dropea sí estaba
+procesando quedaban invisibles para nosotros — y sin ellos el sistema no sabe
+cuántos se entregaron ni cuántos se rehusaron, que es de lo que depende saber
+si la publicidad sale a cuenta.
+
+Para eso está el reconciliador. Le pregunta a Dropea por los pedidos de los que
+nos ha llegado algún aviso y los empareja con los nuestros por la referencia
+que ella misma guarda:
+
+```bash
+npm run dropea:reconcile                 # solo mira y te dice qué haría
+npm run dropea:reconcile -- --apply      # escribe de verdad
+```
+
+- **Sin `--apply` no escribe nada.** Míralo primero: el desglose te dice
+  cuántos enlazaría, cuántos quedan ambiguos y cuántos entran en conflicto.
+- **Solo lee de Dropea.** No puede crear, confirmar ni cancelar nada allí — ni
+  siquiera está importada la función para hacerlo, y hay un test que lo vigila.
+- **Nunca pisa un enlace ni un estado ya cerrado por otra fuente.**
+- Si se corta a mitad, se reanuda donde iba: no repite pedidos.
+
+Después de enlazar, aprovecha la misma consulta para apuntar en qué estado está
+hoy cada envío. Por eso conviene correrlo cuando ya llevas un rato sin tocar
+nada, y guardar el desglose que imprime: es el dato que hay que apuntar en
+`docs/ESTADO-PRODUCCION.md`.
+
 ---
 
 ## Configuración completa del `.env` del NAS

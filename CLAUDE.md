@@ -115,6 +115,16 @@ Aplica a backfills, migraciones de datos, reprocesos y cualquier cosa que recorr
 - **Paginación con checkpoint** (en la tabla `settings`, sin crear tablas nuevas para esto) y **backoff ante 429**. Todo proceso largo debe ser **reanudable** sin repetir páginas ya hechas.
 - Los pedidos que existen en Shopify pero no localmente se insertan con `status='ignored_old'` para que **no entren en ninguna cola** de llamadas ni confirmaciones. Reusa `normalizeOrder()` en lugar de mapear a mano.
 
+Hoy son tres, y los tres cumplen lo de arriba. Un script nuevo de este tipo se escribe copiando este patrón, no inventando otro:
+
+| Comando | Qué recorre | Escribe |
+|---|---|---|
+| `npm run shopify:backfill` | histórico de pedidos de Shopify | eje de cierre + enlace Dropea por tag (E4) |
+| `npm run dropea:reconcile` | pedidos de Dropea con webhook recibido | `supplier_external_order_id` + eje de cierre (E8) |
+| `npm run shopify:webhooks -- --ensure` | suscripciones de webhook | crea las que faltan; **nunca borra ni modifica** |
+
+`dropea:reconcile` añade una regla propia: **solo lee de Dropea** (`getDropeaOrder`, GET). Ni una función de escritura importada, y un test que lo vigila — es la misma idea que la salvaguarda de WhatsApp, aplicada al proveedor.
+
 ---
 
 ## 7. API de Shopify: dos trampas conocidas
@@ -157,33 +167,50 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**En producción, desplegado en el NAS la noche del 24-08-2026:** commit
-`635d169`, esquema **5**. E1 (eje de cierre) + E2 (webhooks de cierre) + E3
-(backfill, corrido con `read_all_orders` verificado: 93 pedidos, cobertura
-completa) + E4 (enlace con Dropea por tag) + E5 (reconciliación cada 6 h) +
-elegibilidad central (`src/lib/orders/eligibility.ts`) + **E7** (orquestador
-de llamadas Retell, desplegado y **apagado**: kill switch OFF, shadow ON) +
-la cadencia de reintentos de llamadas anclada a días de calendario (PR #5,
-mergeado). Contenedor *healthy*, WhatsApp reconectó sin QR. Detalle completo
-del despliegue y del diagnóstico posterior en `docs/CONTEXTO-2026-08-24.md`;
-snapshot vivo del estado en `docs/ESTADO-PRODUCCION.md`.
+**En producción, NAS al día con `main` (`7fa41c8`), esquema 5.** Desplegado en
+dos tandas: la noche del 24-08-2026 entraron E1 (eje de cierre) + E2 (webhooks
+de cierre) + E3 (backfill, corrido con `read_all_orders` verificado: 93
+pedidos, cobertura completa) + E4 (enlace con Dropea por tag) + E5
+(reconciliación cada 6 h) + elegibilidad central (`src/lib/orders/eligibility.ts`)
++ **E7** (orquestador de llamadas Retell, **apagado**: kill switch OFF, shadow
+ON) + PR #5 (cadencia de reintentos anclada a días de calendario). El 25-08
+entró **E8**. Detalle del despliegue del 24-08 y del diagnóstico que originó E8
+en `docs/CONTEXTO-2026-08-24.md`; snapshot vivo en `docs/ESTADO-PRODUCCION.md`.
 
-**Hallazgo del mismo despliegue, sin resolver:** Dropea está procesando 21
-pedidos y avisando de cada cambio de estado, pero solo 3 están enlazados
-localmente — 18 huérfanos, porque el enlace por tag (E4) no cubre pedidos sin
-`dropea_id`. Consecuencia: el eje de cierre todavía no tiene ni una entrega
-ni un rehúse reales de Dropea. Ver `docs/CONTEXTO-2026-08-24.md` §4.
+**E8 — reconciliador de Dropea por API: desplegado y `--apply` corrido
+(25-08-2026).** Resuelve el hallazgo del 24-08: Dropea procesaba 21 pedidos y
+avisaba de cada cambio de estado, pero solo 3 estaban enlazados localmente
+(el tag de E4 no existe en el 97 % de los pedidos: llevan `dropea_error`, no
+`dropea_id`). El reconciliador empareja por `DropeaOrder.external_order_id`
+—único campo de correlación que expone su API— probando contra las **dos**
+claves locales posibles (`shopify_order_id` y `shopify_order_number`), y el
+desglose dice cuál acertó en vez de asumirlo. Tras enlazar, rellena el eje de
+cierre con el estado actual de Dropea reutilizando la misma llamada.
+`npm run dropea:reconcile`, dry-run por defecto. Solo lectura de Dropea.
 
-**Siguiente: E8 — reconciliador de Dropea por API.** Traer pedidos por su
-API (la lectura ya funciona), emparejar con los locales por la clave que
-traiga su payload (número de pedido de Shopify, referencia externa o
-teléfono — *averiguar primero cuál*), escribir `supplier_external_order_id`
-solo donde no exista ya. `--dry-run` por defecto. Especificación completa en
-`docs/CONTEXTO-2026-08-24.md` §5.
+⚠️ **Sin registrar todavía: las cifras del `--apply`** (cuántos enlazó por cada
+clave, ambiguos, conflictos) y, con ellas, si el eje de cierre ya tiene
+entregas y rehúses reales — que era el objetivo. Hasta pegar esa salida en
+`docs/ESTADO-PRODUCCION.md`, la tasa de entrega **sigue sin poder darse por
+fiable**.
+
+**Abierto, sin tocar desde el 24-08** (detalle en `docs/CONTEXTO-2026-08-24.md`
+§6): qué significa el tag `dropea_error` en 90 de 93 pedidos · ~13 anulados de
+0,00 € con clientes reales · 3 pedidos bloqueados por ciudad `"-"` · ~14
+cancelaciones que el backfill no recoge · `in_progress` en cero pese a haber
+fulfillments reales · la lista del panel sin ordenar por fecha de llegada.
+
+**Bloqueado por terceros:** número de Twilio en revisión regulatoria (sin él
+E7 no puede llamar aunque se active) y Dropi PRO (app rota, API sin
+documentar).
 
 **TEST_MODE sigue ON** (decisión de Pedro): mientras dure, `needs_call` y la
 tasa de respuesta no miden nada real — los pedidos de clientes reales se
 ignoran, no es que no respondan.
+
+**Siguiente: sin épica asignada.** Lo que más valor tiene ahora no es código
+nuevo, sino cerrar las incógnitas de arriba con datos: registrar la salida de
+E8 y averiguar qué es `dropea_error`.
 
 ---
 
