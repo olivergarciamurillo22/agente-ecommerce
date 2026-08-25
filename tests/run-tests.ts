@@ -7317,6 +7317,9 @@ async function main(): Promise<void> {
   const confirmMod = await import("../src/lib/orders/confirmation");
 
   const META_ENV = {
+    // La config del PILOTO: el webhook solo ACTÚA con cloud_api activo (con
+    // Baileys activo lo ignora para no procesar el mismo mensaje dos veces).
+    WHATSAPP_PROVIDER: "cloud_api",
     META_WHATSAPP_API_ENABLED: "1",
     META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
     META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
@@ -7714,6 +7717,196 @@ async function main(): Promise<void> {
     assert.equal(fila2.sent, 1, "fuera de la cola");
     assert.ok(fila2.failed_at);
     assert.match(fila2.failure_reason ?? "", /outside_24h_window/);
+  });
+
+  await test("COEXISTENCIA · con Baileys activo, el webhook de Meta NO actúa: cero doble proceso", async () => {
+    // Durante la transición pueden llegar los MISMOS mensajes por los dos
+    // caminos (la sesión de Baileys y el webhook de Meta), con ids DISTINTOS:
+    // el dedupe por id no cubre esto. Cubre este gate.
+    const tel = "34600000130";
+    mkMulti("971001", "6001", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.coex1", timestamp: "1756100100", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv({ ...META_ENV, WHATSAPP_PROVIDER: "baileys" }, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200, "a Meta se le responde 200 (si no, reintenta eternamente)");
+      assert.equal(db.getOrderByShopifyId("971001")!.status, "awaiting_reply", "NO se actúa");
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === tel).length, 0, "cero respuestas");
+      const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 100 });
+      assert.ok(evs.some((e) => e.event_type === "meta_inbound_ignored_provider_baileys"), "queda constancia");
+    });
+  });
+
+  await test("VENTANA 24H · el entrante por Cloud ABRE la ventana (el bug que habría matado el piloto)", async () => {
+    // Antes del arreglo, el webhook no insertaba el mensaje en `messages` y
+    // la ventana JAMÁS se abría en modo cloud: todo texto libre fallaba
+    // outside_24h_window incluso respondiendo al cliente en el momento.
+    const tel = "34600000131";
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.win1", timestamp: "1756100110", type: "text", text: { body: "hola" } },
+      tel
+    );
+    await withEnv(META_ENV, async () => {
+      assert.equal(metaProv.isWithinSessionWindow(tel), false, "antes de escribir: fuera");
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(metaProv.isWithinSessionWindow(tel), true, "el entrante abre la ventana");
+
+      // Y un texto libre ya puede salir.
+      const { llamadas, fetchImpl } = fakeMetaFetch([]);
+      const prov = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+      const r = await prov.send(tel, { kind: "text", text: "gracias" });
+      assert.equal(r.ok, true);
+      assert.equal(llamadas.length, 1);
+    });
+  });
+
+  await test("VENTANA 24H · frontera exacta: 23h59 dentro, 24h00 y 24h01 fuera", () => {
+    const tel = "34600000132";
+    const convo = db.getOrCreateConversation(tel);
+    const t0 = 1756000000;
+    db.systemDbHandle()
+      .prepare("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', 'hola', ?)")
+      .run(convo.id, t0);
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600 - 60), true, "23h59: dentro");
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600), false, "24h00 exactas: FUERA (conservador)");
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600 + 60), false, "24h01: fuera");
+    // Y comprobar la ventana NO crea conversaciones (solo lectura).
+    const antes = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM conversations").get() as { n: number }).n;
+    metaProv.isWithinSessionWindow("34999999999");
+    const despues = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM conversations").get() as { n: number }).n;
+    assert.equal(despues, antes, "el chequeo es de solo lectura");
+  });
+
+  await test("AMBIGUO · timeout tras enviar NO se reintenta (duplicar es peor que perder); DNS caído SÍ", async () => {
+    const tel = "34600000131"; // ventana abierta arriba
+    await withEnv(META_ENV, async () => {
+      const provTimeout = new metaProv.MetaCloudWhatsAppProvider(async () => {
+        throw new Error("The operation was aborted due to timeout");
+      });
+      const rt = await provTimeout.send(tel, { kind: "text", text: "x" });
+      assert.equal(rt.ok, false);
+      assert.equal(rt.retryable, false, "la petición PUDO llegar a Meta: reenviar duplicaría el WhatsApp");
+      assert.match(rt.error ?? "", /ambiguo/);
+
+      const provDns = new metaProv.MetaCloudWhatsAppProvider(async () => {
+        throw new Error("getaddrinfo ENOTFOUND graph.facebook.com");
+      });
+      const rd = await provDns.send(tel, { kind: "text", text: "x" });
+      assert.equal(rd.retryable, true, "la petición JAMÁS salió: reintentar es seguro");
+    });
+  });
+
+  await test("AMBIGUO · HTTP 200 con cuerpo malformado = ENVIADO sin id, jamás reintento", async () => {
+    const tel = "34600000131";
+    await withEnv(META_ENV, async () => {
+      const prov = new metaProv.MetaCloudWhatsAppProvider(
+        async () => new Response("<html>no soy json</html>", { status: 200 })
+      );
+      const r = await prov.send(tel, { kind: "text", text: "x" });
+      assert.equal(r.ok, true, "Meta ACEPTÓ: darlo por fallido reenviaría un mensaje ya entregado");
+      assert.equal(r.providerMessageId, null, "sin id: los estados no correlarán, que es solo cosmético");
+    });
+  });
+
+  await test("ESTADOS META · monotonicidad: failed NO pisa un delivered previo (webhook atrasado)", async () => {
+    const tel = "34600000133";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje entregado");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.mono1");
+    await withEnv(META_ENV, () => {
+      const rawDel = metaStatusBody({ id: "wamid.mono1", status: "delivered", timestamp: "1756100120", recipient_id: tel });
+      metaHook.processMetaWebhook(rawDel, firmaMeta(rawDel));
+      const rawFail = metaStatusBody({
+        id: "wamid.mono1", status: "failed", timestamp: "1756100121", recipient_id: tel,
+        errors: [{ code: 131026, title: "Undeliverable" }],
+      });
+      metaHook.processMetaWebhook(rawFail, firmaMeta(rawFail));
+      const fila = db.getOutboxByProviderMessageId("wamid.mono1")!;
+      assert.equal(fila.failed_at, null, "un entregado no puede volverse fallido");
+      assert.equal(fila.delivered_at, 1756100120);
+    });
+  });
+
+  await test("CLOUD OUTBOX · una IMAGEN del panel falla con gracia y motivo, jamás sale como texto vacío", async () => {
+    const tel = "34600000134";
+    const convo = db.getOrCreateConversation(tel);
+    const imgId = db.enqueueOutboxImage(convo.id, tel, "/tmp/no-existe.jpg", "");
+    const fakeProv = {
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string) => ({ ok: to === tel ? false : true, providerMessageId: "wamid.x", error: "no debería llamarse para la imagen", retryable: false }),
+    };
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === imgId); i++) {
+      await metaOutbox.runCloudOutboxTick(fakeProv);
+    }
+    const fila = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(imgId) as {
+      sent: number; failed_at: number | null; failure_reason: string | null;
+    };
+    assert.equal(fila.sent, 1);
+    assert.ok(fila.failed_at, "terminal");
+    assert.match(fila.failure_reason ?? "", /imagen no soportada/);
+  });
+
+  await test("AUDIO CLOUD · queda registrado y visible, no rompe el COD, y el cliente puede seguir por texto", async () => {
+    const tel = "34600000135";
+    mkMulti("971002", "6002", tel);
+    await withEnv(META_ENV, () => {
+      const rawAudio = metaInboundBody(
+        { from: tel, id: "wamid.audio1", timestamp: "1756100130", type: "audio", audio: { id: "media1" } },
+        tel
+      );
+      const r = metaHook.processMetaWebhook(rawAudio, firmaMeta(rawAudio));
+      assert.equal(r.status, 200);
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "awaiting_reply", "el pedido no se toca");
+      // Registrado en la conversación (y por tanto abre la ventana de 24 h).
+      assert.equal(metaProv.isWithinSessionWindow(tel), true, "una nota de voz también abre la ventana");
+
+      // El cliente sigue por texto y todo funciona.
+      const rawTxt = metaInboundBody(
+        { from: tel, id: "wamid.audio2", timestamp: "1756100131", type: "text", text: { body: "1" } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawTxt, firmaMeta(rawTxt));
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "confirmed");
+    });
+  });
+
+  await test("BOTÓN OBSOLETO · pulsar 'Confirmar' sin pedidos activos: silencio, sin errores ni respuestas raras", async () => {
+    const tel = "34600000136"; // sin pedidos
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.stale1", timestamp: "1756100140", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === tel).length, 0, "sin respuesta automática");
+    });
+  });
+
+  await test("ROLLBACK · el fallback de un interactivo encolado en cloud sale como texto 1/2/3 por Baileys", async () => {
+    // Escenario real de rollback: hay filas interactivas pendientes cuando
+    // se vuelve a WHATSAPP_PROVIDER=baileys. La política es PROVEEDOR
+    // RESUELTO AL ENVIAR: el loop de Baileys no conoce message_type y manda
+    // `content` — que es EXACTAMENTE el fallback 1/2/3. Nada se pierde, nada
+    // se duplica (el claim es el mismo), y el cliente recibe el flujo viejo.
+    const tel = "34600000137";
+    const orden = mkMulti("971003", "6003", tel);
+    const spec = interactive.buildConfirmationInteractive(db.getOrderById(orden.id)!);
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "encolado como interactivo");
+    assert.match(item.content, /1 — Confirmar/, "y su content ES el fallback: Baileys lo manda tal cual");
+    assert.equal(item.type, "text", "para el loop de Baileys es un texto normal (columna vieja `type`)");
   });
 
   await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {

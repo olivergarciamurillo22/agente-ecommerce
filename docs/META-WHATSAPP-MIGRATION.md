@@ -115,3 +115,42 @@ borra un `read`) y son idempotentes.
 3. No borrar `auth/` de Baileys hasta semanas después del corte definitivo.
 4. No activar `WHATSAPP_PROVIDER=cloud_api` en el NAS sin haber pasado el
    piloto con TEST_MODE=1 y la allowlist.
+
+## Políticas fijadas en la auditoría pre-piloto (25-08-2026)
+
+**Outbox mixto — proveedor resuelto AL ENVIAR, no al encolar.** El loop
+activo drena todo lo pendiente. Un interactivo encolado en modo cloud y
+drenado por Baileys tras un rollback sale como su texto de fallback (el
+flujo 1/2/3), porque `content` ES el fallback y el loop de Baileys no conoce
+`message_type`. Nada se pierde, nada cambia de significado, y el claim
+atómico es el mismo — no puede duplicarse. Se eligió así porque fijar el
+proveedor al encolar dejaría mensajes atascados para siempre tras un
+rollback.
+
+**Resultado ambiguo = no reintentar.** Un timeout o un reset pueden ocurrir
+DESPUÉS de que la petición llegara a Meta: reintentar podría mandar el mismo
+WhatsApp dos veces. Solo se reintenta lo que garantiza que la petición nunca
+salió (DNS caído, conexión rechazada). Un `200` con cuerpo ilegible cuenta
+como ENVIADO sin id. Perder un mensaje es recuperable (recordatorios,
+`needs_call`); duplicarlo no. **At-most-once, nunca exactly-once** — Meta no
+ofrece clave de idempotencia de envío.
+
+**Claves de dedupe por tipo de evento del webhook:**
+
+| Evento | Dedupe |
+|---|---|
+| Mensajes entrantes (texto/botón/lista/audio/imagen) | `claimWebhookEvent("meta:" + wamid)` |
+| Estados (sent/delivered/read/failed) | sin claim: idempotentes por efecto (`COALESCE`, solo-avanzan, `failed` no pisa `delivered`) |
+| Cross-provider (coexistencia) | los ids NO coinciden entre Baileys y Meta → lo cubre el **gate de proveedor**: el webhook de Meta solo actúa con `WHATSAPP_PROVIDER=cloud_api` |
+
+**La ventana de 24 h se abre con CUALQUIER entrante**, también notas de voz
+e imágenes: el webhook registra todo entrante en `messages` (es además lo
+que el panel enseña). Frontera conservadora: a las 24 h exactas ya cuenta
+como fuera.
+
+**Carrera conocida y aceptada:** un webhook de estado puede llegar en los
+milisegundos entre que Meta acepta el envío y que persistimos su
+`provider_message_id`; ese estado se pierde (cosmético: el mensaje salió una
+vez y bien). Y si el proceso muere entre el claim y el envío, el mensaje se
+pierde y lo recoge la red de recordatorios — el mismo compromiso documentado
+del loop de Baileys.

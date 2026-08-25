@@ -18,9 +18,10 @@
 
 import crypto from "node:crypto";
 import pino from "pino";
-import { claimWebhookEvent, setSetting } from "../db";
+import { claimWebhookEvent, getOrCreateConversation, insertMessage, setSetting } from "../db";
 import { logIntegrationEvent, recordServiceCheck } from "../system/repo";
 import { sendWhatsAppMessage } from "../whatsapp";
+import { whatsappProviderName } from "./provider";
 import { handleOrderReply, handleOrderButtonReply } from "../orders/confirmation";
 import { updateOutboxStatusByProviderMessageId } from "../db";
 import { parseMetaWebhookPayload, type InboundWhatsAppMessage } from "./inbound";
@@ -69,6 +70,17 @@ export interface MetaWebhookResult {
   body: Record<string, unknown>;
 }
 
+/** Texto con el que un entrante queda registrado en la conversación. */
+function textoParaPanel(m: InboundWhatsAppMessage): string {
+  if (m.kind === "text") return m.text ?? "";
+  if (m.kind === "button_reply" || m.kind === "list_reply") {
+    return `[botón] ${m.text ?? m.payload ?? ""}`;
+  }
+  if (m.kind === "audio") return "[nota de voz recibida por Cloud API]";
+  if (m.kind === "image") return m.text ? `[imagen] ${m.text}` : "[imagen recibida]";
+  return "[mensaje no reconocido]";
+}
+
 /** Un mensaje entrante normalizado → flujo COD determinista. */
 function procesarMensaje(m: InboundWhatsAppMessage): void {
   // Dedupe por id de mensaje: Meta reintenta la entrega del webhook.
@@ -76,6 +88,32 @@ function procesarMensaje(m: InboundWhatsAppMessage): void {
     logger.info(`[META] mensaje ${m.messageId} repetido — ignorado`);
     return;
   }
+
+  // GATE DE PROVEEDOR (coexistencia): si el proveedor activo es Baileys, el
+  // MISMO mensaje va a llegar también por la sesión de WhatsApp Web y la va
+  // a procesar el handler de Baileys. Actuar aquí además lo duplicaría todo
+  // (dos respuestas al cliente, doble transición). Los ids no coinciden
+  // entre proveedores, así que el dedupe por id NO cubre este caso — cubre
+  // este gate. Se registra que llegó, y nada más.
+  if (whatsappProviderName() !== "cloud_api") {
+    logIntegrationEvent(
+      "whatsapp",
+      "meta_inbound_ignored_provider_baileys",
+      "info",
+      "entrante por el webhook de Meta con Baileys como proveedor activo: ignorado para no procesar el mismo mensaje dos veces"
+    );
+    return;
+  }
+
+  // REGISTRAR el entrante ANTES de decidir nada. Dos razones que no son
+  // cosmética: (1) el panel de Chats tiene que enseñar lo que dijo el
+  // cliente; (2) la VENTANA DE 24 H se calcula sobre messages.role='user' —
+  // sin esta línea, la ventana jamás se abriría en modo cloud y todo texto
+  // libre fallaría outside_24h_window incluso en mitad de una conversación.
+  // Audio e imagen también cuentan: para Meta, cualquier entrante abre la
+  // ventana, y nuestro registro tiene que decir lo mismo.
+  const convo = getOrCreateConversation(m.phone, m.profileName ?? undefined);
+  insertMessage(convo.id, "user", textoParaPanel(m).slice(0, 2000));
 
   let resultado;
   if ((m.kind === "button_reply" || m.kind === "list_reply") && m.payload) {
@@ -86,8 +124,10 @@ function procesarMensaje(m: InboundWhatsAppMessage): void {
     resultado = handleOrderReply(m.phone, m.text);
   } else {
     // Audio/imagen/desconocido por Cloud API: fuera del alcance del piloto.
-    // No se responde nada (misma política que un número sin pedidos).
-    logger.info(`[META] entrante ${m.kind} de ***${m.phone.slice(-4)}: sin manejo en el piloto`);
+    // Queda registrado y visible en el panel; no se responde nada (misma
+    // política que un número sin pedidos). El COD no se rompe: el cliente
+    // puede seguir escribiendo texto o pulsando botones.
+    logger.info(`[META] entrante ${m.kind} de ***${m.phone.slice(-4)}: registrado, sin manejo en el piloto`);
     return;
   }
 

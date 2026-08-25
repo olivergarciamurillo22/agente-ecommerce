@@ -77,6 +77,21 @@ export async function runCloudOutboxTick(provider: WhatsAppProvider): Promise<{ 
       );
       continue;
     }
+    // Imagen (la manda un humano desde el panel de Chats): la Cloud API
+    // exige subir el binario a Meta primero, y eso NO está implementado.
+    // Fallar con gracia y motivo visible — jamás mandar un texto vacío o el
+    // pie de foto suelto como si fuera el mensaje.
+    if (item.type === "image") {
+      if (!markOutboxSent(item.id)) continue;
+      markOutboxFailedTerminal(
+        item.id,
+        provider.name,
+        "imagen no soportada por la Cloud API todavía: reenviar como texto, o usar Baileys"
+      );
+      result.failed++;
+      continue;
+    }
+
     // CLAIM atómico: si otro proceso se lo llevó, aquí no se envía nada.
     if (!markOutboxSent(item.id)) continue;
 

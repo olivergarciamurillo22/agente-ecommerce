@@ -18,7 +18,7 @@
 // ============================================================
 
 import pino from "pino";
-import { getLastInboundAt, getOrCreateConversation } from "../db";
+import { getConversationIdByPhone, getLastInboundAt } from "../db";
 import { classifyHttpError } from "../system/errors";
 import type {
   OutboundWhatsAppMessage,
@@ -49,11 +49,23 @@ export function metaCloudConfigured(): boolean {
   return metaCloudEnabled() && Boolean(phoneNumberId()) && Boolean(accessToken());
 }
 
-/** Ventana de sesión de Meta: 24 h desde el último mensaje DEL CLIENTE. */
+/**
+ * Ventana de sesión de Meta: 24 h desde el último mensaje DEL CLIENTE.
+ *
+ * Fuente de verdad: `messages.role='user'` (epoch UTC de SQLite). El webhook
+ * de Meta INSERTA ahí cada entrante — incluido audio/imagen como
+ * placeholder — precisamente para que la ventana se abra con cualquier
+ * mensaje del cliente, igual que la cuenta Meta.
+ *
+ * Comparación estricta `< 24h`: en el segundo exacto 24:00 ya se considera
+ * FUERA (conservador: mejor una plantilla de más que un rechazo de Meta).
+ * Solo lectura: comprobar la ventana no crea conversaciones.
+ */
 export function isWithinSessionWindow(phone: string, nowSec = Math.floor(Date.now() / 1000)): boolean {
-  const convo = getOrCreateConversation(phone);
-  const lastInbound = getLastInboundAt(convo.id);
-  if (lastInbound === null) return false; // nunca nos escribió: plantilla sí o sí
+  const convoId = getConversationIdByPhone(phone);
+  if (convoId === null) return false; // nunca nos escribió: plantilla sí o sí
+  const lastInbound = getLastInboundAt(convoId);
+  if (lastInbound === null) return false;
   return nowSec - lastInbound < 24 * 3600;
 }
 
@@ -180,7 +192,11 @@ export class MetaCloudWhatsAppProvider implements WhatsAppProvider {
         let detalle = `HTTP ${res.status}`;
         try {
           const body = (await res.json()) as { error?: { message?: string; code?: number } };
-          if (body.error?.message) detalle = `${detalle}: ${body.error.message}`;
+          // El código de Meta se preserva SIEMPRE (131047 = fuera de sesión,
+          // 132xxx = plantilla, 100 = parámetro inválido…): es lo que permite
+          // diagnosticar sin adivinar. El mensaje va recortado y sin PII.
+          if (body.error?.code) detalle = `${detalle} [code ${body.error.code}]`;
+          if (body.error?.message) detalle = `${detalle}: ${String(body.error.message).slice(0, 160)}`;
         } catch {
           /* cuerpo no-JSON: nos quedamos con el status */
         }
@@ -193,15 +209,31 @@ export class MetaCloudWhatsAppProvider implements WhatsAppProvider {
           retryable: clasificado.category === "retryable" || clasificado.category === "rate_limit",
         };
       }
-      const json = (await res.json()) as { messages?: Array<{ id?: string }> };
+      let json: { messages?: Array<{ id?: string }> };
+      try {
+        json = (await res.json()) as { messages?: Array<{ id?: string }> };
+      } catch {
+        // HTTP 200 con cuerpo ilegible: Meta ACEPTÓ el mensaje. Reenviar
+        // duplicaría; se da por enviado sin id (los estados no correlarán,
+        // que es cosmético — un duplicado al cliente no lo es).
+        logger.warn("[META] 200 con respuesta malformada: enviado sin provider_message_id");
+        return { ok: true, providerMessageId: null };
+      }
       return { ok: true, providerMessageId: json.messages?.[0]?.id ?? null };
     } catch (err) {
-      const clasificado = classifyHttpError(null, err);
+      // POLÍTICA AT-MOST-ONCE ante resultado AMBIGUO: un timeout o un reset
+      // pueden ocurrir DESPUÉS de que la petición llegara a Meta — reintentar
+      // podría mandar el mismo WhatsApp dos veces al cliente. Solo se
+      // reintenta lo que garantiza que la petición NUNCA salió (DNS caído,
+      // conexión rechazada). Perder un mensaje es recuperable (recordatorios,
+      // needs_call); duplicarlo no. Misma política que el loop de Baileys.
+      const raw = err instanceof Error ? err.message : String(err);
+      const nuncaSalio = /ENOTFOUND|ECONNREFUSED|EAI_AGAIN/i.test(raw);
       return {
         ok: false,
         providerMessageId: null,
-        error: clasificado.raw || clasificado.message,
-        retryable: clasificado.category === "retryable",
+        error: nuncaSalio ? raw : `resultado ambiguo (${raw.slice(0, 120)}): no se reintenta para no duplicar`,
+        retryable: nuncaSalio,
       };
     }
   }

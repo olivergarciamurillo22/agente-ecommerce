@@ -1901,10 +1901,13 @@ export function updateOutboxStatusByProviderMessageId(
       )
       .run(atSec, atSec, providerMessageId);
   } else if (status === "failed") {
+    // MONOTONICIDAD: un mensaje ya entregado (o leído) NO puede pasar a
+    // fallado por un webhook atrasado o duplicado. failed es un terminal
+    // ALTERNATIVO a delivered, no un estado posterior.
     info = db
       .prepare(
         `UPDATE outbox SET failed_at = COALESCE(failed_at, ?), failure_reason = COALESCE(failure_reason, ?)
-         WHERE provider_message_id = ?`
+         WHERE provider_message_id = ? AND delivered_at IS NULL AND read_at IS NULL`
       )
       .run(atSec, (failureReason ?? "fallo reportado por Meta").slice(0, 300), providerMessageId);
   } else {
@@ -1919,6 +1922,15 @@ export function getOutboxByProviderMessageId(providerMessageId: string): OutboxI
       | OutboxItem
       | undefined) ?? null
   );
+}
+
+/** Conversación por teléfono, SOLO LECTURA (no crea nada). Para chequeos
+ *  como la ventana de 24 h, que no deben tener efectos secundarios. */
+export function getConversationIdByPhone(phone: string): number | null {
+  const row = ctx().db.prepare("SELECT id FROM conversations WHERE phone = ?").get(phone) as
+    | { id: number }
+    | undefined;
+  return row?.id ?? null;
 }
 
 /**
