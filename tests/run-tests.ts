@@ -6664,6 +6664,86 @@ async function main(): Promise<void> {
     assert.equal(db.listOrderStatusHistory(o.id).length, historicoAntes, "el histórico de estados tampoco se toca");
   });
 
+  // ============ 51 · Taxonomía de errores ============
+  console.log("\n— Errores: la categoría dice quién y cuándo lo arregla —");
+
+  const ERR = await import("../src/lib/system/errors");
+
+  await test("ERRORES · el código HTTP manda sobre el texto del mensaje", () => {
+    // Un código es una señal estable; el texto lo puede cambiar el tercero
+    // cualquier día sin avisar.
+    assert.equal(ERR.classifyHttpError(401).category, "auth_error");
+    assert.equal(ERR.classifyHttpError(403).category, "auth_error");
+    assert.equal(ERR.classifyHttpError(429).category, "rate_limit");
+    assert.equal(ERR.classifyHttpError(500).category, "retryable");
+    assert.equal(ERR.classifyHttpError(503).category, "retryable");
+    assert.equal(ERR.classifyHttpError(404).category, "non_retryable");
+    assert.equal(ERR.classifyHttpError(422).category, "validation_error");
+    assert.equal(ERR.classifyHttpError(418).category, "external_provider_error");
+  });
+
+  await test("ERRORES · sin código HTTP se usan los códigos de red, no frases traducibles", () => {
+    for (const m of ["ECONNRESET", "ETIMEDOUT", "socket hang up", "ENOTFOUND api.dropea.com"]) {
+      assert.equal(ERR.classifyHttpError(null, new Error(m)).category, "retryable", m);
+    }
+    assert.equal(
+      ERR.classifyHttpError(null, new Error("DROPEA_API_KEY no configurada")).category,
+      "configuration_error"
+    );
+  });
+
+  await test("ERRORES · reintentar o no: 401 NO se reintenta, 429 y 5xx SÍ", () => {
+    // Reintentar un 401 eternamente gasta cupo y no arregla nada; no
+    // reintentar un timeout pierde trabajo que se habría recuperado solo.
+    assert.equal(ERR.isRetryable("auth_error"), false);
+    assert.equal(ERR.isRetryable("validation_error"), false);
+    assert.equal(ERR.isRetryable("non_retryable"), false);
+    assert.equal(ERR.isRetryable("retryable"), true);
+    assert.equal(ERR.isRetryable("rate_limit"), true);
+  });
+
+  await test("ERRORES · lo que necesita un humano queda marcado como tal", () => {
+    for (const c of ["manual_review", "configuration_error", "auth_error", "internal_error"] as const) {
+      assert.equal(ERR.needsHuman(c), true, c);
+    }
+    for (const c of ["retryable", "rate_limit"] as const) {
+      assert.equal(ERR.needsHuman(c), false, c);
+    }
+  });
+
+  await test("ERRORES · severidad: credenciales y configuración son CRÍTICAS", () => {
+    // Sin credencial no funciona nada; un timeout se arregla solo.
+    assert.equal(ERR.categorySeverity("auth_error"), "critical");
+    assert.equal(ERR.categorySeverity("configuration_error"), "critical");
+    assert.equal(ERR.categorySeverity("retryable"), "info");
+    assert.equal(ERR.categorySeverity("rate_limit"), "info");
+    assert.equal(ERR.categorySeverity("manual_review"), "warning");
+  });
+
+  await test("ERRORES · cada categoría tiene texto para Pedro, sin jerga", () => {
+    for (const c of ERR.ERROR_CATEGORIES) {
+      const l = ERR.categoryLabel(c);
+      assert.ok(l.length > 5, c);
+      // Nada de "Bearer", "token success", códigos sueltos ni inglés técnico.
+      assert.equal(/bearer|null|undefined|HTTP \d/i.test(l), false, `jerga en "${l}"`);
+    }
+  });
+
+  await test("ERRORES · problemas de datos del pedido: revisión vs validación", () => {
+    // Sin mapping alguien tiene que decidir; sin localidad alguien tiene que
+    // corregir. Son arreglos distintos y no se pintan igual.
+    assert.equal(ERR.classifyOrderDataError("unmapped_products: sin asociación").category, "manual_review");
+    assert.equal(ERR.classifyOrderDataError("mixed_supplier").category, "manual_review");
+    assert.equal(ERR.classifyOrderDataError("blocked_address: localidad vacía").category, "validation_error");
+  });
+
+  await test("ERRORES · un fallo de SQLite es un fallo NUESTRO, no del proveedor", () => {
+    const c = ERR.classifyInternalError(new Error("SQLITE_BUSY: database is locked"));
+    assert.equal(c.category, "internal_error");
+    assert.match(c.message, /base de datos/);
+    assert.equal(ERR.needsHuman(c.category), true);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
