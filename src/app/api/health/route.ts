@@ -15,7 +15,12 @@ export async function GET(): Promise<NextResponse> {
       {
         ok: connected,
         status: conn.status,
-        phone: conn.phone ?? null,
+        // ENMASCARADO a propósito: este endpoint es PÚBLICO (lo consultan
+        // monitores externos sin credenciales) y devolvía el número de
+        // WhatsApp del negocio entero. Un monitor solo necesita saber si hay
+        // conexión; los últimos dígitos bastan para que Pedro distinga qué
+        // número está vinculado sin publicarlo a quien pregunte.
+        phone: conn.phone ? `***${String(conn.phone).slice(-4)}` : null,
         time: new Date().toISOString(),
       },
       { status: connected ? 200 : 503 }

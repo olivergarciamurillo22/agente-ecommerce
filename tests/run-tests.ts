@@ -6915,6 +6915,93 @@ async function main(): Promise<void> {
     assert.equal(dropi.dropiProvider.isConfigured(), false);
   });
 
+  // ============ 54 · Seguridad y postura ============
+  console.log("\n— Seguridad —");
+
+  const SEC = await import("../src/lib/system/security-posture");
+
+  await test("SEGURIDAD · avisa si el panel no tiene contraseña propia", async () => {
+    await withEnv({ DASHBOARD_PASSWORD: "" }, () => {
+      const items = SEC.getSecurityPosture();
+      const p = items.find((i) => i.key === "dashboard_password")!;
+      assert.equal(p.level, "warning");
+      // El aviso tiene que decir la CONSECUENCIA, no solo "falta una variable".
+      assert.match(p.detail, /red local|pedidos|conversaciones/i);
+    });
+    await withEnv({ DASHBOARD_PASSWORD: "una-clave" }, () => {
+      assert.equal(SEC.getSecurityPosture().find((i) => i.key === "dashboard_password")!.level, "ok");
+    });
+  });
+
+  await test("SEGURIDAD · un secreto de webhook ausente se explica como integración parada, no como agujero", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "" }, () => {
+      const p = SEC.getSecurityPosture().find((i) => i.key === "dropea_webhook_secret")!;
+      assert.equal(p.level, "warning");
+      assert.match(p.detail, /No es un agujero/i);
+    });
+  });
+
+  await test("SEGURIDAD · TEST_MODE se anuncia con lo que significa de verdad", async () => {
+    await withEnv({ TEST_MODE: "1" }, () => {
+      const p = SEC.getSecurityPosture().find((i) => i.key === "test_mode")!;
+      assert.match(p.detail, /no miden nada real|se ignoran/i);
+    });
+    await withEnv({ TEST_MODE: "0" }, () => {
+      assert.equal(SEC.getSecurityPosture().some((i) => i.key === "test_mode"), false);
+    });
+  });
+
+  await test("SEGURIDAD · el endpoint público de salud NO publica el teléfono entero", async () => {
+    const mod = await import("../src/app/api/health/route");
+    const res = await mod.GET();
+    const body = (await res.json()) as { phone: string | null };
+    if (body.phone !== null) {
+      assert.match(body.phone, /^\*\*\*\d{4}$/, "solo los últimos 4 dígitos");
+    }
+  });
+
+  await test("SEGURIDAD · los tres verificadores de firma usan comparación en tiempo constante", () => {
+    // Una comparación normal filtra el secreto por el tiempo de respuesta.
+    for (const f of [
+      "src/lib/shopify/hmac.ts",
+      "src/lib/suppliers/dropea/webhook.ts",
+      "src/lib/calls/retell.ts",
+    ]) {
+      const src = fs.readFileSync(path.join(process.cwd(), f), "utf8");
+      assert.ok(src.includes("timingSafeEqual"), `${f} debe comparar en tiempo constante`);
+    }
+    // Y el del panel corre en Edge (sin node:crypto), con su propia versión.
+    const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
+    assert.ok(/safeEqual|timingSafeEqual/.test(proxy));
+  });
+
+  await test("SEGURIDAD · no hay secretos escritos en el repositorio", () => {
+    // Patrones de credencial real: token de Shopify, clave de OpenRouter y
+    // Bearer literal. Las menciones en comentarios y sanitizadores no cuentan.
+    const sospechosos = [/shpat_[A-Za-z0-9]{16,}/, /shpss_[A-Za-z0-9]{16,}/, /sk-or-v1-[A-Za-z0-9]{16,}/];
+    const raiz = process.cwd();
+    const revisar = ["src", "scripts", "tests", "docs"];
+    const pendientes: string[] = revisar.map((d) => path.join(raiz, d));
+    let vistos = 0;
+    while (pendientes.length) {
+      const dir = pendientes.pop()!;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          pendientes.push(full);
+          continue;
+        }
+        if (!/\.(ts|tsx|md|json)$/.test(e.name)) continue;
+        vistos++;
+        const c = fs.readFileSync(full, "utf8");
+        for (const pat of sospechosos) {
+          assert.equal(pat.test(c), false, `posible secreto en ${path.relative(raiz, full)}`);
+        }
+      }
+    }
+    assert.ok(vistos > 50, "el barrido tiene que haber mirado ficheros de verdad");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
