@@ -34,6 +34,29 @@ export interface ShopifyLineItem {
   sku?: string | null;
   product_id?: number | string | null;
   variant_id?: number | string | null;
+
+  // --- Campos de FULFILLMENT por línea (REST Admin API, recurso Order) ---
+  //
+  // `raw_payload` guarda el cuerpo del webhook VERBATIM, así que estos campos
+  // están físicamente ahí aunque antes no se declararan. Se tipan como
+  // opcionales a propósito: un pedido histórico puede no traerlos, y el
+  // inferidor tiene que poder distinguir "vale 0" de "no viene".
+  //
+  // ⚠️ NO están verificados contra un payload real de Casamable — no hay
+  // ninguna muestra guardada en el repo. Vienen del contrato público de la
+  // API. Por eso todo lo que los consume falla CERRADO: si no están, se dice
+  // "insufficient_data", nunca se asume un valor.
+
+  /** null | "fulfilled" | "partial" — estado de ESTA línea, no del pedido. */
+  fulfillment_status?: string | null;
+  /** Unidades que quedan por despachar. 0 = línea despachada del todo. */
+  fulfillable_quantity?: number | null;
+  /** Quién despacha ("manual", "gift_card", el handle de una app…). */
+  fulfillment_service?: string | null;
+  /** false = no se envía nada físico (servicios, digitales). Señal principal. */
+  requires_shipping?: boolean | null;
+  /** true = tarjeta regalo: virtual, nunca es mercancía. */
+  gift_card?: boolean | null;
 }
 
 export interface ShopifyOrderPayload {

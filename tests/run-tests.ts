@@ -119,13 +119,107 @@ function codPayload(overrides: Record<string, unknown> = {}): Record<string, unk
       phone: "+34 611 111 111",
     },
     billing_address: null,
+    // Líneas REALISTAS: la Admin API siempre manda product_id/variant_id y
+    // los campos de fulfillment. Una fixture sin ellos hacía pasar tests que
+    // en producción se habrían comportado distinto.
     line_items: [
-      { title: "Crema facial hidratante", quantity: 2, price: "19.95" },
-      { title: "Sérum vitamina C", quantity: 1, price: "10.00" },
+      {
+        title: "Crema facial hidratante",
+        quantity: 2,
+        price: "19.95",
+        sku: "CREMA-01",
+        product_id: 8100000000001,
+        variant_id: 4100000000001,
+        requires_shipping: true,
+        gift_card: false,
+        fulfillment_service: "manual",
+        fulfillment_status: null,
+        fulfillable_quantity: 2,
+      },
+      {
+        title: "Sérum vitamina C",
+        quantity: 1,
+        price: "10.00",
+        sku: "SERUM-01",
+        product_id: 8100000000002,
+        variant_id: 4100000000002,
+        requires_shipping: true,
+        gift_card: false,
+        fulfillment_service: "manual",
+        fulfillment_status: null,
+        fulfillable_quantity: 1,
+      },
     ],
     note_attributes: [],
     ...overrides,
   };
+}
+
+
+/**
+ * Líneas de pedido REALISTAS para probar fulfillment por línea.
+ *
+ * `fisicasDespachadas` / `fisicasPendientes`: cuántas líneas de mercancía en
+ * cada estado. `seguro`: añade la línea `Seguro de Envío` de Releasit, que es
+ * la que en producción deja el pedido en `partial` para siempre.
+ */
+function lineas(opts: {
+  fisicasDespachadas?: number;
+  fisicasPendientes?: number;
+  seguro?: boolean;
+} = {}): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  let n = 0;
+  for (let i = 0; i < (opts.fisicasDespachadas ?? 0); i++) {
+    n++;
+    out.push({
+      title: `Producto fisico ${n}`,
+      quantity: 1,
+      price: "19.95",
+      sku: `SKU-${n}`,
+      product_id: 8200000000000 + n,
+      variant_id: 4200000000000 + n,
+      requires_shipping: true,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: "fulfilled",
+      fulfillable_quantity: 0,
+    });
+  }
+  for (let i = 0; i < (opts.fisicasPendientes ?? 0); i++) {
+    n++;
+    out.push({
+      title: `Producto fisico ${n}`,
+      quantity: 1,
+      price: "19.95",
+      sku: `SKU-${n}`,
+      product_id: 8200000000000 + n,
+      variant_id: 4200000000000 + n,
+      requires_shipping: true,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: null,
+      fulfillable_quantity: 1,
+    });
+  }
+  if (opts.seguro) {
+    // Tal cual lo manda Releasit: sin SKU ni IDs de catálogo y, sobre todo,
+    // requires_shipping = false. Nadie lo despacha nunca.
+    out.push({
+      title: "Seguro de Envío",
+      quantity: 1,
+      price: "1.95",
+      sku: null,
+      product_id: null,
+      variant_id: null,
+      requires_shipping: false,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: null,
+      fulfillable_quantity: 1,
+    });
+  }
+  return out;
 }
 
 const shopifyHeaders = (raw: string, extra: Record<string, string | null> = {}) => ({
@@ -4388,7 +4482,7 @@ async function main(): Promise<void> {
     assert.equal(a1.signal?.status, "cancelled");
     assert.equal(a1.signal?.at, Math.floor(Date.parse("2026-08-20T10:00:00Z") / 1000), "closure_at es la fecha de Shopify, no now()");
 
-    const despachado = backfillOrder({ id: 995004, fulfillment_status: "fulfilled", updated_at: "2026-08-21T11:00:00Z" });
+    const despachado = backfillOrder({ id: 995004, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-21T11:00:00Z" });
     const a2 = backfill.decideBackfillAction(null, despachado);
     assert.equal(a2.kind, "insert_in_progress");
     assert.notEqual(a2.signal?.status, "delivered", "fulfilled NUNCA es delivered");
@@ -4415,7 +4509,7 @@ async function main(): Promise<void> {
     const pagina = {
       orders: [
         backfillOrder({ id: 995101, cancelled_at: "2026-08-20T09:00:00Z" }),
-        backfillOrder({ id: 995102, fulfillment_status: "fulfilled", updated_at: "2026-08-20T10:00:00Z" }),
+        backfillOrder({ id: 995102, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T10:00:00Z" }),
         backfillOrder({ id: 995103, gateway: "Tarjeta", payment_gateway_names: ["Tarjeta"], tags: "" }),
       ],
       nextCursor: null,
@@ -4437,7 +4531,7 @@ async function main(): Promise<void> {
     const pagina = {
       orders: [
         backfillOrder({ id: 995200, cancelled_at: "2026-08-20T09:00:00Z" }), // NO existe: se inserta
-        backfillOrder({ id: 995201, fulfillment_status: "fulfilled", updated_at: "2026-08-20T11:00:00Z" }), // SÍ existe: se actualiza
+        backfillOrder({ id: 995201, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T11:00:00Z" }), // SÍ existe: se actualiza
       ],
       nextCursor: null,
     };
@@ -5834,55 +5928,174 @@ async function main(): Promise<void> {
   // ============ 45 · Arreglos de fidelidad (lo que el sistema contaba mal) ============
   console.log("\n— Fidelidad: fulfillment parcial y orden de llegada —");
 
-  await test("fulfillment `partial` TAMBIÉN es in_progress (el caso normal en Casamable, no el raro)", () => {
-    // Los pedidos llevan una línea `Seguro de Envío` que no es mercancía y que
-    // el proveedor nunca despacha: el pedido se queda en `partial` para
-    // siempre y jamás llega a `fulfilled`. Mirar solo `fulfilled` dejaba esos
-    // pedidos con el cierre en `unknown`.
-    const parcial = backfillOrder({
-      id: 998001,
-      fulfillment_status: "partial",
-      updated_at: "2026-08-24T12:00:00Z",
-    });
-    const señal = backfill.planClosureFromShopify(parcial);
-    assert.equal(señal?.status, "in_progress");
-    assert.equal(señal?.at, Math.floor(Date.parse("2026-08-24T12:00:00Z") / 1000), "fecha de Shopify, no now()");
-    assert.notEqual(señal?.status, "delivered", "parcial no es entregado, igual que fulfilled no lo es");
+  const ff = await import("../src/lib/orders/fulfillment");
+  const inferir = (li: Array<Record<string, unknown>>, global?: string | null) =>
+    ff.inferPhysicalFulfillment(
+      { line_items: li, fulfillment_status: global ?? null } as never,
+      true
+    );
 
-    // Y sigue funcionando lo que ya funcionaba.
+  await test("FF 1 · CASO CASAMABLE: producto despachado + Seguro de Envío sin despachar → fulfilled", () => {
+    // El caso crítico. Shopify deja el PEDIDO en `partial` para siempre
+    // porque nadie despacha nunca el seguro. La mercancía, en cambio, salió
+    // entera. Decidir con el global sería decidir con un dato falso.
+    const r = inferir(lineas({ fisicasDespachadas: 1, seguro: true }), "partial");
+    assert.equal(r.state, "fulfilled", "toda la MERCANCÍA salió");
+    assert.equal(r.basis, "line_level");
+    assert.equal(r.physicalLines, 1);
+    assert.equal(r.serviceLines, 1, "el seguro no cuenta como mercancía");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), true);
+
+    // Y de punta a punta: el cierre resultante es in_progress, nunca delivered.
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({
+        id: 998101,
+        fulfillment_status: "partial",
+        line_items: lineas({ fisicasDespachadas: 1, seguro: true }),
+        updated_at: "2026-08-24T12:00:00Z",
+      })
+    );
+    assert.equal(señal?.status, "in_progress");
+    assert.notEqual(señal?.status, "delivered", "Shopify NUNCA puede afirmar una entrega");
+  });
+
+  await test("FF 2 · producto físico sin despachar + seguro → not_started", () => {
+    const r = inferir(lineas({ fisicasPendientes: 1, seguro: true }), null);
+    assert.equal(r.state, "not_started");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), false, "no ha salido nada: no es in_progress");
+  });
+
+  await test("FF 3 · dos físicos, uno despachado y otro no → partial", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 1, fisicasPendientes: 1 }), "partial");
+    assert.equal(r.state, "partial");
+    assert.equal(r.physicalLines, 2);
+    assert.equal(r.fulfilledLines, 1);
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), true, "algo salió: sí cuenta como en curso");
+  });
+
+  await test("FF 4 · dos físicos, los dos despachados → fulfilled", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 2 }), "fulfilled");
+    assert.equal(r.state, "fulfilled");
+    assert.equal(r.fulfilledLines, 2);
+  });
+
+  await test("FF 5 · solo Seguro de Envío → no_physical_items (no hay nada que despachar)", () => {
+    const r = inferir(lineas({ seguro: true }), null);
+    assert.equal(r.state, "no_physical_items");
+    assert.equal(r.physicalLines, 0);
+    assert.equal(
+      ff.physicalStateAllowsInProgress(r.state),
+      false,
+      "sin mercancía no se puede afirmar que el pedido esté en curso: va a revisión"
+    );
+  });
+
+  await test("FF 6 · restocked NO implica entregado ni rehusado, y no cierra nada", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 1 }), "restocked");
+    assert.equal(r.state, "restocked");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), false);
     assert.equal(
       backfill.planClosureFromShopify(
-        backfillOrder({ id: 998002, fulfillment_status: "fulfilled", updated_at: "2026-08-24T12:00:00Z" })
-      )?.status,
-      "in_progress"
-    );
-    assert.equal(backfill.planClosureFromShopify(backfillOrder({ id: 998003 })), null, "sin fulfillment: sin señal");
-
-    // Regla que se mantiene intacta: sin NINGUNA fecha de Shopify no se
-    // escribe señal. Antes que estampar now() y corromper la cronología,
-    // se prefiere no saber.
-    assert.equal(
-      backfill.planClosureFromShopify(backfillOrder({ id: 998007, fulfillment_status: "partial" })),
+        backfillOrder({ id: 998104, fulfillment_status: "restocked", line_items: lineas({ fisicasDespachadas: 1 }) })
+      ),
       null,
-      "parcial pero sin fecha: no se inventa una"
+      "volvió al almacén: el motivo lo dice otra fuente, no Shopify"
     );
   });
 
-  await test("fulfillment `restocked` NO es in_progress: la mercancía volvió al almacén", () => {
+  await test("FF 7 · cancelled de Shopify gana sobre cualquier estado de mercancía", () => {
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({
+        id: 998105,
+        fulfillment_status: "partial",
+        line_items: lineas({ fisicasDespachadas: 1, seguro: true }),
+        cancelled_at: "2026-08-24T09:00:00Z",
+      })
+    );
+    assert.equal(señal?.status, "cancelled");
+    assert.equal(señal?.at, Math.floor(Date.parse("2026-08-24T09:00:00Z") / 1000));
+  });
+
+  await test("FF 8 · la ENTREGA no sale nunca del fulfillment: Shopify solo aporta in_progress/cancelled", () => {
+    // Aunque toda la mercancía esté despachada y haya tracking, `delivered`
+    // pertenece al eje de cierre y solo lo escribe una fuente fiable (Dropea).
+    const o = mkOrder("998106", "8106", "34600198106");
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({ id: 998106, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 2 }), updated_at: "2026-08-24T12:00:00Z" })
+    );
+    assert.equal(señal?.status, "in_progress");
+    db.setOrderClosure(o.id, señal!.status, "shopify", señal!.at);
+    assert.equal(db.getOrderById(o.id)!.closure_status, "in_progress");
+
+    // Solo Dropea puede afirmar la entrega.
+    assert.equal(db.setOrderClosure(o.id, "delivered", "dropea", señal!.at + 3600), true);
+    assert.equal(db.getOrderById(o.id)!.closure_source, "dropea");
+  });
+
+  await test("FF 9 · línea sin ninguna metadata → falla CERRADO (no se cuenta como mercancía)", () => {
+    const r = inferir([{ title: "Cosa rara", quantity: 1, price: "5.00" }], null);
+    assert.equal(r.physicalLines, 0, "sin señales no se afirma que sea mercancía");
+    assert.equal(r.state, "no_physical_items");
+    // Contarla de más dejaría el pedido "a medias" eternamente; contarla de
+    // menos lo deja en un estado visible que va a revisión.
+    assert.equal(ff.isPhysicalFulfillmentLine({ title: "Cosa rara" }), false);
+    // Una tarjeta regalo es virtual aunque traiga IDs de catálogo.
     assert.equal(
-      backfill.planClosureFromShopify(backfillOrder({ id: 998004, fulfillment_status: "restocked" })),
-      null
+      ff.isPhysicalFulfillmentLine({ title: "Tarjeta", sku: "GC-1", product_id: 1, gift_card: true }),
+      false
     );
-    // Y una cancelación gana sobre cualquier fulfillment, como ya era.
-    const cancelado = backfill.planClosureFromShopify(
-      backfillOrder({ id: 998005, fulfillment_status: "partial", cancelled_at: "2026-08-24T09:00:00Z" })
+    // Y `requires_shipping` manda sobre todo lo demás.
+    assert.equal(
+      ff.isPhysicalFulfillmentLine({ title: "Servicio", sku: "SRV-1", product_id: 1, requires_shipping: false }),
+      false
     );
-    assert.equal(cancelado?.status, "cancelled");
+    assert.equal(ff.isPhysicalFulfillmentLine({ title: "Sin ids", requires_shipping: true }), true);
   });
 
-  await test("backfill: un pedido parcialmente despachado se importa como in_progress", () => {
-    const parcial = backfillOrder({ id: 998006, fulfillment_status: "partial", updated_at: "2026-08-24T12:00:00Z" });
-    assert.equal(backfill.decideBackfillAction(null, parcial).kind, "insert_in_progress");
+  await test("FF 10 · una línea es física aunque NO tenga mapping de proveedor (routing ≠ fulfillment)", () => {
+    // Un SKU sin fila en supplier_product_mapping sigue siendo mercancía: no
+    // saber a qué proveedor mandarlo no lo convierte en un servicio.
+    const linea = {
+      title: "Producto sin mapping",
+      quantity: 1,
+      sku: "SKU-JAMAS-MAPEADO",
+      product_id: 9999999999,
+      variant_id: 8888888888,
+      requires_shipping: true,
+      fulfillment_status: "fulfilled",
+      fulfillable_quantity: 0,
+    };
+    assert.equal(ff.isPhysicalFulfillmentLine(linea), true);
+    assert.equal(db.listSupplierProductMappings("dropea").some((m) => m.shopify_sku === "SKU-JAMAS-MAPEADO"), false);
+    assert.equal(inferir([linea], "fulfilled").state, "fulfilled");
+  });
+
+  await test("FF · fallback legacy: sin datos por línea se distingue de dato fiable", () => {
+    // Pedido histórico: líneas sin campos de fulfillment. Con servicios
+    // presentes, un `partial` global NO permite concluir nada.
+    const legacy = [
+      { title: "Producto viejo", quantity: 1, sku: "OLD-1", product_id: 77 },
+      { title: "Seguro de Envío", quantity: 1 },
+    ];
+    const r = inferir(legacy, "partial");
+    assert.equal(r.basis, "global_fallback");
+    assert.equal(r.state, "unknown", "el global no distingue el seguro: no se afirma nada");
+    assert.match(r.reason, /no distingue|servicio/i);
+
+    // Sin servicios, el global sí sirve como fallback honesto.
+    const soloProducto = [{ title: "Producto viejo", quantity: 1, sku: "OLD-1", product_id: 77 }];
+    const r2 = inferir(soloProducto, "fulfilled");
+    assert.equal(r2.basis, "global_fallback");
+    assert.equal(r2.state, "fulfilled");
+
+    // Y un payload CONGELADO (raw_payload de orders/create) no dice nada del
+    // progreso: se marca insufficient_data en vez de "not_started".
+    const congelado = ff.inferPhysicalFulfillment(
+      { line_items: lineas({ fisicasPendientes: 1 }), fulfillment_status: null } as never,
+      false
+    );
+    assert.equal(congelado.basis, "insufficient_data");
+    assert.equal(congelado.state, "unknown");
   });
 
   await test("orden de llegada: el panel ordena por número de pedido, no por cuándo se insertó la fila", () => {

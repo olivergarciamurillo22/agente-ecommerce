@@ -56,6 +56,12 @@ import {
   extractDropeaIdFromPayload,
   linkDropeaFromShopifyTags,
 } from "../orders/supplier-tags";
+import {
+  inferPhysicalFulfillment,
+  physicalStateAllowsInProgress,
+  type FulfillmentBasis,
+  type PhysicalFulfillment,
+} from "../orders/fulfillment";
 import { getAdminAccessToken, shopifyAdminConfigured } from "./admin";
 import { logIntegrationEvent } from "../system/repo";
 
@@ -242,39 +248,47 @@ function toEpochSeconds(iso: string | null | undefined): number | null {
 }
 
 /**
- * ¿Este pedido tiene ya mercancía en camino, según Shopify?
- *
- * `fulfillment_status` de un pedido REST vale `null` | `"partial"` |
- * `"fulfilled"` | `"restocked"`.
- *
- * **`partial` cuenta.** Si una sola línea se despachó, el pedido está en
- * curso. Y en Casamable es el caso NORMAL, no el raro: los pedidos llevan una
- * línea `Seguro de Envío` que no es mercancía y que el proveedor nunca
- * despacha, así que el pedido se queda en `partial` para siempre y jamás
- * llega a `fulfilled`. Mirar solo `fulfilled` dejaba esos pedidos con el
- * cierre en `unknown` — y era candidato a explicar el `in_progress = 0`
- * medido el 24-08-2026 pese a haber envíos con seguimiento real.
- *
- * `restocked` NO cuenta: significa que la mercancía volvió al almacén, que es
- * lo contrario de estar en camino.
- */
-function isFulfillmentUnderway(status: string | null | undefined): boolean {
-  return status === "fulfilled" || status === "partial";
-}
-
-/**
  * ¿Qué dice Shopify sobre el cierre de este pedido? `null` = ningún cierre
  * conocido todavía (sigue abierto/sin fulfillment) — NO se adivina nada.
  */
 export function planClosureFromShopify(order: ShopifyBackfillOrder): ClosureSignal | null {
-  const cancelledAt = toEpochSeconds(order.cancelled_at);
-  if (cancelledAt !== null) return { status: "cancelled", at: cancelledAt };
+  return planClosureFromShopifyDetailed(order).signal;
+}
 
-  if (isFulfillmentUnderway(order.fulfillment_status)) {
-    const at = toEpochSeconds(order.updated_at) ?? toEpochSeconds(order.created_at);
-    if (at !== null) return { status: "in_progress", at };
+export interface ShopifyClosurePlan {
+  signal: ClosureSignal | null;
+  /** Qué se dedujo de la MERCANCÍA (null cuando decidió una cancelación). */
+  fulfillment: PhysicalFulfillment | null;
+}
+
+/**
+ * Igual que `planClosureFromShopify` pero devolviendo también cómo se llegó
+ * ahí, para que el desglose del dry-run diga con qué calidad de dato se
+ * decidió cada pedido en vez de dar un número sin contexto.
+ *
+ * Lo que Shopify PUEDE aportar al eje de cierre: `cancelled`, `in_progress`.
+ * Lo que NO puede, nunca: `delivered` y `refused`. Está impedido por el tipo
+ * de `ClosureSignal`, no por una convención.
+ */
+export function planClosureFromShopifyDetailed(order: ShopifyBackfillOrder): ShopifyClosurePlan {
+  // Una cancelación de Shopify es fiable y gana sobre cualquier fulfillment.
+  const cancelledAt = toEpochSeconds(order.cancelled_at);
+  if (cancelledAt !== null) {
+    return { signal: { status: "cancelled", at: cancelledAt }, fulfillment: null };
   }
-  return null;
+
+  // El payload de esta función SIEMPRE viene del fetch a la Admin API
+  // (orders.json), nunca de `raw_payload`: es dato fresco, así que las
+  // líneas sí reflejan el progreso real.
+  const fulfillment = inferPhysicalFulfillment(order, true);
+
+  if (!physicalStateAllowsInProgress(fulfillment.state)) {
+    return { signal: null, fulfillment };
+  }
+
+  const at = toEpochSeconds(order.updated_at) ?? toEpochSeconds(order.created_at);
+  if (at === null) return { signal: null, fulfillment };
+  return { signal: { status: "in_progress", at }, fulfillment };
 }
 
 export type BackfillActionKind =
@@ -392,6 +406,12 @@ export interface BackfillReport {
   /** E4: enlaces escritos DE VERDAD (siempre 0 en dry-run). Puede ser menor
    *  que `dropeaLink.link` si el id ya lo tenía otro pedido o hubo carrera. */
   dropeaLinked: number;
+  /** Con qué calidad de dato se dedujo la mercancía de cada pedido. Un
+   *  `global_fallback` alto significa que las líneas no traen fulfillment y
+   *  las conclusiones valen menos: hay que verlo, no esconderlo. */
+  fulfillmentBasis: Record<FulfillmentBasis, number>;
+  /** Desglose del estado de MERCANCÍA (independiente del eje de cierre). */
+  fulfillmentState: Record<string, number>;
   /** true = se recorrió todo lo que la API nos deja ver. NO implica el
    *  histórico completo: eso lo dice `coverage`. */
   done: boolean;
@@ -472,6 +492,12 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
   const counts = emptyCounts();
   const dropeaLink = emptyLinkCounts();
   let dropeaLinked = 0;
+  const fulfillmentBasis: Record<FulfillmentBasis, number> = {
+    line_level: 0,
+    global_fallback: 0,
+    insufficient_data: 0,
+  };
+  const fulfillmentState: Record<string, number> = {};
   let pagesProcessed = 0;
   let ordersSeen = 0;
   let done = false;
@@ -486,6 +512,15 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
       const existing = order.id ? getOrderByShopifyId(String(order.id)) : null;
       const action = decideBackfillAction(existing, order);
       counts[action.kind]++;
+
+      // Cómo se leyó la MERCANCÍA de este pedido. Se cuenta siempre, también
+      // para los que no producen señal de cierre: saber que 90 pedidos se
+      // decidieron por fallback global es en sí mismo el dato.
+      const ff = planClosureFromShopifyDetailed(order).fulfillment;
+      if (ff) {
+        fulfillmentBasis[ff.basis]++;
+        fulfillmentState[ff.state] = (fulfillmentState[ff.state] ?? 0) + 1;
+      }
 
       // E4 va aparte del eje de cierre a propósito: un pedido sin señal de
       // cierre ("skip_no_signal") puede tener perfectamente su dropea_id.
@@ -523,6 +558,7 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
       "backfill_completed",
       coverage === "full" ? "info" : "warning",
       `backfill recorrido (cobertura: ${coverage}): ${ordersSeen} pedido(s) vistos, ${counts.insert_cancelled + counts.update_cancelled} → cancelled, ${counts.insert_in_progress + counts.update_in_progress} → in_progress, ${dropeaLinked} enlazado(s) con Dropea por tag` +
+        ` · mercancía leída: ${fulfillmentBasis.line_level} por línea, ${fulfillmentBasis.global_fallback} por fallback global, ${fulfillmentBasis.insufficient_data} sin datos suficientes` +
         (coverage === "full" ? "" : " — SIN read_all_orders verificado: NO se puede afirmar histórico completo")
     );
   }
@@ -538,6 +574,8 @@ export async function runShopifyBackfill(opts: RunBackfillOptions = {}): Promise
     },
     dropeaLink,
     dropeaLinked,
+    fulfillmentBasis,
+    fulfillmentState,
     done,
     nextCursor: cursor,
     scopeCheck,

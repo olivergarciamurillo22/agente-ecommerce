@@ -158,3 +158,87 @@ evidente donde enchufarlo el día que llegue la documentación, con su test.
    test, y desde el vocabulario oficial del proveedor.
 4. **El histórico dice qué eje cambió** (`status_axis`). Un `delivered`
    logístico y un `delivered` de cierre no son la misma fila.
+
+---
+
+## Shopify fulfillment vs OrderClosureStatus
+
+### Por qué el `partial` global no es fiable
+
+Cada pedido de Casamable lleva una línea **`Seguro de Envío`** (la añade
+Releasit). No es mercancía y **ningún proveedor la despacha nunca**. Shopify
+calcula el `fulfillment_status` del PEDIDO mirando todas las líneas, así que
+el pedido se queda en **`partial` para siempre**: el producto real salió hace
+semanas y nunca llega a `fulfilled`.
+
+Decidir con ese campo es decidir con un dato estructuralmente falso. Es la
+causa probable del `in_progress = 0` medido el 24-08-2026 pese a haber envíos
+con seguimiento real.
+
+### Cómo se trata
+
+Se mira **línea a línea**, contando solo mercancía
+(`src/lib/orders/fulfillment.ts`). Señales para decidir si una línea es
+mercancía, de más fiable a menos — **la primera que resuelve, manda**:
+
+| # | Señal | Regla |
+|---|---|---|
+| 1 | `gift_card = true` | No es mercancía: virtual por definición |
+| 2 | `requires_shipping` | **La buena.** Es EL campo con el que Shopify dice si algo se envía |
+| 3 | `fulfillment_service = "gift_card"` | No es mercancía |
+| 4 | `product_id` / `variant_id` / `sku` | Con identidad de catálogo → es producto. El `Seguro de Envío` no tiene ninguno |
+| 5 | Título (**fallback documentado**) | Último recurso. Un título es texto libre que se puede cambiar en Shopify cualquier día: nunca gana a un campo de la API |
+
+Sin ninguna señal, **falla cerrado**: no se cuenta como mercancía. Contar de
+más dejaría el pedido "a medias" eternamente; contar de menos lo deja en
+`no_physical_items`, que es visible y va a revisión en vez de mentir.
+
+**Estados de mercancía:** `no_physical_items` · `not_started` · `partial` ·
+`fulfilled` · `restocked` · `unknown`.
+
+### Qué puede y qué NO puede inferir Shopify
+
+| Puede aportar | Nunca puede |
+|---|---|
+| `in_progress` (salió mercancía: `fulfilled` o `partial` físico) | **`delivered`** |
+| `cancelled` (`cancelled_at`, fiable, gana sobre todo) | **`refused`** |
+| `unknown` (sin evidencia) | |
+
+*fulfilled* significa **despachado**, no entregado. En COD la entrega real y
+el rehúse solo los conoce el proveedor. Está impedido por el **tipo** de
+`ClosureSignal`, no por una convención.
+
+`restocked` no implica entregado ni rehusado: solo que la mercancía volvió al
+almacén. El motivo lo dice otra fuente.
+
+### ⚠️ `raw_payload` NO sirve para esto
+
+`orders.raw_payload` se escribe **una sola vez, en el INSERT** del webhook
+`orders/create`, y **nunca se refresca**. En ese instante ninguna línea está
+despachada todavía. Alimentar el inferidor con él devolvería `not_started`
+siempre, para todos los pedidos, para siempre — y parecería un dato, no un
+error.
+
+Fuentes válidas: el fetch a la Admin API del **backfill** y de la
+**reconciliación**. Por eso `inferPhysicalFulfillment(payload, payloadIsFresh)`
+exige declarar de dónde viene, sin valor por defecto.
+
+### Calidad del dato: `basis`
+
+Cada inferencia dice con qué se decidió, y el dry-run del backfill lo desglosa:
+
+| `basis` | Significa |
+|---|---|
+| `line_level` | Se leyeron los campos de fulfillment de cada línea. Fiable |
+| `global_fallback` | Sin datos por línea: se usó el estado global del pedido |
+| `insufficient_data` | Ni línea ni global: no se afirma nada |
+
+Con servicios presentes y sin datos por línea, un `partial` global da
+`unknown`, no `partial`: el global no distingue el seguro.
+
+### Routing ≠ fulfillment
+
+`isPhysicalFulfillmentLine()` **no tiene nada que ver** con
+`supplier_product_mapping`. Una línea puede ser perfectamente mercancía y no
+tener todavía mapping de proveedor: son preguntas distintas y se responden por
+separado.
