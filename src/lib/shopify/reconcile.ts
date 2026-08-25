@@ -136,6 +136,7 @@ export async function runShopifyReconcile(opts: {
         customer_note: n.customerNote,
         last_error: "reconciled_from_shopify: webhook orders/create perdido — revisar a mano",
         raw_payload: JSON.stringify(remote).slice(0, 200_000),
+        ordered_at: n.orderedAt,
       });
       if (created) {
         report.insertedMissing++;
