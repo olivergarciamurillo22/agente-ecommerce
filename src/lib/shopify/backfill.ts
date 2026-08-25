@@ -371,6 +371,7 @@ function applyBackfillAction(action: BackfillAction, order: ShopifyBackfillOrder
       customer_note: n.customerNote,
       last_error: "backfilled_from_shopify: pedido histórico importado por E3, nunca activo",
       raw_payload: rawBody.slice(0, 200_000),
+      ordered_at: n.orderedAt,
     });
     setOrderClosure(fila.id, action.signal.status, "shopify", action.signal.at);
     return;
