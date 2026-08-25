@@ -6546,6 +6546,124 @@ async function main(): Promise<void> {
     }
   });
 
+  // ============ 50 · Retención y privacidad ============
+  console.log("\n— Retención: la PII no vive eternamente, el negocio sí —");
+
+  const RET = await import("../src/lib/system/retention");
+
+  await test("RETENCIÓN · el payload reducido conserva las líneas y TIRA toda la PII", () => {
+    const original = JSON.stringify({
+      id: 123,
+      order_number: 456,
+      total_price: "39.90",
+      currency: "EUR",
+      tags: "releasit_cod_form, dropea_id:1",
+      fulfillment_status: "fulfilled",
+      email: "cliente@ejemplo.com",
+      phone: "+34600111222",
+      note: "llamar por la tarde",
+      customer: { first_name: "Ana", last_name: "García", phone: "+34600111222" },
+      shipping_address: { address1: "Calle Falsa 1", city: "Madrid", phone: "+34600111222" },
+      billing_address: { address1: "Calle Falsa 1" },
+      note_attributes: [{ name: "¿A qué hora estarás?", value: "por la tarde" }],
+      line_items: [
+        { title: "Cortaúñas", quantity: 1, price: "19.95", sku: "10428", product_id: 1, variant_id: 2, requires_shipping: true, fulfillment_status: "fulfilled", fulfillable_quantity: 0 },
+      ],
+    });
+    const reducido = RET.anonymizeShopifyPayload(original)!;
+    const o = JSON.parse(reducido);
+
+    // Lo que el sistema necesita releer sigue ahí.
+    assert.equal(o.id, 123);
+    assert.equal(o.total_price, "39.90");
+    assert.equal(o.fulfillment_status, "fulfilled");
+    assert.equal(o.line_items.length, 1);
+    assert.equal(o.line_items[0].sku, "10428");
+    assert.equal(o.line_items[0].requires_shipping, true, "el fulfillment por línea sobrevive");
+    assert.equal(o._pii_removed, true, "queda marcado que NO es el payload original");
+
+    // La PII no está por ningún lado, ni siquiera como subcadena.
+    for (const rastro of ["cliente@ejemplo.com", "600111222", "Ana", "García", "Calle Falsa", "Madrid", "llamar por la tarde", "por la tarde"]) {
+      assert.equal(reducido.includes(rastro), false, `queda rastro de PII: ${rastro}`);
+    }
+    assert.equal(o.customer, undefined);
+    assert.equal(o.shipping_address, undefined);
+    assert.equal(o.note_attributes, undefined);
+  });
+
+  await test("RETENCIÓN · lista BLANCA: un campo nuevo de Shopify con PII no se cuela por omisión", () => {
+    const conCampoNuevo = JSON.stringify({
+      id: 1,
+      line_items: [],
+      campo_inventado_por_shopify: { dni: "12345678Z", movil: "+34600000000" },
+    });
+    const reducido = RET.anonymizeShopifyPayload(conCampoNuevo)!;
+    assert.equal(reducido.includes("12345678Z"), false);
+    assert.equal(reducido.includes("campo_inventado"), false, "solo pasa lo listado explícitamente");
+  });
+
+  await test("RETENCIÓN · solo toca pedidos CERRADOS: uno vivo conserva sus datos de contacto", () => {
+    const ahora = 1_800_000_000;
+    const viejo = ahora - 200 * 86400;
+
+    const vivo = mkOrder("993001", "9301", "34600193001");
+    const cerrado = mkOrder("993002", "9302", "34600193002");
+    const payload = JSON.stringify({ id: 993002, customer: { first_name: "Pepe" }, line_items: [] });
+    for (const o of [vivo, cerrado]) {
+      db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify({ id: Number(o.shopify_order_id), customer: { first_name: "Pepe" }, line_items: [] }), viejo, o.id);
+    }
+    // Solo uno tiene cierre terminal.
+    db.setOrderClosure(cerrado.id, "delivered", "dropea", viejo);
+
+    const n = RET.reduceOldRawPayloads({ nowSec: ahora });
+    assert.ok(n >= 1);
+    assert.equal(
+      db.getOrderById(vivo.id)!.raw_payload!.includes("Pepe"),
+      true,
+      "un pedido vivo puede necesitar sus datos para una corrección o una llamada"
+    );
+    assert.equal(db.getOrderById(cerrado.id)!.raw_payload!.includes("Pepe"), false, "el cerrado sí se reduce");
+    assert.ok(payload.includes("Pepe"));
+  });
+
+  await test("RETENCIÓN · idempotente: correrla dos veces no cambia nada la segunda", () => {
+    const ahora = 1_800_100_000;
+    const primera = RET.runRetention({ nowSec: ahora });
+    const segunda = RET.runRetention({ nowSec: ahora });
+    assert.equal(segunda.rawPayloadsReduced, 0, "ya estaban reducidos");
+    assert.equal(segunda.messagesDeleted, 0);
+    assert.equal(segunda.webhookEventsDeleted, 0);
+    assert.equal(primera.errors.length, 0);
+  });
+
+  await test("RETENCIÓN · el dry-run NO borra ni reduce nada", () => {
+    const ahora = 1_800_200_000;
+    const o = mkOrder("993010", "9310", "34600193010");
+    db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify({ id: 993010, customer: { first_name: "Lola" }, line_items: [] }), ahora - 300 * 86400, o.id);
+    db.setOrderClosure(o.id, "delivered", "dropea", ahora - 300 * 86400);
+
+    const seco = RET.runRetention({ dryRun: true, nowSec: ahora });
+    assert.ok(seco.rawPayloadsReduced >= 1, "el dry-run CUENTA lo que haría");
+    assert.equal(db.getOrderById(o.id)!.raw_payload!.includes("Lola"), true, "pero no toca nada");
+  });
+
+  await test("RETENCIÓN · el NEGOCIO no se borra nunca: pedido, cierre e histórico intactos", () => {
+    const ahora = 1_800_300_000;
+    const o = mkOrder("993020", "9320", "34600193020");
+    db.setOrderClosure(o.id, "refused", "dropea", ahora - 400 * 86400);
+    const historicoAntes = db.listOrderStatusHistory(o.id).length;
+
+    RET.runRetention({ nowSec: ahora });
+
+    const fila = db.getOrderById(o.id)!;
+    assert.ok(fila, "el pedido sigue existiendo");
+    assert.equal(fila.closure_status, "refused", "el eje de cierre es contabilidad: intocable");
+    assert.equal(fila.closure_source, "dropea");
+    assert.equal(db.listOrderStatusHistory(o.id).length, historicoAntes, "el histórico de estados tampoco se toca");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
