@@ -20,12 +20,14 @@ import {
   getOrderByShopifyId,
   getOrderBySupplierExternalId,
   getOrderByTrackingNumber,
+  setOrderClosure,
   setOrderSupplierPlatformAndExternalId,
   setOrderSupplierReview,
   type OrderRow,
 } from "../../db";
 import { processSupplierUpdate } from "../../tracking/service";
 import { normalizeDropeaStatus } from "./status-map";
+import { planClosureFromDropea } from "../../orders/closure";
 import { isDropeaTopic, type DropeaOrder, type DropeaWebhookEnvelope } from "./types";
 
 import { logIntegrationEvent } from "../../system/repo";
@@ -140,6 +142,42 @@ function aplicarEventoPedido(
     occurredAt: meta.occurredAt,
   });
 
+  // EJE DE CIERRE — se escribe AQUÍ, en vivo, no solo cuando alguien corre el
+  // reconciliador a mano. Este era el agujero: `delivered` y `refused` son la
+  // materia prima de la tasa de entrega, y hasta ahora el webhook actualizaba
+  // el eje logístico y dejaba el de negocio intacto. Misma política que usa
+  // E8 (src/lib/orders/closure.ts): un par (status, sub_status) no puede
+  // significar cosas distintas según por dónde entre.
+  const cierre = planClosureFromDropea(pedido.status, pedido.sub_status ?? null, meta.occurredAt);
+  let closureAplicado = false;
+  if (cierre.review) {
+    // Volvió el paquete pero NO por rehúse del cliente: no se cierra nada.
+    logIntegrationEvent(
+      "dropea",
+      "closure_needs_review",
+      "warning",
+      cierre.review.reason,
+      order.shopify_order_number
+    );
+  }
+  if (cierre.plan) {
+    closureAplicado = setOrderClosure(order.id, cierre.plan.status, "dropea", cierre.plan.at);
+    if (closureAplicado) {
+      logger.info(
+        `[SUPPLIER] #${order.shopify_order_number} cierre → ${cierre.plan.status} (${cierre.plan.reason})`
+      );
+    } else {
+      // canTransitionClosure lo bloqueó: ya había un terminal distinto.
+      logIntegrationEvent(
+        "dropea",
+        "closure_conflict",
+        "warning",
+        `Dropea dice "${cierre.plan.status}" (${cierre.plan.reason}) pero el cierre local ya es terminal: revisar a mano`,
+        order.shopify_order_number
+      );
+    }
+  }
+
   return {
     status: 200,
     body: {
@@ -148,6 +186,8 @@ function aplicarEventoPedido(
       status: resultado.newStatus,
       events: resultado.events,
       notified: resultado.notified,
+      closure: cierre.plan?.status ?? null,
+      closure_applied: closureAplicado,
     },
   };
 }

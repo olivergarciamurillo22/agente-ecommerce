@@ -3721,12 +3721,30 @@ async function main(): Promise<void> {
       assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
       assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
     });
+    // El histórico ya distingue EJES: un mismo hecho del proveedor puede
+    // producir una transición logística y otra de cierre, que son cosas
+    // distintas. Lo que se comprueba aquí es que el DUPLICADO no repite
+    // ninguna de las dos, así que se cuenta por eje, no en bruto.
     const h = db.listOrderStatusHistory(o.id);
-    assert.equal(h.length, 1);
-    assert.equal(h[0].source, "webhook");
-    assert.equal(h[0].event_id, "dropea:evt-990004-order.status.changed");
-    assert.equal(h[0].raw_sub_status, "SHIPPED");
-    assert.equal(h[0].occurred_at, Math.floor(Date.parse("2026-08-22T10:00:00.000Z") / 1000), "fecha del hecho según Dropea");
+    const logistico = h.filter((x) => x.status_axis === "tracking");
+    const cierre = h.filter((x) => x.status_axis === "closure");
+
+    assert.equal(logistico.length, 1, "el webhook repetido no duplica la transición logística");
+    assert.equal(logistico[0].source, "webhook");
+    assert.equal(logistico[0].event_id, "dropea:evt-990004-order.status.changed");
+    assert.equal(logistico[0].raw_sub_status, "SHIPPED");
+    assert.equal(
+      logistico[0].occurred_at,
+      Math.floor(Date.parse("2026-08-22T10:00:00.000Z") / 1000),
+      "fecha del hecho según Dropea"
+    );
+
+    // SHIPPED sí cierra a in_progress (el pedido salió), y tampoco se duplica.
+    assert.equal(cierre.length, 1, "el webhook repetido no duplica la transición de cierre");
+    assert.equal(cierre[0].new_status, "in_progress");
+    assert.equal(cierre[0].previous_status, "unknown");
+    assert.equal(db.getOrderById(o.id)!.closure_status, "in_progress");
+    assert.equal(db.getOrderById(o.id)!.closure_source, "dropea");
   });
 
   await test("A3 tasa de entrega: entregados / (entregados + devueltos); en curso NO cuentan", () => {
@@ -3763,7 +3781,21 @@ async function main(): Promise<void> {
     assert.ok((w.bySupplier.find((x) => x.key === "dropea")?.shipped ?? 0) >= 4);
     assert.ok(w.byProduct.length >= 1);
     assert.equal(w.delivered + w.returned + w.pending, w.shipped, "todo enviado está resuelto o pendiente");
-    assert.equal(w.deliveryRate, deliveryMetrics.computeDeliveryRate(w.delivered, w.returned));
+    // CAMBIO DE MODELO (25-08-2026): la tasa de la VENTANA sale del eje de
+    // CIERRE, no de estos contadores logísticos. Estos cuatro pedidos solo
+    // tienen estado de tracking (nadie escribió su cierre), así que su
+    // desenlace de negocio es desconocido y la tasa debe ser null — no 66,7 %.
+    // Decir "no lo sé" es la respuesta correcta; inventar una tasa a partir
+    // del eje equivocado era el bug.
+    assert.equal(w.deliveryRate, w.closure.deliveryRate, "la ventana usa el eje de cierre");
+    // El cálculo logístico sigue existiendo y es correcto por transportista
+    // (GLS-A3 = 66,7 %, comprobado arriba): lo que cambió es QUIÉN manda en
+    // la tasa de la ventana, no que el otro cálculo esté mal.
+    assert.notEqual(
+      w.deliveryRate,
+      deliveryMetrics.computeDeliveryRate(w.delivered, w.returned),
+      "la tasa de negocio ya NO es la tasa logística: son ejes distintos"
+    );
     assert.ok((w.avgHoursToDeliver ?? 0) >= 0);
     // Fuera de la ventana: nada.
     assert.equal(deliveryMetrics.getDeliveryWindow(ahora - 7200, ahora - 3600).shipped, 0);
@@ -3951,8 +3983,8 @@ async function main(): Promise<void> {
   await test("A6 unit economics: sin costes ni ads → incompleto con la lista de lo que falta, cifras reales intactas", () => {
     const ahora = Math.floor(Date.now() / 1000);
     const rows = [
-      { id: 1, status: "delivered", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
-      { id: 2, status: "returned", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 1, status: "delivered", closure: "delivered", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", closure: "refused", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
     ];
     const w = unitEconomics.computeEconomics(rows, [], new Map(), ahora - 86400, ahora);
     assert.equal(w.complete, false);
@@ -3969,8 +4001,8 @@ async function main(): Promise<void> {
   await test("A6 unit economics: con costes y ads → completo; margen y ROAS bruto/neto correctos", () => {
     const ahora = Math.floor(Date.now() / 1000);
     const rows = [
-      { id: 1, status: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
-      { id: 2, status: "returned", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 1, status: "delivered", closure: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", closure: "refused", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
     ];
     const costs = [{ sku: "LIMP-001", title: "Limpiador", product_cost: 5, shipping_cost: 4, cod_fee: 1, updated_at: 0 }];
     const hoy = new Date();
@@ -5874,6 +5906,183 @@ async function main(): Promise<void> {
       .filter((o) => mios.has(o.id))
       .map((o) => o.shopify_order_number);
     assert.deepEqual(porEstado, ["990003", "990002", "990001"]);
+  });
+
+  // ============ 46 · Modelo de 4 ejes: cierre como fuente de verdad ============
+  console.log("\n— Modelo de estados: el eje de cierre manda —");
+
+  const closure = await import("../src/lib/orders/closure");
+
+  await test("EJES · la tasa cuenta delivered y refused, y NADA más", () => {
+    assert.equal(closure.countsInDeliveryRate("delivered"), true);
+    assert.equal(closure.countsInDeliveryRate("refused"), true);
+    assert.equal(closure.countsInDeliveryRate("in_progress"), false, "en curso no es un desenlace");
+    assert.equal(closure.countsInDeliveryRate("unknown"), false, "no saber no es fallar");
+    assert.equal(
+      closure.countsInDeliveryRate("cancelled"),
+      false,
+      "un cancelado NUNCA se intentó entregar: en el denominador hundiría la tasa por algo ajeno a la logística"
+    );
+
+    assert.equal(closure.computeClosureDeliveryRate(7, 3), 70);
+    assert.equal(closure.computeClosureDeliveryRate(2, 1), 66.67);
+    assert.equal(closure.computeClosureDeliveryRate(0, 0), null, "sin resueltos → null, no 0 %");
+  });
+
+  await test("EJES · Dropea: DELIVERED y PAID cierran entregado; REFUSED cierra rehusado", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    assert.equal(closure.planClosureFromDropea("FINISH", "DELIVERED", at).plan?.status, "delivered");
+    // En COD, cobrado ES entregado: es la mejor evidencia que existe.
+    assert.equal(closure.planClosureFromDropea("FINISH", "PAID", at).plan?.status, "delivered");
+    assert.equal(closure.planClosureFromDropea("FINISH", "REFUSED", at).plan?.status, "refused");
+    assert.equal(closure.planClosureFromDropea("FINISH", "CANCELLED", at).plan?.status, "cancelled");
+    assert.equal(closure.planClosureFromDropea("FINISH", "REJECTED", at).plan?.status, "cancelled");
+  });
+
+  await test("EJES · `returned` NO implica `refused`: REFUSED_LOST_DAMAGED no cierra y va a revisión", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    // Los dos normalizan a tracking `returned`, pero NO son el mismo hecho de
+    // negocio: uno es el cliente rechazando el COD, el otro un paquete
+    // perdido o roto. Contar el segundo como rehúse infla la métrica que
+    // decide si la publicidad es rentable.
+    const rehuse = closure.planClosureFromDropea("FINISH", "REFUSED", at);
+    const perdido = closure.planClosureFromDropea("FINISH", "REFUSED_LOST_DAMAGED", at);
+
+    assert.equal(rehuse.plan?.status, "refused");
+    assert.equal(rehuse.review, null);
+
+    assert.equal(perdido.plan, null, "no se cierra nada: no fue decisión del cliente");
+    assert.equal(perdido.review?.kind, "returned_not_refused");
+    assert.match(perdido.review!.reason, /no por rehúse|NO por rehúse/i);
+  });
+
+  await test("EJES · una incidencia NUNCA cierra el pedido: el cierre se queda como estaba", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    for (const sub of [
+      "DELIVERY_EXCEPTION",
+      "LOST_DAMAGED",
+      "REVIEW",
+      "TECHNICAL_ERROR",
+      "INSUFFICIENT_STOCK",
+      "CARRIER_VALIDATION_FAILED",
+      "WAREHOUSE_INTEGRATION_FAILED",
+    ]) {
+      const d = closure.planClosureFromDropea("ERROR", sub, at);
+      assert.equal(d.plan, null, `${sub} no debe tocar el eje de cierre`);
+    }
+    // Y la preparación tampoco: aún no ha salido nada, in_progress sería mentira.
+    for (const sub of ["CREATING", "PICKING", "PACKED", "AWAITING_PICKUP", "PENDING_SUPPLIER"]) {
+      assert.equal(closure.planClosureFromDropea("PROCESSING", sub, at).plan, null, sub);
+    }
+    // En manos del transportista SÍ es "en curso".
+    for (const sub of ["SHIPPED", "OUT_FOR_DELIVERY", "DELIVERY_ATTEMPTED"]) {
+      assert.equal(closure.planClosureFromDropea("SHIPPING", sub, at).plan?.status, "in_progress", sub);
+    }
+  });
+
+  await test("EJES · sin fecha de la fuente no se escribe cierre (jamás now())", () => {
+    assert.equal(closure.planClosureFromDropea("FINISH", "DELIVERED", null).plan, null);
+    // Y un par desconocido tampoco inventa nada.
+    assert.equal(closure.planClosureFromDropea("FINISH", "PALABRA_RARA", 1_700_000_000).plan, null);
+    assert.equal(closure.planClosureFromDropea("FINISH", null, 1_700_000_000).plan, null, "FINISH sin sub-estado no afirma entrega");
+  });
+
+  await test("EJES · Dropi no infiere cierre hasta tener su mapa de estados real", () => {
+    // Sin catálogo confirmado, inferir el desenlace económico sería inventarse
+    // el dato más caro del negocio. Fail-closed a propósito.
+    for (const st of ["delivered", "returned", "cancelled", "in_transit"] as const) {
+      assert.equal(closure.planClosureFromTracking(st, "dropi", 1_700_000_000).plan, null, st);
+    }
+  });
+
+  await test("EJES · refused y returned COEXISTEN: son ejes distintos, no sinónimos", () => {
+    const o = mkSynced("991001", "8001", "34600191001");
+    // Logística: el paquete volvió al origen.
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-EJ1", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    // Negocio: sabemos que fue rehúse del COD.
+    assert.equal(db.setOrderClosure(o.id, "refused", "dropea", 1_700_000_000), true);
+
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.supplier_status_normalized, "returned", "el eje logístico dice returned");
+    assert.equal(fila.closure_status, "refused", "el eje de negocio dice refused");
+    assert.equal(fila.closure_source, "dropea");
+  });
+
+  await test("EJES · el histórico distingue qué eje cambió (status_axis)", () => {
+    const o = mkSynced("991002", "8002", "34600191002");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-EJ2", source: "polling" });
+    db.setOrderClosure(o.id, "delivered", "dropea", 1_700_000_100);
+
+    const h = db.listOrderStatusHistory(o.id);
+    const log = h.filter((x) => x.status_axis === "tracking");
+    const cie = h.filter((x) => x.status_axis === "closure");
+    assert.ok(log.length >= 1, "hay transición logística");
+    assert.equal(cie.length, 1, "y exactamente una de cierre");
+    assert.equal(cie[0].new_status, "delivered");
+    assert.equal(cie[0].occurred_at, 1_700_000_100, "fecha del evento en la fuente, no now()");
+  });
+
+  await test("EJES · métricas: el denominador ignora el eje logístico por completo", () => {
+    // Ventana propia, lejos del resto de tests, para contar sin ruido.
+    const base = Math.floor(Date.parse("2026-07-01T12:00:00Z") / 1000);
+    const mk = (id: string, num: string, tel: string, cierre: "delivered" | "refused" | "in_progress" | "cancelled") => {
+      const o = mkSynced(id, num, tel);
+      db.setOrderClosure(o.id, cierre, "dropea", base + 10);
+      return o;
+    };
+    mk("991010", "8010", "34600191010", "delivered");
+    mk("991011", "8011", "34600191011", "delivered");
+    mk("991012", "8012", "34600191012", "delivered");
+    mk("991013", "8013", "34600191013", "refused");
+    mk("991014", "8014", "34600191014", "in_progress");
+    mk("991015", "8015", "34600191015", "cancelled");
+
+    const b = deliveryMetrics.getClosureBreakdown(base, base + 100);
+    assert.equal(b.delivered, 3);
+    assert.equal(b.refused, 1);
+    assert.equal(b.inProgress, 1);
+    assert.equal(b.cancelled, 1);
+    assert.equal(b.resolved, 4, "solo delivered + refused");
+    assert.equal(b.deliveryRate, 75, "3/(3+1) = 75 % — ni el en curso ni el cancelado tocan el denominador");
+  });
+
+  await test("EJES · reconcile de Dropea escribe el eje de cierre con la política central", async () => {
+    // mkOrder (no mkSynced): mkSynced ya deja un id externo propio, y entonces
+    // el reconciliador lo trataría como conflicto de enlace en vez de como el
+    // pedido a cerrar — que es justo lo que se quiere comprobar aquí.
+    const o = mkOrder("991020", "8020", "34600191020");
+    assert.equal(
+      db.setOrderSupplierPlatformAndExternalId(o.id, "dropea", "7770001"),
+      true,
+      "el pedido queda enlazado a 7770001"
+    );
+
+    // La población a reconciliar sale de los webhooks de pedido recibidos.
+    db.claimWebhookEvent("ejes-rec-1", "dropea", "order.status.changed", "7770001");
+
+    const r = await dropeaReconcile.runDropeaReconcile({
+      dryRun: false,
+      resetCheckpoint: true,
+      // Solo este recurso devuelve algo enlazable; el resto de la población
+      // (webhooks de otros tests) sale sin correlación y no toca nada.
+      fetcher: async (id) =>
+        ({
+          id: Number(id),
+          status: id === "7770001" ? "FINISH" : "SHIPPING",
+          sub_status: id === "7770001" ? "DELIVERED" : "SHIPPED",
+          external_order_id: id === "7770001" ? "991020" : null,
+          updated_at: "2026-08-25T09:00:00Z",
+          created_at: "2026-08-20T09:00:00Z",
+        }) as import("../src/lib/suppliers/dropea/types").DropeaOrder,
+    });
+    const mio = r.items.find((i) => i.resourceId === "7770001")!;
+    assert.equal(mio.closureStatus, "delivered");
+    assert.equal(mio.closureApplied, true);
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.closure_status, "delivered");
+    assert.equal(fila.closure_source, "dropea");
+    assert.equal(fila.closure_at, Math.floor(Date.parse("2026-08-25T09:00:00Z") / 1000));
   });
 
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============

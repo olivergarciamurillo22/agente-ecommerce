@@ -212,6 +212,49 @@ export function migrateClosureAxis(db: Database.Database): void {
 }
 
 /**
+ * Migración (SCHEMA_VERSION 6): `status_axis` en `order_status_history`.
+ *
+ * La tabla mezclaba transiciones de ejes distintos en las mismas columnas
+ * (`previous_status` / `new_status`), así que un `delivered` del eje
+ * LOGÍSTICO y un `delivered` del eje de CIERRE eran indistinguibles al
+ * leerla. Con cuatro máquinas de estado declaradas (ver
+ * docs/MODELO-ESTADOS.md) eso es una ambigüedad que sí importa.
+ *
+ * Aditiva e idempotente, y con BACKFILL NEUTRO: las filas existentes reciben
+ * `'tracking'` porque hasta hoy el ÚNICO escritor de esta tabla era
+ * `processSupplierUpdate` (el eje logístico) — no es inferencia, es el hecho
+ * comprobable de que no había otro. El DEFAULT también es `'tracking'` para
+ * que cualquier inserción antigua que no pase el campo siga siendo correcta.
+ *
+ * Parametrizada por conexión, igual que las anteriores.
+ */
+export function migrateStatusAxis(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(order_status_history)").all() as Array<{ name: string }>).map(
+      (c) => c.name
+    )
+  );
+  if (!cols.has("status_axis")) {
+    try {
+      db.exec(
+        "ALTER TABLE order_status_history ADD COLUMN status_axis TEXT NOT NULL DEFAULT 'tracking'"
+      );
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_osh_axis ON order_status_history(status_axis, occurred_at)"
+    );
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
  * Migración E7 (SCHEMA_VERSION 5): orquestador de llamadas de confirmación.
  * Aditiva e idempotente (CREATE TABLE IF NOT EXISTS + ADD COLUMN comprobado).
  * Parametrizada por conexión, igual que migrateClosureAxis.
@@ -701,6 +744,10 @@ function build() {
       raw_status TEXT,
       raw_sub_status TEXT,
       source TEXT NOT NULL CHECK(source IN ('webhook','polling','manual','reconciliation')),
+      -- Qué EJE cambió. Sin esto, un 'delivered' logístico y un 'delivered'
+      -- de cierre son indistinguibles al leer la tabla. Ver StatusAxis.
+      status_axis TEXT NOT NULL DEFAULT 'tracking'
+        CHECK(status_axis IN ('confirmation','supplier_sync','tracking','closure')),
       event_id TEXT,
       occurred_at INTEGER NOT NULL,
       recorded_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -864,6 +911,7 @@ function build() {
 
   migrateClosureAxis(db);
   migrateCallOrchestrator(db);
+  migrateStatusAxis(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1033,7 +1081,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1984,6 +2032,15 @@ export function setOrderSupplierPlatformAndExternalId(
 
 export type StatusHistorySource = "webhook" | "polling" | "manual" | "reconciliation";
 
+/**
+ * Cuál de las CUATRO máquinas de estado cambió. Ver docs/MODELO-ESTADOS.md.
+ * No se mezclan: cada eje tiene su vocabulario, su fuente de verdad y sus
+ * reglas de terminalidad.
+ */
+export type StatusAxis = "confirmation" | "supplier_sync" | "tracking" | "closure";
+
+export const STATUS_AXES: StatusAxis[] = ["confirmation", "supplier_sync", "tracking", "closure"];
+
 export interface OrderStatusHistoryRow {
   id: number;
   order_id: number;
@@ -1995,6 +2052,7 @@ export interface OrderStatusHistoryRow {
   raw_status: string | null;
   raw_sub_status: string | null;
   source: StatusHistorySource;
+  status_axis: StatusAxis;
   event_id: string | null;
   occurred_at: number;
   recorded_at: number;
@@ -2010,6 +2068,9 @@ export interface StatusHistoryInput {
   rawStatus: string | null;
   rawSubStatus?: string | null;
   source: StatusHistorySource;
+  /** Qué eje cambió. Por defecto 'tracking': es el único escritor histórico
+   *  de esta tabla, así que omitirlo sigue siendo correcto para ese camino. */
+  statusAxis?: StatusAxis;
   eventId?: string | null;
   /** Epoch segundos. Si no se conoce, ahora. */
   occurredAt?: number | null;
@@ -2044,8 +2105,8 @@ export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
     .prepare(
       `INSERT INTO order_status_history
         (order_id, shopify_order_id, supplier_platform, carrier, previous_status, new_status,
-         raw_status, raw_sub_status, source, event_id, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         raw_status, raw_sub_status, source, status_axis, event_id, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       h.orderId,
@@ -2057,6 +2118,7 @@ export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
       h.rawStatus ?? null,
       h.rawSubStatus ?? null,
       h.source,
+      h.statusAxis ?? "tracking",
       eventId,
       occurredAt
     );
@@ -2466,7 +2528,32 @@ export function setOrderClosure(
   const info = ctx()
     .db.prepare(`UPDATE orders SET closure_status = ?, closure_source = ?, closure_at = ?, ${TOUCH} WHERE id = ?`)
     .run(status, source, at, id);
-  return info.changes > 0;
+  if (info.changes === 0) return false;
+
+  // Rastro en el histórico, marcado como eje de CIERRE. Sin esto, el eje que
+  // manda en el dinero era el único sin auditoría: se veía el valor actual
+  // pero no quién lo puso ni cuándo cambió. Repetir el mismo valor (permitido:
+  // refresca fuente y fecha) no genera fila: no es una transición.
+  if (row.closure_status !== status) {
+    const meta = ctx().db.prepare("SELECT shopify_order_id, supplier_platform, carrier FROM orders WHERE id = ?").get(id) as
+      | { shopify_order_id: string; supplier_platform: string | null; carrier: string | null }
+      | undefined;
+    if (meta) {
+      insertOrderStatusHistory({
+        orderId: id,
+        shopifyOrderId: meta.shopify_order_id,
+        supplierPlatform: meta.supplier_platform,
+        carrier: meta.carrier,
+        previousStatus: row.closure_status,
+        newStatus: status,
+        rawStatus: null,
+        source: source === "llamada_ia" || source === "manual" ? "manual" : "webhook",
+        statusAxis: "closure",
+        occurredAt: at,
+      });
+    }
+  }
+  return true;
 }
 
 /** Marca updated_at sin cambiar nada más (backoff natural de reintentos). */

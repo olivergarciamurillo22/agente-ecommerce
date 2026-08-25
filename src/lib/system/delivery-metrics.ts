@@ -23,6 +23,7 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { computeClosureDeliveryRate } from "../orders/closure";
 import { lineItemsFromPayload } from "../orders/line-items";
 
 const SHIPPED_STATES = [
@@ -48,6 +49,9 @@ export interface DeliveryBucket {
 }
 
 export interface DeliveryWindow extends DeliveryBucket {
+  /** Eje de CIERRE (fuente de verdad de negocio). `deliveryRate` de la
+   *  ventana sale de aquí, no de los contadores logísticos de abajo. */
+  closure: ClosureBreakdown;
   /** Pedidos creados en la ventana (todos, enviados o no). */
   created: number;
   cancelled: number;
@@ -149,6 +153,9 @@ function buildWindow(rows: ShippedRow[], created: number, cancelled: number): De
 
   return {
     ...finishBucket(total),
+    // Placeholder: getDeliveryWindow() lo sustituye por el desglose real del
+    // eje de cierre. buildWindow solo sabe de logística, a propósito.
+    closure: emptyClosure(),
     created,
     cancelled,
     avgHoursToDeliver: nEntregados > 0 ? Math.round((sumaHoras / nEntregados) * 10) / 10 : null,
@@ -210,10 +217,105 @@ function countOrders(fromTs: number, toTs: number): { created: number; cancelled
   return { created, cancelled };
 }
 
+
+// ============================================================
+// CIERRE DE NEGOCIO — eje 4 (`orders.closure_status`).
+//
+// FUENTE DE VERDAD de la tasa de entrega desde el 25-08-2026. Antes esta
+// métrica se calculaba sobre `supplier_status_normalized`, que es el eje
+// LOGÍSTICO: el resultado era que todo lo que E5/E8 escribían en el eje de
+// cierre no aparecía por ninguna parte, y la tarjeta seguía diciendo "sin
+// datos" aunque hubiera entregas confirmadas. Los dos ejes nunca se cruzaban.
+//
+// FÓRMULA (acordada, no negociable sin volver a acordarla):
+//
+//     tasa de entrega = delivered / (delivered + refused)
+//
+// `unknown`, `in_progress` y `cancelled` NO entran ni en el numerador ni en
+// el denominador. Un pedido cancelado no es una entrega fallida: nunca se
+// llegó a intentar entregarlo, y meterlo en el denominador hundiría la tasa
+// por razones ajenas a la logística.
+//
+// La ventana se mide por `closure_at` — la fecha del EVENTO en la fuente, no
+// la de proceso — para que "entregados esta semana" signifique lo que dice.
+// ============================================================
+
+export interface ClosureBreakdown {
+  delivered: number;
+  refused: number;
+  inProgress: number;
+  cancelled: number;
+  unknown: number;
+  /** delivered + refused: los únicos que cuentan para la tasa. */
+  resolved: number;
+  /** delivered / (delivered + refused). `null` si no hay ninguno resuelto. */
+  deliveryRate: number | null;
+}
+
+function emptyClosure(): ClosureBreakdown {
+  return {
+    delivered: 0,
+    refused: 0,
+    inProgress: 0,
+    cancelled: 0,
+    unknown: 0,
+    resolved: 0,
+    deliveryRate: null,
+  };
+}
+
+/**
+ * Desglose del eje de cierre en una ventana, por `closure_at`.
+ *
+ * Los `unknown` se cuentan por `created_at`: por definición no tienen
+ * `closure_at`, y aun así hay que poder verlos — son los pedidos de los que
+ * el sistema todavía no sabe nada, y su número es en sí mismo una alerta.
+ */
+export function getClosureBreakdown(fromTs: number, toTs: number): ClosureBreakdown {
+  const db = systemDbHandle();
+  const out = emptyClosure();
+
+  const filas = db
+    .prepare(
+      `SELECT closure_status AS s, COUNT(*) AS n FROM orders
+        WHERE closure_status != 'unknown' AND closure_at >= ? AND closure_at < ?
+        GROUP BY closure_status`
+    )
+    .all(fromTs, toTs) as Array<{ s: string; n: number }>;
+  for (const f of filas) {
+    if (f.s === "delivered") out.delivered = f.n;
+    else if (f.s === "refused") out.refused = f.n;
+    else if (f.s === "in_progress") out.inProgress = f.n;
+    else if (f.s === "cancelled") out.cancelled = f.n;
+  }
+
+  out.unknown = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM orders
+          WHERE closure_status = 'unknown' AND created_at >= ? AND created_at < ?`
+      )
+      .get(fromTs, toTs) as { n: number }
+  ).n;
+
+  out.resolved = out.delivered + out.refused;
+  out.deliveryRate = computeClosureDeliveryRate(out.delivered, out.refused);
+  return out;
+}
+
 export function getDeliveryWindow(fromTs: number, toTs: number): DeliveryWindow {
   const rows = listShippedRows(fromTs, toTs);
   const { created, cancelled } = countOrders(fromTs, toTs);
-  return buildWindow(rows, created, cancelled);
+  const ventana = buildWindow(rows, created, cancelled);
+  const closure = getClosureBreakdown(fromTs, toTs);
+  return {
+    ...ventana,
+    closure,
+    // La tasa de la ventana SALE DEL EJE DE CIERRE. Los buckets por producto,
+    // proveedor y transportista siguen siendo logísticos a propósito: ahí lo
+    // que interesa es el comportamiento del envío, no el desenlace económico.
+    deliveryRate: closure.deliveryRate,
+  };
 }
 
 export function getDeliveryMetrics(nowMs = Date.now()): DeliveryMetrics {

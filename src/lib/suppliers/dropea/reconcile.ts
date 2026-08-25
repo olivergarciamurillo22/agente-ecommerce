@@ -54,6 +54,7 @@ import {
 import { getDropeaOrder } from "./index";
 import { dropeaCredentialsPresent, dropeaReadEnabled, DropeaApiError } from "./client";
 import { normalizeDropeaStatus } from "./status-map";
+import { planClosureFromDropea, type ClosureDecision } from "../../orders/closure";
 import { logIntegrationEvent } from "../../system/repo";
 import type { DropeaOrder } from "./types";
 
@@ -147,25 +148,34 @@ export interface ClosureFromDropea {
 
 /**
  * Traduce el estado ACTUAL de un pedido de Dropea al eje de cierre.
- * `null` = no se escribe nada: o el par (status, sub_status) es desconocido
- * (nunca se adivina) o Dropea no trae ninguna fecha utilizable.
+ *
+ * DELEGA en `planClosureFromDropea` (src/lib/orders/closure.ts): la política
+ * del eje de cierre vive en UN solo sitio y se comparte con el webhook en
+ * vivo, para que el mismo par (status, sub_status) no pueda significar dos
+ * cosas distintas según por dónde entre.
+ *
+ * Antes se traducía desde el estado YA NORMALIZADO, y eso colapsaba `REFUSED`
+ * (rehúse del cliente) con `REFUSED_LOST_DAMAGED` (paquete perdido o roto) en
+ * un único `returned` → `refused`. Contar el segundo como rehúse inflaba la
+ * métrica que decide si la publicidad es rentable. Ahora el segundo NO cierra
+ * y se marca para revisión humana.
+ *
+ * `null` = no se escribe nada.
  */
 export function planClosureFromDropeaOrder(order: DropeaOrder): ClosureFromDropea | null {
-  const tracking = normalizeDropeaStatus(order.status, order.sub_status ?? null);
-  if (tracking === "unknown") return null;
-
   const at = toEpochSeconds(order.updated_at) ?? toEpochSeconds(order.created_at);
-  if (at === null) return null;
+  const decision = planClosureFromDropea(order.status, order.sub_status ?? null, at);
+  if (!decision.plan) return null;
+  return {
+    status: decision.plan.status as ClosureFromDropea["status"],
+    at: decision.plan.at,
+  };
+}
 
-  const status: ClosureFromDropea["status"] =
-    tracking === "delivered"
-      ? "delivered"
-      : tracking === "returned"
-        ? "refused"
-        : tracking === "cancelled"
-          ? "cancelled"
-          : "in_progress"; // created/processing/shipped/in_transit/out_for_delivery/delivery_attempted/at_pickup_point/incident
-  return { status, at };
+/** La misma decisión, pero completa (incluye la marca de revisión humana). */
+export function decideClosureFromDropeaOrder(order: DropeaOrder): ClosureDecision {
+  const at = toEpochSeconds(order.updated_at) ?? toEpochSeconds(order.created_at);
+  return planClosureFromDropea(order.status, order.sub_status ?? null, at);
 }
 
 // --- Orquestación: paginado por lista fija, checkpoint, backoff ---
