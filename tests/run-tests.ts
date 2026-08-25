@@ -7909,6 +7909,54 @@ async function main(): Promise<void> {
     assert.equal(item.type, "text", "para el loop de Baileys es un texto normal (columna vieja `type`)");
   });
 
+  /** getOrdersDueInitialSend() procesa como mucho 20 por tick (created_at
+   *  ASC); a esta altura del fichero puede haber otros pending_send más
+   *  viejos sueltos de tests anteriores por delante en la cola. Se repite
+   *  el tick hasta que a ESTE pedido concreto le toque, con un tope de
+   *  seguridad para no colgarse si algo real se rompe. */
+  async function tickHastaQueSalgaDe(orderId: number, estadoInicial: string): Promise<void> {
+    for (let i = 0; i < 25; i++) {
+      if (db.getOrderById(orderId)!.status !== estadoInicial) return;
+      await runSchedulerTick(Math.floor(Date.now() / 1000));
+    }
+    throw new Error(`el pedido ${orderId} sigue en ${estadoInicial} tras 25 ticks`);
+  }
+
+  await test("BOTONES · el scheduler manda la confirmación inicial como interactivo cuando el proveedor activo es cloud_api", async () => {
+    const tel = "34600000138";
+    const o = mkOrder("971101", "6101", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "cloud_api: la confirmación inicial sale como interactivo");
+    const payload = JSON.parse(item.payload_json!) as {
+      kind: string;
+      buttons: Array<{ id: string; title: string }>;
+    };
+    assert.equal(payload.kind, "interactive_buttons");
+    assert.deepEqual(
+      payload.buttons.map((b) => b.id),
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE],
+      "los tres botones, en los payloads deterministas que interpreta handleOrderButtonReply"
+    );
+    assert.match(
+      item.content,
+      /1 — Confirmar/,
+      "el fallback (panel / rollback) es el de buildConfirmationInteractive, no el texto plano de messages.ts"
+    );
+  });
+
+  await test("BOTONES · con Baileys (proveedor por defecto) la confirmación inicial sigue en texto plano — sin regresión", async () => {
+    const tel = "34600000139";
+    const o = mkOrder("971102", "6102", tel);
+    await tickHastaQueSalgaDe(o.id, "pending_send"); // sin WHATSAPP_PROVIDER: default baileys
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "text", "baileys: sigue siendo texto plano, exactamente como antes de este cambio");
+    assert.equal(item.payload_json, null, "sin payload interactivo para Baileys — nada nuevo que interpretar");
+    assert.match(item.content, /1 - Todo correcto/);
+  });
+
   await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {
     const parsed = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
       { from: "34600000123", id: "wamid.n1", timestamp: "1756100080", type: "button", button: { payload: "confirm_order", text: "Confirmar" } },
