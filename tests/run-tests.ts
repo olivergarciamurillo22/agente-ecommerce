@@ -6348,6 +6348,104 @@ async function main(): Promise<void> {
     assert.equal(segundaPasada.resolved, 0, "las filas resolubles ya se resolvieron en la pasada anterior");
   });
 
+  // ============ T2 · MAX_ORDER_AGE_MINUTES contra ordered_at ============
+  console.log("\n— T2: antigüedad medida por ordered_at, no por created_at —");
+
+  await test("T2 scheduler: ordered_at viejo caduca la fila aunque created_at sea de ahora mismo (import en tiempo real, compra vieja)", async () => {
+    const o = mkOrder("972001", "2801", "34600000200");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // created_at se queda tal cual (recién insertado por mkOrder); solo se
+    // fija ordered_at como una compra muy vieja — el escenario que antes de
+    // T2 el scheduler NO detectaba porque miraba created_at.
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(nowSec - 999_999, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.equal(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "ordered_at viejo debe caducar la fila aunque created_at (import) sea de ahora mismo"
+    );
+  });
+
+  await test("T2 scheduler: created_at viejo (import tardío) con ordered_at reciente NO caduca — antes de T2 sí habría caducado", async () => {
+    const o = mkOrder("972002", "2802", "34600000201");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Al revés que el test anterior: la FILA se insertó "hace mucho" (import
+    // tardío / reproceso), pero la compra real fue hace un minuto. Con la
+    // lógica pre-T2 (basada en created_at) esto habría caducado sin motivo.
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET created_at = ?, ordered_at = ? WHERE id = ?")
+      .run(nowSec - 999_999, nowSec - 60, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.notEqual(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "ordered_at reciente: la compra fue hace un minuto, no debe caducar por mucho que la fila llevara tiempo insertada"
+    );
+  });
+
+  await test("T2 scheduler: sin ordered_at (fila de antes de T1, aún sin backfillar) sigue cayendo a created_at — sin regresión", async () => {
+    const o = mkOrder("972003", "2803", "34600000202");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // ordered_at se queda NULL a propósito (no se toca): es exactamente el
+    // comportamiento anterior a T1/T2, que debe seguir intacto.
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = ? WHERE id = ?").run(nowSec - 999_999, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.equal(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "sin ordered_at, debe seguir cayendo al created_at viejo — mismo comportamiento que antes de T2"
+    );
+  });
+
+  await test("T2 webhook: sigue rechazando por anti-replay con created_at antiguo (mismo resultado, ahora vía ordered_at + orderTooOld)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({
+        id: 972101,
+        order_number: 2901,
+        created_at: "2026-01-01T10:00:00+02:00", // muy anterior a hoy
+      });
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.equal(db.getOrderByShopifyId("972101")!.status, "ignored_old");
+    });
+  });
+
+  await test("T2 webhook: created_at reciente NO se marca ignored_old (el refactor a orderTooOld no cambia el caso normal)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({
+        id: 972102,
+        order_number: 2902,
+        created_at: new Date().toISOString(),
+      });
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.notEqual(db.getOrderByShopifyId("972102")!.status, "ignored_old");
+    });
+  });
+
+  await test("T2 webhook: payload SIN created_at no se puede medir → se deja pasar (permisivo, igual que antes de T2)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({ id: 972103, order_number: 2903 });
+      delete (payload as Record<string, unknown>).created_at;
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.notEqual(
+        db.getOrderByShopifyId("972103")!.status,
+        "ignored_old",
+        "sin dato de antigüedad, no se bloquea por una ausencia que no es indicio de nada"
+      );
+    });
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
