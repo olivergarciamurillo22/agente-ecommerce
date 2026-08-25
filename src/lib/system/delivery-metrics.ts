@@ -23,6 +23,7 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { measure, withMinimumSample, type Measured } from "./metric-result";
 import { startOfBusinessDay, endOfBusinessDay, lastBusinessDays } from "../time";
 import { computeClosureDeliveryRate } from "../orders/closure";
 import { lineItemsFromPayload } from "../orders/line-items";
@@ -321,6 +322,20 @@ export function getDeliveryWindow(fromTs: number, toTs: number): DeliveryWindow 
     // que interesa es el comportamiento del envío, no el desenlace económico.
     deliveryRate: closure.deliveryRate,
   };
+}
+
+/**
+ * Igual que `getDeliveryMetrics` pero declarando CON QUÉ CONFIANZA responde.
+ *
+ * Es la que debe consumir el Control Center: si una consulta revienta, aquí
+ * llega `status: "error"` con `value: null`, no un puñado de ceros que
+ * parecen datos. Y si hay menos pedidos resueltos que `DELIVERY_RATE_MIN_SAMPLE`,
+ * llega `partial`: la tasa se ve, pero marcada como no concluyente.
+ */
+export function getDeliveryMetricsMeasured(nowMs = Date.now()): Measured<DeliveryMetrics> {
+  const m = measure("delivery-metrics", () => getDeliveryMetrics(nowMs));
+  if (m.status !== "ok" || !m.value) return m;
+  return withMinimumSample(m, m.value.last7d.closure.resolved, m.value.minSample);
 }
 
 export function getDeliveryMetrics(nowMs = Date.now()): DeliveryMetrics {

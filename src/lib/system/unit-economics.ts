@@ -22,6 +22,7 @@
 // ============================================================
 
 import { listDailyAdSpend, listProductCosts, systemDbHandle, type ProductCostRow } from "../db";
+import { measure, type Measured } from "./metric-result";
 import { madridParts } from "../time";
 import { lineItemsFromPayload } from "../orders/line-items";
 import { startOfLocalDay } from "./delivery-metrics";
@@ -227,6 +228,16 @@ function shippedRows(from: number, to: number): Row[] {
        WHERE s.shipped_at >= ? AND s.shipped_at < ?`
     )
     .all(...SHIPPED_STATES, from, to) as Row[];
+}
+
+/**
+ * Economía con estado de confianza. La que debe consumir el panel.
+ *
+ * Un fallo aquí no puede devolver 0 € de margen: sería indistinguible de un
+ * mes que se fue a cero, y son cosas muy distintas.
+ */
+export function getUnitEconomicsMeasured(nowMs = Date.now()): Measured<UnitEconomics> {
+  return measure("unit-economics", () => getUnitEconomics(nowMs));
 }
 
 export function getUnitEconomics(nowMs = Date.now()): UnitEconomics {

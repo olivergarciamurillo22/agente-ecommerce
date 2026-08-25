@@ -6468,6 +6468,84 @@ async function main(): Promise<void> {
     assert.equal(tzmod.formatBusinessDateTime(Math.floor(Date.parse("2026-01-10T22:30:00Z") / 1000)), "10/01/2026 23:30");
   });
 
+  // ============ 49 · Métricas fail-closed ============
+  console.log("\n— Métricas: '0' y 'no lo sé' no se pintan igual —");
+
+  const MR = await import("../src/lib/system/metric-result");
+
+  await test("FAILCLOSED · una consulta que revienta NO devuelve un número plausible", () => {
+    const m = MR.measure<number>("prueba", () => {
+      throw new Error("no such table: inventada");
+    });
+    assert.equal(m.status, "error");
+    assert.equal(m.value, null, "NUNCA un valor de relleno junto a un error");
+    assert.match(m.error ?? "", /no such table/);
+  });
+
+  await test("FAILCLOSED · 'unknown' (sin datos) y 'error' (algo falló) son distintos", () => {
+    const sinDatos = MR.unknown<number>("todavía no hay pedidos resueltos");
+    assert.equal(sinDatos.status, "unknown");
+    assert.equal(sinDatos.error, null, "no hay error: es que aún no ha pasado nada");
+
+    const roto = MR.failed<number>(new Error("disco lleno"), "prueba");
+    assert.equal(roto.status, "error");
+    assert.ok(roto.error);
+    // "esperar" arregla lo primero; "mirar el log" arregla lo segundo.
+    assert.notEqual(sinDatos.status, roto.status);
+  });
+
+  await test("FAILCLOSED · métrica compuesta: una parte rota degrada, no borra el resto", () => {
+    const m = MR.measureParts("compuesta", {
+      buena: () => 42,
+      rota: () => {
+        throw new Error("columna inexistente");
+      },
+    });
+    assert.equal(m.status, "partial");
+    assert.equal(m.value?.buena, 42, "lo que sí se pudo calcular se conserva");
+    assert.equal(m.degraded.length, 1);
+    assert.match(m.degraded[0], /rota/);
+
+    // Si TODAS las partes fallan, es un error, no un "partial" vacío.
+    const todo = MR.measureParts("compuesta", {
+      a: () => { throw new Error("x"); },
+      b: () => { throw new Error("y"); },
+    });
+    assert.equal(todo.status, "error");
+    assert.equal(todo.value, null);
+  });
+
+  await test("FAILCLOSED · muestra insuficiente degrada la tasa en vez de afirmarla", () => {
+    const m = MR.ok({ rate: 33.3 });
+    // 3 resueltos con mínimo 10: el dato se ve, pero NO se puede concluir.
+    const poco = MR.withMinimumSample(m, 3, 10);
+    assert.equal(poco.status, "partial");
+    assert.match(poco.degraded.join(" "), /muestra insuficiente/);
+    assert.ok(poco.value, "el número sigue visible: se marca, no se oculta");
+
+    const suficiente = MR.withMinimumSample(MR.ok({ rate: 70 }), 12, 10);
+    assert.equal(suficiente.status, "ok");
+  });
+
+  await test("FAILCLOSED · las métricas reales exponen su confianza", () => {
+    const d = deliveryMetrics.getDeliveryMetricsMeasured();
+    assert.ok(["ok", "partial", "unknown", "error"].includes(d.status));
+    // Con la DB de test sana, la métrica se calcula; si la muestra es corta,
+    // llega como partial — nunca como "ok" con una tasa no concluyente.
+    assert.notEqual(d.status, "error");
+    if (d.status === "partial") assert.ok(d.degraded.length > 0, "partial siempre dice POR QUÉ");
+  });
+
+  await test("FAILCLOSED · el overview del sistema viaja con el estado de cada métrica", async () => {
+    const ov = await import("../src/lib/system/overview");
+    const o = ov.getSystemOverview();
+    assert.ok(o.metricStatus, "el panel necesita distinguir 0 de no-disponible");
+    for (const k of ["tracking", "delivery", "economics"] as const) {
+      assert.ok(["ok", "partial", "unknown", "error"].includes(o.metricStatus[k].status), k);
+      assert.equal(o.metricStatus[k].value, null, "el estado no duplica el valor: solo lo califica");
+    }
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

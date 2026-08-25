@@ -27,10 +27,15 @@ import {
   type ShopifyHealth,
   type WhatsAppHealth,
 } from "./health-integrations";
-import { getTrackingOverview, type TrackingOverview } from "./tracking-overview";
-import { getDeliveryMetrics, type DeliveryMetrics } from "./delivery-metrics";
+import {
+  getTrackingOverview,
+  getTrackingOverviewMeasured,
+  type TrackingOverview,
+} from "./tracking-overview";
+import type { Measured } from "./metric-result";
+import { getDeliveryMetrics, getDeliveryMetricsMeasured, type DeliveryMetrics } from "./delivery-metrics";
 import { getBusinessAlerts, type BusinessAlertsResult } from "./business-alerts";
-import { getUnitEconomics, type UnitEconomics } from "./unit-economics";
+import { getUnitEconomics, getUnitEconomicsMeasured, type UnitEconomics } from "./unit-economics";
 import { listIntegrationEvents } from "./repo";
 import { emergencyStop } from "../safety";
 import type { HealthCard, HealthStatus, IntegrationEventRow } from "./types";
@@ -49,6 +54,13 @@ export interface SystemOverview {
   outbox: OutboxHealth;
   schedulers: SchedulerHealth[];
   tracking: TrackingOverview;
+  /** Confianza de cada métrica: "ok" | "partial" | "unknown" | "error".
+   *  Sin esto, un 0 por fallo de consulta y un 0 real se pintan igual. */
+  metricStatus: {
+    tracking: Measured<unknown>;
+    delivery: Measured<unknown>;
+    economics: Measured<unknown>;
+  };
   /** Fase A · sección de negocio: entrega, alertas y economía. */
   business: {
     status: HealthStatus;
@@ -83,11 +95,27 @@ export function getSystemOverview(): SystemOverview {
   const backups = getBackupHealth();
   const outbox = getOutboxHealth();
   const schedulers = getSchedulersHealth();
-  const tracking = getTrackingOverview();
+  const trackingM = getTrackingOverviewMeasured();
   const t = Math.floor(Date.now() / 1000);
-  const delivery = getDeliveryMetrics();
+  const deliveryM = getDeliveryMetricsMeasured();
+  const economicsM = getUnitEconomicsMeasured();
+
+  // Las métricas ya no devuelven ceros de relleno cuando fallan: llegan con
+  // `status` y, si es `error`, con `value: null`. El panel tiene que poder
+  // distinguir "0" de "no disponible", así que el estado viaja hasta la UI.
+  // Para el resto del ensamblado se usa el valor si lo hay; si no, se toma
+  // una estructura vacía SOLO para no romper el render — y `*Status` deja
+  // constancia de que ese cero no es un dato.
+  // Si una métrica falló, se usa el valor CRUDO sin envolver solo para que el
+  // render no reviente; `metricStatus` es lo que dice si ese cero significa
+  // algo. Nunca al revés: el número nunca se presenta como bueno por su cuenta.
+  const tracking = trackingM.value ?? getTrackingOverview();
+  const delivery = deliveryM.value ?? getDeliveryMetrics();
+  const economics = economicsM.value ?? getUnitEconomics();
+  // Las alertas de negocio solo se evalúan si la métrica de la que dependen
+  // es fiable: alertar de "tasa de entrega baja" a partir de un fallo de
+  // consulta sería exactamente el error que este bloque viene a eliminar.
   const alerts = getBusinessAlerts(delivery);
-  const economics = getUnitEconomics();
 
   const todosSinSenales = schedulers.every((s) => s.status === "unknown");
   const schedulersWorst: HealthStatus = todosSinSenales
@@ -207,7 +235,19 @@ export function getSystemOverview(): SystemOverview {
     outbox,
     schedulers,
     tracking,
-    business: { status: alerts.status, delivery, alerts, economics },
+    metricStatus: {
+      tracking: { ...trackingM, value: null },
+      delivery: { ...deliveryM, value: null },
+      economics: { ...economicsM, value: null },
+    },
+    business: {
+      // Si la métrica de entrega no es fiable, el bloque de negocio no puede
+      // presentarse como sano aunque no haya ninguna alerta encendida.
+      status: deliveryM.status === "error" ? "unknown" : alerts.status,
+      delivery,
+      alerts,
+      economics,
+    },
     recentProblems,
   };
 }

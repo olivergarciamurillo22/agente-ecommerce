@@ -8,6 +8,7 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { measure, type Measured } from "./metric-result";
 import { startOfBusinessDay } from "../time";
 import type { HealthStatus } from "./types";
 
@@ -45,6 +46,11 @@ export interface TrackingOverview {
   staleHours: number;
   staleOrders: Array<{ orderNumber: string; state: string; hoursSinceCheck: number | null }>;
   message: string;
+}
+
+/** Vista de tracking con estado de confianza (la que debe usar el panel). */
+export function getTrackingOverviewMeasured(): Measured<TrackingOverview> {
+  return measure("tracking-overview", () => getTrackingOverview());
 }
 
 export function getTrackingOverview(): TrackingOverview {
