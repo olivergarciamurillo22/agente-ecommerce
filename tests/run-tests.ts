@@ -6744,6 +6744,102 @@ async function main(): Promise<void> {
     assert.equal(ERR.needsHuman(c.category), true);
   });
 
+  // ============ 52 · Tracking y outbox: garantías bajo estrés ============
+  console.log("\n— Tracking: los terminales no retroceden —");
+
+  await test("TRACKING · un terminal NO retrocede: returned → shipped se descarta y queda registrado", () => {
+    // Bug real encontrado en la auditoría: `returned`, `cancelled` e
+    // `incident` valían -1 en la tabla de ORDEN, así que quedaban FUERA de la
+    // comparación y cualquier evento posterior los sacaba de ahí. Un webhook
+    // atrasado convertía una devolución en un envío vivo y el pedido volvía
+    // a las colas de seguimiento.
+    const o = mkSynced("994001", "9401", "34600194001");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-T1", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "returned");
+
+    // Llega un evento atrasado que diría "shipped".
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "shipped", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "returned", "sigue devuelto");
+    assert.equal(r.events.length, 0, "no genera eventos: no ha pasado nada");
+  });
+
+  await test("TRACKING · cancelled → delivered tampoco pasa (era el caso más caro)", () => {
+    const o = mkSynced("994002", "9402", "34600194002");
+    tracking.processSupplierUpdate(o, { rawStatus: "cancelled", source: "webhook" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "cancelled");
+
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "cancelled");
+    assert.equal(
+      db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length,
+      antes,
+      "y por tanto tampoco se le escribe al cliente"
+    );
+  });
+
+  await test("TRACKING · delivered → returned se bloquea: el desenlace bueno no se pierde por un evento raro", () => {
+    const o = mkSynced("994003", "9403", "34600194003");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-T3", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+    // Si el proveedor de verdad dice eso, hay algo que entender: queda evento.
+    const eventos = sysRepo.listIntegrationEvents({ integration: "tracking", limit: 500 });
+    assert.ok(eventos.some((e) => e.event_type === "terminal_regression_blocked" && e.order_ref === "9403"));
+  });
+
+  await test("TRACKING · repetir el MISMO terminal sí está permitido (refresco idempotente)", () => {
+    const o = mkSynced("994004", "9404", "34600194004");
+    tracking.processSupplierUpdate(o, { rawStatus: "delivered", source: "polling" });
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+    assert.equal(r.events.length, 0, "sin cambio, sin evento: es idempotente, no un bloqueo");
+  });
+
+  await test("TRACKING · un estado desconocido NO pisa el anterior ni avisa a nadie", () => {
+    const o = mkSynced("994005", "9405", "34600194005");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit", trackingNumber: "TRK-T5", source: "polling" });
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "PALABRA_QUE_NO_EXISTE", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "in_transit");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes);
+  });
+
+  await test("TRACKING · retroceso dentro de la línea normal: out_for_delivery → shipped se ignora", () => {
+    const o = mkSynced("994006", "9406", "34600194006");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery", trackingNumber: "TRK-T6", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "shipped", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+  });
+
+  await test("TRACKING · delivery_attempted puede ir y volver: NO es un retroceso", () => {
+    // El repartidor no encontró al cliente y vuelve a salir al día siguiente.
+    const o = mkSynced("994007", "9407", "34600194007");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery", trackingNumber: "TRK-T7", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, {
+      rawStatus: "SHIPPING.DELIVERY_ATTEMPTED",
+      normalizedOverride: "delivery_attempted",
+      source: "webhook",
+    });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivery_attempted");
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery", source: "webhook" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery", "vuelve a reparto sin problema");
+  });
+
+  await test("TRACKING · el normalizador reconoce nuestro propio vocabulario por identidad", () => {
+    // `delivery_attempted` y `at_pickup_point` existen en TrackingStatus pero
+    // no estaban en el mapa por defecto: solo en el catálogo de Dropea. Por
+    // cualquier otra vía caían en "unknown" EN SILENCIO.
+    const n = require("../src/lib/tracking/normalizer") as typeof import("../src/lib/tracking/normalizer");
+    assert.equal(n.normalizeSupplierStatus("delivery_attempted"), "delivery_attempted");
+    assert.equal(n.normalizeSupplierStatus("at_pickup_point"), "at_pickup_point");
+    assert.equal(n.normalizeSupplierStatus("DELIVERY_ATTEMPTED"), "delivery_attempted", "sin distinguir mayúsculas");
+    // Y lo que sigue sin significar nada, sigue siendo unknown.
+    assert.equal(n.normalizeSupplierStatus("palabra_inventada"), "unknown");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

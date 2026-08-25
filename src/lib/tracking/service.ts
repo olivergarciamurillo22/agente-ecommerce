@@ -17,6 +17,7 @@ import {
 } from "../db";
 import { normalizeSupplierStatus } from "./normalizer";
 import { notifyTrackingEvent } from "./notifications";
+import { isTerminalTracking } from "./types";
 import type { SupplierUpdate, TrackingEvent, TrackingStatus } from "./types";
 import { logIntegrationEvent } from "../system/repo";
 
@@ -79,8 +80,39 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
   // una palabra que no entendemos, conservamos el estado anterior.
   let newStatus: TrackingStatus = normalizado === "unknown" ? previousStatus : normalizado;
 
-  // Updates atrasados (llegan desordenados): no retroceder en la línea
-  // normal. Incidencias, devoluciones y cancelaciones sí mandan siempre.
+  // CAPA 1 — Estados TERMINALES del eje logístico: no se abandonan.
+  //
+  // El guardado por ORDEN de abajo NO cubría esto: `returned`, `cancelled` e
+  // `incident` valen -1, así que quedaban fuera de la comparación y CUALQUIER
+  // evento posterior podía sacarlos de ahí. Comprobado antes de arreglarlo:
+  // `returned → shipped`, `cancelled → delivered` y `returned → delivered`
+  // pasaban sin problema. Un webhook atrasado o un reintento del proveedor
+  // convertía una devolución en un envío vivo, y el pedido volvía a las
+  // colas de seguimiento como si nada.
+  //
+  // Política, igual que en el eje de cierre (canTransitionClosure): un
+  // terminal solo admite repetirse a sí mismo. Cualquier otra cosa se
+  // descarta y queda registrada para que la vea un humano — porque si el
+  // proveedor de verdad está diciendo eso, hay algo que entender, no que
+  // aplicar a ciegas.
+  if (isTerminalTracking(previousStatus) && newStatus !== previousStatus) {
+    logger.warn(
+      `[TRACKING] #${order.shopify_order_number} intento de salir del terminal ${previousStatus} hacia ${newStatus}: descartado`
+    );
+    logIntegrationEvent(
+      "tracking",
+      "terminal_regression_blocked",
+      "warning",
+      `el proveedor reporta "${newStatus}" sobre un envío ya ${previousStatus}: no se aplica, revisar a mano`,
+      order.shopify_order_number
+    );
+    newStatus = previousStatus;
+  }
+
+  // CAPA 2 — Updates atrasados dentro de la línea normal: no retroceder.
+  // Incidencias, intentos de entrega y puntos de recogida sí pueden llegar
+  // tras "en reparto" y volver a "en reparto" al día siguiente: no son
+  // retrocesos y por eso quedan fuera de esta comparación.
   if (ORDEN[newStatus] >= 0 && ORDEN[previousStatus] > ORDEN[newStatus]) {
     logger.info(
       `[TRACKING] #${order.shopify_order_number} update atrasado (${newStatus} tras ${previousStatus}): se ignora`
