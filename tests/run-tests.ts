@@ -7304,6 +7304,456 @@ async function main(): Promise<void> {
     assert.equal(orden[0], "otro", "teléfonos distintos no se bloquean entre sí");
   });
 
+  // ============ 57 · Cloud API de Meta: provider, webhook, botones ============
+  console.log("\n— Meta Cloud API: provider, webhook y botones —");
+
+  const metaProv = await import("../src/lib/whatsapp/meta-cloud");
+  const metaHook = await import("../src/lib/whatsapp/meta-webhook");
+  const metaIn = await import("../src/lib/whatsapp/inbound");
+  const metaOutbox = await import("../src/lib/whatsapp/cloud-outbox");
+  const interactive = await import("../src/lib/whatsapp/interactive");
+  const waTemplates = await import("../src/lib/whatsapp/templates");
+  const waTop = await import("../src/lib/whatsapp");
+  const confirmMod = await import("../src/lib/orders/confirmation");
+
+  const META_ENV = {
+    META_WHATSAPP_API_ENABLED: "1",
+    META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+    META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+    META_WHATSAPP_APP_SECRET: "app-secret-de-prueba",
+    META_WHATSAPP_VERIFY_TOKEN: "verify-token-de-prueba",
+  };
+
+  /** fetch falso: captura la llamada y responde como Meta. */
+  const fakeMetaFetch = (respuestas: Array<{ status: number; body: unknown }>) => {
+    const llamadas: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      llamadas.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+      const r = respuestas.shift() ?? { status: 200, body: { messages: [{ id: "wamid.TEST" }] } };
+      return new Response(JSON.stringify(r.body), { status: r.status });
+    };
+    return { llamadas, fetchImpl };
+  };
+
+  const firmaMeta = (raw: string) =>
+    "sha256=" + crypto.createHmac("sha256", "app-secret-de-prueba").update(raw, "utf8").digest("hex");
+
+  /** Webhook de Meta con un mensaje entrante. */
+  const metaInboundBody = (msg: Record<string, unknown>, waId: string) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "messages", value: { contacts: [{ wa_id: waId, profile: { name: "Cliente" } }], messages: [msg] } }] }],
+    });
+
+  const metaStatusBody = (st: Record<string, unknown>) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "messages", value: { statuses: [st] } }] }],
+    });
+
+  await test("META · fail-closed: sin habilitar NO se hace ni una llamada de red", async () => {
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv({ META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const r = await p.send("34600000110", { kind: "text", text: "hola" });
+      assert.equal(r.ok, false);
+      assert.equal(r.retryable, false, "terminal: reintentar sin credenciales da lo mismo");
+      assert.equal(llamadas.length, 0, "CERO llamadas a Meta");
+    });
+  });
+
+  await test("META · ventana de 24 h: texto libre sin mensaje previo del cliente → terminal, plantilla → pasa", async () => {
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      // Este teléfono JAMÁS nos escribió: fuera de ventana por definición.
+      const r = await p.send("34600000111", { kind: "text", text: "hola" });
+      assert.equal(r.ok, false);
+      assert.match(r.error ?? "", /outside_24h_window/);
+      assert.equal(r.retryable, false);
+      assert.equal(llamadas.length, 0, "ni se intenta: Meta lo rechazaría igual");
+
+      // Una PLANTILLA sí puede salir fuera de ventana.
+      const rt = await p.send("34600000111", {
+        kind: "template", templateName: "order_reminder", language: "es", bodyParams: ["Cliente", "pedido"],
+      });
+      assert.equal(rt.ok, true);
+      assert.equal(rt.providerMessageId, "wamid.TEST");
+      assert.equal(llamadas.length, 1);
+    });
+  });
+
+  await test("META · dentro de ventana: texto libre sale y el payload es el de la Graph API", async () => {
+    const tel = "34600000112";
+    const convo = db.getOrCreateConversation(tel, "Cliente Meta");
+    db.insertMessage(convo.id, "user", "hola, soy el cliente"); // abre la ventana
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      const r = await p.send(tel, { kind: "text", text: "gracias por escribir" });
+      assert.equal(r.ok, true);
+      assert.match(llamadas[0].url, /graph\.facebook\.com\/v23\.0\/111222333\/messages/);
+      assert.equal(llamadas[0].body.type, "text");
+      assert.equal((llamadas[0].body.text as { body: string }).body, "gracias por escribir");
+    });
+  });
+
+  await test("META · botones: payload correcto y límites de Meta validados ANTES de gastar la llamada", async () => {
+    const tel = "34600000112"; // ventana ya abierta arriba
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      const r = await p.send(tel, {
+        kind: "interactive_buttons",
+        body: "¿Está todo correcto?",
+        buttons: [
+          { id: "confirm_order", title: "✅ Confirmar pedido" },
+          { id: "change_address", title: "📍 Cambiar dirección" },
+          { id: "delivery_note", title: "📝 Dejar nota" },
+        ],
+      });
+      assert.equal(r.ok, true);
+      const body = llamadas[0].body as { type: string; interactive: { type: string; action: { buttons: Array<{ reply: { id: string } }> } } };
+      assert.equal(body.type, "interactive");
+      assert.equal(body.interactive.type, "button");
+      assert.equal(body.interactive.action.buttons[0].reply.id, "confirm_order");
+
+      // 4 botones → rechazado LOCALMENTE, sin llamada.
+      const antes = llamadas.length;
+      const r4 = await p.send(tel, {
+        kind: "interactive_buttons",
+        body: "x",
+        buttons: [
+          { id: "a", title: "A" }, { id: "b", title: "B" }, { id: "c", title: "C" }, { id: "d", title: "D" },
+        ],
+      });
+      assert.equal(r4.ok, false);
+      assert.match(r4.error ?? "", /entre 1 y 3/);
+      assert.equal(llamadas.length, antes, "no se gastó la llamada");
+
+      // Título >20 caracteres → igual.
+      const rl = await p.send(tel, {
+        kind: "interactive_buttons", body: "x",
+        buttons: [{ id: "a", title: "Este título es demasiado largo para Meta" }],
+      });
+      assert.equal(rl.ok, false);
+      assert.match(rl.error ?? "", /20/);
+    });
+  });
+
+  await test("META · clasificación de errores: 429/5xx reintentables, 401 terminal", async () => {
+    const tel = "34600000112";
+    await withEnv(META_ENV, async () => {
+      const p429 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 429, body: { error: { message: "rate limit" } } }]).fetchImpl
+      );
+      const r429 = await p429.send(tel, { kind: "text", text: "x" });
+      assert.equal(r429.ok, false);
+      assert.equal(r429.retryable, true, "429 se reintenta");
+
+      const p500 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 500, body: {} }]).fetchImpl
+      );
+      assert.equal((await p500.send(tel, { kind: "text", text: "x" })).retryable, true, "5xx se reintenta");
+
+      const p401 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 401, body: { error: { message: "bad token" } } }]).fetchImpl
+      );
+      const r401 = await p401.send(tel, { kind: "text", text: "x" });
+      assert.equal(r401.retryable, false, "credencial mala: reintentar da lo mismo");
+    });
+  });
+
+  await test("META · plantillas: el catálogo valida nombre y número de variables", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    assert.equal(m.kind, "template");
+    assert.throws(() => waTemplates.buildTemplateMessage("plantilla_inventada", []), /desconocida/);
+    assert.throws(
+      () => waTemplates.buildTemplateMessage("order_confirmation_request", ["solo-una"]),
+      /esperaba 3/
+    );
+    assert.equal(waTemplates.loadTemplateSpecs().length, 6, "las 6 plantillas del plan");
+  });
+
+  await test("WEBHOOK META · verificación inicial: token correcto devuelve el challenge, incorrecto 403, sin configurar 500", async () => {
+    await withEnv(META_ENV, () => {
+      const ok = metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "verify-token-de-prueba", challenge: "reto-123" });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.body, "reto-123", "el challenge vuelve TAL CUAL (texto plano)");
+      assert.equal(metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "otro", challenge: "x" }).status, 403);
+    });
+    await withEnv({ META_WHATSAPP_VERIFY_TOKEN: "" }, () => {
+      assert.equal(metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "a", challenge: "x" }).status, 500);
+    });
+  });
+
+  await test("WEBHOOK META · firma inválida → 401 sin efectos; sin app secret → 500", async () => {
+    const tel = "34600000113";
+    mkMulti("970101", "5001", tel);
+    const raw = metaInboundBody({ from: tel, id: "wamid.in1", timestamp: "1756100000", type: "text", text: { body: "1" } }, tel);
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, "sha256=" + "0".repeat(64));
+      assert.equal(r.status, 401);
+      assert.equal(db.getOrderByShopifyId("970101")!.status, "awaiting_reply", "cero efectos");
+    });
+    await withEnv({ META_WHATSAPP_APP_SECRET: "" }, () => {
+      assert.equal(metaHook.processMetaWebhook(raw, firmaMeta(raw)).status, 500, "error NUESTRO, no de Meta");
+    });
+  });
+
+  await test("WEBHOOK META · botón 'Confirmar' → la MISMA máquina COD: pedido confirmado y respuesta por outbox", async () => {
+    const tel = "34600000113"; // pedido 5001 creado arriba
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.btn1", timestamp: "1756100010", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "✅ Confirmar pedido" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getOrderByShopifyId("970101")!.status, "confirmed", "el payload confirma, sin NLP del título");
+      const out = db.getPendingOutbox(500).filter((x) => x.phone === tel);
+      assert.equal(out.length, 1, "la respuesta salió por el outbox");
+      assert.equal(out[out.length - 1].content, msgs.MSG_CONFIRMED);
+    });
+  });
+
+  await test("WEBHOOK META · el mismo webhook DOS veces: un solo efecto (dedupe por id de mensaje)", async () => {
+    const tel = "34600000114";
+    mkMulti("970102", "5002", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.dup1", timestamp: "1756100020", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      metaHook.processMetaWebhook(raw, firmaMeta(raw)); // reintento de Meta
+      const out = db.getPendingOutbox(500).filter((x) => x.phone === tel);
+      assert.equal(out.length, 1, "una sola respuesta aunque Meta reintente");
+    });
+  });
+
+  await test("WEBHOOK META · botones de dirección y nota → needs_correction y awaiting_delivery_note", async () => {
+    const telA = "34600000115";
+    mkMulti("970103", "5003", telA);
+    const rawA = metaInboundBody(
+      { from: telA, id: "wamid.addr1", timestamp: "1756100030", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "change_address", title: "📍 Cambiar dirección" } } },
+      telA
+    );
+    const telB = "34600000116";
+    mkMulti("970104", "5004", telB);
+    const rawB = metaInboundBody(
+      { from: telB, id: "wamid.note1", timestamp: "1756100031", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "delivery_note", title: "📝 Dejar nota" } } },
+      telB
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(rawA, firmaMeta(rawA));
+      assert.equal(db.getOrderByShopifyId("970103")!.status, "needs_correction");
+      // El siguiente TEXTO es la dirección (mismo flujo de siempre).
+      const rawDir = metaInboundBody(
+        { from: telA, id: "wamid.addr2", timestamp: "1756100032", type: "text", text: { body: "Calle Nueva 5, 2ºA, 36202 Vigo" } },
+        telA
+      );
+      metaHook.processMetaWebhook(rawDir, firmaMeta(rawDir));
+      assert.match(db.getOrderByShopifyId("970103")!.proposed_address ?? "", /Calle Nueva 5/);
+
+      metaHook.processMetaWebhook(rawB, firmaMeta(rawB));
+      assert.equal(db.getOrderByShopifyId("970104")!.status, "awaiting_delivery_note");
+    });
+  });
+
+  await test("WEBHOOK META · multi-pedido por LISTA: list_reply selecciona y el botón confirma ESE pedido", async () => {
+    const tel = "34600000117";
+    mkMulti("970105", "5005", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("970106", "5006", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+    await withEnv(META_ENV, () => {
+      const rawSel = metaInboundBody(
+        { from: tel, id: "wamid.list1", timestamp: "1756100040", type: "interactive",
+          interactive: { type: "list_reply", list_reply: { id: "select_order:5006", title: "#5006" } } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawSel, firmaMeta(rawSel));
+      const rawConf = metaInboundBody(
+        { from: tel, id: "wamid.list2", timestamp: "1756100041", type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawConf, firmaMeta(rawConf));
+      assert.equal(db.getOrderByShopifyId("970106")!.status, "confirmed", "el seleccionado");
+      assert.equal(db.getOrderByShopifyId("970105")!.status, "awaiting_reply", "el otro intacto");
+    });
+  });
+
+  await test("WEBHOOK META · botón 'cancelar' con un pedido → cancellation_requested, sin tocar Shopify", async () => {
+    const tel = "34600000118";
+    mkMulti("970107", "5007", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.cancel1", timestamp: "1756100050", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "cancel_request", title: "❌ Quiero cancelar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      const o = db.getOrderByShopifyId("970107")!;
+      assert.equal(o.status, "needs_call", "a revisión humana");
+      assert.ok(o.cancellation_requested_at, "petición estampada");
+      assert.equal(o.closure_status, "unknown", "Shopify y el cierre, intactos");
+    });
+  });
+
+  await test("ESTADOS META · delivered y read se persisten por provider_message_id; read implica delivered", async () => {
+    const tel = "34600000119";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje con seguimiento");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.status1");
+
+    await withEnv(META_ENV, () => {
+      // Llega el READ antes que el DELIVERED (Meta no garantiza orden).
+      const rawRead = metaStatusBody({ id: "wamid.status1", status: "read", timestamp: "1756100060", recipient_id: tel });
+      metaHook.processMetaWebhook(rawRead, firmaMeta(rawRead));
+      let fila = db.getOutboxByProviderMessageId("wamid.status1")!;
+      assert.equal(fila.read_at, 1756100060);
+      assert.equal(fila.delivered_at, 1756100060, "un read implica entregado aunque el delivered se perdiera");
+
+      // El delivered atrasado NO retrocede nada.
+      const rawDel = metaStatusBody({ id: "wamid.status1", status: "delivered", timestamp: "1756100055", recipient_id: tel });
+      metaHook.processMetaWebhook(rawDel, firmaMeta(rawDel));
+      fila = db.getOutboxByProviderMessageId("wamid.status1")!;
+      assert.equal(fila.read_at, 1756100060, "el read no se pierde");
+      assert.equal(fila.delivered_at, 1756100060, "COALESCE: el primero gana, no se pisa");
+    });
+  });
+
+  await test("ESTADOS META · failed guarda el motivo y queda visible", async () => {
+    const tel = "34600000120";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje que fallará");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.status2");
+    await withEnv(META_ENV, () => {
+      const raw = metaStatusBody({
+        id: "wamid.status2", status: "failed", timestamp: "1756100070", recipient_id: tel,
+        errors: [{ code: 131047, title: "Re-engagement message" }],
+      });
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      const fila = db.getOutboxByProviderMessageId("wamid.status2")!;
+      assert.ok(fila.failed_at);
+      assert.match(fila.failure_reason ?? "", /131047/);
+    });
+  });
+
+  await test("PROVIDER SWITCH · el mismo sendWhatsAppInteractive encola botones en cloud y texto plano en baileys", async () => {
+    const tel = "34600000121";
+    const orden = mkMulti("970108", "5008", tel);
+    const spec = interactive.buildConfirmationInteractive(db.getOrderById(orden.id)!);
+
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.message_type, "interactive_buttons");
+      assert.ok(item.payload_json, "el mensaje interactivo entero viaja en payload_json");
+      assert.match(item.content, /1 — Confirmar/, "content = fallback para el panel");
+    });
+    await withEnv({ WHATSAPP_PROVIDER: "baileys" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.message_type, "text", "Baileys no tiene botones: sale el fallback 1/2/3");
+      assert.equal(item.payload_json, null);
+    });
+  });
+
+  await test("CLOUD OUTBOX · tick: envía, persiste provider_message_id; retryable revierte; terminal marca failed", async () => {
+    const tel = "34600000122";
+    const convo = db.getOrCreateConversation(tel);
+    db.insertMessage(convo.id, "user", "abro ventana");
+
+    // La cola arrastra pendientes de OTROS tests (procesa los 20 más viejos
+    // por tick). El provider falso responde según el destinatario: éxito
+    // para este teléfono, y para los ajenos lo que toque en cada fase — la
+    // DB es desechable, pero los contadores del test son solo de `tel`.
+    let seq = 0;
+    const soloMiTelefono = (fn: () => import("../src/lib/whatsapp/provider").SendResult) => ({
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string) =>
+        to === tel ? fn() : { ok: true, providerMessageId: `wamid.ajeno.${++seq}` },
+    });
+
+    const id1 = db.enqueueOutbox(convo.id, tel, "mensaje uno");
+    const okProv = soloMiTelefono(() => ({ ok: true, providerMessageId: `wamid.tick.${++seq}` }));
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === id1); i++) {
+      await metaOutbox.runCloudOutboxTick(okProv);
+    }
+    const fila1 = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(id1) as {
+      sent: number; provider: string | null; provider_message_id: string | null;
+    };
+    assert.equal(fila1.sent, 1, "enviado");
+    assert.equal(fila1.provider, "cloud_api");
+    assert.match(fila1.provider_message_id ?? "", /^wamid\.tick\./, "el id de Meta queda persistido");
+
+    // Fallo RETRYABLE: vuelve a la cola.
+    const id2 = db.enqueueOutbox(convo.id, tel, "mensaje dos");
+    const provFalla = soloMiTelefono(() => ({ ok: false, providerMessageId: null, error: "ECONNRESET", retryable: true }));
+    for (let i = 0; i < 5; i++) await metaOutbox.runCloudOutboxTick(provFalla);
+    assert.equal(db.getPendingOutbox(500).some((x) => x.id === id2), true, "revertido: se reintenta");
+
+    // Fallo TERMINAL: fuera de la cola CON motivo.
+    const provTerminal = soloMiTelefono(() => ({ ok: false, providerMessageId: null, error: "outside_24h_window", retryable: false }));
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === id2); i++) {
+      await metaOutbox.runCloudOutboxTick(provTerminal);
+    }
+    const fila2 = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(id2) as {
+      sent: number; failed_at: number | null; failure_reason: string | null;
+    };
+    assert.equal(fila2.sent, 1, "fuera de la cola");
+    assert.ok(fila2.failed_at);
+    assert.match(fila2.failure_reason ?? "", /outside_24h_window/);
+  });
+
+  await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {
+    const parsed = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n1", timestamp: "1756100080", type: "button", button: { payload: "confirm_order", text: "Confirmar" } },
+      "34600000123"
+    )));
+    assert.equal(parsed.messages[0].kind, "button_reply", "el botón de PLANTILLA también es button_reply");
+    assert.equal(parsed.messages[0].payload, "confirm_order");
+
+    const audio = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n2", timestamp: "1756100081", type: "audio", audio: {} },
+      "34600000123"
+    )));
+    assert.equal(audio.messages[0].kind, "audio");
+
+    const raro = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n3", timestamp: "1756100082", type: "sticker" },
+      "34600000123"
+    )));
+    assert.equal(raro.messages[0].kind, "unknown", "lo no reconocido es visible, no descartado en silencio");
+    assert.equal(metaIn.parseMetaWebhookPayload({ object: "otra_cosa" }).messages.length, 0);
+  });
+
+  await test("META · builders: límites de Meta respetados en los mensajes reales de Casamable", () => {
+    const tel = "34600000124";
+    const o1 = mkMulti("970109", "5009", tel, { product_summary: "Cortaúñas y Pulidor Eléctrico 3 en 1 Profesional" });
+    const o2 = mkMulti("970110", "5010", tel, { product_summary: "Espejo Retrovisor" });
+
+    const conf = interactive.buildConfirmationInteractive(db.getOrderById(o1.id)!);
+    assert.equal(metaProv.validateOutbound(conf.message), null, "la confirmación pasa los límites");
+    assert.match(conf.fallbackText, /1 — Confirmar/, "el fallback ES el flujo 1/2/3");
+
+    const lista = interactive.buildOrderSelectionList([db.getOrderById(o1.id)!, db.getOrderById(o2.id)!]);
+    assert.equal(metaProv.validateOutbound(lista.message), null, "la lista pasa los límites (título ≤24, desc ≤72)");
+    if (lista.message.kind === "interactive_list") {
+      assert.equal(lista.message.rows[0].id, "select_order:5009", "payload determinista, no texto visible");
+    }
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

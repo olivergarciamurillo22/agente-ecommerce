@@ -571,3 +571,58 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
     authorized: active.some((o) => o.pilot_authorized === 1),
   };
 }
+
+// --- Botones de la Cloud API → la MISMA máquina de estados ---
+
+/** Payloads deterministas de los botones. El texto visible es presentación. */
+export const BUTTON_PAYLOADS = {
+  CONFIRM: "confirm_order",
+  CHANGE_ADDRESS: "change_address",
+  DELIVERY_NOTE: "delivery_note",
+  CANCEL_REQUEST: "cancel_request",
+  /** Prefijo de selección en listas multi-pedido: select_order:1097 */
+  SELECT_ORDER: "select_order:",
+} as const;
+
+/**
+ * Traduce el payload de un botón a la ENTRADA EQUIVALENTE de la máquina de
+ * texto y la reutiliza entera. Cero lógica nueva de estados: un botón es
+ * exactamente lo mismo que escribir la respuesta, pero sin ambigüedad.
+ *
+ * `cancel_request` es el único con tratamiento propio: pulsar un botón que
+ * dice "Quiero cancelar" ya es una acción deliberada, así que con UN pedido
+ * inequívoco se registra directamente (la "ejecución" sigue siendo solo
+ * marcar + needs_call: Shopify no se toca jamás). Con varios pedidos y sin
+ * selección, entra en el flujo seguro de "¿ambos o solo uno?".
+ */
+export function handleOrderButtonReply(phone: string, payload: string): OrderReplyResult {
+  const p = payload.trim();
+
+  if (p.startsWith(BUTTON_PAYLOADS.SELECT_ORDER)) {
+    const num = p.slice(BUTTON_PAYLOADS.SELECT_ORDER.length).replace(/[^0-9]/g, "");
+    if (!num) return { handled: false };
+    return handleOrderReply(phone, num);
+  }
+
+  if (p === BUTTON_PAYLOADS.CONFIRM) return handleOrderReply(phone, "1");
+  if (p === BUTTON_PAYLOADS.CHANGE_ADDRESS) return handleOrderReply(phone, "2");
+  if (p === BUTTON_PAYLOADS.DELIVERY_NOTE) return handleOrderReply(phone, "3");
+
+  if (p === BUTTON_PAYLOADS.CANCEL_REQUEST) {
+    const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+    if (active.length === 0) return { handled: false };
+    if (active.length === 1) {
+      // Botón deliberado + pedido inequívoco = confirmación suficiente.
+      return handleOrderReply(phone, `cancelar ${active[0].shopify_order_number}`);
+    }
+    const context = loadValidContext(phone, active);
+    if (context.selectedOrder) {
+      return handleOrderReply(phone, `cancelar ${context.selectedOrder.shopify_order_number}`);
+    }
+    return handleOrderReply(phone, "cancelar"); // → "¿ambos o solo uno?"
+  }
+
+  // Payload desconocido: no se adivina nada. Visible en logs, sin respuesta.
+  logger.warn(`[ORDER] payload de botón desconocido: "${p.slice(0, 40)}"`);
+  return { handled: false };
+}

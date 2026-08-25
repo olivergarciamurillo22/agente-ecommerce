@@ -11,6 +11,8 @@
 // ============================================================
 
 import { getConnectionState, getSetting, systemDbHandle } from "../db";
+import { whatsappProviderName } from "../whatsapp/provider";
+import { metaCloudConfigured } from "../whatsapp/meta-cloud";
 import { canWriteToShopify, emergencyStop, maskPhone, testMode } from "../safety";
 import { shopifyAdminConfigured } from "../shopify/admin";
 import { dropeaCredentialsPresent, dropeaReadEnabled } from "../suppliers/dropea/client";
@@ -40,6 +42,12 @@ export interface WhatsAppHealth {
   testMode: boolean;
   lastError: string | null;
   message: string;
+  /** Proveedor activo: baileys | cloud_api. La UI no habla de QR si es cloud. */
+  provider: "baileys" | "cloud_api";
+  /** Solo en cloud_api: última recepción del webhook de Meta. */
+  metaWebhookLastReceivedAt: number | null;
+  /** Solo en cloud_api: entregados/leídos/fallados en las últimas 24 h. */
+  deliveryStats24h: { delivered: number; read: number; failed: number } | null;
 }
 
 export function getWhatsAppHealth(): WhatsAppHealth {
@@ -57,7 +65,54 @@ export function getWhatsAppHealth(): WhatsAppHealth {
     testMode: testMode(),
     lastError: null,
     message: "",
+    provider: whatsappProviderName(),
+    metaWebhookLastReceivedAt: null,
+    deliveryStats24h: null,
   };
+
+  // ── Proveedor CLOUD API: sin QR ni sesión — otra salud distinta ──
+  if (base.provider === "cloud_api") {
+    try {
+      const db = systemDbHandle();
+      const agg = db
+        .prepare(
+          `SELECT
+             (SELECT MAX(COALESCE(sent_at, created_at)) FROM outbox WHERE sent = 1) AS lastOut,
+             (SELECT MAX(created_at) FROM messages WHERE role = 'user') AS lastIn,
+             (SELECT COUNT(*) FROM outbox WHERE sent = 0) AS pending,
+             (SELECT COUNT(*) FROM outbox WHERE delivered_at >= unixepoch() - 86400) AS d24,
+             (SELECT COUNT(*) FROM outbox WHERE read_at >= unixepoch() - 86400) AS r24,
+             (SELECT COUNT(*) FROM outbox WHERE failed_at >= unixepoch() - 86400) AS f24`
+        )
+        .get() as { lastOut: number | null; lastIn: number | null; pending: number; d24: number; r24: number; f24: number };
+      base.lastOutboundAt = agg.lastOut;
+      base.lastInboundAt = agg.lastIn;
+      base.outboxPending = agg.pending;
+      base.deliveryStats24h = { delivered: agg.d24, read: agg.r24, failed: agg.f24 };
+      const beat = getSetting("meta_webhook_last_received_at");
+      base.metaWebhookLastReceivedAt = beat ? parseInt(beat, 10) || null : null;
+    } catch {
+      /* la parte común de abajo reporta el fallo */
+    }
+    if (!metaCloudConfigured()) {
+      base.status = "warning";
+      base.connectionStatus = "not_configured";
+      base.message = "Cloud API activa como proveedor pero SIN credenciales de Meta: nada puede salir";
+    } else {
+      base.status = "healthy";
+      base.connectionStatus = "configured";
+      base.message = base.sendEnabled
+        ? "API oficial de Meta configurada (conexión por token, sin QR)"
+        : "API oficial de Meta configurada · envíos DESACTIVADOS (safe mode)";
+      if (base.deliveryStats24h && base.deliveryStats24h.failed > 0) {
+        base.status = "warning";
+        base.message = `${base.deliveryStats24h.failed} mensaje(s) fallidos en 24 h — revisar la cola de envíos`;
+      }
+    }
+    base.lastError = getServiceHealth("whatsapp")?.last_error_message ?? null;
+    return base;
+  }
+
   try {
     const conn = getConnectionState();
     base.connectionStatus = conn.status;

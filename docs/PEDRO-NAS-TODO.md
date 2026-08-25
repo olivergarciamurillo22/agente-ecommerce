@@ -56,10 +56,11 @@ docker compose exec casamable-agent npm run backup
 git pull --ff-only origin main
 docker compose up -d --build
 ```
-- **Escribe:** sí. La migración lleva el esquema de **5** a **8**:
-  `status_axis` en el histórico (v6), tabla `scheduler_leases` (v7) y el
+- **Escribe:** sí. La migración lleva el esquema de **5** a **9**:
+  `status_axis` en el histórico (v6), tabla `scheduler_leases` (v7), el
   contexto de conversación multi-pedido + marcas de duplicado/cancelación
-  (v8). Es **aditiva**: no borra ni transforma ninguna fila existente.
+  (v8) y los estados de mensaje del outbox para la API oficial de Meta (v9).
+  Es **aditiva**: no borra ni transforma ninguna fila existente.
 - **Riesgo:** bajo, pero es el paso irreversible sin restaurar backup.
 
 ### B3 · Comprobar que todo arrancó
@@ -69,7 +70,7 @@ docker compose exec casamable-agent npm run db:health
 ```
 - **Escribe:** no.
 - **Copia:** la salida entera de `db:health`.
-- **Debe decir:** esquema **8**, integridad `ok`, contenedor *healthy*.
+- **Debe decir:** esquema **9**, integridad `ok`, contenedor *healthy*.
 - **PARA SI:** WhatsApp pide QR, o el esquema no sube. No sigas.
 
 ### B4 · Mirar el panel
@@ -173,6 +174,12 @@ docker compose exec casamable-agent npm run retention
   proveedor ni contabilidad. Ver `docs/DATA-RETENTION.md`.
 
 ---
+
+## D3 · WhatsApp oficial (cuando decidáis arrancarlo)
+
+Todo el código está preparado y probado en local. Lo que falta es TU alta en
+Meta: está paso a paso en **`docs/PEDRO-META-WHATSAPP-SETUP.md`** (hazlo con
+Óliver a mano). Hasta entonces, nada cambia: `WHATSAPP_PROVIDER=baileys`.
 
 ## E · Bloqueado por terceros (nada que hacer, solo seguimiento)
 

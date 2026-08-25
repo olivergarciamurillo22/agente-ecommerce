@@ -57,6 +57,7 @@ COPY --from=builder /app/tsconfig.json ./tsconfig.json
 COPY --from=builder /app/src ./src
 COPY --from=builder /app/scripts ./scripts
 COPY --from=builder /app/prompts ./prompts
+COPY --from=builder /app/config ./config
 
 # Puntos de montaje del estado persistente. Se crean para que el contenedor
 # arranque también sin volúmenes (aunque en el NAS SIEMPRE se montan), y

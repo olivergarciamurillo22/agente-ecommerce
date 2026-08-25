@@ -1,0 +1,80 @@
+{
+  "_readme": [
+    "Especificación de las plantillas UTILITY para la Cloud API de Meta.",
+    "BORRADOR: los textos finales se ajustan al darlas de alta, porque Meta",
+    "las revisa una a una y puede rechazar formatos (emojis en variables,",
+    "saltos de línea arbitrarios). NO son los textos definitivos.",
+    "Cada plantilla existe porque hay un mensaje del sistema que puede tener",
+    "que salir FUERA de la ventana de 24 h — dentro de ventana se usan los",
+    "mensajes libres de siempre (más naturales y gratis)."
+  ],
+  "templates": [
+    {
+      "name": "order_confirmation_request",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Primer mensaje del flujo COD cuando el cliente no ha escrito nunca (siempre fuera de ventana por definición).",
+      "variables": ["nombre", "producto", "importe"],
+      "draft_body": "Hola {{1}} 👋 Tenemos tu pedido de Casamable: {{2}} por {{3}}, a pagar al recibirlo. ¿Está todo correcto?",
+      "buttons": [
+        { "type": "QUICK_REPLY", "text": "Confirmar pedido", "payload": "confirm_order" },
+        { "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" },
+        { "type": "QUICK_REPLY", "text": "Dejar una nota", "payload": "delivery_note" }
+      ],
+      "fallback": "el mensaje de confirmación de texto actual (orders/messages.ts)"
+    },
+    {
+      "name": "order_reminder",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Recordatorio si no contestó al primer mensaje y la ventana de 24 h ya venció.",
+      "variables": ["nombre", "producto"],
+      "draft_body": "Hola {{1}}, seguimos esperando tu confirmación del pedido {{2}} para poder enviarlo. Responde cuando puedas.",
+      "buttons": [
+        { "type": "QUICK_REPLY", "text": "Confirmar pedido", "payload": "confirm_order" },
+        { "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" }
+      ],
+      "fallback": "buildReminderMessage (orders/messages.ts)"
+    },
+    {
+      "name": "tracking_available",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "El pedido ya tiene número de seguimiento (suele ser días después de confirmar: fuera de ventana casi siempre).",
+      "variables": ["producto", "tracking_url"],
+      "draft_body": "Tu pedido {{1}} ya está en camino 🚚 Puedes seguirlo aquí: {{2}}",
+      "buttons": [],
+      "fallback": "buildTrackingAvailableMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "out_for_delivery_cod",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Sale a reparto HOY: recordar el importe en efectivo (clave en COD).",
+      "variables": ["producto", "importe"],
+      "draft_body": "Tu pedido {{1}} sale a reparto hoy. Recuerda tener {{2}} en efectivo para pagar al repartidor.",
+      "buttons": [],
+      "fallback": "buildOutForDeliveryMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "delivery_attempt_failed",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "El repartidor no encontró al cliente. Es el aviso que más pedidos recupera.",
+      "variables": ["nombre"],
+      "draft_body": "Hola {{1}}, el repartidor ha intentado entregar tu pedido de Casamable y no ha podido. Volverá a pasar; si no vas a estar o prefieres otra dirección, respóndenos a este mensaje.",
+      "buttons": [{ "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" }],
+      "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "manual_attention_required",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Hace falta hablar con el cliente (incidencia, dirección inválida) y la ventana venció.",
+      "variables": ["nombre"],
+      "draft_body": "Hola {{1}}, necesitamos confirmar un detalle de tu pedido de Casamable. Respóndenos a este mensaje cuando puedas y lo resolvemos en un momento.",
+      "buttons": [],
+      "fallback": "mensaje libre equivalente, dentro de ventana"
+    }
+  ]
+}

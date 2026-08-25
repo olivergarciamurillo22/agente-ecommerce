@@ -66,6 +66,15 @@ export interface OutboxItem {
   /** 1 = envío de un pedido autorizado a mano para el piloto (ver orders.pilot_authorized). */
   authorized: number;
   created_at: number;
+  provider: string | null;
+  provider_message_id: string | null;
+  message_type: string;
+  template_name: string | null;
+  payload_json: string | null;
+  delivered_at: number | null;
+  read_at: number | null;
+  failed_at: number | null;
+  failure_reason: string | null;
 }
 
 // --- Pedidos COD (confirmación por WhatsApp) ---
@@ -211,6 +220,59 @@ export function migrateClosureAxis(db: Database.Database): void {
     // estado para filtrar por fecha. Se justifica porque se ejecuta 3 veces
     // (hoy/7d/30d) en cada carga del Control Center.
     db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure_at ON orders(closure_status, closure_at)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
+ * Migración (SCHEMA_VERSION 9): el outbox aprende de PROVEEDOR y de ESTADOS.
+ *
+ * Con Baileys, "enviado" era todo lo que se podía saber. La Cloud API de
+ * Meta devuelve un id de mensaje y luego cuenta por webhook si se entregó,
+ * se leyó o falló — cuatro cosas que no son lo mismo y que hasta ahora se
+ * confundían en un único `sent`:
+ *
+ *   encolado  → fila en outbox, sent=0
+ *   enviado   → sent=1 (+ provider_message_id si lo hubo)
+ *   entregado → delivered_at (webhook `delivered`)
+ *   leído     → read_at (webhook `read`)
+ *   fallado   → failed_at + failure_reason (webhook `failed` o error de envío)
+ *
+ * `message_type` y `payload_json` permiten encolar mensajes INTERACTIVOS
+ * (botones, listas) manteniendo `content` como texto de fallback: es lo que
+ * enseña el panel y lo que sale si el proveedor activo no soporta botones.
+ * Aditiva e idempotente, como todas.
+ */
+export function migrateOutboxProvider(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(outbox)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["provider", "TEXT"],
+    ["provider_message_id", "TEXT"],
+    ["message_type", "TEXT NOT NULL DEFAULT 'text'"],
+    ["template_name", "TEXT"],
+    ["payload_json", "TEXT"],
+    ["delivered_at", "INTEGER"],
+    ["read_at", "INTEGER"],
+    ["failed_at", "INTEGER"],
+    ["failure_reason", "TEXT"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE outbox ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_outbox_pmid ON outbox(provider_message_id) WHERE provider_message_id IS NOT NULL"
+    );
   } catch (err) {
     const mensaje = err instanceof Error ? err.message : String(err);
     if (!/already exists/i.test(mensaje)) throw err;
@@ -1014,6 +1076,7 @@ function build() {
   migrateStatusAxis(db);
   migrateSchedulerLeases(db);
   migrateConversationOrderContext(db);
+  migrateOutboxProvider(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1183,7 +1246,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1756,6 +1819,121 @@ export function getActiveOrdersByPhone(phone: string): OrderRow[] {
     .all(phone) as OrderRow[];
 }
 
+
+
+// --- Outbox: proveedor, id de mensaje y estados (Cloud API de Meta) ---
+
+/** Encola un mensaje RICO (interactivo o plantilla). `content` es SIEMPRE el
+ *  texto de fallback: lo que enseña el panel y lo que saldría por un
+ *  proveedor sin soporte de botones. */
+export function enqueueOutboxRich(
+  conversationId: number,
+  phone: string,
+  input: {
+    content: string;
+    messageType: "text" | "interactive_buttons" | "interactive_list" | "template";
+    payloadJson?: string | null;
+    templateName?: string | null;
+    authorized?: boolean;
+  }
+): number {
+  const info = ctx()
+    .db.prepare(
+      `INSERT INTO outbox (conversation_id, phone, content, authorized, message_type, template_name, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      conversationId,
+      phone,
+      input.content,
+      input.authorized ? 1 : 0,
+      input.messageType,
+      input.templateName ?? null,
+      input.payloadJson ?? null
+    );
+  return info.lastInsertRowid as number;
+}
+
+/** Tras un envío aceptado por el proveedor: quién lo llevó y con qué id. */
+export function setOutboxProviderResult(id: number, provider: string, providerMessageId: string | null): void {
+  ctx()
+    .db.prepare("UPDATE outbox SET provider = ?, provider_message_id = ? WHERE id = ?")
+    .run(provider, providerMessageId, id);
+}
+
+/**
+ * Fallo TERMINAL de envío: no se reintenta (reintentarlo daría lo mismo).
+ * El item queda marcado como enviado para salir de la cola, pero con
+ * failed_at y el motivo — el panel lo distingue de un envío bueno.
+ */
+export function markOutboxFailedTerminal(id: number, provider: string, reason: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE outbox SET sent = 1, sent_at = unixepoch(), provider = ?,
+        failed_at = unixepoch(), failure_reason = ? WHERE id = ?`
+    )
+    .run(provider, reason.slice(0, 300), id);
+}
+
+/**
+ * Actualiza el estado de un mensaje a partir del webhook de Meta.
+ * Los estados solo AVANZAN (un `read` no se borra si llega un `delivered`
+ * atrasado) y son idempotentes: el mismo webhook dos veces no cambia nada.
+ */
+export function updateOutboxStatusByProviderMessageId(
+  providerMessageId: string,
+  status: "sent" | "delivered" | "read" | "failed",
+  atSec: number,
+  failureReason?: string | null
+): boolean {
+  const db = ctx().db;
+  let info;
+  if (status === "delivered") {
+    info = db
+      .prepare("UPDATE outbox SET delivered_at = COALESCE(delivered_at, ?) WHERE provider_message_id = ?")
+      .run(atSec, providerMessageId);
+  } else if (status === "read") {
+    // Un read implica entregado aunque el webhook `delivered` se perdiera.
+    info = db
+      .prepare(
+        `UPDATE outbox SET read_at = COALESCE(read_at, ?), delivered_at = COALESCE(delivered_at, ?)
+         WHERE provider_message_id = ?`
+      )
+      .run(atSec, atSec, providerMessageId);
+  } else if (status === "failed") {
+    info = db
+      .prepare(
+        `UPDATE outbox SET failed_at = COALESCE(failed_at, ?), failure_reason = COALESCE(failure_reason, ?)
+         WHERE provider_message_id = ?`
+      )
+      .run(atSec, (failureReason ?? "fallo reportado por Meta").slice(0, 300), providerMessageId);
+  } else {
+    return true; // `sent`: ya lo estampó el propio envío; nada que hacer.
+  }
+  return info.changes > 0;
+}
+
+export function getOutboxByProviderMessageId(providerMessageId: string): OutboxItem | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM outbox WHERE provider_message_id = ?").get(providerMessageId) as
+      | OutboxItem
+      | undefined) ?? null
+  );
+}
+
+/**
+ * ¿Cuándo fue el último mensaje ENTRANTE de esta conversación?
+ * Es la base de la ventana de 24 h de Meta: fuera de ella, un mensaje libre
+ * está prohibido y hace falta plantilla.
+ */
+export function getLastInboundAt(conversationId: number): number | null {
+  const row = ctx()
+    .db.prepare(
+      "SELECT MAX(created_at) AS t FROM messages WHERE conversation_id = ? AND role = 'user'"
+    )
+    .get(conversationId) as { t: number | null };
+  return row.t ?? null;
+}
 
 // --- Contexto de conversación multi-pedido (bug real del 25-08-2026) ---
 
