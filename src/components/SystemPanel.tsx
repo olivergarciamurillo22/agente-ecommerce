@@ -185,7 +185,19 @@ interface Overview {
       adSpendDays: number;
     };
   };
+  security: Array<{ key: string; label: string; level: "ok" | "warning" | "critical"; detail: string }>;
+  metricStatus: {
+    tracking: MeasuredStatus;
+    delivery: MeasuredStatus;
+    economics: MeasuredStatus;
+  };
   recentProblems: EventRow[];
+}
+
+interface MeasuredStatus {
+  status: "ok" | "partial" | "unknown" | "error";
+  error: string | null;
+  degraded: string[];
 }
 
 interface DeliveryBucket {
@@ -197,7 +209,18 @@ interface DeliveryBucket {
   incidents: number;
   deliveryRate: number | null;
 }
+/** Eje 4 · CIERRE — la fuente de verdad del negocio. Ver docs/MODELO-ESTADOS.md. */
+interface ClosureBreakdown {
+  delivered: number;
+  refused: number;
+  inProgress: number;
+  cancelled: number;
+  unknown: number;
+  resolved: number;
+  deliveryRate: number | null;
+}
 interface DeliveryWindow extends DeliveryBucket {
+  closure: ClosureBreakdown;
   created: number;
   cancelled: number;
   avgHoursToDeliver: number | null;
@@ -661,6 +684,215 @@ function CallsPanel() {
   );
 }
 
+
+/**
+ * Cinta que aparece cuando una métrica NO es de fiar.
+ *
+ * Existe porque "0" y "no lo sé" se pintaban igual: si una consulta fallaba,
+ * el panel enseñaba ceros que parecían datos. Ahora un cero solo significa
+ * cero cuando esto no aparece.
+ */
+function MetricWarning({ m, que }: { m: MeasuredStatus; que: string }) {
+  if (m.status === "ok") return null;
+  const texto =
+    m.status === "error"
+      ? `No se ha podido calcular ${que}. Los números de abajo NO son fiables.`
+      : m.status === "unknown"
+        ? `Todavía no hay datos suficientes para ${que}.`
+        : `${que.charAt(0).toUpperCase() + que.slice(1)} está incompleto.`;
+  const color =
+    m.status === "error"
+      ? "bg-rose-500/10 border-rose-500/40 text-rose-200"
+      : "bg-amber-500/10 border-amber-500/40 text-amber-200";
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-xs mb-3 ${color}`}>
+      <div className="font-semibold">{texto}</div>
+      {m.degraded.length > 0 && (
+        <ul className="mt-1 list-disc list-inside text-[11px] opacity-90">
+          {m.degraded.slice(0, 3).map((d, i) => (
+            <li key={i}>{d}</li>
+          ))}
+        </ul>
+      )}
+      {m.error && <div className="mt-1 text-[11px] opacity-75 font-mono break-all">{m.error}</div>}
+    </div>
+  );
+}
+
+/** Contador de un eje, con su etiqueta en cristiano. */
+function AxisCount({ k, v, tone }: { k: string; v: number; tone?: "good" | "bad" | "muted" }) {
+  const color =
+    tone === "good" ? "text-emerald-300" : tone === "bad" ? "text-rose-300" : tone === "muted" ? "text-brand-muted" : "";
+  return <Row k={k} v={<span className={`font-semibold ${color}`}>{v}</span>} />;
+}
+
+
+interface MappingRow {
+  id: number;
+  supplier_platform: string;
+  shopify_product_id: string | null;
+  shopify_variant_id: string | null;
+  shopify_sku: string | null;
+  shopify_title: string | null;
+  supplier_product_id: string | null;
+  supplier_variant_id: string;
+  supplier_unit_price: number | null;
+  active: boolean;
+  updated_at: number;
+  issues: Array<{ field: string; level: "error" | "warning"; message: string }>;
+}
+
+/**
+ * Gestión del emparejado producto de Shopify ↔ producto del proveedor.
+ *
+ * Es la tabla de la que depende TODO el enrutado: si está vacía, cada pedido
+ * sale a revisión humana. Por eso el estado vacío no es un hueco silencioso
+ * sino un aviso explicando la consecuencia.
+ *
+ * Aquí NO se crean pedidos ni se llama a ningún proveedor. "Validar" es
+ * comprobar la forma de la fila.
+ */
+function MappingsPanel() {
+  const [rows, setRows] = useState<MappingRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState<number | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await fetch("/api/system/mappings", { cache: "no-store" });
+      const j = (await r.json()) as { ok: boolean; mappings?: MappingRow[]; error?: string };
+      if (!j.ok) throw new Error(j.error ?? "no se pudo leer");
+      setRows(j.mappings ?? []);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "error");
+      setRows(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function toggle(m: MappingRow) {
+    setSaving(m.id);
+    try {
+      await fetch("/api/system/mappings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: m.id, active: !m.active }),
+      });
+      await load();
+    } finally {
+      setSaving(null);
+    }
+  }
+
+  if (error) {
+    return (
+      <Section title="Productos emparejados con el proveedor">
+        <div className="text-sm text-rose-300">No se ha podido leer la lista: {error}</div>
+      </Section>
+    );
+  }
+  if (rows === null) {
+    return (
+      <Section title="Productos emparejados con el proveedor">
+        <div className="text-sm text-brand-muted">Cargando…</div>
+      </Section>
+    );
+  }
+
+  return (
+    <Section title="Productos emparejados con el proveedor">
+      <div className="text-[11px] text-brand-muted mb-3">
+        De esta tabla depende a qué proveedor va cada pedido. Un producto que no esté aquí hace que su pedido salga a
+        revisión manual — no se pierde, pero hay que atenderlo a mano.
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-xs text-amber-200">
+          <div className="font-semibold">No hay ningún producto emparejado.</div>
+          <div className="mt-1 opacity-90">
+            Mientras esté así, <strong>todos</strong> los pedidos van a revisión manual. Es el comportamiento seguro,
+            pero significa meterlos a mano uno a uno.
+          </div>
+        </div>
+      ) : (
+        <div className="overflow-x-auto -mx-1 px-1">
+          <table className="w-full text-xs min-w-[880px]">
+            <thead className="text-brand-muted">
+              <tr className="border-b border-brand-border/40">
+                <th className="text-left py-1.5 pr-3">Producto en Shopify</th>
+                <th className="text-left py-1.5 pr-3">SKU</th>
+                <th className="text-left py-1.5 pr-3">Variante Shopify</th>
+                <th className="text-left py-1.5 pr-3">Proveedor</th>
+                <th className="text-left py-1.5 pr-3">Producto proveedor</th>
+                <th className="text-left py-1.5 pr-3">Variante proveedor</th>
+                <th className="text-right py-1.5 pr-3">Coste</th>
+                <th className="text-left py-1.5 pr-3">Revisado</th>
+                <th className="text-right py-1.5">Estado</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => {
+                const errores = m.issues.filter((i) => i.level === "error");
+                const avisos = m.issues.filter((i) => i.level === "warning");
+                return (
+                  <tr key={m.id} className={`border-b border-brand-border/20 ${m.active ? "" : "opacity-50"}`}>
+                    <td className="py-1.5 pr-3">{m.shopify_title ?? "—"}</td>
+                    <td className="py-1.5 pr-3 font-mono">{m.shopify_sku ?? "—"}</td>
+                    <td className="py-1.5 pr-3 font-mono text-brand-muted">{m.shopify_variant_id ?? "—"}</td>
+                    <td className="py-1.5 pr-3">{m.supplier_platform}</td>
+                    <td className="py-1.5 pr-3 font-mono text-brand-muted">{m.supplier_product_id ?? "—"}</td>
+                    <td className="py-1.5 pr-3 font-mono">{m.supplier_variant_id}</td>
+                    <td className="py-1.5 pr-3 text-right">
+                      {m.supplier_unit_price !== null ? `${m.supplier_unit_price.toFixed(2)} €` : "—"}
+                    </td>
+                    <td className="py-1.5 pr-3 text-brand-muted whitespace-nowrap">{fecha(m.updated_at)}</td>
+                    <td className="py-1.5 text-right whitespace-nowrap">
+                      {errores.length > 0 && <StatusPill status="critical" />}
+                      {errores.length === 0 && avisos.length > 0 && <StatusPill status="warning" />}
+                      {m.issues.length === 0 && <StatusPill status={m.active ? "healthy" : "unknown"} />}
+                      <button
+                        onClick={() => void toggle(m)}
+                        disabled={saving === m.id}
+                        className="ml-2 px-2 py-0.5 rounded border border-brand-border text-[11px] hover:text-brand-text disabled:opacity-40"
+                      >
+                        {m.active ? "Desactivar" : "Activar"}
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {rows.some((m) => m.issues.length > 0) && (
+        <div className="mt-3 space-y-1">
+          {rows.flatMap((m) =>
+            m.issues.map((i, k) => (
+              <div key={`${m.id}-${k}`} className="flex items-start gap-2 text-[11px]">
+                <StatusPill status={i.level === "error" ? "critical" : "warning"} />
+                <span>
+                  <span className="font-semibold">{m.shopify_title ?? m.shopify_sku ?? `#${m.id}`}</span> — {i.message}
+                </span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+
+      <div className="text-[11px] text-brand-muted mt-3">
+        Desde aquí no se crea ningún pedido ni se llama a la API de ningún proveedor. Desactivar no borra: la fila
+        deja de decidir enrutado pero se conserva, para poder entender después por qué un pedido fue donde fue.
+      </div>
+    </Section>
+  );
+}
+
 const TABS = [
   ["overview", "Resumen"],
   ["integrations", "Integraciones"],
@@ -669,6 +901,7 @@ const TABS = [
   ["schedulers", "Tareas"],
   ["outbox", "Cola de envíos"],
   ["tracking", "Envíos"],
+  ["mappings", "Productos"],
   ["business", "Negocio"],
   ["calls", "Llamadas"],
   ["events", "Eventos"],
@@ -817,6 +1050,22 @@ export default function SystemPanel() {
                 ))}
               </div>
             )}
+          </Section>
+
+          <Section title="Cómo está configurado esto">
+            <div className="text-[11px] text-brand-muted mb-2">
+              Cosas que se ponen una vez y luego se olvidan. Si algo de aquí está en ámbar, no es que se haya roto
+              hoy: es que lleva así desde que se configuró.
+            </div>
+            {data.security.map((s) => (
+              <div key={s.key} className="flex items-start gap-2 text-xs py-1.5 border-b border-brand-border/30 last:border-0">
+                <StatusPill status={s.level === "ok" ? "healthy" : s.level} />
+                <span className="flex-1">
+                  <span className="font-semibold">{s.label}</span>
+                  <span className="text-brand-muted"> — {s.detail}</span>
+                </span>
+              </div>
+            ))}
           </Section>
         </>
       )}
@@ -1052,7 +1301,23 @@ export default function SystemPanel() {
 
       {tab === "business" && (
         <div className="space-y-3">
+          <MetricWarning m={data.metricStatus.delivery} que="la entrega" />
+
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+            <Section title="Cómo terminaron los pedidos (30 días)">
+              <div className="text-[11px] text-brand-muted mb-2">
+                Cómo acabó cada pedido de verdad. Es de aquí, y solo de aquí, de donde sale la tasa de entrega.
+              </div>
+              <AxisCount k="Entregados" v={data.business.delivery.last30d.closure.delivered} tone="good" />
+              <AxisCount k="Rehusados por el cliente" v={data.business.delivery.last30d.closure.refused} tone="bad" />
+              <AxisCount k="En curso" v={data.business.delivery.last30d.closure.inProgress} />
+              <AxisCount k="Cancelados" v={data.business.delivery.last30d.closure.cancelled} tone="muted" />
+              <AxisCount k="Sin saber todavía" v={data.business.delivery.last30d.closure.unknown} tone="muted" />
+              <div className="text-[11px] text-brand-muted mt-2">
+                &laquo;Rehusado&raquo; es que el cliente no aceptó el contrareembolso. &laquo;Cancelado&raquo; es que
+                el pedido se anuló antes de intentar entregarlo: no cuenta como entrega fallida.
+              </div>
+            </Section>
             <Section title="Operativa">
               <div className="mb-2">
                 <StatusPill status={data.business.alerts.status} />
@@ -1063,21 +1328,27 @@ export default function SystemPanel() {
                 v={<span className={data.business.alerts.snapshot.needsCallStale ? "text-amber-300" : ""}>{data.business.alerts.snapshot.needsCallStale}</span>}
               />
               <Row k="Incidencias abiertas" v={data.business.alerts.snapshot.openIncidents} />
-              <Row k="Entregados hoy" v={data.business.delivery.today.delivered} />
-              <Row k="Devueltos (7 d)" v={data.business.delivery.last7d.returned} />
+              <Row k="Entregados hoy" v={data.business.delivery.today.closure.delivered} />
+              <Row k="Rehusados (7 d)" v={data.business.delivery.last7d.closure.refused} />
               <Row k="Envíos sin noticias" v={data.business.alerts.snapshot.trackingStale} />
             </Section>
-            <Section title="Rendimiento">
-              <Row k="Entrega hoy" v={<span className={rateColor(data.business.delivery.today.deliveryRate)}>{pct(data.business.delivery.today.deliveryRate)}</span>} />
-              <Row k="Entrega 7 días" v={<span className={rateColor(data.business.delivery.last7d.deliveryRate)}>{pct(data.business.delivery.last7d.deliveryRate)}</span>} />
-              <Row k="Entrega 30 días" v={<span className={rateColor(data.business.delivery.last30d.deliveryRate)}>{pct(data.business.delivery.last30d.deliveryRate)}</span>} />
-              <Row k="Enviados / resueltos (7 d)" v={`${data.business.delivery.last7d.shipped} / ${data.business.delivery.last7d.delivered + data.business.delivery.last7d.returned}`} />
+            <Section title="Tasa de entrega">
+              <Row k="Hoy" v={<span className={rateColor(data.business.delivery.today.closure.deliveryRate)}>{pct(data.business.delivery.today.closure.deliveryRate)}</span>} />
+              <Row k="7 días" v={<span className={rateColor(data.business.delivery.last7d.closure.deliveryRate)}>{pct(data.business.delivery.last7d.closure.deliveryRate)}</span>} />
+              <Row k="30 días" v={<span className={rateColor(data.business.delivery.last30d.closure.deliveryRate)}>{pct(data.business.delivery.last30d.closure.deliveryRate)}</span>} />
+              <Row
+                k="Pedidos ya resueltos (7 d)"
+                v={`${data.business.delivery.last7d.closure.resolved} de ${data.business.delivery.last7d.closure.resolved + data.business.delivery.last7d.closure.inProgress + data.business.delivery.last7d.closure.unknown}`}
+              />
               <Row k="Horas medias hasta entrega (30 d)" v={data.business.delivery.last30d.avgHoursToDeliver ?? "—"} />
               <div className="text-[11px] text-brand-muted mt-2">
-                Tasa = entregados / (entregados + devueltos). Los envíos en curso no cuentan. Muestra mínima: {data.business.delivery.minSample}.
+                Entregados ÷ (entregados + rehusados). Los pedidos en curso, cancelados y sin saber no entran en la
+                cuenta. Hacen falta al menos {data.business.delivery.minSample} pedidos resueltos para que el
+                porcentaje signifique algo.
               </div>
             </Section>
             <Section title="Economía (30 días)">
+              <MetricWarning m={data.metricStatus.economics} que="la economía" />
               <Row k="Facturación bruta" v={money(data.business.economics.last30d.grossRevenue, data.business.economics.last30d.currency)} />
               <Row k="Ingresos entregados" v={money(data.business.economics.last30d.deliveredRevenue, data.business.economics.last30d.currency)} />
               <Row k="Margen estimado" v={money(data.business.economics.last30d.estimatedMargin, data.business.economics.last30d.currency)} />
@@ -1104,9 +1375,9 @@ export default function SystemPanel() {
           </Section>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-            <BucketTable title="Por producto (30 d)" rows={data.business.delivery.last30d.byProduct} />
-            <BucketTable title="Por proveedor (30 d)" rows={data.business.delivery.last30d.bySupplier} />
-            <BucketTable title="Por transportista (30 d)" rows={data.business.delivery.last30d.byCarrier} />
+            <BucketTable title="Envíos por producto (30 d)" rows={data.business.delivery.last30d.byProduct} />
+            <BucketTable title="Envíos por proveedor (30 d)" rows={data.business.delivery.last30d.bySupplier} />
+            <BucketTable title="Envíos por transportista (30 d)" rows={data.business.delivery.last30d.byCarrier} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
@@ -1118,6 +1389,8 @@ export default function SystemPanel() {
           <CostsEditor onSaved={refresh} suggested={data.business.economics.skusWithoutCost} />
         </div>
       )}
+
+      {tab === "mappings" && <MappingsPanel />}
 
       {tab === "calls" && <CallsPanel />}
 

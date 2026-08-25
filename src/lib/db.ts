@@ -2352,6 +2352,30 @@ export function upsertSupplierProductMapping(m: {
   return info.lastInsertRowid as number;
 }
 
+/**
+ * Activa o desactiva un mapping sin borrarlo.
+ *
+ * Desactivar en vez de borrar es lo correcto aquí: si un mapping estaba mal,
+ * borrarlo pierde la evidencia de qué se estaba usando y por qué un pedido
+ * se enrutó como se enrutó. Desactivado deja de decidir routing pero sigue
+ * siendo consultable.
+ */
+export function setSupplierProductMappingActive(id: number, active: boolean): boolean {
+  const info = ctx()
+    .db.prepare("UPDATE supplier_product_mapping SET active = ?, updated_at = unixepoch() WHERE id = ?")
+    .run(active ? 1 : 0, id);
+  return info.changes > 0;
+}
+
+/** Un mapping concreto, por id. */
+export function getSupplierProductMapping(id: number): SupplierProductMapping | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM supplier_product_mapping WHERE id = ?").get(id) as
+      | SupplierProductMapping
+      | undefined) ?? null
+  );
+}
+
 export function deleteSupplierProductMapping(id: number): void {
   ctx().db.prepare("DELETE FROM supplier_product_mapping WHERE id = ?").run(id);
 }

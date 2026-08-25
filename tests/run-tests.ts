@@ -7002,6 +7002,71 @@ async function main(): Promise<void> {
     assert.ok(vistos > 50, "el barrido tiene que haber mirado ficheros de verdad");
   });
 
+  // ============ 55 · Mapping: validación de forma ============
+  console.log("\n— Mapping de productos —");
+
+  const MV = await import("../src/lib/suppliers/mapping-validation");
+
+  await test("MAPPING · detecta el error real: pegar el metafield en vez del variant_id", () => {
+    // Pasó de verdad: el metafield `dropea.product_id` de Shopify
+    // (a3f618c76fb450ce890e7189) NO es el variant_id de Dropea (15896).
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "10428",
+      supplier_variant_id: "a3f618c76fb450ce890e7189",
+    });
+    const e = issues.find((i) => i.field === "supplier_variant_id")!;
+    assert.equal(e.level, "error");
+    assert.match(e.message, /metafield/i);
+    assert.equal(MV.mappingIsSavable(issues), false, "un error de forma impide guardar");
+  });
+
+  await test("MAPPING · sin variante del proveedor no se puede enrutar nada", () => {
+    const issues = MV.validateMapping({ supplier_platform: "dropea", shopify_sku: "X", supplier_variant_id: "" });
+    assert.equal(MV.mappingIsSavable(issues), false);
+    assert.match(issues[0].message, /falta el identificador/i);
+  });
+
+  await test("MAPPING · sin SKU se avisa de que el emparejado por título es frágil", () => {
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_title: "Cortaúñas Eléctrico 3 en 1",
+      supplier_variant_id: "15896",
+    });
+    assert.equal(MV.mappingIsSavable(issues), true, "es un aviso, no un error: a veces es lo único que hay");
+    assert.match(issues.map((i) => i.message).join(" "), /renombra|silencio/i);
+  });
+
+  await test("MAPPING · un mapping correcto pasa sin avisos", () => {
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "10428",
+      shopify_title: "Cortaúñas Eléctrico 3 en 1",
+      shopify_product_id: "15964094660938",
+      shopify_variant_id: "62950185173322",
+      supplier_variant_id: "15896",
+      supplier_unit_price: 7.7,
+    });
+    assert.deepEqual(issues, [], "el mapping real de Casamable no debe generar ni un aviso");
+  });
+
+  await test("MAPPING · desactivar NO borra: la fila sigue consultable", () => {
+    const id = db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "TEST-MAP-1",
+      shopify_title: "Producto de prueba",
+      supplier_variant_id: "99999",
+      active: true,
+    });
+    assert.equal(db.setSupplierProductMappingActive(id, false), true);
+    const fila = db.getSupplierProductMapping(id)!;
+    assert.ok(fila, "sigue existiendo");
+    assert.equal(fila.active, 0);
+    // Reactivable.
+    assert.equal(db.setSupplierProductMappingActive(id, true), true);
+    assert.equal(db.getSupplierProductMapping(id)!.active, 1);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
