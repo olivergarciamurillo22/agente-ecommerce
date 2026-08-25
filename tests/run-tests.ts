@@ -6840,6 +6840,81 @@ async function main(): Promise<void> {
     assert.equal(n.normalizeSupplierStatus("palabra_inventada"), "unknown");
   });
 
+  // ============ 53 · Fixtures: escenarios realistas, cero PII ============
+  console.log("\n— Fixtures y escenarios —");
+
+  const FX = await import("./fixtures/index");
+  const { normalizeOrder: normalizeOrderFn } = await import("../src/lib/orders/normalize");
+
+  await test("FIXTURES · ninguna fixture lleva datos de una persona real", () => {
+    const todo = JSON.stringify([
+      ...Object.values(FX.shopifyScenarios).map((f) => f()),
+      ...Object.values(FX.dropeaScenarios).map((f) => f()),
+      ...Object.values(FX.dropiScenarios).map((f) => f()),
+    ]);
+    // Dominios reservados por RFC 2606 y rango de móvil no asignado.
+    assert.ok(todo.includes("example.com"));
+    assert.equal(/@(gmail|hotmail|outlook|yahoo|icloud)\./i.test(todo), false, "sin correos reales");
+    assert.equal(/casamable/i.test(todo), false, "sin datos del negocio real");
+    // Ningún teléfono español que no sea del rango de prueba 600 000 0xx.
+    for (const tel of todo.match(/\+?34[\s\d]{9,}/g) ?? []) {
+      assert.match(tel.replace(/\s/g, ""), /^\+?34600000\d{3}$/, `teléfono no anonimizado: ${tel}`);
+    }
+  });
+
+  await test("FIXTURES · Shopify: los cinco escenarios se comportan como se espera", () => {
+    const ff = require("../src/lib/orders/fulfillment") as typeof import("../src/lib/orders/fulfillment");
+
+    // COD normal: mercancía sin despachar.
+    assert.equal(ff.inferPhysicalFulfillment(FX.shopifyScenarios.codNormal() as never, true).state, "not_started");
+
+    // El caso Casamable: Shopify dice `partial`, la mercancía está entera.
+    const parcial = ff.inferPhysicalFulfillment(FX.shopifyScenarios.partialPorSeguro() as never, true);
+    assert.equal(parcial.state, "fulfilled");
+    assert.equal(parcial.serviceLines, 1);
+
+    // Cancelado: gana sobre cualquier fulfillment.
+    assert.equal(backfill.planClosureFromShopify(FX.shopifyScenarios.cancelado() as never)?.status, "cancelled");
+
+    // Mixto: dos productos físicos + servicio.
+    const mixto = ff.inferPhysicalFulfillment(FX.shopifyScenarios.mixto() as never, true);
+    assert.equal(mixto.physicalLines, 2);
+
+    // Ciudad inválida: el normalizador la limpia y el router la bloqueará.
+    const n = normalizeOrderFn(FX.shopifyScenarios.ciudadInvalida() as never);
+    assert.equal(n.city, "-", "el normalizador conserva el crudo; la validación es del router");
+  });
+
+  await test("FIXTURES · Dropea: cada escenario cae en el cierre correcto", () => {
+    const C = require("../src/lib/orders/closure") as typeof import("../src/lib/orders/closure");
+    const at = 1_800_000_000;
+    const decidir = (o: Record<string, unknown>) =>
+      C.planClosureFromDropea(o.status as string, o.sub_status as string, at);
+
+    assert.equal(decidir(FX.dropeaScenarios.entregado()).plan?.status, "delivered");
+    assert.equal(decidir(FX.dropeaScenarios.cobrado()).plan?.status, "delivered");
+    assert.equal(decidir(FX.dropeaScenarios.rehusado()).plan?.status, "refused");
+    assert.equal(decidir(FX.dropeaScenarios.cancelado()).plan?.status, "cancelled");
+    assert.equal(decidir(FX.dropeaScenarios.intentoFallido()).plan?.status, "in_progress");
+
+    // Los dos que NO deben cerrar nada.
+    assert.equal(decidir(FX.dropeaScenarios.perdidoODanado()).plan, null);
+    assert.equal(decidir(FX.dropeaScenarios.perdidoODanado()).review?.kind, "returned_not_refused");
+    assert.equal(decidir(FX.dropeaScenarios.incidencia()).plan, null);
+    assert.equal(decidir(FX.dropeaScenarios.desconocido()).plan, null, "un estado fuera del catálogo no infiere nada");
+  });
+
+  await test("FIXTURES · Dropi: todo cae en fail-closed, no se inventa semántica", () => {
+    const C = require("../src/lib/orders/closure") as typeof import("../src/lib/orders/closure");
+    // Sin catálogo confirmado, ningún evento de Dropi puede cerrar un pedido.
+    for (const st of ["delivered", "returned", "cancelled"] as const) {
+      assert.equal(C.planClosureFromTracking(st, "dropi", 1_800_000_000).plan, null, st);
+    }
+    // Y su provider sigue sin configurar: cualquier operación real lanza.
+    const dropi = require("../src/lib/suppliers/dropi") as typeof import("../src/lib/suppliers/dropi");
+    assert.equal(dropi.dropiProvider.isConfigured(), false);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

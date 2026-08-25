@@ -205,6 +205,12 @@ export function migrateClosureAxis(db: Database.Database): void {
   }
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure ON orders(closure_status)");
+    // Índice compuesto para la métrica de negocio, que es la consulta caliente
+    // del panel: "cierres de esta ventana, agrupados por estado". Con solo
+    // closure_status, SQLite tenía que recorrer todas las filas de cada
+    // estado para filtrar por fecha. Se justifica porque se ejecuta 3 veces
+    // (hoy/7d/30d) en cada carga del Control Center.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure_at ON orders(closure_status, closure_at)");
   } catch (err) {
     const mensaje = err instanceof Error ? err.message : String(err);
     if (!/already exists/i.test(mensaje)) throw err;
@@ -618,6 +624,10 @@ function build() {
 
     CREATE INDEX IF NOT EXISTS idx_messages_conv
       ON messages(conversation_id, created_at);
+    -- Retención: el barrido es "todos los mensajes anteriores a X", sin
+    -- conversación. Sin este índice recorría la tabla entera, que es
+    -- precisamente la que más crece.
+    CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 
     CREATE TABLE IF NOT EXISTS connection_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
