@@ -107,6 +107,20 @@ export interface NormalizedOrder {
   /** Nota del pedido + campos extra del formulario (p.ej. Releasit pregunta
    *  "¿A qué hora estarás en casa?"). Solo informativo para Pedro. */
   customerNote: string | null;
+  /**
+   * Fecha REAL de compra en Shopify (`order.created_at`, epoch en segundos) —
+   * no confundir con la columna local `created_at` de `orders`, que es el
+   * instante en que ESTA fila se insertó (import/backfill), no el de la
+   * compra. `null` si el payload no trae `created_at` o no es parseable.
+   */
+  orderedAt: number | null;
+}
+
+/** ISO 8601 → epoch en segundos. `null` si falta o no es parseable. */
+function toEpochSeconds(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
 // --- Detección COD ---
@@ -290,6 +304,7 @@ export function normalizeOrder(order: ShopifyOrderPayload): NormalizedOrder {
     postalCode: addr?.zip ?? null,
     country: addr?.country ?? addr?.country_code ?? null,
     customerNote: customerNote(order),
+    orderedAt: toEpochSeconds(order.created_at),
   };
 }
 

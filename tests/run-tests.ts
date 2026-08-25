@@ -234,13 +234,14 @@ async function main(): Promise<void> {
   console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
 
   const db = await import("../src/lib/db");
-  const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage } = await import(
+  const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage, normalizeOrder } = await import(
     "../src/lib/orders/normalize"
   );
   const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
+  const backfillOrderedAt = await import("../src/lib/shopify/backfill-ordered-at");
   const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
@@ -8312,6 +8313,225 @@ async function main(): Promise<void> {
       assert.ok(!vistos.includes(id), `${id} no se vuelve a pedir en la segunda pasada`);
     }
     assert.equal(db.getSetting("dropea_reconcile_last_resource_id"), "", "checkpoint limpio al terminar el recorrido completo");
+  });
+
+  // ============ T1 · ordered_at (fecha real de compra vs. fecha de import) ============
+  console.log("\n— T1: ordered_at —");
+
+  await test("T1 migración: aditiva — añade la columna a una tabla orders pre-T1, NULL por defecto", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "t1-empty.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    db.migrateOrderedAt(raw);
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.ok(cols.includes("ordered_at"));
+
+    raw.prepare("INSERT INTO orders (shopify_order_id) VALUES ('t1-empty-1')").run();
+    const fila = raw.prepare("SELECT ordered_at FROM orders WHERE shopify_order_id = 't1-empty-1'").get();
+    assert.equal(fila.ordered_at, null);
+    raw.close();
+  });
+
+  await test("T1 migración: correr dos/tres veces es un no-op — no duplica la columna ni pisa valores ya escritos", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "t1-twice.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    raw.prepare("INSERT INTO orders (shopify_order_id) VALUES ('t1-twice-1')").run();
+
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "primera pasada");
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "segunda pasada");
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "tercera pasada");
+
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.equal(cols.filter((c: string) => c === "ordered_at").length, 1, "la columna no se duplica");
+
+    raw.prepare("UPDATE orders SET ordered_at = 1700000000 WHERE shopify_order_id = 't1-twice-1'").run();
+    db.migrateOrderedAt(raw);
+    const fila = raw.prepare("SELECT ordered_at FROM orders WHERE shopify_order_id = 't1-twice-1'").get();
+    assert.equal(fila.ordered_at, 1700000000, "un valor ya escrito no se pisa al volver a migrar");
+    raw.close();
+  });
+
+  await test("T1 normalizeOrder: orderedAt sale de created_at (ISO → epoch); ausente o inválido → null", () => {
+    const conFecha = normalizeOrder(codPayload({ id: 991001, order_number: 5001, created_at: "2026-01-15T10:30:00Z" }) as never);
+    assert.equal(conFecha.orderedAt, Math.floor(Date.parse("2026-01-15T10:30:00Z") / 1000));
+
+    const sinFecha = normalizeOrder(codPayload({ id: 991002, order_number: 5002, created_at: undefined }) as never);
+    assert.equal(sinFecha.orderedAt, null);
+
+    const fechaRota = normalizeOrder(codPayload({ id: 991003, order_number: 5003, created_at: "no-es-una-fecha" }) as never);
+    assert.equal(fechaRota.orderedAt, null);
+  });
+
+  await test("T1 webhook orders/create: guarda ordered_at desde el payload, DISTINTO del created_at local (que es cuándo se insertó la fila)", () => {
+    const antesDeInsertar = Math.floor(Date.now() / 1000);
+    const raw = JSON.stringify(
+      codPayload({ id: 991101, order_number: 5101, created_at: "2026-01-01T08:00:00Z" })
+    );
+    processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    const o = db.getOrderByShopifyId("991101")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-01T08:00:00Z") / 1000), "ordered_at = fecha real de compra");
+    assert.ok(o.created_at >= antesDeInsertar, "created_at (local) sigue siendo el instante de inserción, no la fecha de compra");
+    assert.notEqual(o.ordered_at, o.created_at, "en este caso son fechas MUY distintas — no deben confundirse");
+  });
+
+  await test("T1 webhook orders/create: sin created_at en el payload, ordered_at se queda NULL (nunca se inventa)", () => {
+    const payload = codPayload({ id: 991102, order_number: 5102 });
+    delete (payload as Record<string, unknown>).created_at;
+    const raw = JSON.stringify(payload);
+    processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    const o = db.getOrderByShopifyId("991102")!;
+    assert.equal(o.ordered_at, null);
+  });
+
+  await test("T1 backfill (E3) — insert_cancelled: ordered_at también se guarda para un pedido cancelado del histórico", async () => {
+    const cancelado = backfillOrder({
+      id: 991201,
+      order_number: 5201,
+      cancelled_at: "2026-02-01T12:00:00Z",
+      created_at: "2026-01-20T09:00:00Z",
+    });
+    await backfill.runShopifyBackfill({
+      dryRun: false,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      pageFetcher: async () => ({ orders: [cancelado], nextCursor: null }),
+    });
+    const o = db.getOrderByShopifyId("991201")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-20T09:00:00Z") / 1000));
+  });
+
+  await test("T1 backfill (E3) — insert_in_progress de punta a punta: ordered_at queda escrito en el pedido histórico insertado", async () => {
+    const pedido = backfillOrder({
+      id: 991210,
+      order_number: 5210,
+      fulfillment_status: "fulfilled",
+      created_at: "2026-01-10T09:00:00Z",
+      updated_at: "2026-01-12T09:00:00Z",
+    });
+    await backfill.runShopifyBackfill({
+      dryRun: false,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      pageFetcher: async () => ({ orders: [pedido], nextCursor: null }),
+    });
+    const o = db.getOrderByShopifyId("991210")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-10T09:00:00Z") / 1000));
+  });
+
+  await test("T1 reconciliación (F3): un orders/create perdido también se importa con ordered_at resuelto", async () => {
+    const remoto = backfillOrder({
+      id: 991301,
+      order_number: 5301,
+      fulfillment_status: "fulfilled",
+      created_at: "2026-01-05T09:00:00Z",
+      updated_at: "2026-01-06T09:00:00Z",
+    });
+    await reconcile.runShopifyReconcile({ fetcher: async () => [remoto] });
+    const o = db.getOrderByShopifyId("991301")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-05T09:00:00Z") / 1000));
+  });
+
+  await test("T1 salvaguarda estructural: el backfill de ordered_at no importa WhatsApp/Baileys, ni de lejos", () => {
+    const prohibido = [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+    ];
+    for (const rel of ["src/lib/shopify/backfill-ordered-at.ts", "scripts/backfill-ordered-at.ts"]) {
+      const contenido = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const patron of prohibido) {
+        assert.ok(!patron.test(contenido), `${rel} no debe contener ${patron}`);
+      }
+    }
+  });
+
+  await test("T1 resolveOrderedAtFromRawPayload: los cuatro casos puros (resuelto, sin payload, JSON roto, sin fecha utilizable)", () => {
+    const okPayload = JSON.stringify({ created_at: "2026-03-01T10:00:00Z" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(okPayload), {
+      kind: "resolved",
+      orderedAt: Math.floor(Date.parse("2026-03-01T10:00:00Z") / 1000),
+    });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(null), { kind: "unresolved_no_payload" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(""), { kind: "unresolved_no_payload" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload("{esto no es json"), {
+      kind: "unresolved_unparseable",
+    });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(JSON.stringify({ id: 1 })), {
+      kind: "unresolved_no_date",
+    });
+    assert.deepEqual(
+      backfillOrderedAt.resolveOrderedAtFromRawPayload(JSON.stringify({ created_at: "no-es-fecha" })),
+      { kind: "unresolved_no_date" }
+    );
+  });
+
+  await test("T1 runBackfillOrderedAt (dry-run): decide todo, no escribe NADA, el desglose cuadra", () => {
+    const conPayloadValido = mkOrder("991401", "5401", "34600119401");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-04-01T10:00:00Z" }), conPayloadValido.id);
+
+    const sinPayload = mkOrder("991402", "5402", "34600119402"); // mkOrder no pone raw_payload
+
+    const conPayloadRoto = mkOrder("991403", "5403", "34600119403");
+    db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ? WHERE id = ?").run("{roto", conPayloadRoto.id);
+
+    const conPayloadSinFecha = mkOrder("991404", "5404", "34600119404");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ id: 1 }), conPayloadSinFecha.id);
+
+    const report = backfillOrderedAt.runBackfillOrderedAt({ dryRun: true });
+    assert.ok(report.total >= 4, "al menos las 4 filas de este test están pendientes");
+    assert.ok(report.resolved >= 1);
+    assert.ok(report.unresolvedNoPayload >= 1);
+    assert.ok(report.unresolvedUnparseable >= 1);
+    assert.ok(report.unresolvedNoDate >= 1);
+
+    // Dry-run de verdad: ninguna de las 4 filas de este test quedó escrita.
+    for (const id of [conPayloadValido.id, sinPayload.id, conPayloadRoto.id, conPayloadSinFecha.id]) {
+      assert.equal(db.getOrderById(id)!.ordered_at, null, `id ${id} no debe tocarse en dry-run`);
+    }
+  });
+
+  await test("T1 runBackfillOrderedAt (aplicado): escribe SOLO las filas resolubles; las demás quedan NULL", () => {
+    const resoluble = mkOrder("991501", "5501", "34600119501");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-05-01T10:00:00Z" }), resoluble.id);
+
+    const irresoluble = mkOrder("991502", "5502", "34600119502"); // sin raw_payload
+
+    const yaResuelta = mkOrder("991503", "5503", "34600119503");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET ordered_at = 1700000000, raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-06-01T10:00:00Z" }), yaResuelta.id);
+
+    const totalAntes = backfillOrderedAt.runBackfillOrderedAt({ dryRun: true }).total;
+    const report = backfillOrderedAt.runBackfillOrderedAt({ dryRun: false });
+    assert.equal(report.total, totalAntes, "el segundo dry-run de arriba no debe haber tocado nada");
+
+    assert.equal(
+      db.getOrderById(resoluble.id)!.ordered_at,
+      Math.floor(Date.parse("2026-05-01T10:00:00Z") / 1000),
+      "la fila resoluble queda escrita"
+    );
+    assert.equal(db.getOrderById(irresoluble.id)!.ordered_at, null, "sin raw_payload, se queda NULL — no se inventa nada");
+    assert.equal(
+      db.getOrderById(yaResuelta.id)!.ordered_at,
+      1700000000,
+      "una fila que YA tenía ordered_at no se toca ni se recalcula desde su raw_payload"
+    );
+
+    // Repetir con --apply es idempotente: nada nuevo que resolver.
+    const segundaPasada = backfillOrderedAt.runBackfillOrderedAt({ dryRun: false });
+    assert.equal(segundaPasada.resolved, 0, "las filas resolubles ya se resolvieron en la pasada anterior");
   });
 
   // ============ Resumen ============
