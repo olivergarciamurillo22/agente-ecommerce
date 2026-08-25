@@ -5777,6 +5777,83 @@ async function main(): Promise<void> {
     assert.equal(plan2.toCreate.some((x) => x.topic === "orders/create"), false);
   });
 
+  // ============ 45 · Arreglos de fidelidad (lo que el sistema contaba mal) ============
+  console.log("\n— Fidelidad: fulfillment parcial y orden de llegada —");
+
+  await test("fulfillment `partial` TAMBIÉN es in_progress (el caso normal en Casamable, no el raro)", () => {
+    // Los pedidos llevan una línea `Seguro de Envío` que no es mercancía y que
+    // el proveedor nunca despacha: el pedido se queda en `partial` para
+    // siempre y jamás llega a `fulfilled`. Mirar solo `fulfilled` dejaba esos
+    // pedidos con el cierre en `unknown`.
+    const parcial = backfillOrder({
+      id: 998001,
+      fulfillment_status: "partial",
+      updated_at: "2026-08-24T12:00:00Z",
+    });
+    const señal = backfill.planClosureFromShopify(parcial);
+    assert.equal(señal?.status, "in_progress");
+    assert.equal(señal?.at, Math.floor(Date.parse("2026-08-24T12:00:00Z") / 1000), "fecha de Shopify, no now()");
+    assert.notEqual(señal?.status, "delivered", "parcial no es entregado, igual que fulfilled no lo es");
+
+    // Y sigue funcionando lo que ya funcionaba.
+    assert.equal(
+      backfill.planClosureFromShopify(
+        backfillOrder({ id: 998002, fulfillment_status: "fulfilled", updated_at: "2026-08-24T12:00:00Z" })
+      )?.status,
+      "in_progress"
+    );
+    assert.equal(backfill.planClosureFromShopify(backfillOrder({ id: 998003 })), null, "sin fulfillment: sin señal");
+
+    // Regla que se mantiene intacta: sin NINGUNA fecha de Shopify no se
+    // escribe señal. Antes que estampar now() y corromper la cronología,
+    // se prefiere no saber.
+    assert.equal(
+      backfill.planClosureFromShopify(backfillOrder({ id: 998007, fulfillment_status: "partial" })),
+      null,
+      "parcial pero sin fecha: no se inventa una"
+    );
+  });
+
+  await test("fulfillment `restocked` NO es in_progress: la mercancía volvió al almacén", () => {
+    assert.equal(
+      backfill.planClosureFromShopify(backfillOrder({ id: 998004, fulfillment_status: "restocked" })),
+      null
+    );
+    // Y una cancelación gana sobre cualquier fulfillment, como ya era.
+    const cancelado = backfill.planClosureFromShopify(
+      backfillOrder({ id: 998005, fulfillment_status: "partial", cancelled_at: "2026-08-24T09:00:00Z" })
+    );
+    assert.equal(cancelado?.status, "cancelled");
+  });
+
+  await test("backfill: un pedido parcialmente despachado se importa como in_progress", () => {
+    const parcial = backfillOrder({ id: 998006, fulfillment_status: "partial", updated_at: "2026-08-24T12:00:00Z" });
+    assert.equal(backfill.decideBackfillAction(null, parcial).kind, "insert_in_progress");
+  });
+
+  await test("orden de llegada: el panel ordena por número de pedido, no por cuándo se insertó la fila", () => {
+    // El backfill insertó 93 pedidos en el mismo instante: `created_at` no
+    // distingue nada entre ellos. Se insertan aquí DESORDENADOS a propósito.
+    const b = mkOrder("998101", "990002", "34600198101"); // el de en medio, primero
+    const a = mkOrder("998102", "990003", "34600198102"); // el más nuevo, segundo
+    const c = mkOrder("998103", "990001", "34600198103"); // el más viejo, último
+
+    const mios = new Set([a.id, b.id, c.id]);
+    const orden = db
+      .listOrders(undefined, 1000)
+      .filter((o) => mios.has(o.id))
+      .map((o) => o.shopify_order_number);
+
+    assert.deepEqual(orden, ["990003", "990002", "990001"], "de más nuevo a más viejo por número de pedido");
+
+    // Y el mismo criterio filtrando por estado (la otra consulta del panel).
+    const porEstado = db
+      .listOrders("pending_send", 1000)
+      .filter((o) => mios.has(o.id))
+      .map((o) => o.shopify_order_number);
+    assert.deepEqual(porEstado, ["990003", "990002", "990001"]);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

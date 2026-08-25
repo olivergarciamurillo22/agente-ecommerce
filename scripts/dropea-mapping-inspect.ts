@@ -45,12 +45,23 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // 1. Catálogo de Dropea (todas las páginas razonables).
+  // 1. Catálogo de Dropea — ENTERO, hasta que una página venga incompleta.
+  //
+  // Antes se paraba en la página 10 (500 productos) sobre un catálogo de
+  // 4.142: el Cortaúñas estaba en la página 46, así que el emparejado
+  // "no lo encontraba" y parecía que el producto no existía en Dropea.
+  // Un tope silencioso en una herramienta de diagnóstico es una respuesta
+  // falsa; si ahora se alcanza el tope de seguridad, se DICE.
+  const PAGE_SIZE = 100;
+  const MAX_PAGES = 200; // 20.000 productos: red de seguridad, no un límite real
   const variantes: Array<{ variantId: number; sku: string; nombre: string; precio: number; producto: number }> = [];
+  let paginas = 0;
+  let topeAlcanzado = false;
   try {
-    for (let page = 1; page <= 10; page++) {
-      const res = await provider.listDropeaProducts(page, 50);
+    for (let page = 1; page <= MAX_PAGES; page++) {
+      const res = await provider.listDropeaProducts(page, PAGE_SIZE);
       const items = res?.items ?? [];
+      paginas = page;
       for (const p of items) {
         for (const v of p.variants ?? []) {
           variantes.push({
@@ -62,13 +73,19 @@ async function main(): Promise<void> {
           });
         }
       }
-      if (items.length < 50) break;
+      if (items.length < PAGE_SIZE) break;
+      if (page === MAX_PAGES) topeAlcanzado = true;
     }
   } catch (err) {
     console.log(`✗ No se pudo leer el catálogo: ${(err as Error).message}\n`);
     process.exit(1);
   }
-  console.log(`Catálogo de Dropea: ${variantes.length} variante(s)\n`);
+  console.log(`Catálogo de Dropea: ${variantes.length} variante(s) en ${paginas} página(s)`);
+  if (topeAlcanzado) {
+    console.log(`⚠️  Se alcanzó el tope de ${MAX_PAGES} páginas: el catálogo puede estar INCOMPLETO.`);
+    console.log("    Lo que no aparezca aquí puede existir igualmente en Dropea.");
+  }
+  console.log("");
 
   // 2. Nuestros productos: los que han aparecido en pedidos reales.
   const titulos = new Map<string, string | null>();

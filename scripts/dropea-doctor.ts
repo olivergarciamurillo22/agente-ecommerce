@@ -111,11 +111,25 @@ async function main(): Promise<void> {
   // --- 5. Webhooks registrados ---
   console.log("\n5. WEBHOOKS REGISTRADOS");
   try {
-    const hooks = (await provider.listDropeaWebhooks()) as { items?: Array<Record<string, unknown>> } | Array<Record<string, unknown>>;
-    const items = Array.isArray(hooks) ? hooks : (hooks?.items ?? []);
-    if (!items.length) console.log("   (ninguno suscrito todavía)");
-    for (const h of items) {
-      console.log(`   · ${h.topic} → ${h.url} ${h.active ? "[activo]" : "[inactivo]"}`);
+    // La API devuelve las suscripciones en `data.webhooks`; versiones
+    // anteriores de este script solo miraban `items`, así que decía
+    // "(ninguno suscrito todavía)" con 6 activas — una herramienta de
+    // diagnóstico que miente es peor que no tenerla. Se prueban todas las
+    // formas conocidas y, si no casa ninguna, se ENSEÑA la respuesta cruda
+    // en vez de afirmar que no hay nada.
+    const hooks = await provider.listDropeaWebhooks();
+    const items = extraerWebhooks(hooks);
+    if (items === null) {
+      console.log("   ⚠️  Respuesta con una forma que este script no reconoce.");
+      console.log("       NO significa que no haya suscripciones. Cruda:");
+      console.log(`       ${JSON.stringify(hooks).slice(0, 500)}`);
+    } else if (!items.length) {
+      console.log("   (ninguno suscrito todavía)");
+    } else {
+      console.log(`   ${items.length} suscripción(es):`);
+      for (const h of items) {
+        console.log(`   · ${h.topic} → ${h.url} ${h.active ? "[activo]" : "[inactivo]"}`);
+      }
     }
   } catch (err) {
     console.log(`   ✗ ${(err as Error).message}`);
@@ -150,3 +164,27 @@ main().catch((err) => {
   console.error("\n✗ Fallo inesperado:", err instanceof Error ? err.message : err, "\n");
   process.exit(1);
 });
+
+type Hook = Record<string, unknown>;
+
+/**
+ * Saca la lista de suscripciones de la respuesta de Dropea.
+ *
+ * Devuelve `null` (≠ lista vacía) si NINGUNA forma conocida casa: eso es
+ * "no lo sé", no "no hay ninguna". Distinguirlo es el arreglo: antes las dos
+ * cosas se pintaban igual.
+ */
+function extraerWebhooks(res: unknown): Hook[] | null {
+  if (Array.isArray(res)) return res as Hook[];
+  if (!res || typeof res !== "object") return null;
+  const o = res as Record<string, unknown>;
+  const candidatos: unknown[] = [
+    (o.data as Record<string, unknown> | undefined)?.webhooks,
+    o.webhooks,
+    o.items,
+    (o.data as Record<string, unknown> | undefined)?.items,
+    o.data,
+  ];
+  for (const c of candidatos) if (Array.isArray(c)) return c as Hook[];
+  return null;
+}

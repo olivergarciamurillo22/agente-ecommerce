@@ -242,6 +242,27 @@ function toEpochSeconds(iso: string | null | undefined): number | null {
 }
 
 /**
+ * ¿Este pedido tiene ya mercancía en camino, según Shopify?
+ *
+ * `fulfillment_status` de un pedido REST vale `null` | `"partial"` |
+ * `"fulfilled"` | `"restocked"`.
+ *
+ * **`partial` cuenta.** Si una sola línea se despachó, el pedido está en
+ * curso. Y en Casamable es el caso NORMAL, no el raro: los pedidos llevan una
+ * línea `Seguro de Envío` que no es mercancía y que el proveedor nunca
+ * despacha, así que el pedido se queda en `partial` para siempre y jamás
+ * llega a `fulfilled`. Mirar solo `fulfilled` dejaba esos pedidos con el
+ * cierre en `unknown` — y era candidato a explicar el `in_progress = 0`
+ * medido el 24-08-2026 pese a haber envíos con seguimiento real.
+ *
+ * `restocked` NO cuenta: significa que la mercancía volvió al almacén, que es
+ * lo contrario de estar en camino.
+ */
+function isFulfillmentUnderway(status: string | null | undefined): boolean {
+  return status === "fulfilled" || status === "partial";
+}
+
+/**
  * ¿Qué dice Shopify sobre el cierre de este pedido? `null` = ningún cierre
  * conocido todavía (sigue abierto/sin fulfillment) — NO se adivina nada.
  */
@@ -249,7 +270,7 @@ export function planClosureFromShopify(order: ShopifyBackfillOrder): ClosureSign
   const cancelledAt = toEpochSeconds(order.cancelled_at);
   if (cancelledAt !== null) return { status: "cancelled", at: cancelledAt };
 
-  if (order.fulfillment_status === "fulfilled") {
+  if (isFulfillmentUnderway(order.fulfillment_status)) {
     const at = toEpochSeconds(order.updated_at) ?? toEpochSeconds(order.created_at);
     if (at !== null) return { status: "in_progress", at };
   }

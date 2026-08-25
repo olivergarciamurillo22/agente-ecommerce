@@ -4,7 +4,7 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
-**Última actualización: 25-08-2026** (E8 desplegado y `dropea:reconcile --apply` corrido; ver `docs/CONTEXTO-2026-08-24.md` para el despliegue del 24-08 y el diagnóstico que originó E8).
+**Última actualización: 25-08-2026** (E8 desplegado y `dropea:reconcile --apply` corrido; después, tanda de arreglos de fidelidad — fulfillment parcial, orden del panel y dos herramientas de diagnóstico que mentían. **Esa tanda está en `main`, aún NO en el NAS.**)
 
 ---
 
@@ -94,7 +94,7 @@ Doble validación operativa: primero identifica proveedor, después frena si la 
 
 Dos huecos adicionales medidos el 24-08, sin explicar todavía:
 - **~14 cancelaciones que el backfill no recoge** (hay ~20 anulados en Shopify, solo 6 transicionaron): están detrás de los 24 "ya tenía fuente propia" — no se sabe qué escribió esa fuente.
-- **`in_progress` en cero** pese a haber pedidos "En curso"/con seguimiento añadido en Shopify (`#35010824`, `#35010814`) — verificar si la detección de fulfillment coge el caso real.
+- **`in_progress` en cero** pese a haber pedidos "En curso"/con seguimiento añadido en Shopify (`#35010824`, `#35010814`). **Causa probable encontrada el 25-08 leyendo el código:** solo se contaba `fulfillment_status = "fulfilled"`, y los pedidos de Casamable llevan una línea `Seguro de Envío` que no es mercancía y que el proveedor nunca despacha — así que Shopify los deja en **`partial` para siempre** y nunca llegan a `fulfilled`. Corregido en `main` (`partial` también cuenta; `restocked` no). **Se confirma o se descarta al desplegar y volver a correr el backfill**: si era eso, esos pedidos pasarán a `in_progress`.
 
 ---
 
@@ -121,8 +121,8 @@ Contexto de negocio (contabilidad real de agosto, 2 días): margen **6,24%**, RO
 1. ~13 pedidos anulados de 0,00 € con clientes reales — comprobar si son duplicados de Releasit o ventas perdidas.
 2. 3 pedidos bloqueados por ciudad `"-"`.
 3. ~14 cancelaciones que el backfill no recoge (§4 arriba).
-4. `in_progress` en cero pese a fulfillments reales (§4 arriba).
-5. Lista de pedidos del panel sin ordenar por fecha de llegada.
+4. `in_progress` en cero pese a fulfillments reales — **causa probable identificada y corregida en `main`**, pendiente de confirmar desplegando (§4 arriba).
+5. ~~Lista de pedidos del panel sin ordenar por fecha de llegada~~ — ✓ resuelto el 25-08. No era el `ORDER BY`, que ya existía: era que ordenaba por `created_at`, que es la hora de INSERTAR la fila, y el backfill insertó los 93 pedidos en el mismo instante. Ahora ordena por `shopify_order_number`, que sí es la llegada real. Sin migración de esquema.
 6. ~~`.env.example` desactualizado~~ — ✓ resuelto el 25-08: `CALL_RETRY_DELAYS_MINUTES` (que no leía nadie) sustituido por `CALL_FIRST_RETRY_MINUTES`, con la nota de que del 2º al 4º reintento la cadencia es por día de calendario y vive fija en el código.
 
 **Bloqueado por terceros:**
@@ -143,7 +143,7 @@ Y la API key de Dropea **sin permisos de escritura**, que es la capa que protege
 
 ## 8 · Deuda técnica anotada
 
-- `scripts/dropea-doctor.ts` línea 115 lee las suscripciones en `hooks.items`, pero la API las devuelve en **`data.webhooks`**. Resultado: dice "(ninguno suscrito)" con 6 activas. Solo diagnóstico.
-- `dropea:mapping:inspect` recorre 10 páginas de 500 productos sobre un catálogo de 4.142.
+- ~~`scripts/dropea-doctor.ts` decía "(ninguno suscrito)" con 6 webhooks activos~~ — ✓ resuelto el 25-08. Ahora prueba todas las formas conocidas (`data.webhooks`, `webhooks`, `items`, array plano) y, si no reconoce ninguna, **enseña la respuesta cruda en vez de afirmar que no hay nada**: "no lo sé" y "no hay ninguno" ya no se pintan igual.
+- ~~`dropea:mapping:inspect` recorría 10 páginas de 500 productos sobre un catálogo de 4.142~~ — ✓ resuelto el 25-08. Recorre el catálogo entero (páginas de 100 hasta que una venga incompleta) y, si alguna vez tocara el tope de seguridad de 200 páginas, **lo dice** en vez de callarlo. Era la razón de que el Cortaúñas "no apareciera": estaba en la página 46.
 - El WAL de SQLite no se compacta al reiniciar (comportamiento normal; umbral ya bajado a 2 MB).
 - Las franjas horarias de llamadas (`CALL_WINDOWS`) están hardcodeadas; deberían acabar en `settings` como el resto de ajustes de llamadas, para poder probar franjas distintas sin desplegar (anotado en la revisión del PR #5).

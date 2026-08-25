@@ -1521,14 +1521,36 @@ export function getOrderByShopifyOrderNumber(orderNumber: string): OrderRow | nu
 }
 
 /** Lista pedidos, opcionalmente filtrados por estado, más recientes primero. */
+/**
+ * Orden "por fecha de llegada del pedido", de más nuevo a más viejo.
+ *
+ * NO se usa `created_at`: esa columna es `unixepoch()` del momento en que la
+ * fila se INSERTÓ aquí, no de cuándo compró el cliente. Los 93 pedidos que
+ * importó el backfill del 24-08 se insertaron todos en el mismo instante, así
+ * que ordenar por `created_at` los apila en un montón sin orden real — que es
+ * exactamente lo que se sufría en el panel.
+ *
+ * `shopify_order_number` sí es la llegada real: Shopify lo incrementa pedido a
+ * pedido dentro de la misma tienda. Se castea porque la columna es TEXT (para
+ * no perder ceros ni prefijos raros); un valor no numérico castea a 0 y se va
+ * al final, que es mejor sitio que en medio. `created_at` queda de desempate.
+ *
+ * Se prefirió esto a añadir una columna `shopify_created_at`: daría el mismo
+ * resultado y costaría una migración de esquema, un backfill y un despliegue.
+ */
+const ORDERS_ARRIVAL_ORDER =
+  "CAST(shopify_order_number AS INTEGER) DESC, created_at DESC, id DESC";
+
 export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
   const db = ctx().db;
   if (status) {
     return db
-      .prepare("SELECT * FROM orders WHERE status = ? ORDER BY created_at DESC, id DESC LIMIT ?")
+      .prepare(`SELECT * FROM orders WHERE status = ? ORDER BY ${ORDERS_ARRIVAL_ORDER} LIMIT ?`)
       .all(status, limit) as OrderRow[];
   }
-  return db.prepare("SELECT * FROM orders ORDER BY created_at DESC, id DESC LIMIT ?").all(limit) as OrderRow[];
+  return db
+    .prepare(`SELECT * FROM orders ORDER BY ${ORDERS_ARRIVAL_ORDER} LIMIT ?`)
+    .all(limit) as OrderRow[];
 }
 
 export interface OrderCounts {
