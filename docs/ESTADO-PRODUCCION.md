@@ -4,6 +4,11 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
+> ⚠️ **25-08-2026 · hay una rama de hardening SIN desplegar**
+> (`fix/hardening-casamable`, esquema **7**). Lo que hay debajo describe el
+> NAS, que sigue en esquema 5. Ver `docs/HARDENING-REPORT.md` y
+> `docs/PEDRO-NAS-TODO.md`.
+
 **Última actualización: 25-08-2026** (E8 desplegado y `dropea:reconcile --apply` corrido; después, tanda de arreglos de fidelidad — fulfillment parcial, orden del panel y dos herramientas de diagnóstico que mentían. **Esa tanda está en `main`, aún NO en el NAS.**)
 
 ---

@@ -242,3 +242,31 @@ Con servicios presentes y sin datos por línea, un `partial` global da
 `supplier_product_mapping`. Una línea puede ser perfectamente mercancía y no
 tener todavía mapping de proveedor: son preguntas distintas y se responden por
 separado.
+
+---
+
+## Auditoría del histórico (`order_status_history`)
+
+Desde el esquema 6 cada fila lleva **`status_axis`**: `confirmation` ·
+`supplier_sync` · `tracking` · `closure`.
+
+Sin eso, un `delivered` del eje logístico y un `delivered` del eje de cierre
+eran indistinguibles al leer la tabla. Las filas anteriores a la migración se
+marcaron como `tracking` — no es una inferencia: hasta ese día
+`processSupplierUpdate` era el **único** escritor de esa tabla.
+
+`setOrderClosure` deja ahora su propia fila. El eje que manda en el dinero era
+el único sin auditoría: se veía el valor actual pero no quién lo puso.
+
+## Estados terminales: las dos barreras
+
+| Eje | Terminales | Qué pasa si algo intenta salir |
+|---|---|---|
+| Cierre | `delivered` `refused` `cancelled` | `canTransitionClosure` lo impide. Repetir el mismo valor sí vale (refresca fuente y fecha) |
+| Tracking | `delivered` `returned` `cancelled` | Se descarta y deja `terminal_regression_blocked` |
+
+La barrera del eje logístico se añadió el 25-08-2026 al descubrir que **no
+existía**: `returned`, `cancelled` e `incident` valían -1 en la tabla de orden,
+así que quedaban fuera de la comparación de retrocesos. `returned → shipped`,
+`cancelled → delivered` y `returned → delivered` pasaban sin problema. Un
+webhook atrasado convertía una devolución en un envío vivo.
