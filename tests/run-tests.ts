@@ -5855,6 +5855,33 @@ async function main(): Promise<void> {
     assert.deepEqual(porEstado, ["990003", "990002", "990001"]);
   });
 
+  await test("T3 orden de llegada: con ordered_at (T1) manda la fecha REAL de compra, no el número de pedido", () => {
+    // Números de pedido a propósito AL REVÉS de lo que dirían sus fechas de
+    // compra reales: si el panel siguiera ordenando por shopify_order_number,
+    // esto saldría mal.
+    const masReciente = mkOrder("973001", "990005", "34600198201"); // number chico, compra más reciente
+    const masAntiguo = mkOrder("973002", "990010", "34600198202"); // number grande, compra más vieja
+    const sinResolver = mkOrder("973003", "990020", "34600198203"); // number el más grande, sin ordered_at
+
+    const ahora = Math.floor(Date.now() / 1000);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora, masReciente.id);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora - 3 * 86400, masAntiguo.id);
+    // sinResolver se queda con ordered_at NULL a propósito.
+
+    const mios = new Set([masReciente.id, masAntiguo.id, sinResolver.id]);
+    const orden = db
+      .listOrders(undefined, 1000)
+      .filter((o) => mios.has(o.id))
+      .map((o) => o.shopify_order_number);
+
+    assert.deepEqual(
+      orden,
+      ["990005", "990010", "990020"],
+      "ordered_at manda: el pedido más reciente por FECHA sale primero aunque su número sea el más chico; " +
+        "el que no tiene ordered_at resuelto cae al final aunque su número sea el más grande de los tres"
+    );
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

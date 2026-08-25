@@ -1572,22 +1572,32 @@ export function getOrderByShopifyOrderNumber(orderNumber: string): OrderRow | nu
 /**
  * Orden "por fecha de llegada del pedido", de más nuevo a más viejo.
  *
- * NO se usa `created_at`: esa columna es `unixepoch()` del momento en que la
- * fila se INSERTÓ aquí, no de cuándo compró el cliente. Los 93 pedidos que
- * importó el backfill del 24-08 se insertaron todos en el mismo instante, así
- * que ordenar por `created_at` los apila en un montón sin orden real — que es
- * exactamente lo que se sufría en el panel.
+ * T3: la fuente de verdad ahora es `ordered_at` (T1 — la fecha REAL de
+ * compra en Shopify). NO se usa `created_at`: esa columna es `unixepoch()`
+ * del momento en que la fila se INSERTÓ aquí, no de cuándo compró el
+ * cliente. Los 93 pedidos que importó el backfill del 24-08 se insertaron
+ * todos en el mismo instante, así que ordenar por `created_at` los apila en
+ * un montón sin orden real — que es exactamente lo que se sufría en el
+ * panel antes de T1/T3.
  *
- * `shopify_order_number` sí es la llegada real: Shopify lo incrementa pedido a
- * pedido dentro de la misma tienda. Se castea porque la columna es TEXT (para
- * no perder ceros ni prefijos raros); un valor no numérico castea a 0 y se va
- * al final, que es mejor sitio que en medio. `created_at` queda de desempate.
+ * `ordered_at DESC` basta por sí solo para el fallback de las filas sin
+ * resolver: SQLite trata NULL como el valor más pequeño posible, así que en
+ * DESC los NULL caen solos al final — sin CASE WHEN. Para esas filas (aún
+ * sin backfillar por `scripts/backfill-ordered-at.ts`, o de un payload que
+ * nunca trajo `created_at`) el desempate sigue siendo el criterio de
+ * Óliver: `shopify_order_number` (Shopify lo incrementa pedido a pedido
+ * dentro de la misma tienda; se castea porque la columna es TEXT, y un
+ * valor no numérico cae a 0 → al final, mejor que en medio), y `created_at`
+ * de último recurso.
  *
- * Se prefirió esto a añadir una columna `shopify_created_at`: daría el mismo
- * resultado y costaría una migración de esquema, un backfill y un despliegue.
+ * Se DESVÍA a propósito de caer directo a `created_at` si `ordered_at` es
+ * NULL: eso reintroduciría el bug original para esas filas exactas (las
+ * importadas en bloque por un backfill comparten el mismo `created_at`, sin
+ * orden real entre ellas). El fallback de Óliver ya resuelve ese caso
+ * mejor, así que se reutiliza en vez de duplicarlo.
  */
 const ORDERS_ARRIVAL_ORDER =
-  "CAST(shopify_order_number AS INTEGER) DESC, created_at DESC, id DESC";
+  "ordered_at DESC, CAST(shopify_order_number AS INTEGER) DESC, created_at DESC, id DESC";
 
 export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
   const db = ctx().db;
