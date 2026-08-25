@@ -5777,6 +5777,28 @@ async function main(): Promise<void> {
     assert.equal(plan2.toCreate.some((x) => x.topic === "orders/create"), false);
   });
 
+  await test("outbox: el claim es ATÓMICO — dos procesos sobre el mismo item, un solo envío", () => {
+    // Reproduce el caso de dos bots vivos a la vez (dos contenedores, o un
+    // reinicio solapado): ambos leen la misma fila pendiente y ambos intentan
+    // reclamarla. Solo uno puede ganar; el otro NO debe enviar.
+    const conv = db.getOrCreateConversation("34600199001", "Cliente Claim");
+    const itemId = db.enqueueOutbox(conv.id, "34600199001", "mensaje que no se puede duplicar");
+    assert.ok(
+      db.getPendingOutbox(500).some((x) => x.id === itemId),
+      "el item está en la cola como pendiente"
+    );
+
+    const ganador = db.markOutboxSent(itemId);
+    const perdedor = db.markOutboxSent(itemId);
+    assert.equal(ganador, true, "el primero gana el claim");
+    assert.equal(perdedor, false, "el segundo NO: el item ya no estaba pendiente");
+
+    // Y el revert del patrón claim→send→revert sigue funcionando: si el
+    // ganador falla al enviar, el item vuelve a estar reclamable.
+    db.revertOutboxSent(itemId);
+    assert.equal(db.markOutboxSent(itemId), true, "tras revertir, se puede reclamar otra vez");
+  });
+
   // ============ 45 · Arreglos de fidelidad (lo que el sistema contaba mal) ============
   console.log("\n— Fidelidad: fulfillment parcial y orden de llegada —");
 

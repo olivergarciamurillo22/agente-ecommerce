@@ -77,7 +77,12 @@ export function startOutboxLoop(sock: WASocket): void {
       // si el claim se pierde sin enviar, la red de seguridad de reminders/
       // needs_call recoge al cliente. WhatsApp no ofrece idempotency key:
       // este es el mejor compromiso posible (documentado en PEDRO-MVP.md).
-      markOutboxSent(item.id);
+      // CLAIM atómico: si otro proceso se lo llevó, aquí no se envía nada.
+      // Sin esta comprobación, dos bots en marcha duplicarían el mensaje.
+      if (!markOutboxSent(item.id)) {
+        logger.info(`[bot] outbox #${item.id} ya reclamado por otro proceso — no se envía`);
+        continue;
+      }
       try {
         if (item.type === "image" && item.media_path) {
           if (!fs.existsSync(item.media_path)) {

@@ -944,8 +944,13 @@ function build() {
   const stmtGetPendingOutbox = db.prepare<[number], OutboxItem>(
     "SELECT * FROM outbox WHERE sent = 0 ORDER BY created_at ASC LIMIT ?"
   );
+  // `AND sent = 0` NO es decorativo: convierte esto en un CLAIM atómico.
+  // Sin esa condición, dos procesos que hubieran leído la misma fila
+  // pendiente la "reclamarían" los dos con éxito y el cliente recibiría el
+  // mismo WhatsApp DOS veces. Con ella, solo uno ve changes=1 y envía.
+  // Mismo patrón que claimTrackingNotification y claimSupplierCreate.
   const stmtMarkOutboxSent = db.prepare(
-    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ?"
+    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ? AND sent = 0"
   );
 
   // --- Borrado de conversaciones (atómico) ---
@@ -1200,8 +1205,17 @@ export function getPendingOutbox(limit = 20): OutboxItem[] {
   return ctx().stmtGetPendingOutbox.all(limit);
 }
 
-export function markOutboxSent(id: number): void {
-  ctx().stmtMarkOutboxSent.run(id);
+/**
+ * RECLAMA el derecho a enviar este item, de forma atómica.
+ *
+ * Devuelve `true` solo si esta llamada ganó el claim (el item estaba
+ * pendiente). `false` significa que otro proceso ya lo reclamó: quien lo
+ * reciba NO debe enviar nada. Es la barrera que hace que el patrón
+ * claim→send→revert siga siendo at-most-once aunque corriera más de un
+ * proceso de bot a la vez (dos contenedores, o un reinicio solapado).
+ */
+export function markOutboxSent(id: number): boolean {
+  return ctx().stmtMarkOutboxSent.run(id).changes > 0;
 }
 
 /**
