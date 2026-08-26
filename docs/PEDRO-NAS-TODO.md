@@ -41,7 +41,14 @@
 
 ---
 
-## B · Despliegue de esta versión
+## B · Despliegue de esta versión — ✅ HECHO el 25-08-2026
+
+> Pedro lo ejecutó completo: backup `messages-2026-08-25_1540.db`, commit
+> `fe53c9d`, esquema **9**, outbox 93/93/0 idéntico al baseline, WhatsApp
+> reconectó sin QR. Evidencia en `docs/CONTEXTO-2026-08-25.md` §3. Los pasos
+> se conservan abajo como plantilla para el PRÓXIMO despliegue.
+
+## B · Despliegue (plantilla para la próxima vez)
 
 ### B1 · Copia de seguridad
 ```bash

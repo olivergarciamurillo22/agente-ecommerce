@@ -8048,6 +8048,62 @@ async function main(): Promise<void> {
     assert.match(item.content, /1 - Todo correcto/);
   });
 
+  await test("COEXISTENCIA · los ECOS del móvil de Pedro jamás disparan el flujo: sin bucles posibles", async () => {
+    // Pregunta abierta de Pedro (CONTEXTO-2026-08-25 §6.2): al activar
+    // coexistencia llegarán smb_message_echoes (lo que el negocio escribe
+    // desde el móvil). DOS capas impiden el bucle:
+    //  1. El parser descarta ENTERO cualquier campo que no sea "messages".
+    const eco = metaIn.parseMetaWebhookPayload({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "smb_message_echoes", value: { message_echoes: [{ from: "34641308254", id: "wamid.echo1", type: "text", text: { body: "respuesta manual de Pedro" } }] } }] }],
+    });
+    assert.equal(eco.messages.length, 0, "un eco no produce NINGÚN mensaje entrante");
+    for (const campo of ["smb_app_state_sync", "history"]) {
+      const otro = metaIn.parseMetaWebhookPayload({
+        object: "whatsapp_business_account",
+        entry: [{ changes: [{ field: campo, value: { messages: [{ from: "34600000140", id: "wamid.x", type: "text", text: { body: "1" } }] } }] }],
+      });
+      assert.equal(otro.messages.length, 0, `${campo} se descarta entero`);
+    }
+
+    //  2. Y aunque un eco llegara disfrazado dentro de "messages" con el
+    //     número del PROPIO negocio como remitente: ese número no tiene
+    //     pedidos activos → handled=false → silencio, cero respuestas.
+    const raw = metaInboundBody(
+      { from: "34641308254", id: "wamid.echo2", timestamp: "1756100200", type: "text", text: { body: "todo correcto" } },
+      "34641308254"
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === "34641308254").length, 0, "cero auto-respuestas al propio número");
+    });
+  });
+
+  await test("PLANTILLAS · el estado (APPROVED/REJECTED) llega al feed de eventos, con el rechazo como warning", async () => {
+    // Antes se descartaba en silencio: la única forma de saber si la
+    // plantilla del piloto se aprobó era mirar WhatsApp Manager a mano.
+    const cuerpo = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [
+        { field: "message_template_status_update", value: { message_template_name: "order_confirmation_request", event: "APPROVED" } },
+        { field: "message_template_status_update", value: { message_template_name: "order_reminder", event: "REJECTED", reason: "INVALID_FORMAT" } },
+      ] }],
+    });
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(cuerpo, firmaMeta(cuerpo));
+      assert.equal(r.status, 200);
+      const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 100 });
+      const aprobada = evs.find((e) => e.event_type === "meta_template_status" && /order_confirmation_request.*APPROVED/.test(e.message));
+      const rechazada = evs.find((e) => e.event_type === "meta_template_status" && /order_reminder.*REJECTED/.test(e.message));
+      assert.ok(aprobada, "la aprobación se ve en el panel");
+      assert.equal(aprobada!.severity, "info");
+      assert.ok(rechazada, "el rechazo también, con su motivo");
+      assert.equal(rechazada!.severity, "warning", "un rechazo bloquea mensajes fuera de ventana: warning");
+      assert.match(rechazada!.message, /INVALID_FORMAT/);
+    });
+  });
+
   await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {
     const parsed = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
       { from: "34600000123", id: "wamid.n1", timestamp: "1756100080", type: "button", button: { payload: "confirm_order", text: "Confirmar" } },

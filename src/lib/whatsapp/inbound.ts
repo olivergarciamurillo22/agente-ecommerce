@@ -39,9 +39,19 @@ export interface OutboundStatusUpdate {
   errorDetail: string | null;
 }
 
+/** Cambio de estado de una PLANTILLA (aprobada/rechazada/pausada). */
+export interface TemplateStatusUpdate {
+  templateName: string;
+  /** APPROVED | REJECTED | PAUSED | PENDING… tal cual lo manda Meta. */
+  event: string;
+  /** Motivo de rechazo, si Meta lo da. */
+  reason: string | null;
+}
+
 export interface ParsedMetaWebhook {
   messages: InboundWhatsAppMessage[];
   statuses: OutboundStatusUpdate[];
+  templateUpdates: TemplateStatusUpdate[];
 }
 
 /* Forma del webhook de la Cloud API (subconjunto que usamos):
@@ -71,12 +81,30 @@ function toEpoch(v: unknown): number {
  * nunca descartado en silencio ni interpretado a ciegas.
  */
 export function parseMetaWebhookPayload(body: unknown): ParsedMetaWebhook {
-  const out: ParsedMetaWebhook = { messages: [], statuses: [] };
+  const out: ParsedMetaWebhook = { messages: [], statuses: [], templateUpdates: [] };
   const parsed = body as MetaWebhookBody;
   if (parsed?.object !== "whatsapp_business_account") return out;
 
   for (const entry of parsed.entry ?? []) {
     for (const change of entry.changes ?? []) {
+      // Estado de PLANTILLAS: antes se descartaba en silencio y la única
+      // forma de saber si una plantilla se aprobó era mirar WhatsApp
+      // Manager a mano — con el piloto bloqueado justo en esa aprobación.
+      if (change.field === "message_template_status_update") {
+        const v = change.value as unknown as { message_template_name?: string; event?: string; reason?: string | null };
+        if (v?.message_template_name && v?.event) {
+          out.templateUpdates.push({
+            templateName: String(v.message_template_name),
+            event: String(v.event),
+            reason: v.reason ? String(v.reason) : null,
+          });
+        }
+        continue;
+      }
+      // Cualquier otro campo (smb_message_echoes, smb_app_state_sync,
+      // history…) se descarta AQUÍ, entero: los ECOS de coexistencia — lo
+      // que Pedro escriba desde su móvil — jamás llegan al flujo COD, así
+      // que no pueden disparar una respuesta automática ni entrar en bucle.
       if (change.field !== "messages") continue;
       const value = change.value ?? {};
       const nombrePorWaId = new Map(

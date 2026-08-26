@@ -168,6 +168,18 @@ export function processMetaWebhook(rawBody: string, signatureHeader: string | nu
 
   for (const m of parsed.messages) procesarMensaje(m);
 
+  // Estado de plantillas → feed de eventos del panel. Una plantilla
+  // rechazada es CRÍTICA: sin ella no se puede escribir a nadie fuera de la
+  // ventana de 24 h, y nadie se entera si no se enseña aquí.
+  for (const t of parsed.templateUpdates) {
+    logIntegrationEvent(
+      "whatsapp",
+      "meta_template_status",
+      t.event === "REJECTED" || t.event === "PAUSED" ? "warning" : "info",
+      `plantilla "${t.templateName}": ${t.event}${t.reason ? ` (${t.reason})` : ""}`
+    );
+  }
+
   let statusesAplicados = 0;
   for (const st of parsed.statuses) {
     if (!st.providerMessageId) continue;

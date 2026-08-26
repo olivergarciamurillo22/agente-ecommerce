@@ -1,3 +1,16 @@
+> ⚠️ **DESACTUALIZADO — corregido el 26-08-2026 con datos verificados en el
+> alta real.** Dos afirmaciones de este documento resultaron falsas:
+>
+> 1. **Coexistence SÍ está disponible en la UE** desde octubre de 2025
+>    (mundial desde mayo de 2026). España está soportada — el alta de
+>    Casamable se hizo el 25-08-2026.
+> 2. **NO hace falta un BSP**: se puede hacer directo con app propia de Meta
+>    + Embedded Signup + Webhook Override, que es exactamente como se hizo.
+>
+> La referencia vigente es `docs/META-WHATSAPP-MIGRATION.md` (arquitectura y
+> políticas) y `docs/PEDRO-META-WHATSAPP-SETUP.md` (el alta paso a paso).
+> Este archivo se conserva por el contexto histórico de la decisión.
+
 # 11 · WhatsApp Coexistence (API oficial + app a la vez)
 
 > Investigado el 2026-06-02 a raíz de una duda de un alumno: un vídeo de YouTube

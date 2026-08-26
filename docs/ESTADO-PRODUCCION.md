@@ -4,12 +4,28 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
-> ⚠️ **25-08-2026 · hay una rama de hardening SIN desplegar**
-> (`fix/hardening-casamable`, esquema **7**). Lo que hay debajo describe el
-> NAS, que sigue en esquema 5. Ver `docs/HARDENING-REPORT.md` y
-> `docs/PEDRO-NAS-TODO.md`.
+**Última actualización: 26-08-2026.**
 
-**Última actualización: 25-08-2026** (E8 desplegado y `dropea:reconcile --apply` corrido; después, tanda de arreglos de fidelidad — fulfillment parcial, orden del panel y dos herramientas de diagnóstico que mentían. **Esa tanda está en `main`, aún NO en el NAS.**)
+> ⚠️ **PRODUCCIÓN CORRE `fix/hardening-casamable` (commit `fe53c9d`+, esquema
+> 9), NO `main`.** Desplegada por Pedro el 25-08 con backup y baseline
+> medidos (outbox 93/93/0 idéntico antes y después; WhatsApp reconectó sin
+> QR; las 4 migraciones nuevas corrieron). `main` está 27 commits por detrás
+> de producción: la reconciliación (merge) es la decisión pendiente de
+> Óliver. El detalle completo del despliegue y de los frentes de Meta, Dropi
+> y llamadas está en `docs/CONTEXTO-2026-08-25.md` — este snapshot lo resume.
+
+**Novedades del 25-08 en el NAS:**
+- **WhatsApp Cloud API instalada y APAGADA**: app de Meta creada y publicada,
+  webhook `https://agente.casamable.es/api/webhooks/whatsapp` verificado con
+  un evento real (el gate de coexistencia registró y no respondió — medido
+  en producción). Proveedor activo: **Baileys**, sin cambios de
+  comportamiento.
+- **Retell montado y APAGADO**: número +34 950 835 615 (voz, solo España),
+  trunk por Dublín, webhook del agente apuntando al NAS. Kill switch
+  cerrado, shadow ON, allowlist con el móvil de Pedro. Prompt v5 sin validar.
+- **Dropi desatascado**: la causa era el campo *vendor* del producto en
+  Shopify (`Casamable` → `Dropi PRO`). Verificado con el pedido `#35010994`
+  pasando a `IN_PROGRESS`.
 
 ---
 
