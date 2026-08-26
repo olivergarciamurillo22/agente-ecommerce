@@ -17,7 +17,7 @@ import {
   gatewayHaystack,
   type ShopifyOrderPayload,
 } from "../orders/normalize";
-import { verifyShopifyHmac } from "./hmac";
+import { verifyShopifyHmac, diagnoseShopifyHmacSecret } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
 import { maxOrderAgeMinutes } from "../safety";
 
@@ -43,7 +43,14 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
   }
 
   if (!verifyShopifyHmac(rawBody, headers.hmac, secret)) {
-    logger.warn(`[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}) — rechazado`);
+    // DIAGNÓSTICO (BUG2): prueba también contra SHOPIFY_CLIENT_SECRET — la
+    // migración admin-created → app-owned del 24-08 pudo dejar alguna
+    // suscripción firmando con el secreto de la app en vez del de la
+    // tienda. Nunca loguea un secreto, solo la etiqueta de cuál coincidió.
+    const coincideCon = diagnoseShopifyHmacSecret(rawBody, headers.hmac);
+    logger.warn(
+      `[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, coincide_con=${coincideCon}, longitud_cuerpo=${rawBody.length}) — rechazado`
+    );
     // Al feed: una racha de estos es un secret mal pegado o alguien probando.
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
