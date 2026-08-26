@@ -7993,7 +7993,9 @@ async function main(): Promise<void> {
     };
     assert.equal(fila2.sent, 1, "fuera de la cola");
     assert.ok(fila2.failed_at);
-    assert.match(fila2.failure_reason ?? "", /outside_24h_window/);
+    // T1 §2.5: el motivo ya no es el genérico de Meta sino el DISTINGUIBLE
+    // (sin plantilla equivalente adjunta, el dispatcher lo reclasifica).
+    assert.match(fila2.failure_reason ?? "", /template_not_configured_outside_window/);
   });
 
   await test("COEXISTENCIA · con Baileys activo, el webhook de Meta NO actúa: cero doble proceso", async () => {
@@ -8325,6 +8327,52 @@ async function main(): Promise<void> {
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "interactive_buttons", "dentro de ventana: interactivo normal, la plantilla se cobra y aquí no hace falta");
     assert.equal(item.template_name, null);
+  });
+
+  await test("T1 · degradación EN ENVÍO: la ventana caduca con la fila en cola → sale la plantilla y la DB dice la verdad", async () => {
+    const tel = "34600177610";
+    const convo = db.getOrCreateConversation(tel, "Cliente Caducado");
+    db.insertMessage(convo.id, "user", "hola"); // dentro de ventana AL ENCOLAR
+
+    const orden = mkMulti("972610", "7610", tel);
+    const spec = interactive.buildConfirmationOutbound(db.getOrderById(orden.id)!, true);
+    assert.equal(spec.message.kind, "interactive_buttons", "dentro de ventana: se encola interactivo");
+    assert.ok(spec.templateFallback, "con su plantilla equivalente adjunta");
+    let itemId = 0;
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      itemId = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!.id;
+    });
+
+    // El provider falso: el interactivo muere por ventana; la plantilla sale.
+    const enviados: string[] = [];
+    const prov = {
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string, m: import("../src/lib/whatsapp/provider").OutboundWhatsAppMessage) => {
+        if (to !== tel) return { ok: true, providerMessageId: `wamid.ajenoT1.${enviados.length}` };
+        enviados.push(m.kind);
+        if (m.kind === "template") return { ok: true, providerMessageId: "wamid.degradado1" };
+        return { ok: false, providerMessageId: null, error: "outside_24h_window: sesión caducada", retryable: false };
+      },
+    };
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === itemId); i++) {
+      await metaOutbox.runCloudOutboxTick(prov);
+    }
+
+    assert.deepEqual(enviados, ["interactive_buttons", "template"], "un intento interactivo, luego LA plantilla — jamás dos mensajes al cliente");
+    const fila = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(itemId) as {
+      sent: number; message_type: string; template_name: string | null; provider_message_id: string | null;
+      failure_reason: string | null; failed_at: number | null;
+    };
+    assert.equal(fila.sent, 1);
+    assert.equal(fila.message_type, "template", "la DB dice lo que salió DE VERDAD, no lo que se encoló");
+    assert.equal(fila.template_name, "order_confirmation_request");
+    assert.equal(fila.provider_message_id, "wamid.degradado1");
+    assert.match(fila.failure_reason ?? "", /fallback_reason=outside_24h_window/, "la degradación queda auditada");
+    assert.equal(fila.failed_at, null, "degradado con éxito NO es un fallo");
   });
 
   await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {

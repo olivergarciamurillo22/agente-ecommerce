@@ -20,6 +20,7 @@
 
 import pino from "pino";
 import {
+  systemDbHandle,
   getConversationById,
   getPendingOutbox,
   markOutboxSent,
@@ -95,7 +96,41 @@ export async function runCloudOutboxTick(provider: WhatsAppProvider): Promise<{ 
     // CLAIM atómico: si otro proceso se lo llevó, aquí no se envía nada.
     if (!markOutboxSent(item.id)) continue;
 
-    const r = await provider.send(item.phone, outboundFromItem(item));
+    const mensaje = outboundFromItem(item);
+    let r = await provider.send(item.phone, mensaje);
+
+    // DEGRADACIÓN EN ENVÍO (T1 §2.4): una fila encolada como interactiva
+    // dentro de ventana pudo CADUCAR esperando (retenida por gates,
+    // reintentos). Si el motivo del fallo es exactamente la ventana y la
+    // fila trae su plantilla equivalente, se manda ESA — el primer intento
+    // no llegó a salir, así que no hay duplicado posible. Y se persiste lo
+    // que salió DE VERDAD: message_type=template + template_name + el
+    // motivo de la degradación. La DB no miente diciendo que salió un
+    // interactivo.
+    if (!r.ok && !r.retryable && /outside_24h_window/.test(r.error ?? "") && mensaje.kind !== "template") {
+      const conFallback = extractTemplateFallback(item);
+      if (conFallback) {
+        r = await provider.send(item.phone, conFallback);
+        if (r.ok) {
+          registerSendTimeDowngrade(item.id, conFallback.templateName);
+          logger.info(
+            `[META] → outbox #${item.id} degradado a plantilla "${conFallback.templateName}" (la ventana caducó en cola)`
+          );
+        }
+      } else {
+        // Fuera de ventana y SIN plantilla equivalente: fallo distinguible
+        // (T1 §2.5) — no el genérico outside_24h_window, sino el que dice
+        // qué falta y quién lo arregla.
+        r = {
+          ok: false,
+          providerMessageId: null,
+          retryable: false,
+          error:
+            "template_not_configured_outside_window: la ventana de 24 h caducó y este mensaje no tiene plantilla aprobada equivalente — se necesita plantilla en Meta o que el cliente escriba",
+        };
+      }
+    }
+
     if (r.ok) {
       setOutboxProviderResult(item.id, provider.name, r.providerMessageId);
       logger.info(`[META] → outbox #${item.id} enviado a ${maskPhone(item.phone)} (${item.message_type})`);
@@ -114,6 +149,33 @@ export async function runCloudOutboxTick(provider: WhatsAppProvider): Promise<{ 
     }
   }
   return result;
+}
+
+/** La plantilla equivalente adjunta al encolar (InteractiveSpec.templateFallback). */
+function extractTemplateFallback(
+  item: OutboxItem
+): Extract<import("./provider").OutboundWhatsAppMessage, { kind: "template" }> | null {
+  if (!item.payload_json) return null;
+  try {
+    const spec = JSON.parse(item.payload_json) as { templateFallback?: { kind?: string; templateName?: string } };
+    if (spec.templateFallback?.kind === "template" && spec.templateFallback.templateName) {
+      return spec.templateFallback as Extract<import("./provider").OutboundWhatsAppMessage, { kind: "template" }>;
+    }
+  } catch {
+    /* payload ilegible: sin fallback */
+  }
+  return null;
+}
+
+/** Persiste que la fila salió como PLANTILLA y por qué (auditable). */
+function registerSendTimeDowngrade(itemId: number, templateName: string): void {
+  systemDbHandle()
+    .prepare(
+      `UPDATE outbox SET message_type = 'template', template_name = ?,
+        failure_reason = 'fallback_reason=outside_24h_window (degradado en envío: la ventana caducó en cola)'
+       WHERE id = ?`
+    )
+    .run(templateName, itemId);
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;

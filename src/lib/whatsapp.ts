@@ -102,7 +102,11 @@ export function sendWhatsAppInteractive(phone: string, spec: InteractiveSpec, op
     enqueueOutboxRich(convo.id, phone, {
       content: spec.fallbackText,
       messageType,
-      payloadJson: JSON.stringify(spec.message),
+      // El payload lleva el mensaje Y (si existe) su plantilla equivalente,
+      // para que el loop de entrega pueda degradar si la ventana caduca en
+      // cola. outboundFromItem lee `kind` en la raíz: se aplana el mensaje y
+      // el fallback viaja como campo hermano.
+      payloadJson: JSON.stringify({ ...spec.message, templateFallback: spec.templateFallback ?? undefined }),
       templateName: spec.message.kind === "template" ? spec.message.templateName : null,
       authorized,
     });

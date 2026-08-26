@@ -34,6 +34,15 @@ export interface InteractiveSpec {
   message: OutboundWhatsAppMessage;
   /** Texto equivalente para Baileys y para el panel de Chats. */
   fallbackText: string;
+  /**
+   * Plantilla EQUIVALENTE para cuando el interactivo no pueda salir por
+   * ventana de 24 h. La decisión principal es en el ENCOLADO (el scheduler
+   * mira la ventana), pero una fila puede caducar ESPERANDO en la cola
+   * (retenida por gates, reintentos): en ese caso el loop de entrega
+   * degrada a esta plantilla en vez de fallar terminal — y persiste lo que
+   * salió de verdad. Solo para mensajes que tengan plantilla aprobada.
+   */
+  templateFallback?: Extract<OutboundWhatsAppMessage, { kind: "template" }>;
 }
 
 /** Confirmación de pedido con botones (el mensaje inicial del flujo COD). */
@@ -74,17 +83,28 @@ export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
  * en Meta — no antes, para no fallar por un nombre que la WABA no conoce.
  */
 export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: boolean): InteractiveSpec {
-  if (withinSessionWindow) return buildConfirmationInteractive(order);
+  if (withinSessionWindow) {
+    const spec = buildConfirmationInteractive(order);
+    // La ventana puede caducar con la fila EN la cola: se adjunta la
+    // plantilla equivalente para que el loop de entrega pueda degradar.
+    return { ...spec, templateFallback: confirmationTemplate(order) };
+  }
   return {
-    message: buildTemplateMessage("order_confirmation_request", [
-      firstName(order) || "cliente",
-      shortProductLine(order),
-      money(order),
-    ]),
+    message: confirmationTemplate(order),
     // Mismo texto que el interactivo: es lo que enseña el panel y lo que
     // sale tal cual si algún día se hace rollback a Baileys con esto en cola.
     fallbackText: buildConfirmationInteractive(order).fallbackText,
   };
+}
+
+/** La plantilla de confirmación con las MISMAS variables que el interactivo
+ *  (una sola fuente de datos: el pedido). */
+function confirmationTemplate(order: OrderRow): Extract<OutboundWhatsAppMessage, { kind: "template" }> {
+  return buildTemplateMessage("order_confirmation_request", [
+      firstName(order) || "cliente",
+    shortProductLine(order),
+    money(order),
+  ]);
 }
 
 /** Selector multi-pedido como LISTA (en vez de pedir números por texto). */

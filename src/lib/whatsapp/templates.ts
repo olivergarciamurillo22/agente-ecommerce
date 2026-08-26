@@ -47,7 +47,10 @@ export function getTemplateSpec(name: string): TemplateSpec | null {
  * plantilla con parámetros de menos es un rechazo seguro de Meta, mejor
  * pillarlo aquí que en producción.
  */
-export function buildTemplateMessage(name: string, params: string[]): OutboundWhatsAppMessage {
+export function buildTemplateMessage(
+  name: string,
+  params: string[]
+): Extract<OutboundWhatsAppMessage, { kind: "template" }> {
   const spec = getTemplateSpec(name);
   if (!spec) throw new Error(`plantilla desconocida: "${name}" (no está en config/whatsapp-templates.json)`);
   if (params.length !== spec.variables.length) {
@@ -64,4 +67,18 @@ export function buildTemplateMessage(name: string, params: string[]): OutboundWh
     // no se inventan aquí — así no pueden desincronizarse de BUTTON_PAYLOADS.
     buttonPayloads: spec.buttons.map((b) => b.payload),
   };
+}
+
+/**
+ * Advertencia operativa (T1 §2.6): la categoría del catálogo LOCAL dice lo
+ * que DEBERÍA ser la plantilla, no lo que Meta aprobó de verdad — eso solo
+ * se ve en WhatsApp Manager. Nunca se infiere por el nombre.
+ */
+export function templateCategoryWarning(name: string): string | null {
+  const spec = getTemplateSpec(name);
+  if (!spec) return `la plantilla "${name}" no está en el catálogo local`;
+  if (spec.category !== "UTILITY") {
+    return `la plantilla "${name}" está declarada como ${spec.category} en el catálogo local — para confirmaciones de pedido debe ser UTILITY`;
+  }
+  return `verificar en WhatsApp Manager que "${name}" está aprobada como UTILITY: el catálogo local declara la intención, no la aprobación real`;
 }
