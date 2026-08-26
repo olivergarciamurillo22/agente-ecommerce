@@ -174,15 +174,26 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**⚠️ PRODUCCIÓN CORRE LA RAMA `fix/hardening-casamable`, NO `main`.**
-Pedro la desplegó el 25-08-2026 (commit `fe53c9d`+, esquema **9**) porque el
-piloto de Meta dependía de código que solo existía ahí. `main` (`f502168`)
-está 27 commits por detrás de lo desplegado — **mergear `main` es la
-reconciliación pendiente**, decisión de Óliver. Detalle completo y medido de
-esa sesión en `docs/CONTEXTO-2026-08-25.md` (léelo antes de tocar nada de
+**⚠️ EL NAS AÚN CORRE `fix/hardening-casamable` (esquema 9/10); `main` YA
+ESTÁ RECONCILIADO Y POR DELANTE.** El 26-08-2026 se mergeó
+`feat/operational-closure` → `main` (merge `73884b1`, esquema **11**, 493
+tests) tras verificar el grafo: hardening ⊂ main ⊂ closure, cero commits de
+producción fuera. **Desplegar `main` en el NAS es la acción pendiente, de
+Pedro**: pasos exactos en `docs/PEDRO-DEPLOY-OPERACIONAL.md` y manifest con
+rollback en `docs/DEPLOY-MANIFEST-26-08.md` (backup → precheck →
+`73884b1` → observación 30 min). Ninguna variable de entorno nueva. Contexto
+de la sesión de Pedro en `docs/CONTEXTO-2026-08-25.md` (leer antes de tocar
 Meta, Dropi o llamadas).
 
-**En la rama de hardening (26-08-2026, 418 tests):** los 4 ejes de estado
+**Cierre operativo (26-08, en main):** pestaña **Acciones** por defecto
+(bandeja de Pedro, 6 tipos por urgencia, resoluciones v11) · duplicados
+detectados a la entrada del webhook · watchdog de cancelaciones/duplicados ·
+contrato `docs/GOLDEN-PATH.md` + `ACCEPTANCE-CRITERIA.md` con test E2E ·
+`npm run casamable:simulate` (10 flujos) · `npm run readiness` (LOCAL READY)
+· `npm run deploy:precheck` (SAFE TO DEPLOY CODE / BLOCKED) · runbooks de
+Pedro y Óliver.
+
+**Base de hardening (contenida en main):** los 4 ejes de estado
 con el cierre como fuente de verdad de negocio · fulfillment por línea ·
 leases de scheduler · retención/PII · métricas fail-closed · timezone
 explícito · taxonomía de errores · máquina multi-pedido con memoria (bug
