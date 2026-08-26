@@ -237,7 +237,7 @@ async function main(): Promise<void> {
   const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage } = await import(
     "../src/lib/orders/normalize"
   );
-  const { verifyShopifyHmac, diagnoseShopifyHmacSecret } = await import("../src/lib/shopify/hmac");
+  const { verifyShopifyHmac, verifyShopifyHmacEitherSecret } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
@@ -354,25 +354,33 @@ async function main(): Promise<void> {
     assert.equal(verifyShopifyHmac("cuerpo", sign("cuerpo"), undefined), false);
   });
 
-  await test("BUG2 diagnóstico: diagnoseShopifyHmacSecret dice CUÁL de los dos secretos firmó, sin aceptar nada", async () => {
+  await test("BUG2: verifyShopifyHmacEitherSecret acepta el secreto de webhooks de la tienda", () => {
+    const r = verifyShopifyHmacEitherSecret("cuerpo", sign("cuerpo"));
+    assert.equal(r.valid, true);
+    assert.equal(r.matchedWith, "webhook_secret");
+  });
+
+  await test("BUG2: verifyShopifyHmacEitherSecret acepta el CLIENT SECRET de la app (el caso real: los 4 webhooks son app-owned)", async () => {
     const signWith = (secret: string, body: string) => crypto.createHmac("sha256", secret).update(body).digest("base64");
-
-    // Firmado con el secreto de webhooks de la tienda (el que ya se valida hoy).
-    assert.equal(diagnoseShopifyHmacSecret("cuerpo", sign("cuerpo")), "webhook_secret");
-
-    // Firmado con el CLIENT SECRET de la app — el caso sospechoso del BUG2:
-    // una suscripción app-owned firmando con un secreto que el código no
-    // comprueba todavía.
     await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
       const firmaClientSecret = signWith("test_client_secret", "cuerpo");
-      assert.equal(diagnoseShopifyHmacSecret("cuerpo", firmaClientSecret), "client_secret");
+      const r = verifyShopifyHmacEitherSecret("cuerpo", firmaClientSecret);
+      assert.equal(r.valid, true);
+      assert.equal(r.matchedWith, "client_secret");
     });
+  });
 
-    // Ninguno de los dos (firma inventada, o SHOPIFY_CLIENT_SECRET sin configurar).
-    assert.equal(diagnoseShopifyHmacSecret("cuerpo", sign("otro cuerpo")), "ninguno");
+  await test("BUG2: verifyShopifyHmacEitherSecret rechaza una firma que no coincide con ninguno de los dos", async () => {
+    const signWith = (secret: string, body: string) => crypto.createHmac("sha256", secret).update(body).digest("base64");
+    const rInventada = verifyShopifyHmacEitherSecret("cuerpo", sign("otro cuerpo"));
+    assert.equal(rInventada.valid, false);
+    assert.equal(rInventada.matchedWith, "ninguno");
+
     await withEnv({ SHOPIFY_CLIENT_SECRET: undefined }, () => {
-      const firmaClientSecret = signWith("un-secreto-cualquiera", "cuerpo");
-      assert.equal(diagnoseShopifyHmacSecret("cuerpo", firmaClientSecret), "ninguno");
+      const firmaOtroSecreto = signWith("un-secreto-cualquiera", "cuerpo");
+      const r = verifyShopifyHmacEitherSecret("cuerpo", firmaOtroSecreto);
+      assert.equal(r.valid, false);
+      assert.equal(r.matchedWith, "ninguno");
     });
   });
 
@@ -404,14 +412,21 @@ async function main(): Promise<void> {
     assert.equal(db.getOrderByShopifyId("900002"), null);
   });
 
-  await test("BUG2 diagnóstico: firmado con SHOPIFY_CLIENT_SECRET sigue dando 401 — es diagnóstico, NO acepta un segundo secreto todavía", async () => {
-    const raw = JSON.stringify(codPayload({ id: 900003, order_number: 1103 }));
+  await test("BUG2: firmado con SHOPIFY_CLIENT_SECRET se ACEPTA (los 4 webhooks de esta tienda son app-owned) y deja rastro info", async () => {
+    const sysRepo = await import("../src/lib/system/repo");
+    const raw = JSON.stringify(codPayload({ id: 900099, order_number: 1199 }));
     await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
       const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
+      const antes = sysRepo.countIntegrationEvents("shopify", "webhook_client_secret_match", 0);
       const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: firmaClientSecret }));
-      assert.equal(res.status, 401, "el diagnóstico solo informa — el pedido sigue rechazándose hasta que se decida aceptar los dos secretos");
+      assert.equal(res.status, 200, "BUG2: el client secret es un secreto legítimo de Shopify, no debe rechazarse");
+      assert.equal(
+        sysRepo.countIntegrationEvents("shopify", "webhook_client_secret_match", 0),
+        antes + 1,
+        "queda rastro de que se validó con el secreto de la app, no el de la tienda"
+      );
     });
-    assert.equal(db.getOrderByShopifyId("900003"), null);
+    assert.ok(db.getOrderByShopifyId("900099"), "el pedido SÍ se guarda: la firma es válida");
   });
   await test("pedido NO COD se ignora con 200", () => {
     const raw = JSON.stringify(
@@ -3610,7 +3625,28 @@ async function main(): Promise<void> {
         assert.equal(h.authMode, "static");
         assert.equal(h.status, "critical", "401 reciente → critical");
         sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        // Estado virgen de verdad: sin firmas inválidas heredadas de otros
+        // tests (BUG2 las hace ruidosas a propósito — aquí probamos el
+        // camino sano, no ese).
+        const Database = require("better-sqlite3");
+        const raw = new Database(path.join(tmpDir, "messages.db"));
+        raw.prepare("DELETE FROM integration_events WHERE integration = 'shopify' AND event_type = 'webhook_bad_signature'").run();
+        raw.close();
         assert.equal(sysInteg.getShopifyHealth().status, "healthy");
+      }
+    );
+  });
+
+  await test("BUG2: getShopifyHealth se pone ruidoso (warning) si ha habido webhooks con firma inválida en 24 h", async () => {
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_token_de_prueba", SHOPIFY_STORE_DOMAIN: "x.myshopify.com" },
+      () => {
+        sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
+        const h = sysInteg.getShopifyHealth();
+        assert.ok(h.webhookBadSignature24h >= 1, "un rechazo real ya no puede quedar invisible");
+        assert.equal(h.status, "warning");
+        assert.match(h.message, /firma inválida en 24 h/);
       }
     );
   });
@@ -4366,18 +4402,18 @@ async function main(): Promise<void> {
     assert.equal(db.getOrderById(o.id)!.closure_status, "unknown");
   });
 
-  await test("BUG2 diagnóstico en orders-events: firmado con SHOPIFY_CLIENT_SECRET también sigue en 401 — mismo diagnóstico, mismo endpoint compartido por los 3 topics", async () => {
-    const o = mkOrder("990802", "3802", "34600119802");
-    const raw = JSON.stringify(closurePayload({ id: 990802 }));
+  await test("BUG2 en orders-events: firmado con SHOPIFY_CLIENT_SECRET se ACEPTA — mismo endpoint compartido por los 3 topics", async () => {
+    const o = mkOrder("990899", "3899", "34600119899");
+    const raw = JSON.stringify(closurePayload({ id: 990899, cancelled_at: "2026-08-23T10:00:00Z" }));
     await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
       const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
       const res = processOrdersEventWebhook(
         raw,
         shopifyHeaders(raw, { topic: "orders/cancelled", hmac: firmaClientSecret, webhookId: "wh-bug2-clientsecret" })
       );
-      assert.equal(res.status, 401);
+      assert.equal(res.status, 200, "BUG2: orders/cancelled, orders/fulfilled y orders/updated comparten este endpoint — los tres estaban fallando por lo mismo");
     });
-    assert.equal(db.getOrderById(o.id)!.closure_status, "unknown", "sin efecto: el diagnóstico no cambia la decisión");
+    assert.equal(db.getOrderById(o.id)!.closure_status, "cancelled", "ahora SÍ se aplica: antes se perdía toda cancelación firmada con el client secret");
   });
 
   await test("E2 orders/cancelled: closure_status → cancelled, source shopify, closure_at = cancelled_at del payload", () => {
@@ -7049,6 +7085,21 @@ async function main(): Promise<void> {
     if (body.phone !== null) {
       assert.match(body.phone, /^\*\*\*\d{4}$/, "solo los últimos 4 dígitos");
     }
+  });
+
+  await test("BUG2: /api/health y /api/health/live avisan de webhooks de Shopify con firma inválida, sin cambiar el código de estado por eso", async () => {
+    sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
+
+    const pub = await import("../src/app/api/health/route");
+    const resPub = await pub.GET();
+    const bodyPub = (await resPub.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
+    assert.ok(bodyPub.shopifyWebhookBadSignature24h >= 1);
+
+    const live = await import("../src/app/api/health/live/route");
+    const resLive = await live.GET();
+    const bodyLive = (await resLive.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
+    assert.equal(resLive.status, 200, "informativo: nunca tumba la liveness por esto");
+    assert.ok(bodyLive.shopifyWebhookBadSignature24h >= 1);
   });
 
   await test("SEGURIDAD · los tres verificadores de firma usan comparación en tiempo constante", () => {

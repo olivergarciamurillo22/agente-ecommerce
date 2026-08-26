@@ -192,6 +192,8 @@ export interface ShopifyHealth {
   lastApiErrorAt: number | null;
   lastApiError: string | null;
   lastTagWriteAt: number | null;
+  /** Webhooks rechazados por HMAC inválido en las últimas 24 h. */
+  webhookBadSignature24h: number;
   message: string;
 }
 
@@ -213,6 +215,7 @@ export function getShopifyHealth(): ShopifyHealth {
     lastApiErrorAt: null,
     lastApiError: null,
     lastTagWriteAt: null,
+    webhookBadSignature24h: countIntegrationEvents("shopify", "webhook_bad_signature", now() - 86400),
     message: "",
   };
 
@@ -242,12 +245,9 @@ export function getShopifyHealth(): ShopifyHealth {
     base.message = base.webhookSecretPresent
       ? "webhook configurado pero sin credenciales de la Admin API (no se puede etiquetar)"
       : "sin configurar";
-    return base;
-  }
-
-  // El estado ACTUAL es el de la fila (cada registro lo actualiza): no se
-  // reconstruye comparando timestamps, que solo tienen resolución de segundo.
-  if (health?.status === "critical" || health?.status === "warning") {
+  } else if (health?.status === "critical" || health?.status === "warning") {
+    // El estado ACTUAL es el de la fila (cada registro lo actualiza): no se
+    // reconstruye comparando timestamps, que solo tienen resolución de segundo.
     base.status = health.status;
     base.message = `último intento con la API falló: ${base.lastApiError ?? "error"}`;
   } else {
@@ -256,6 +256,16 @@ export function getShopifyHealth(): ShopifyHealth {
       ? `API lista (${authMode}) · escrituras permitidas`
       : `API lista (${authMode}) · escrituras BLOQUEADAS por gates`;
   }
+
+  // Firmas inválidas recientes (BUG2, 26-08): un rechazo silencioso en
+  // integration_events es invisible si nadie mira el feed — llevábamos días
+  // perdiendo cancelaciones sin enterarnos. Esto lo hace ruidoso aunque el
+  // resto de la integración esté sana.
+  if (base.webhookBadSignature24h > 0) {
+    base.status = base.status === "critical" ? "critical" : "warning";
+    base.message += ` · ${base.webhookBadSignature24h} webhook(s) con firma inválida en 24 h`;
+  }
+
   return base;
 }
 
