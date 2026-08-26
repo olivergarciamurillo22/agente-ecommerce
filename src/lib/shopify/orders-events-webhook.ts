@@ -109,7 +109,12 @@ export function processOrdersEventWebhook(
   }
 
   if (!verifyShopifyHmac(rawBody, headers.hmac, secret)) {
-    logger.warn(`[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}) — rechazado`);
+    // webhookId (id de ENTREGA, no de suscripción) para poder correlacionar
+    // una racha de rechazos con una suscripción concreta de Shopify (ver
+    // BUG2: una suscripción duplicada firma con otro secreto).
+    logger.warn(
+      `[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}, webhookId=${headers.webhookId ?? "?"}) — rechazado`
+    );
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
   }

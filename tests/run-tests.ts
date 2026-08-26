@@ -5777,6 +5777,51 @@ async function main(): Promise<void> {
     assert.equal(plan2.toCreate.some((x) => x.topic === "orders/create"), false);
   });
 
+  await test("BUG2 planWebhookEnsure: dos suscripciones del MISMO topic se detectan como duplicado, aunque una apunte bien", async () => {
+    const { planWebhookEnsure } = await import("../src/lib/shopify/webhook-subscriptions");
+    const deseadas = [
+      { topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+      { topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+    ];
+
+    // El caso real del bug: orders/updated tiene DOS suscripciones — la
+    // nueva (app-owned, URL correcta) y una vieja (admin-created) que quedó
+    // viva tras la migración del 24-08. Con el .find() de antes, esto se
+    // veía como "✓ Correctas" sin más: nunca se enteraba de la segunda.
+    const plan = planWebhookEnsure(
+      [
+        { id: 1, topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+        { id: 10, topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+        { id: 7, topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+      ],
+      deseadas
+    );
+
+    assert.equal(plan.duplicates.length, 1, "orders/updated debe salir como duplicado");
+    assert.equal(plan.duplicates[0].topic, "orders/updated");
+    assert.deepEqual(
+      plan.duplicates[0].subscriptions.map((s) => s.id).sort((a, b) => a - b),
+      [7, 10],
+      "las DOS suscripciones deben listarse, con su id, para decidir a mano cuál sobra"
+    );
+    assert.ok(
+      plan.ok.some((x) => x.topic === "orders/updated"),
+      "sigue contando como cubierto: al menos una de las dos apunta a la URL correcta"
+    );
+    assert.equal(plan.toCreate.some((x) => x.topic === "orders/updated"), false, "nunca crea una tercera copia");
+
+    // Si NINGUNA de las duplicadas apunta a la URL correcta: duplicado Y mismatched a la vez.
+    const planPeor = planWebhookEnsure(
+      [
+        { id: 10, topic: "orders/updated", address: "https://vieja.example/hook" },
+        { id: 7, topic: "orders/updated", address: "https://tambien-vieja.example/hook" },
+      ],
+      deseadas
+    );
+    assert.equal(planPeor.duplicates.length, 1);
+    assert.equal(planPeor.mismatched.some((m) => m.topic === "orders/updated"), true);
+  });
+
   // ============ 45 · Arreglos de fidelidad (lo que el sistema contaba mal) ============
   console.log("\n— Fidelidad: fulfillment parcial y orden de llegada —");
 
