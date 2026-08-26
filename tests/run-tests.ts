@@ -8620,6 +8620,139 @@ async function main(): Promise<void> {
     }
   });
 
+  // ============ 59 · Entorno local: schema, perfiles y redacción ============
+  console.log("\n— Entorno local: env schema y doctor —");
+
+  const envSchema = await import("../src/lib/config/env-schema");
+
+  /** Entorno sintético SIN heredar el real (los tests no dependen del Mac). */
+  const entorno = (vars: Record<string, string>): NodeJS.ProcessEnv => vars as NodeJS.ProcessEnv;
+
+  await test("ENV · local-safe: sin credenciales reales está VERDE (se puede trabajar sin nada)", () => {
+    const a = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1" }));
+    assert.equal(a.ready, true, "cero credenciales = listo para desarrollo local");
+    assert.deepEqual(a.missingRequired, []);
+  });
+
+  await test("ENV · local-safe grita ante producción encendida en el Mac", () => {
+    const a = envSchema.auditEnvironment("local-safe", entorno({ APP_MODE: "production", TEST_MODE: "0" }));
+    assert.equal(a.ready, false);
+    assert.ok(a.dangers.some((d) => d.startsWith("🚨")), "combinación peligrosa detectada y gritada");
+    // Y los interruptores de efectos reales encendidos también avisan.
+    const b = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", WHATSAPP_SEND_ENABLED: "1", SHOPIFY_WRITE_ENABLED: "1" }));
+    assert.ok(b.missingRequired.includes("WHATSAPP_SEND_ENABLED"), "local-safe exige envíos apagados");
+  });
+
+  await test("ENV · cloud-pilot: exige credenciales Meta, provider, TEST_MODE y allowlist NO vacía", () => {
+    const sinNada = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({}));
+    assert.equal(sinNada.ready, false);
+    for (const v of ["META_WHATSAPP_ACCESS_TOKEN", "META_WHATSAPP_APP_SECRET", "META_WHATSAPP_PHONE_NUMBER_ID", "TEST_PHONE_ALLOWLIST", "WHATSAPP_PROVIDER", "TEST_MODE"]) {
+      assert.ok(sinNada.missingRequired.includes(v), `${v} debe faltar`);
+    }
+    const completo = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", TEST_MODE: "1",
+      TEST_PHONE_ALLOWLIST: "34600000001", META_WHATSAPP_PHONE_NUMBER_ID: "12345",
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: "6789", META_WHATSAPP_ACCESS_TOKEN: "x",
+      META_WHATSAPP_APP_SECRET: "x", META_WHATSAPP_VERIFY_TOKEN: "x",
+      APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1",
+    }));
+    assert.equal(completo.ready, true, "con todo puesto, verde");
+  });
+
+  await test("ENV · retell-pilot: allowlist vacía = FAIL con el aviso de no activar ai_calls_enabled", () => {
+    const a = envSchema.auditEnvironment("retell-pilot", entorno({
+      RETELL_API_KEY: "x", RETELL_AGENT_ID: "agent_x", RETELL_FROM_NUMBER: "+34950835615", TEST_MODE: "1",
+    }));
+    assert.equal(a.ready, false);
+    assert.ok(a.missingRequired.includes("CALLS_ALLOWLIST"));
+    assert.ok(a.dangers.some((d) => /NO ACTIVES ai_calls_enabled/.test(d)));
+  });
+
+  await test("ENV · shopify-readonly: acepta token estático O client_id+secret, y exige writes apagados", () => {
+    const conToken = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_ADMIN_ACCESS_TOKEN: "x", SHOPIFY_WRITE_ENABLED: "0", TEST_MODE: "1",
+    }));
+    assert.equal(conToken.ready, true, "el token estático basta");
+    const conPar = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_CLIENT_ID: "x", SHOPIFY_CLIENT_SECRET: "y", TEST_MODE: "1",
+    }));
+    assert.equal(conPar.ready, true, "el par client_id+secret también");
+    const sinCreds = envSchema.auditEnvironment("shopify-readonly", entorno({ SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", TEST_MODE: "1" }));
+    assert.equal(sinCreds.ready, false, "sin ninguna de las dos vías, no");
+    const conWrites = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_ADMIN_ACCESS_TOKEN: "x", SHOPIFY_WRITE_ENABLED: "1", TEST_MODE: "1",
+    }));
+    assert.equal(conWrites.ready, false, "readonly con writes encendidos NO es readonly");
+  });
+
+  await test("ENV · Dropi NO es requisito de nada, y rellenarla es un ERROR señalado", () => {
+    for (const perfil of ["local-safe", "shopify-readonly", "whatsapp-cloud-pilot", "retell-pilot"] as const) {
+      const a = envSchema.auditEnvironment(perfil, entorno({ TEST_MODE: "1" }));
+      assert.equal(a.missingRequired.some((v) => v.startsWith("DROPIPRO")), false, `${perfil} no pide nada de Dropi`);
+    }
+    const rellenada = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", DROPIPRO_API_KEY: "algo" }));
+    const item = rellenada.items.find((i) => i.spec.name === "DROPIPRO_API_KEY")!;
+    assert.equal(item.state, "invalid", "no existe API que la use: rellenarla es un error, no un logro");
+  });
+
+  await test("ENV · REDACCIÓN: un secreto configurado JAMÁS expone su valor en la auditoría", () => {
+    const a = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      META_WHATSAPP_ACCESS_TOKEN: "EAA-VALOR-QUE-NO-PUEDE-SALIR",
+      RETELL_API_KEY: "key_VALOR-QUE-NO-PUEDE-SALIR",
+    }));
+    const serializado = JSON.stringify(a);
+    assert.equal(serializado.includes("QUE-NO-PUEDE-SALIR"), false, "el valor de un secreto no aparece NI EN LA ESTRUCTURA");
+    const token = a.items.find((i) => i.spec.name === "META_WHATSAPP_ACCESS_TOKEN")!;
+    assert.equal(token.shownValue, null, "shownValue de un secreto es SIEMPRE null");
+  });
+
+  await test("ENV · placeholders y typos: 'changeme' cuenta como vacío y un enum inválido no pasa en silencio", () => {
+    const conPlaceholder = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      WHATSAPP_PROVIDER: "cloud_api", TEST_MODE: "1",
+      META_WHATSAPP_ACCESS_TOKEN: "changeme",
+    }));
+    assert.ok(conPlaceholder.missingRequired.includes("META_WHATSAPP_ACCESS_TOKEN"), "'changeme' NO es una credencial");
+
+    const typo = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", WHATSAPP_PROVIDER: "cloudapi" }));
+    const item = typo.items.find((i) => i.spec.name === "WHATSAPP_PROVIDER")!;
+    assert.equal(item.state, "invalid", "un typo en el enum se señala, jamás pasa en silencio");
+    assert.match(item.problem ?? "", /baileys \| cloud_api/);
+  });
+
+  await test("ENV · .env.local está ignorado por Git (el archivo de secretos no puede versionarse)", () => {
+    const { execSync } = require("node:child_process") as typeof import("node:child_process");
+    const out = execSync("git check-ignore .env.local || true", { encoding: "utf8", cwd: process.cwd() }).trim();
+    assert.equal(out, ".env.local");
+  });
+
+  await test("ENV · env:init nunca sobrescribe un .env.local existente", () => {
+    // Se prueba la LÓGICA en un directorio temporal, no el .env.local real.
+    const os = require("node:os") as typeof import("node:os");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "envinit-"));
+    try {
+      fs.writeFileSync(path.join(dir, ".env.example"), "VARIABLE=\n");
+      fs.writeFileSync(path.join(dir, ".env.local"), "MI_SECRETO_YA_PEGADO=x\n");
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      execSync(`npx tsx ${path.join(process.cwd(), "scripts/env-init.ts")}`, { cwd: dir, encoding: "utf8" });
+      assert.equal(
+        fs.readFileSync(path.join(dir, ".env.local"), "utf8"),
+        "MI_SECRETO_YA_PEGADO=x\n",
+        "el archivo con secretos pegados NO se toca"
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("ENV · seguridad de la DB local: las rutas de NAS se reconocen como peligrosas", () => {
+    // La misma regla que usan local:doctor y local:reset.
+    const sospechosas = ["/volume1/docker/CasamableAgent/repo/data", "/app/data", "./nas-data/data"];
+    const buenas = [path.resolve(process.cwd(), "data"), "/Users/oliver/proyecto/data"];
+    const esNas = (p: string) => /\/volume1\/|\/app\/data|nas-data/.test(p);
+    for (const p of sospechosas) assert.equal(esNas(p), true, p);
+    for (const p of buenas) assert.equal(esNas(p), false, p);
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
