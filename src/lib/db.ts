@@ -1814,7 +1814,12 @@ export function getOrderByShopifyOrderNumber(orderNumber: string): OrderRow | nu
  * resultado y costaría una migración de esquema, un backfill y un despliegue.
  */
 const ORDERS_ARRIVAL_ORDER =
-  "CAST(shopify_order_number AS INTEGER) DESC, created_at DESC, id DESC";
+  // T3 (26-08): con `ordered_at` disponible (la fecha REAL de compra), esa
+  // manda. COALESCE a created_at para las filas históricas aún sin backfill
+  // de la columna, y el número de pedido como desempate estable — que era el
+  // criterio anterior y sigue siendo correcto entre pedidos del mismo
+  // instante.
+  "COALESCE(ordered_at, created_at) DESC, CAST(shopify_order_number AS INTEGER) DESC, id DESC";
 
 export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
   const db = ctx().db;

@@ -8414,6 +8414,21 @@ async function main(): Promise<void> {
     }
   });
 
+  await test("T3 · el panel ordena por ordered_at (fecha REAL de compra), no por cuándo se importó", () => {
+    // Un backfill importa HOY un pedido comprado hace días: debe aparecer
+    // DEBAJO de los comprados ayer, aunque su fila sea la más nueva.
+    const tel = "34600177620";
+    const viejoComprado = mkMulti("972620", "9620", tel);   // comprado hace 5 días, importado ahora
+    const nuevoComprado = mkMulti("972621", "9621", tel);   // comprado hace 1 hora
+    const ahora = Math.floor(Date.now() / 1000);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora - 5 * 86400, viejoComprado.id);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora - 3600, nuevoComprado.id);
+
+    const mios = new Set([viejoComprado.id, nuevoComprado.id]);
+    const orden = db.listOrders(undefined, 2000).filter((o) => mios.has(o.id)).map((o) => o.shopify_order_number);
+    assert.deepEqual(orden, ["9621", "9620"], "manda la fecha de compra, no la de import");
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
