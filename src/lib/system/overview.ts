@@ -34,6 +34,7 @@ import {
 } from "./tracking-overview";
 import type { Measured } from "./metric-result";
 import { getSecurityPosture, type PostureItem } from "./security-posture";
+import { getCallsHealth, type CallsHealth } from "./health-integrations";
 import { getDeliveryMetrics, getDeliveryMetricsMeasured, type DeliveryMetrics } from "./delivery-metrics";
 import { getBusinessAlerts, type BusinessAlertsResult } from "./business-alerts";
 import { getUnitEconomics, getUnitEconomicsMeasured, type UnitEconomics } from "./unit-economics";
@@ -57,6 +58,8 @@ export interface SystemOverview {
   tracking: TrackingOverview;
   /** Cómo está configurado esto en cuanto a seguridad y corrección. */
   security: PostureItem[];
+  /** Salud operativa de las llamadas (Retell): visible sin abrir la pestaña. */
+  calls: CallsHealth;
   /** Confianza de cada métrica: "ok" | "partial" | "unknown" | "error".
    *  Sin esto, un 0 por fallo de consulta y un 0 real se pintan igual. */
   metricStatus: {
@@ -239,6 +242,7 @@ export function getSystemOverview(): SystemOverview {
     schedulers,
     tracking,
     security: getSecurityPosture(),
+    calls: getCallsHealth(),
     metricStatus: {
       tracking: { ...trackingM, value: null },
       delivery: { ...deliveryM, value: null },

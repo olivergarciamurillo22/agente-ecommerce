@@ -421,3 +421,90 @@ export function getDropiHealth(): DropiHealth {
   }
   return base;
 }
+
+// --- Retell / llamadas: salud OPERATIVA (sin inventar billing) ---
+
+export interface CallsHealth {
+  enabled: boolean;
+  shadowMode: boolean;
+  /** true si hay allowlist con números (la protección del piloto). */
+  allowlistActive: boolean;
+  lastAttemptAt: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  consecutiveFailures: number;
+  /** Retell no expone saldo por API que tengamos verificado: se dice la
+   *  verdad ("hay que mirarlo a mano"), nunca un healthy falso. */
+  paymentStatus: "unknown_manual_check_required";
+  status: HealthStatus;
+  message: string;
+}
+
+export function getCallsHealth(): CallsHealth {
+  const base: CallsHealth = {
+    enabled: false,
+    shadowMode: true,
+    allowlistActive: false,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    consecutiveFailures: 0,
+    paymentStatus: "unknown_manual_check_required",
+    status: "unknown",
+    message: "",
+  };
+  try {
+    const db = systemDbHandle();
+    const cfgRow = (k: string) =>
+      (db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined)?.value;
+    base.enabled = (cfgRow("ai_calls_enabled") ?? process.env.AI_CALLS_ENABLED ?? "0") === "1";
+    base.shadowMode = (cfgRow("calls_shadow_mode") ?? process.env.CALLS_SHADOW_MODE ?? "1") === "1";
+    const allow = (cfgRow("calls_allowlist") ?? process.env.CALLS_ALLOWLIST ?? "").trim();
+    base.allowlistActive = allow.length > 0;
+
+    const agg = db
+      .prepare(
+        `SELECT
+           (SELECT MAX(started_at) FROM call_attempts WHERE started_at IS NOT NULL) AS lastAttempt,
+           (SELECT MAX(ended_at) FROM call_attempts WHERE state = 'completed') AS lastSuccess,
+           (SELECT MAX(COALESCE(ended_at, started_at)) FROM call_attempts WHERE state = 'manual_review') AS lastFailure`
+      )
+      .get() as { lastAttempt: number | null; lastSuccess: number | null; lastFailure: number | null };
+    base.lastAttemptAt = agg.lastAttempt;
+    base.lastSuccessAt = agg.lastSuccess;
+    base.lastFailureAt = agg.lastFailure;
+
+    // Fallos consecutivos: intentos recientes en manual_review posteriores al
+    // último completado. Una racha aquí suele ser saldo agotado o credencial.
+    const racha = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM call_attempts
+          WHERE state = 'manual_review'
+            AND COALESCE(ended_at, started_at, scheduled_at) > COALESCE((
+              SELECT MAX(ended_at) FROM call_attempts WHERE state = 'completed'
+            ), 0)`
+      )
+      .get() as { n: number };
+    base.consecutiveFailures = racha.n;
+
+    if (!base.enabled) {
+      base.status = "healthy";
+      base.message = base.shadowMode
+        ? "apagadas (kill switch cerrado) · shadow ON: simula sin llamar"
+        : "apagadas (kill switch cerrado)";
+    } else if (!base.allowlistActive && process.env.TEST_MODE === "1") {
+      base.status = "warning";
+      base.message = "encendidas SIN allowlist en modo prueba: el fail-closed está bloqueando todas las llamadas — rellena calls_allowlist";
+    } else if (base.consecutiveFailures >= 3) {
+      base.status = "critical";
+      base.message = `${base.consecutiveFailures} llamadas seguidas a revisión sin ninguna completada: revisar saldo de Retell y credenciales (el saldo NO se puede comprobar desde aquí)`;
+    } else {
+      base.status = "healthy";
+      base.message = `encendidas${base.shadowMode ? " en shadow" : ""} · allowlist ${base.allowlistActive ? "activa" : "SIN restricción"}`;
+    }
+  } catch (err) {
+    base.status = "warning";
+    base.message = `no se pudo leer: ${err instanceof Error ? err.message : "error"}`;
+  }
+  return base;
+}

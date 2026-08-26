@@ -8493,6 +8493,85 @@ async function main(): Promise<void> {
     assert.deepEqual(orden, ["9621", "9620"], "manda la fecha de compra, no la de import");
   });
 
+  // ============ 58 · Cierre 26-08: llamadas fail-closed, validador, salud ============
+  console.log("\n— Cierre: llamadas fail-closed y validador de prompt —");
+
+  const promptVal = await import("../src/lib/calls/prompt-validator");
+  const callsCfg58 = await import("../src/lib/calls/config");
+
+  await test("CALLS · FAIL-CLOSED en piloto: allowlist vacía + TEST_MODE=1 NO llama a nadie", async () => {
+    // La trampa real: CALLS_ALLOWLIST vacía significaba "sin restricción" —
+    // lo contrario que TEST_PHONE_ALLOWLIST. Abrir el kill switch con la
+    // lista sin rellenar habría llamado a TODOS los clientes.
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
+    });
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
+    });
+    // Compatibilidad documentada: en producción real (TEST_MODE=0) vacía
+    // sigue siendo "sin restricción" — con el kill switch y el cap delante.
+    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000003"), true);
+    });
+  });
+
+  await test("PROMPT · el validador caza exactamente los fallos del incidente v5", () => {
+    const v5malo =
+      "Hola {{nombre_cliente}}, tu pedido {{numero_pedido | digito a digito}} de {{producto_inventado}} " +
+      "llegará a {direccion} el [fecha_entrega].";
+    const r = promptVal.validatePromptPlaceholders(v5malo);
+    assert.equal(r.ok, false);
+    const kinds = r.issues.map((i) => i.kind).sort();
+    assert.ok(kinds.includes("template_filter"), "el '| dígito a dígito' que el agente leyó en voz alta");
+    assert.ok(kinds.includes("unknown_placeholder"), "variable fuera del contrato");
+    assert.ok(kinds.includes("single_brace"), "{direccion} con una llave no se sustituye");
+    assert.ok(kinds.includes("bracket_placeholder"), "[fecha_entrega] se leería tal cual");
+    assert.deepEqual(r.used, ["nombre_cliente"], "solo la válida cuenta como usada");
+
+    const v6bueno =
+      "Hola {{nombre_cliente}}, llamo de Casamable por tu pedido {{numero_pedido}}: " +
+      "{{unidades}} de {{producto}} por {{importe_total}}, a entregar en {{direccion}}, {{localidad}}.";
+    assert.equal(promptVal.validatePromptPlaceholders(v6bueno).ok, true);
+  });
+
+  await test("PROMPT · contrato sincronizado: las variables del validador SON las de payload.ts", () => {
+    // Si alguien añade una variable al payload sin tocar el validador (o al
+    // revés), esto falla y el desfase se ve aquí, no en una llamada real.
+    const payloadMod = fs.readFileSync(path.join(process.cwd(), "src/lib/calls/payload.ts"), "utf8");
+    const ini = payloadMod.indexOf("variables: {");
+    const fin = payloadMod.indexOf("},", ini);
+    const cuerpo = payloadMod.slice(ini, fin);
+    // Coge tanto `clave: valor` como el shorthand `clave,` (producto, direccion).
+    const delPayload = [...cuerpo.matchAll(/^\s{6}([a-z_]+)[,:]/gm)].map((m) => m[1]).sort();
+    const delValidador = [...promptVal.ALLOWED_PROMPT_VARIABLES].sort();
+    assert.deepEqual(delValidador, delPayload, "payload.ts y prompt-validator.ts deben declarar LAS MISMAS variables");
+  });
+
+  await test("CALLS HEALTH · dice la verdad: kill switch, allowlist del piloto y saldo no comprobable", async () => {
+    const H = await import("../src/lib/system/health-integrations");
+    // Los tests de E7 pueden dejar ajustes en `settings` (tienen prioridad
+    // sobre el env): se fija el estado de partida explícitamente.
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_allowlist", "");
+    const h1 = H.getCallsHealth();
+    assert.equal(h1.enabled, false, "defaults: apagadas");
+    assert.equal(h1.status, "healthy", "apagado a propósito es sano, no un fallo");
+    assert.equal(h1.paymentStatus, "unknown_manual_check_required", "jamás un healthy falso sobre el saldo");
+
+    // Encendidas sin allowlist en modo prueba → warning: el fail-closed está
+    // bloqueando todo y hay que decirlo, no dejar que parezca que funciona.
+    await withEnv({ TEST_MODE: "1" }, () => {
+      db.setSetting("ai_calls_enabled", "1");
+      const h2 = H.getCallsHealth();
+      assert.equal(h2.status, "warning");
+      assert.match(h2.message, /fail-closed|allowlist/i);
+      db.setSetting("ai_calls_enabled", "0"); // dejarlo como estaba
+    });
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
