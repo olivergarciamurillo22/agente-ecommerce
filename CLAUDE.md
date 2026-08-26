@@ -212,12 +212,37 @@ CONTEXTO-2026-08-25 §7. No mergear sin su orden.
 
 ---
 
-## 12. Por rellenar (Óliver)
+## 12. Mapa del repo (rellenado el 26-08-2026; antes "Por rellenar")
 
-Este archivo se escribió desde el contexto de negocio y de diseño, no leyendo el árbol del repo. Completa cuando puedas:
+**Directorios de `src/lib/` y qué vive en cada uno:**
 
-- Mapa de directorios y qué vive en cada sitio (más allá de `src/lib/db.ts`).
-- Versión de la API de Shopify fijada y dónde se configura.
-- Lista de las 6 suscripciones de webhook de Dropea y qué hace cada handler.
-- Variables de entorno requeridas (solo nombres, nunca valores).
-- Cómo se levanta el proyecto en local y con qué DB de prueba.
+| Directorio | Qué es |
+|---|---|
+| `orders/` | El corazón COD: normalización del webhook, máquina de confirmación (`confirmation.ts`, con la multi-pedido), mensajes, **política de cierre** (`closure.ts`), **fulfillment por línea** (`fulfillment.ts`), elegibilidad, scheduler |
+| `shopify/` | Admin API (tag), HMAC, webhook `orders/create`, webhook de cierre, backfill E3, reconciliación E5, suscripciones |
+| `suppliers/` | Router por mapping, `dropea/` (adopción, webhook, reconcile E8, status-map), `dropi/` (andamiaje fail-closed), validación de mapping |
+| `tracking/` | Normalizador, `processSupplierUpdate` (con guardas de terminales), avisos postventa, polling |
+| `whatsapp/` + `whatsapp.ts` | `whatsapp.ts` = chokepoint de ENCOLADO; el directorio = proveedores (Baileys/Meta), webhook de Meta, interactivos, plantillas, loop cloud |
+| `baileys/` | Cliente WhatsApp Web, handler entrante (serializado por teléfono), loop del outbox |
+| `calls/` | Orquestador Retell E7: franjas, calendario, payload, resultados, DNC |
+| `system/` | Control Center: salud, métricas (fail-closed), alertas, economía, leases, retención, taxonomía de errores, postura de seguridad |
+| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v9) · safety gates |
+
+**Versión de la API de Shopify:** `SHOPIFY_API_VERSION`, default **`2026-07`**
+(en `shopify/admin.ts`, `backfill.ts` y `reconcile.ts`).
+
+**Las 6 suscripciones de webhook de Dropea** (`suppliers/dropea/types.ts`):
+`order.created` · `order.status.changed` · `order.cancelled` (→ tracking +
+eje de cierre) · `issue.created` · `issue.status.changed` · `issue.resolved`
+(→ revisión humana, jamás mensaje al cliente). Todas entran por
+`/api/webhooks/dropea` con HMAC.
+
+**Variables de entorno:** `.env.example` es el catálogo completo, organizado
+por secciones y con etiquetas REQUERIDA/OPCIONAL/FUTURA/HEREDADA. Está
+sincronizado contra lo que el código lee de verdad (auditado; ojo: muchas se
+leen dinámicamente, no como literal).
+
+**Levantar en local:** `npm run dev:all` (bot + web a la vez; QR en
+`localhost:3000`). La DB vive en `DATA_DIR` (default `./data`). Los tests
+(`npm test`) usan una **SQLite temporal propia** — jamás tocan `data/` ni la
+red, y corren con los safety gates de flujo abiertos y Shopify cerrado.
