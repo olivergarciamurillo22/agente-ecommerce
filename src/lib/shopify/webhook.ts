@@ -19,7 +19,7 @@ import {
 } from "../orders/normalize";
 import { verifyShopifyHmac } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
-import { maxOrderAgeMinutes } from "../safety";
+import { maxOrderAgeMinutes, orderTooOld } from "../safety";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -87,20 +87,23 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
 
   const n = normalizeOrder(payload);
 
-  // SEGURIDAD anti-replay/backfill: un pedido creado hace más de
-  // MAX_ORDER_AGE_MINUTES no dispara NINGUNA acción (ni WhatsApp, ni
-  // reminders, ni Shopify). Se guarda como ignored_old para poder verlo.
+  // SEGURIDAD anti-replay/backfill (T2): la antigüedad se mide SIEMPRE contra
+  // ordered_at (n.orderedAt — la fecha REAL de compra en Shopify, de T1),
+  // nunca contra cuándo nos enteramos nosotros del pedido. Un pedido creado
+  // hace más de MAX_ORDER_AGE_MINUTES no dispara NINGUNA acción (ni WhatsApp,
+  // ni reminders, ni Shopify). Se guarda como ignored_old para poder verlo.
+  // Si el payload no trae created_at (n.orderedAt === null), no se puede medir
+  // la antigüedad: se deja pasar (igual que antes de T2) en vez de bloquear
+  // por una ausencia que no es indicio de nada.
   let tooOld = false;
-  if (payload.created_at) {
-    const createdMs = Date.parse(payload.created_at);
-    if (Number.isFinite(createdMs)) {
-      const ageMin = (Date.now() - createdMs) / 60_000;
-      if (ageMin > maxOrderAgeMinutes()) {
-        tooOld = true;
-        logger.warn(
-          `[SAFETY] Order ${orderLabel} ignored_old_order (creado hace ${Math.round(ageMin)} min > ${maxOrderAgeMinutes()})`
-        );
-      }
+  if (n.orderedAt !== null) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (orderTooOld(n.orderedAt, nowSec)) {
+      tooOld = true;
+      const ageMin = (nowSec - n.orderedAt) / 60;
+      logger.warn(
+        `[SAFETY] Order ${orderLabel} ignored_old_order (creado hace ${Math.round(ageMin)} min > ${maxOrderAgeMinutes()})`
+      );
     }
   }
 
