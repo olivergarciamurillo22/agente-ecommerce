@@ -20,6 +20,7 @@ import pino from "pino";
 import {
   clearSelectedOrderContext,
   getActiveOrdersByPhone,
+  getNeedsCallOrdersByPhone,
   getConversationOrderContext,
   markOrderPossibleDuplicate,
   recordConversationPrompt,
@@ -381,7 +382,18 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   // allowlist o los autorizados a mano para el piloto. Un pedido no elegible
   // nunca recibió el mensaje inicial, así que su "respuesta" no es tal.
   const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
-  if (active.length === 0) return { handled: false };
+  if (active.length === 0) {
+    // El bot ya se apartó (needs_call = manos humanas) y por diseño calla…
+    // pero "cancelar" NO puede perderse en ese silencio: se estampa la
+    // petición (nada se cancela solo) para que en Acciones pase de "hay que
+    // llamarle" (urgencia 4) a "pide cancelar" (urgencia 1), y se le
+    // confirma al cliente que su petición quedó registrada.
+    if (isCancelIntent(text)) {
+      const enManosHumanas = getNeedsCallOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+      if (enManosHumanas.length > 0) return executeCancellation(phone, enManosHumanas);
+    }
+    return { handled: false };
+  }
 
   const authorized = (r: OrderReplyResult, order: OrderRow): OrderReplyResult => ({
     ...r,

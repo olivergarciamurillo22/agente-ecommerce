@@ -276,7 +276,7 @@ export function getBackupHealth(): BackupHealth {
     base.message = `la última copia no pasa la comprobación: ${base.integrity}`;
   } else if (base.ageHours > criticalHours) {
     base.status = "critical";
-    base.message = `última copia hace ${Math.round(base.ageHours)} h (límite ${criticalHours} h)`;
+    base.message = `última copia hace ${Math.round(base.ageHours)} h (límite ${criticalHours} h) — revisar la tarea de backup del NAS y lanzar una copia a mano hoy`;
   } else if (base.ageHours > warningHours) {
     base.status = "warning";
     base.message = `última copia hace ${Math.round(base.ageHours)} h (aviso a las ${warningHours} h)`;

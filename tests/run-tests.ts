@@ -4293,7 +4293,8 @@ async function main(): Promise<void> {
     await withEnv({ SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_secreto_faseA", DROPEA_API_KEY: "dropea-key-faseA", DROPIPRO_API_KEY: "dropi-key-faseA" }, () => {
       const ov = sysOverview.getSystemOverview();
       assert.ok(ov.business.delivery.last7d);
-      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 6);
+      // 8 = las 6 originales + cancelaciones pendientes + duplicados pendientes (watchdog del cierre operativo)
+      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 8);
       assert.ok(ov.business.economics.last30d);
       const json = JSON.stringify(ov);
       for (const s of ["shpat_secreto_faseA", "dropea-key-faseA", "dropi-key-faseA", "34600119021", "Calle Ejemplo"]) {
@@ -8506,6 +8507,16 @@ async function main(): Promise<void> {
     await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
     });
+    // Y con TEST_MODE SIN DEFINIR: safety.ts lo trata como modo prueba
+    // ACTIVO (!== "0"), así que el fail-closed también aplica. Con === "1"
+    // este caso habría reabierto el agujero de "vacía = todos".
+    const backup = process.env.TEST_MODE;
+    delete process.env.TEST_MODE;
+    try {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "sin definir = también fail-closed");
+    } finally {
+      process.env.TEST_MODE = backup;
+    }
     await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
@@ -8618,6 +8629,145 @@ async function main(): Promise<void> {
         assert.ok(!pat.test(src), `${rel} no debe contener ${pat}`);
       }
     }
+  });
+
+  // ============ 59 · Entorno local: schema, perfiles y redacción ============
+  console.log("\n— Entorno local: env schema y doctor —");
+
+  const envSchema = await import("../src/lib/config/env-schema");
+
+  /** Entorno sintético SIN heredar el real (los tests no dependen del Mac). */
+  const entorno = (vars: Record<string, string>): NodeJS.ProcessEnv => vars as NodeJS.ProcessEnv;
+
+  await test("ENV · local-safe: sin credenciales reales está VERDE (se puede trabajar sin nada)", () => {
+    const a = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1" }));
+    assert.equal(a.ready, true, "cero credenciales = listo para desarrollo local");
+    assert.deepEqual(a.missingRequired, []);
+  });
+
+  await test("ENV · local-safe grita ante producción encendida en el Mac", () => {
+    const a = envSchema.auditEnvironment("local-safe", entorno({ APP_MODE: "production", TEST_MODE: "0" }));
+    assert.equal(a.ready, false);
+    assert.ok(a.dangers.some((d) => d.startsWith("🚨")), "combinación peligrosa detectada y gritada");
+    // Y los interruptores de efectos reales encendidos también avisan.
+    const b = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", WHATSAPP_SEND_ENABLED: "1", SHOPIFY_WRITE_ENABLED: "1" }));
+    assert.ok(b.missingRequired.includes("WHATSAPP_SEND_ENABLED"), "local-safe exige envíos apagados");
+  });
+
+  await test("ENV · cloud-pilot: exige credenciales Meta, provider, TEST_MODE y allowlist NO vacía", () => {
+    const sinNada = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({}));
+    assert.equal(sinNada.ready, false);
+    for (const v of ["META_WHATSAPP_ACCESS_TOKEN", "META_WHATSAPP_APP_SECRET", "META_WHATSAPP_PHONE_NUMBER_ID", "TEST_PHONE_ALLOWLIST", "WHATSAPP_PROVIDER"]) {
+      assert.ok(sinNada.missingRequired.includes(v), `${v} debe faltar`);
+    }
+    // TEST_MODE sin definir NO falta: el código lo trata como ACTIVO
+    // (safety.ts, !== "0") y el schema refleja esa semántica. Lo que sí se
+    // señala es un 0 EXPLÍCITO, que es la única forma de apagarlo.
+    assert.equal(sinNada.missingRequired.includes("TEST_MODE"), false, "sin definir = activo = válido para el piloto");
+    const apagado = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({ TEST_MODE: "0" }));
+    assert.ok(apagado.missingRequired.includes("TEST_MODE"), "TEST_MODE=0 explícito sí se rechaza en el piloto");
+    const completo = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", TEST_MODE: "1",
+      TEST_PHONE_ALLOWLIST: "34600000001", META_WHATSAPP_PHONE_NUMBER_ID: "12345",
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: "6789", META_WHATSAPP_ACCESS_TOKEN: "x",
+      META_WHATSAPP_APP_SECRET: "x", META_WHATSAPP_VERIFY_TOKEN: "x",
+      APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1",
+    }));
+    assert.equal(completo.ready, true, "con todo puesto, verde");
+  });
+
+  await test("ENV · retell-pilot: allowlist vacía = FAIL con el aviso de no activar ai_calls_enabled", () => {
+    const a = envSchema.auditEnvironment("retell-pilot", entorno({
+      RETELL_API_KEY: "x", RETELL_AGENT_ID: "agent_x", RETELL_FROM_NUMBER: "+34950835615", TEST_MODE: "1",
+    }));
+    assert.equal(a.ready, false);
+    assert.ok(a.missingRequired.includes("CALLS_ALLOWLIST"));
+    assert.ok(a.dangers.some((d) => /NO ACTIVES ai_calls_enabled/.test(d)));
+  });
+
+  await test("ENV · shopify-readonly: acepta token estático O client_id+secret, y exige writes apagados", () => {
+    const conToken = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_ADMIN_ACCESS_TOKEN: "x", SHOPIFY_WRITE_ENABLED: "0", TEST_MODE: "1",
+    }));
+    assert.equal(conToken.ready, true, "el token estático basta");
+    const conPar = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_CLIENT_ID: "x", SHOPIFY_CLIENT_SECRET: "y", TEST_MODE: "1",
+    }));
+    assert.equal(conPar.ready, true, "el par client_id+secret también");
+    const sinCreds = envSchema.auditEnvironment("shopify-readonly", entorno({ SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", TEST_MODE: "1" }));
+    assert.equal(sinCreds.ready, false, "sin ninguna de las dos vías, no");
+    const conWrites = envSchema.auditEnvironment("shopify-readonly", entorno({
+      SHOPIFY_STORE_DOMAIN: "tienda.myshopify.com", SHOPIFY_ADMIN_ACCESS_TOKEN: "x", SHOPIFY_WRITE_ENABLED: "1", TEST_MODE: "1",
+    }));
+    assert.equal(conWrites.ready, false, "readonly con writes encendidos NO es readonly");
+  });
+
+  await test("ENV · Dropi NO es requisito de nada, y rellenarla es un ERROR señalado", () => {
+    for (const perfil of ["local-safe", "shopify-readonly", "whatsapp-cloud-pilot", "retell-pilot"] as const) {
+      const a = envSchema.auditEnvironment(perfil, entorno({ TEST_MODE: "1" }));
+      assert.equal(a.missingRequired.some((v) => v.startsWith("DROPIPRO")), false, `${perfil} no pide nada de Dropi`);
+    }
+    const rellenada = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", DROPIPRO_API_KEY: "algo" }));
+    const item = rellenada.items.find((i) => i.spec.name === "DROPIPRO_API_KEY")!;
+    assert.equal(item.state, "invalid", "no existe API que la use: rellenarla es un error, no un logro");
+  });
+
+  await test("ENV · REDACCIÓN: un secreto configurado JAMÁS expone su valor en la auditoría", () => {
+    const a = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      META_WHATSAPP_ACCESS_TOKEN: "EAA-VALOR-QUE-NO-PUEDE-SALIR",
+      RETELL_API_KEY: "key_VALOR-QUE-NO-PUEDE-SALIR",
+    }));
+    const serializado = JSON.stringify(a);
+    assert.equal(serializado.includes("QUE-NO-PUEDE-SALIR"), false, "el valor de un secreto no aparece NI EN LA ESTRUCTURA");
+    const token = a.items.find((i) => i.spec.name === "META_WHATSAPP_ACCESS_TOKEN")!;
+    assert.equal(token.shownValue, null, "shownValue de un secreto es SIEMPRE null");
+  });
+
+  await test("ENV · placeholders y typos: 'changeme' cuenta como vacío y un enum inválido no pasa en silencio", () => {
+    const conPlaceholder = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
+      WHATSAPP_PROVIDER: "cloud_api", TEST_MODE: "1",
+      META_WHATSAPP_ACCESS_TOKEN: "changeme",
+    }));
+    assert.ok(conPlaceholder.missingRequired.includes("META_WHATSAPP_ACCESS_TOKEN"), "'changeme' NO es una credencial");
+
+    const typo = envSchema.auditEnvironment("local-safe", entorno({ TEST_MODE: "1", WHATSAPP_PROVIDER: "cloudapi" }));
+    const item = typo.items.find((i) => i.spec.name === "WHATSAPP_PROVIDER")!;
+    assert.equal(item.state, "invalid", "un typo en el enum se señala, jamás pasa en silencio");
+    assert.match(item.problem ?? "", /baileys \| cloud_api/);
+  });
+
+  await test("ENV · .env.local está ignorado por Git (el archivo de secretos no puede versionarse)", () => {
+    const { execSync } = require("node:child_process") as typeof import("node:child_process");
+    const out = execSync("git check-ignore .env.local || true", { encoding: "utf8", cwd: process.cwd() }).trim();
+    assert.equal(out, ".env.local");
+  });
+
+  await test("ENV · env:init nunca sobrescribe un .env.local existente", () => {
+    // Se prueba la LÓGICA en un directorio temporal, no el .env.local real.
+    const os = require("node:os") as typeof import("node:os");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "envinit-"));
+    try {
+      fs.writeFileSync(path.join(dir, ".env.example"), "VARIABLE=\n");
+      fs.writeFileSync(path.join(dir, ".env.local"), "MI_SECRETO_YA_PEGADO=x\n");
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      execSync(`npx tsx ${path.join(process.cwd(), "scripts/env-init.ts")}`, { cwd: dir, encoding: "utf8" });
+      assert.equal(
+        fs.readFileSync(path.join(dir, ".env.local"), "utf8"),
+        "MI_SECRETO_YA_PEGADO=x\n",
+        "el archivo con secretos pegados NO se toca"
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("ENV · seguridad de la DB local: las rutas de NAS se reconocen como peligrosas", () => {
+    // La misma regla que usan local:doctor y local:reset.
+    const sospechosas = ["/volume1/docker/CasamableAgent/repo/data", "/app/data", "./nas-data/data"];
+    const buenas = [path.resolve(process.cwd(), "data"), "/Users/oliver/proyecto/data"];
+    const esNas = (p: string) => /\/volume1\/|\/app\/data|nas-data/.test(p);
+    for (const p of sospechosas) assert.equal(esNas(p), true, p);
+    for (const p of buenas) assert.equal(esNas(p), false, p);
   });
 
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
@@ -9397,6 +9547,438 @@ async function main(): Promise<void> {
     const script = fs.readFileSync(path.join(process.cwd(), "scripts/investigate-skipped-backfill.ts"), "utf8");
     assert.ok(!/hasFlag\s*\(/.test(script), "T4 no debe tener ni la función que lee flags de process.argv");
     assert.ok(!/process\.argv/.test(script), "T4 no debe leer process.argv en absoluto — no hay nada que activar");
+  });
+
+  // ============ Cierre operativo — Action Center, duplicados en entrada y watchdog ============
+  console.log("· Cierre operativo — Action Center y watchdog");
+  {
+    const actionCenter = await import("../src/lib/system/action-center");
+    const businessAlerts = await import("../src/lib/system/business-alerts");
+    const sysRepo = await import("../src/lib/system/repo");
+
+    await test("v11 action_resolutions: migración idempotente — correr dos veces no falla ni duplica", () => {
+      // La tabla ya existe (build inicial); volver a migrar debe ser un no-op.
+      db.migrateActionResolutions(db.systemDbHandle());
+      db.migrateActionResolutions(db.systemDbHandle());
+      const cols = db.systemDbHandle().prepare("PRAGMA table_info(action_resolutions)").all() as Array<{ name: string }>;
+      assert.deepEqual(cols.map((c) => c.name).sort(), ["action_type", "id", "note", "order_id", "resolved_at"]);
+    });
+
+    await test("Action Center: cancelación pedida → aparece PRIMERO, con qué hacer en imperativo y teléfono enmascarado", () => {
+      const o = mkOrder("985001", "8501", "34698500001");
+      db.markOrderNeedsCall(o.id); // también hay un needs_call para comprobar el orden
+      db.requestOrderCancellation(o.id);
+      const ac = actionCenter.getActionCenter();
+      const item = ac.items.find((i) => i.orderId === o.id && i.type === "CANCEL_REQUEST");
+      assert.ok(item, "debe existir el elemento CANCEL_REQUEST");
+      assert.equal(ac.items[0].type, "CANCEL_REQUEST", "una cancelación pendiente va la primera");
+      assert.match(item!.whatToDo, /Shopify/);
+      assert.match(item!.customer, /\*\*\*0001/);
+      assert.ok(!JSON.stringify(ac).includes("34698500001"), "el teléfono completo no puede salir de la bandeja");
+      // Con cancelación pedida NO se duplica como NEEDS_CALL: una sola decisión, un solo elemento.
+      assert.ok(!ac.items.some((i) => i.orderId === o.id && i.type === "NEEDS_CALL"));
+    });
+
+    await test("Action Center: marcar resuelto lo saca de la bandeja SIN tocar el pedido; repetir la resolución es upsert", () => {
+      const o = db.getOrderByShopifyId("985001")!;
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "hablado con el cliente, mantiene el pedido");
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "nota corregida"); // upsert, no UNIQUE violation
+      assert.ok(db.isActionResolved(o.id, "CANCEL_REQUEST"));
+      const ac = actionCenter.getActionCenter();
+      assert.ok(!ac.items.some((i) => i.orderId === o.id && i.type === "CANCEL_REQUEST"));
+      const despues = db.getOrderByShopifyId("985001")!;
+      assert.ok(despues.cancellation_requested_at, "resolver NO borra la marca del pedido");
+      assert.equal(despues.status, "needs_call", "resolver NO cambia el estado operativo");
+      const notas = db.listActionResolutions().filter((r) => r.order_id === o.id);
+      assert.equal(notas.length, 1, "upsert: una sola fila por (pedido, tipo)");
+      assert.equal(notas[0].note, "nota corregida");
+    });
+
+    await test("Duplicados EN LA ENTRADA: mismo teléfono+producto+importe+dirección en 48 h → ambos marcados + evento; el webhook nunca falla por esto", () => {
+      const base = {
+        shipping_address: {
+          name: "Lucía Pérez", address1: "Av. del Puerto 9", address2: null, city: "Valencia",
+          province: "Valencia", zip: "46021", country: "Spain", country_code: "ES", phone: "+34 698 500 111",
+        },
+      };
+      const raw1 = JSON.stringify(codPayload({ id: 985002, order_number: 8502, ...base }));
+      assert.equal(processOrdersCreateWebhook(raw1, shopifyHeaders(raw1)).status, 200);
+      const raw2 = JSON.stringify(codPayload({ id: 985003, order_number: 8503, ...base }));
+      assert.equal(processOrdersCreateWebhook(raw2, shopifyHeaders(raw2)).status, 200);
+      const o1 = db.getOrderByShopifyId("985002")!;
+      const o2 = db.getOrderByShopifyId("985003")!;
+      assert.equal(o1.possible_duplicate, 1, "el pedido ORIGINAL también se marca");
+      assert.equal(o2.possible_duplicate, 1, "el nuevo se marca");
+      assert.equal(o1.status, "pending_send", "marcar duplicado JAMÁS cancela ni bloquea");
+      const evs = sysRepo.listIntegrationEvents({ limit: 50 }).filter((e) => e.event_type === "duplicate_suspected_on_create");
+      assert.ok(evs.length >= 1, "queda rastro en integration_events");
+      const ac = actionCenter.getActionCenter();
+      assert.ok(ac.items.some((i) => i.orderId === o2.id && i.type === "POSSIBLE_DUPLICATE"));
+    });
+
+    await test("Duplicados EN LA ENTRADA: pedido distinto (otro importe) del mismo teléfono NO se marca", () => {
+      const raw = JSON.stringify(codPayload({
+        id: 985004, order_number: 8504, total_price: "19.95",
+        line_items: [{
+          title: "Crema facial hidratante", quantity: 1, price: "19.95", sku: "CREMA-01",
+          product_id: 8100000000001, variant_id: 4100000000001, requires_shipping: true,
+          gift_card: false, fulfillment_service: "manual", fulfillment_status: null, fulfillable_quantity: 1,
+        }],
+        shipping_address: {
+          name: "Lucía Pérez", address1: "Av. del Puerto 9", address2: null, city: "Valencia",
+          province: "Valencia", zip: "46021", country: "Spain", country_code: "ES", phone: "+34 698 500 111",
+        },
+      }));
+      assert.equal(processOrdersCreateWebhook(raw, shopifyHeaders(raw)).status, 200);
+      assert.equal(db.getOrderByShopifyId("985004")!.possible_duplicate, 0);
+    });
+
+    await test("Watchdog: cancelaciones y duplicados pendientes disparan warning; resolverlos en el Action Center los apaga", () => {
+      const snap1 = businessAlerts.readBusinessSnapshot();
+      assert.ok(snap1.possibleDuplicatesPending >= 2, "los dos duplicados de arriba cuentan");
+      const res1 = businessAlerts.getBusinessAlerts(undefined, snap1);
+      const dup = res1.alerts.find((a) => a.id === "possible_duplicates_pending")!;
+      assert.equal(dup.status, "warning");
+      assert.match(dup.message, /Acciones/, "la alerta dice DÓNDE actuar");
+      // Resolver ambos desde la bandeja → dejan de contar (delta exacto de 2;
+      // el total no es 0 porque tests anteriores de la suite dejan otros
+      // duplicados marcados en la misma DB compartida — a propósito).
+      db.resolveActionItem(db.getOrderByShopifyId("985002")!.id, "POSSIBLE_DUPLICATE", "eran el mismo, cancelado el 8503 en Shopify");
+      db.resolveActionItem(db.getOrderByShopifyId("985003")!.id, "POSSIBLE_DUPLICATE", "eran el mismo, cancelado el 8503 en Shopify");
+      const snap2 = businessAlerts.readBusinessSnapshot();
+      assert.equal(snap2.possibleDuplicatesPending, snap1.possibleDuplicatesPending - 2);
+    });
+
+    await test("Watchdog: cancelación pendiente ya resuelta arriba NO cuenta; una nueva sí", () => {
+      const snapA = businessAlerts.readBusinessSnapshot();
+      const antes = snapA.cancelRequestsPending;
+      const o = mkOrder("985005", "8505", "34698500005");
+      db.requestOrderCancellation(o.id);
+      const snapB = businessAlerts.readBusinessSnapshot();
+      assert.equal(snapB.cancelRequestsPending, antes + 1);
+      assert.equal(businessAlerts.getBusinessAlerts(undefined, snapB).alerts.find((a) => a.id === "cancel_requests_pending")!.status, "warning");
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "gestionada");
+    });
+
+    await test("Action Center: los pedidos ignored_old NUNCA aparecen aunque tengan marcas", () => {
+      const antes = businessAlerts.readBusinessSnapshot();
+      const viejo = mkOrder("985006", "8506", "34698500006");
+      db.systemDbHandle().prepare("UPDATE orders SET status='ignored_old', possible_duplicate=1, cancellation_requested_at=unixepoch() WHERE id = ?").run(viejo.id);
+      const ac = actionCenter.getActionCenter();
+      assert.ok(!ac.items.some((i) => i.orderId === viejo.id), "un pedido antiguo no genera trabajo para Pedro");
+      // Y tampoco cuenta para el watchdog: mismos contadores que antes de crearlo.
+      const despues = businessAlerts.readBusinessSnapshot();
+      assert.equal(despues.possibleDuplicatesPending, antes.possibleDuplicatesPending);
+      assert.equal(despues.cancelRequestsPending, antes.cancelRequestsPending);
+    });
+  }
+
+  // ============ GOLDEN PATH — el contrato completo, de webhook a panel ============
+  console.log("· Golden path — contrato de docs/GOLDEN-PATH.md");
+
+  await test("golden-path-order-confirmation: webhook firmado → guardado → WhatsApp encolado → '1' → confirmado → routing evaluado → panel y Acciones lo reflejan → fulfilled es in_progress → delivered terminal", async () => {
+    const actionCenter = await import("../src/lib/system/action-center");
+    const { getSystemOverview } = await import("../src/lib/system/overview");
+    const tel = "34698600001";
+
+    // Pasos 1-3 del contrato: llega orders/create FIRMADO y se guarda local.
+    const raw = JSON.stringify(codPayload({
+      id: 986001, order_number: 8601,
+      shipping_address: {
+        name: "Golden Path", address1: "Calle del Contrato 1", address2: null, city: "Sevilla",
+        province: "Sevilla", zip: "41001", country: "Spain", country_code: "ES", phone: "+34 698 600 001",
+      },
+    }));
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    let o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "pending_send", "paso 3: guardado y a la cola de envío");
+    assert.equal(o.possible_duplicate, 0, "sin otro pedido igual, nada de marcas");
+
+    // Paso 4: el scheduler encola el WhatsApp (outbox) y pasa a awaiting_reply.
+    const tNow = Math.floor(Date.now() / 1000);
+    await runSchedulerTick(tNow);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "awaiting_reply", "paso 4: WhatsApp de confirmación en vuelo");
+    const out = db.getPendingOutbox(200).find((m) => m.phone === tel);
+    assert.ok(out, "paso 4: el mensaje está en el outbox (envío at-most-once)");
+    assert.match(out!.content, /1 - Todo correcto/);
+
+    // Paso 5: el cliente responde "1".
+    const reply = handleOrderReply(tel, "1");
+    assert.equal(reply.handled, true);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "confirmed", "paso 5: confirmado");
+    assert.ok(o.confirmed_at, "paso 5: confirmed_at estampado");
+
+    // Paso 6: el siguiente tick evalúa el routing y lo deja ESCRITO.
+    await runSchedulerTick(tNow + 60);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.ok(o.supplier_sync_status, "paso 6: la decisión de routing queda en el pedido");
+    // La fixture (CREMA-01) no tiene regla de routing: revisión humana con
+    // motivo, no una adivinanza. Eso también es contrato.
+    assert.equal(o.supplier_sync_status, "manual_review");
+    assert.ok(o.supplier_last_error, "paso 6: el motivo del bloqueo queda explicado");
+
+    // Paso 7: el panel refleja el pedido y el bloqueo está en Acciones.
+    const ov = getSystemOverview();
+    assert.ok(JSON.stringify(ov).length > 0, "paso 7: overview se construye sin lanzar");
+    assert.ok(!JSON.stringify(ov).includes(tel), "paso 7: el panel jamás enseña el teléfono completo");
+    const ac = actionCenter.getActionCenter();
+    const item = ac.items.find((i) => i.orderId === o.id && i.type === "SUPPLIER_ERROR");
+    assert.ok(item, "paso 7: lo que exige acción humana está en Acciones");
+    assert.match(item!.whatToDo, /./, "cada acción dice qué hacer");
+
+    // Paso 8: Shopify marca fulfilled → in_progress, JAMÁS delivered.
+    assert.ok(db.setOrderClosure(o.id, "in_progress", "shopify", tNow + 3600));
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.closure_status, "in_progress", "paso 8: fulfilled = despachado, no entregado");
+
+    // Paso 9: la fuente autoritativa cierra; el terminal no se pisa.
+    assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", tNow + 7200));
+    assert.equal(db.setOrderClosure(o.id, "refused", "shopify", tNow + 9999), false, "paso 9: terminal inmutable");
+    assert.equal(db.getOrderByShopifyId("986001")!.closure_status, "delivered");
+
+    // Invariante 1: nada vuelve a contactar a este cliente por esta causa.
+    const antes = db.getPendingOutbox(500).filter((m) => m.phone === tel).length;
+    await runSchedulerTick(tNow + 999_999);
+    assert.equal(db.getPendingOutbox(500).filter((m) => m.phone === tel).length, antes, "cero contactos nuevos tras confirmar");
+  });
+
+  // ============ CLIENTE DIFÍCIL — la conversación caótica termina siempre ============
+  console.log("· Cliente difícil — caos sin bucle y sin cancelaciones automáticas");
+
+  await test("CLIENTE DIFÍCIL · dos pedidos iguales + 'no sé', 'quiero uno', 'me habéis hecho dos', 'cancelar', 'ese no', 'el otro', 'todo correcto': SIEMPRE responde, JAMÁS cancela solo, y o resuelve o escala", () => {
+    const tel = "34698700001";
+    const oA = mkMulti("987001", "8701", tel);
+    const oB = mkMulti("987002", "8702", tel);
+
+    const secuencia = ["no sé", "quiero uno", "me habéis hecho dos", "cancelar", "ese no", "el otro", "todo correcto"];
+    const respuestas: string[] = [];
+    for (const msg of secuencia) {
+      const r = handleOrderReply(tel, msg);
+      const enManosHumanas = ["987001", "987002"].every(
+        (sid) => db.getOrderByShopifyId(sid)!.status === "needs_call"
+      );
+      if (r.handled) {
+        assert.ok(r.reply && r.reply.length > 0, `"${msg}" gestionado siempre lleva respuesta`);
+        respuestas.push(r.reply!);
+      } else {
+        // El silencio SOLO es legítimo cuando el bot ya se apartó (todo en
+        // needs_call = manos humanas). Mientras el bot lleve la
+        // conversación, callar es el bug de la transcripción real.
+        assert.ok(enManosHumanas, `"${msg}" sin respuesta solo vale si TODO está ya en manos humanas`);
+      }
+      // Invariante 4 del contrato: el agente JAMÁS cancela por su cuenta.
+      for (const sid of ["987001", "987002"]) {
+        assert.notEqual(db.getOrderByShopifyId(sid)!.status, "cancelled", `"${msg}" no puede cancelar nada automáticamente`);
+      }
+    }
+
+    // "cancelar" tras la escalada NO se perdió en el silencio: quedó
+    // estampado para Pedro (urgencia 1 en Acciones), sin cancelar nada.
+    assert.ok(
+      ["987001", "987002"].some((sid) => db.getOrderByShopifyId(sid)!.cancellation_requested_at),
+      "la petición de cancelar queda registrada aunque el bot ya se hubiera apartado"
+    );
+
+    // Anti-bucle: la MISMA respuesta no se repite más de MAX_SAME_PROMPT_REPEATS+1
+    // veces seguidas — el bot real de la transcripción repitió el selector 5 veces.
+    let repes = 1, peor = 1;
+    for (let i = 1; i < respuestas.length; i++) {
+      repes = respuestas[i] === respuestas[i - 1] ? repes + 1 : 1;
+      peor = Math.max(peor, repes);
+    }
+    assert.ok(peor <= 3, `ninguna respuesta se repite en bucle (peor racha: ${peor})`);
+
+    // El final es un estado RESUELTO o ESCALADO, nunca el limbo del selector:
+    // cada pedido acabó confirmado, esperando algo concreto o en manos humanas.
+    const finales = ["987001", "987002"].map((sid) => db.getOrderByShopifyId(sid)!.status);
+    for (const st of finales) {
+      assert.ok(
+        ["confirmed", "needs_call", "awaiting_reply", "needs_correction", "awaiting_delivery_note"].includes(st),
+        `estado final coherente, no un limbo: ${st}`
+      );
+    }
+    // Y al menos uno de los dos acabó donde un humano lo verá (needs_call →
+    // Acciones) o confirmado — la conversación no murió en el selector.
+    assert.ok(
+      finales.some((st) => st === "needs_call" || st === "confirmed"),
+      `la conversación caótica escala o resuelve: ${finales.join(", ")}`
+    );
+    // "me habéis hecho dos" con dos pedidos IGUALES: quedaron marcados para
+    // Pedro (nunca cancelados solos).
+    assert.equal(db.getOrderByShopifyId("987001")!.possible_duplicate, 1, "duplicado marcado para revisión humana");
+    assert.equal(db.getOrderByShopifyId("987002")!.possible_duplicate, 1);
+    void oA; void oB;
+  });
+
+  await test("CLIENTE DIFÍCIL · tras escalar a needs_call, más mensajes NO reinician el interrogatorio ni cambian el estado", () => {
+    const tel = "34698700002";
+    mkMulti("987003", "8703", tel);
+    // Dos ambigüedades → needs_call (presupuesto de aclaraciones agotado).
+    handleOrderReply(tel, "eh");
+    handleOrderReply(tel, "mmm");
+    assert.equal(db.getOrderByShopifyId("987003")!.status, "needs_call");
+    // El cliente sigue escribiendo cosas raras: el pedido NO vuelve al
+    // selector ni se cancela; sigue en manos humanas.
+    for (const msg of ["oye", "hola?", "no sé qué hacer"]) {
+      handleOrderReply(tel, msg);
+      assert.equal(db.getOrderByShopifyId("987003")!.status, "needs_call", `"${msg}" no saca el pedido de la cola humana`);
+    }
+    // PERO una respuesta CLARA sí resuelve aunque esté en needs_call: si el
+    // cliente al final dice "1", nadie tiene que llamarle ya.
+    const r = handleOrderReply(tel, "1");
+    void r;
+    const st = db.getOrderByShopifyId("987003")!.status;
+    assert.ok(["confirmed", "needs_call"].includes(st), "una respuesta clara nunca deja el pedido peor de lo que estaba");
+  });
+
+  // ============ REINICIO y DOS PROCESOS — todo el estado vive en la DB ============
+  console.log("· Reinicio y dos procesos — el estado sobrevive, los envíos no se duplican");
+
+  await test("REINICIO · un pedido a mitad de flujo (selección multi-pedido incluida) sobrevive a un 'reinicio': otra conexión ve TODO y el tick no reenvía nada", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const tel = "34698800001";
+    mkMulti("988001", "8801", tel);
+    mkMulti("988002", "8802", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1", total_price: "36.90" });
+
+    // El cliente selecciona el 8802 y "se apaga el proceso" antes de contestar.
+    const r1 = handleOrderReply(tel, "8802");
+    assert.equal(r1.handled, true);
+
+    // "REINICIO": una conexión NUEVA al MISMO fichero (otro proceso tras el
+    // arranque) tiene que ver el estado completo — colas, contexto, outbox.
+    const conn2 = new Database(db.dbFilePath());
+    try {
+      const ctx2 = conn2.prepare("SELECT selected_order_id FROM conversation_order_context WHERE phone = ?").get(tel) as { selected_order_id: number } | undefined;
+      assert.ok(ctx2?.selected_order_id, "la selección multi-pedido NO vive en memoria: sobrevive al reinicio");
+      const pedidos = conn2.prepare("SELECT status FROM orders WHERE phone = ?").all(tel) as Array<{ status: string }>;
+      assert.equal(pedidos.length, 2, "los pedidos están en el fichero, no en el proceso");
+    } finally {
+      conn2.close();
+    }
+
+    // Tras el "reinicio", el proceso retoma: "todo correcto" usa la selección
+    // persistida y confirma EL 8802 — la conversación no vuelve a empezar.
+    const r2 = handleOrderReply(tel, "todo correcto");
+    assert.equal(r2.handled, true);
+    assert.equal(db.getOrderByShopifyId("988002")!.status, "confirmed", "la selección persistida decide tras el reinicio");
+    assert.equal(db.getOrderByShopifyId("988001")!.status, "awaiting_reply", "el otro pedido no se toca");
+
+    // Y un tick tras el reinicio NO repite el WhatsApp inicial de nadie.
+    const antes = db.getPendingOutbox(500).filter((m) => m.phone === tel).length;
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    assert.equal(db.getPendingOutbox(500).filter((m) => m.phone === tel).length, antes, "reiniciar no reenvía confirmaciones ya mandadas");
+  });
+
+  await test("DOS PROCESOS · mismo SQLite: el claim del outbox lo gana EXACTAMENTE uno; el lease del scheduler, ídem", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const leases = await import("../src/lib/system/leases");
+
+    // --- outbox: dos 'workers' pelean por el mismo mensaje pendiente ---
+    const convo = db.getOrCreateConversation("34698800099", "Test Dos Procesos");
+    db.enqueueOutbox(convo.id, "34698800099", "mensaje único");
+    const item = db.getPendingOutbox(10_000).find((m) => m.phone === "34698800099")!;
+    assert.ok(item, "el mensaje encolado tiene que aparecer entre los pendientes");
+    const conn2 = new Database(db.dbFilePath());
+    try {
+      // Proceso A (el singleton) y proceso B (conexión cruda) reclaman a la vez.
+      const claimA = db.markOutboxSent(item.id);
+      const claimB = (conn2.prepare("UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ? AND sent = 0").run(item.id).changes ?? 0) > 0;
+      assert.equal(claimA || claimB, true, "alguien lo envía");
+      assert.equal(claimA && claimB, false, "pero SOLO uno: at-most-once con dos procesos");
+    } finally {
+      conn2.close();
+    }
+
+    // --- lease: dos owners distintos, el segundo NO entra hasta que expira ---
+    const t0 = 1_900_000_000;
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-A", nowSec: t0 }), true);
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-B", nowSec: t0 + 10 }), false, "el lease vivo bloquea al segundo proceso");
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-A", nowSec: t0 + 20 }), true, "el dueño renueva sin pelear");
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-B", nowSec: t0 + 121 }), true, "expirado el lease, el otro proceso lo toma");
+  });
+
+  // ============ OPERADOR DIFÍCIL — cada avería dice QUÉ HACER, en cristiano ============
+  console.log("· Operador difícil — el panel explica qué hacer, no solo qué falla");
+
+  await test("OPERADOR · llamadas encendidas sin RETELL_API_KEY → critical con instrucción; el fail-closed de allowlist usa la semántica unificada de TEST_MODE", async () => {
+    const { getCallsHealth } = await import("../src/lib/system/health-integrations");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_shadow_mode", "0");
+    await withEnv({ RETELL_API_KEY: undefined }, async () => {
+      const h = getCallsHealth();
+      assert.equal(h.status, "critical");
+      assert.match(h.message, /FALTA RETELL_API_KEY/);
+      assert.match(h.message, /\.env|reinicia/, "dice dónde y cómo arreglarlo");
+    });
+    // TEST_MODE sin definir = ACTIVO (fail-closed). El aviso de allowlist
+    // vacía tiene que saltar también sin la variable, no solo con '1'.
+    await withEnv({ RETELL_API_KEY: "key_test_no_real", TEST_MODE: undefined }, async () => {
+      db.setSetting("calls_allowlist", "");
+      const h = getCallsHealth();
+      assert.equal(h.status, "warning");
+      assert.match(h.message, /calls_allowlist/, "dice el campo exacto a rellenar");
+    });
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_allowlist", "");
+  });
+
+  await test("OPERADOR · Meta sin credenciales con cloud_api activo → el panel lo dice sin rodeos", async () => {
+    const { getWhatsAppHealth } = await import("../src/lib/system/health-integrations");
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_ACCESS_TOKEN: undefined, META_WHATSAPP_PHONE_NUMBER_ID: undefined }, async () => {
+      const h = getWhatsAppHealth();
+      assert.equal(h.provider, "cloud_api");
+      assert.match(h.message, /SIN credenciales de Meta/i);
+      assert.match(h.message, /nada puede salir/i, "consecuencia clara, no jerga");
+    });
+  });
+
+  await test("OPERADOR · firma HMAC inválida acumulada → el mensaje dice qué comprobar y con qué comando", async () => {
+    const { getShopifyHealth } = await import("../src/lib/system/health-integrations");
+    const sysRepo = await import("../src/lib/system/repo");
+    sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "firma inválida (test operador)");
+    const h = getShopifyHealth();
+    assert.ok(h.webhookBadSignature24h >= 1);
+    assert.match(h.message, /SHOPIFY_WEBHOOK_SECRET/);
+    assert.match(h.message, /shopify:doctor/, "apunta a la herramienta de diagnóstico");
+  });
+
+  await test("OPERADOR · backup viejo → critical con acción concreta (revisar tarea del NAS, copia a mano)", async () => {
+    const { getBackupHealth } = await import("../src/lib/system/health-core");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "backup-viejo-"));
+    try {
+      const f = path.join(dir, "messages-2020-01-01.db");
+      // Una DB real (vacía) para que el fallo sea la EDAD, no la integridad.
+      const Database = (await import("better-sqlite3")).default;
+      const tmp = new Database(f);
+      tmp.exec("CREATE TABLE t (id INTEGER)");
+      tmp.close();
+      const viejo = new Date(Date.now() - 100 * 3600 * 1000);
+      fs.utimesSync(f, viejo, viejo);
+      await withEnv({ BACKUP_DIR: dir }, async () => {
+        const h = getBackupHealth();
+        assert.equal(h.status, "critical");
+        assert.match(h.message, /revisar la tarea de backup del NAS/);
+        assert.match(h.message, /copia a mano/);
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("OPERADOR · routing sin regla (vendor/SKU sin mapear) → el pedido explica el motivo y aparece en Acciones con instrucción", async () => {
+    // Ya probado de punta a punta en el golden path; aquí el contrato del
+    // TEXTO: manual_review siempre lleva un motivo legible y una acción.
+    const actionCenter = await import("../src/lib/system/action-center");
+    const o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.supplier_sync_status, "manual_review");
+    assert.ok((o.supplier_last_error ?? "").length > 10, "el motivo no es un código críptico");
+    const item = actionCenter.getActionCenter().items.find((i) => i.orderId === o.id && i.type === "SUPPLIER_ERROR");
+    assert.ok(item);
+    assert.match(item!.whatToDo, /mano|Revisar|Corregir/, "la acción está en imperativo");
   });
 
   // ============ Resumen ============

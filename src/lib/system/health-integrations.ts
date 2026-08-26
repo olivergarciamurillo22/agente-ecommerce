@@ -263,7 +263,7 @@ export function getShopifyHealth(): ShopifyHealth {
   // resto de la integración esté sana.
   if (base.webhookBadSignature24h > 0) {
     base.status = base.status === "critical" ? "critical" : "warning";
-    base.message += ` · ${base.webhookBadSignature24h} webhook(s) con firma inválida en 24 h`;
+    base.message += ` · ${base.webhookBadSignature24h} webhook(s) con firma inválida en 24 h — comprobar que SHOPIFY_WEBHOOK_SECRET es el de ESTA tienda (npm run shopify:doctor)`;
   }
 
   return base;
@@ -492,7 +492,12 @@ export function getCallsHealth(): CallsHealth {
       base.message = base.shadowMode
         ? "apagadas (kill switch cerrado) · shadow ON: simula sin llamar"
         : "apagadas (kill switch cerrado)";
-    } else if (!base.allowlistActive && process.env.TEST_MODE === "1") {
+    } else if (!base.shadowMode && !(process.env.RETELL_API_KEY ?? "").trim()) {
+      // Operador difícil: encender el kill switch sin credencial dejaba el
+      // panel en verde mientras ninguna llamada podía salir.
+      base.status = "critical";
+      base.message = "encendidas pero FALTA RETELL_API_KEY: ninguna llamada puede salir — pégala en el .env del NAS y reinicia el contenedor";
+    } else if (!base.allowlistActive && process.env.TEST_MODE !== "0") {
       base.status = "warning";
       base.message = "encendidas SIN allowlist en modo prueba: el fail-closed está bloqueando todas las llamadas — rellena calls_allowlist";
     } else if (base.consecutiveFailures >= 3) {

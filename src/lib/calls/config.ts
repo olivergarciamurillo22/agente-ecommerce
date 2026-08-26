@@ -58,7 +58,10 @@ export function callAllowedByAllowlist(phoneDigits: string): boolean {
     // todos. En producción real (TEST_MODE=0) conserva el significado
     // documentado de "sin restricción" para no romper compatibilidad — y
     // para entonces el kill switch y el cap diario siguen delante.
-    if (process.env.TEST_MODE === "1") return false;
+    // MISMA semántica que safety.ts (testMode() = TEST_MODE !== "0"): sin
+    // definir cuenta como modo prueba ACTIVO. Con === "1", un TEST_MODE
+    // ausente habría reabierto el agujero de "vacía = todos".
+    if (process.env.TEST_MODE !== "0") return false;
     return true;
   }
   return lista.includes(phoneDigits.replace(/[^\d]/g, ""));

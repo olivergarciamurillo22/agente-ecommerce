@@ -10,7 +10,8 @@
 // ============================================================
 
 import pino from "pino";
-import { insertOrderIfNew } from "../db";
+import { getDuplicateCandidatesByPhone, insertOrderIfNew, markOrderPossibleDuplicate } from "../db";
+import { findPossibleDuplicates } from "../orders/multi-order";
 import {
   isCodOrder,
   normalizeOrder,
@@ -158,6 +159,35 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
   if (!created) {
     logger.info(`[ORDER] ${orderLabel} duplicado (webhook reintentado) — ignorado`);
     return { status: 200, body: { ok: true, duplicate: true, orderId: order.id } };
+  }
+
+  // DETECCIÓN DE DUPLICADOS A LA ENTRADA (golden path, paso 3). El caso
+  // real del 25-08 (doble clic en el formulario Releasit) solo se detectaba
+  // si el CLIENTE se quejaba por WhatsApp. Ahora se marca al llegar: mismo
+  // teléfono + mismo producto + mismo importe + misma dirección dentro de la
+  // ventana. SOLO se marca (possible_duplicate → insignia y Action Center):
+  // jamás se cancela ni se bloquea nada automáticamente — ambos pedidos
+  // siguen su flujo y Pedro decide. El mensaje de confirmación además sirve
+  // de segunda red: el propio cliente dirá "solo hice uno".
+  if (!tooOld && order.phone) {
+    try {
+      const activos = getDuplicateCandidatesByPhone(order.phone);
+      const grupos = findPossibleDuplicates(activos);
+      for (const grupo of grupos) {
+        if (!grupo.some((o) => o.id === order.id)) continue;
+        for (const o of grupo) markOrderPossibleDuplicate(o.id);
+        logIntegrationEvent(
+          "shopify",
+          "duplicate_suspected_on_create",
+          "warning",
+          `pedido recién llegado idéntico a otro activo del mismo teléfono (${grupo.map((o) => "#" + o.shopify_order_number).join(", ")}): marcados para revisión, ninguno se bloquea`,
+          order.shopify_order_number
+        );
+      }
+    } catch (err) {
+      // La detección es best-effort: jamás puede tumbar la entrada del pedido.
+      logger.warn(`[ORDER] detección de duplicados falló (no bloquea): ${err instanceof Error ? err.message : err}`);
+    }
   }
 
   if (tooOld) {

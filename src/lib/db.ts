@@ -227,6 +227,29 @@ export function migrateClosureAxis(db: Database.Database): void {
 }
 
 /**
+ * Migración (SCHEMA_VERSION 11): resoluciones del Action Center.
+ *
+ * Cuando Pedro arregla algo a mano (llamó al cliente, gestionó una
+ * cancelación, decidió qué duplicado va), tiene que poder marcarlo RESUELTO
+ * sin borrar nada: la fila registra quién-qué-cuándo y una nota corta, y el
+ * elemento desaparece de la bandeja pero el histórico queda. Una resolución
+ * es por (pedido, tipo de acción): resolver el duplicado no resuelve la
+ * cancelación del mismo pedido.
+ */
+export function migrateActionResolutions(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS action_resolutions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL,
+      action_type TEXT NOT NULL,
+      note TEXT,
+      resolved_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(order_id, action_type)
+    );
+  `);
+}
+
+/**
  * Migración (SCHEMA_VERSION 9): el outbox aprende de PROVEEDOR y de ESTADOS.
  *
  * Con Baileys, "enviado" era todo lo que se podía saber. La Cloud API de
@@ -1123,6 +1146,7 @@ function build() {
   migrateSchedulerLeases(db);
   migrateConversationOrderContext(db);
   migrateOutboxProvider(db);
+  migrateActionResolutions(db);
   migrateOrderedAt(db);
 
   // --- Conversations ---
@@ -1293,7 +1317,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1872,6 +1896,41 @@ export function getActiveOrdersByPhone(phone: string): OrderRow[] {
     .all(phone) as OrderRow[];
 }
 
+/**
+ * Pedidos de este teléfono que YA están en manos humanas (needs_call).
+ * Para una sola cosa: si el cliente escribe "cancelar" cuando el bot ya se
+ * apartó, la petición debe quedar ESTAMPADA para Pedro (urgencia 1 en
+ * Acciones), no perderse en el silencio.
+ */
+export function getNeedsCallOrdersByPhone(phone: string): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders WHERE phone = ? AND status = 'needs_call'
+       ORDER BY created_at DESC, id DESC`
+    )
+    .all(phone) as OrderRow[];
+}
+
+/**
+ * Candidatos a duplicado del mismo teléfono para la detección A LA ENTRADA.
+ *
+ * Distinto de getActiveOrdersByPhone a propósito: aquí SÍ cuentan
+ * 'pending_send' (el recién insertado siempre está ahí — sin esto la
+ * detección a la entrada no saltaba jamás) y 'needs_call' (el original pudo
+ * agotar el flujo de WhatsApp y seguir siendo el mismo pedido repetido).
+ * Fuera quedan confirmed/cancelled/ignored_old/error: un pedido ya decidido
+ * no es "posible duplicado", es historia.
+ */
+export function getDuplicateCandidatesByPhone(phone: string): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE phone = ? AND status IN ('pending_send','awaiting_reply','reminder_sent','awaiting_delivery_note','needs_correction','needs_call')
+       ORDER BY created_at DESC, id DESC`
+    )
+    .all(phone) as OrderRow[];
+}
+
 
 
 // --- Outbox: proveedor, id de mensaje y estados (Cloud API de Meta) ---
@@ -1998,6 +2057,30 @@ export function getLastInboundAt(conversationId: number): number | null {
     )
     .get(conversationId) as { t: number | null };
   return row.t ?? null;
+}
+
+
+// --- Action Center: resoluciones manuales de Pedro ---
+
+export function resolveActionItem(orderId: number, actionType: string, note?: string | null): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO action_resolutions (order_id, action_type, note) VALUES (?, ?, ?)
+       ON CONFLICT(order_id, action_type) DO UPDATE SET note = excluded.note, resolved_at = unixepoch()`
+    )
+    .run(orderId, actionType, note?.slice(0, 300) ?? null);
+}
+
+export function isActionResolved(orderId: number, actionType: string): boolean {
+  return Boolean(
+    ctx().db.prepare("SELECT 1 FROM action_resolutions WHERE order_id = ? AND action_type = ?").get(orderId, actionType)
+  );
+}
+
+export function listActionResolutions(): Array<{ order_id: number; action_type: string; note: string | null; resolved_at: number }> {
+  return ctx()
+    .db.prepare("SELECT order_id, action_type, note, resolved_at FROM action_resolutions")
+    .all() as Array<{ order_id: number; action_type: string; note: string | null; resolved_at: number }>;
 }
 
 // --- Contexto de conversación multi-pedido (bug real del 25-08-2026) ---
