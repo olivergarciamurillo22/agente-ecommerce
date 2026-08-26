@@ -8499,21 +8499,30 @@ async function main(): Promise<void> {
   const promptVal = await import("../src/lib/calls/prompt-validator");
   const callsCfg58 = await import("../src/lib/calls/config");
 
-  await test("CALLS · FAIL-CLOSED en piloto: allowlist vacía + TEST_MODE=1 NO llama a nadie", async () => {
-    // La trampa real: CALLS_ALLOWLIST vacía significaba "sin restricción" —
-    // lo contrario que TEST_PHONE_ALLOWLIST. Abrir el kill switch con la
-    // lista sin rellenar habría llamado a TODOS los clientes.
-    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
+  await test("CALLS · FAIL-CLOSED con interruptor PROPIO: en piloto (default) allowlist vacía = NADIE; TEST_MODE ya NO pinta nada aquí", async () => {
+    await withEnv({ CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: undefined }, () => {
+      assert.equal(callsCfg58.callsPilotMode(), true, "sin definir = piloto ACTIVO (fail-closed)");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en piloto, vacía = NADIE");
     });
-    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
+    // DESACOPLE (decisión 26-08 noche): TEST_MODE no gobierna las llamadas.
+    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: undefined }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "TEST_MODE=0 ya no abre las llamadas");
+    });
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: "0" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "producción de llamadas EXPLÍCITA aunque TEST_MODE=1");
+    });
+    await withEnv({ CALLS_ALLOWLIST: "34600000001", CALLS_PILOT_MODE: "0" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no, ni en producción");
     });
-    // Compatibilidad documentada: en producción real (TEST_MODE=0) vacía
-    // sigue siendo "sin restricción" — con el kill switch y el cap delante.
-    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "" }, () => {
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000003"), true);
+    // Prioridad settings sobre env (cambiable sin desplegar).
+    await withEnv({ CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: "1" }, () => {
+      db.setSetting("calls_pilot_mode", "0");
+      try {
+        assert.equal(callsCfg58.callAllowedByAllowlist("34600000009"), true, "settings.calls_pilot_mode=0 gana al env");
+      } finally {
+        db.setSetting("calls_pilot_mode", "");
+      }
     });
   });
 

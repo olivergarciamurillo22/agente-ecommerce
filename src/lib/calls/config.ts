@@ -46,20 +46,36 @@ export function callsAllowlist(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * MODO PILOTO DE LLAMADAS — interruptor PROPIO, desacoplado de TEST_MODE.
+ *
+ * Decisión del 26-08 (noche, con Pedro): el fail-closed original colgaba de
+ * TEST_MODE, pero TEST_MODE gobierna además WhatsApp, las escrituras en
+ * Shopify y qué pedidos son operativos. Con las llamadas YA en producción
+ * real (TEST_MODE=1 en el NAS), desbloquearlas habría exigido TEST_MODE=0:
+ * cambiar cinco cosas para arreglar una. Las llamadas tienen su propia llave.
+ *
+ *   '1' o SIN DEFINIR = piloto (fail-closed): allowlist vacía = NADIE.
+ *   '0' EXPLÍCITO     = producción de llamadas: vacía = sin restricción
+ *                       (kill switch, cap diario y franja SIEMPRE delante).
+ *
+ * Prioridad settings.calls_pilot_mode (cambiable sin desplegar, npm run
+ * calls:mode) sobre la variable CALLS_PILOT_MODE del .env.
+ */
+export function callsPilotMode(): boolean {
+  return cfg("calls_pilot_mode", "CALLS_PILOT_MODE", "1") !== "0";
+}
+
 export function callAllowedByAllowlist(phoneDigits: string): boolean {
   const lista = callsAllowlist();
   if (lista.length === 0) {
-    // FAIL-CLOSED EN PILOTO (26-08): la trampa medida en producción era que
-    // esta lista vacía significaba "sin restricción" — exactamente lo
-    // CONTRARIO que TEST_PHONE_ALLOWLIST, y a un paso de que abrir
-    // ai_calls_enabled con la lista sin rellenar llamara a TODOS los
-    // clientes. Mientras el sistema esté en modo prueba (TEST_MODE=1, que
-    // es como va a estar durante todo el piloto), una lista vacía BLOQUEA a
-    // todos. En producción real (TEST_MODE=0) conserva el significado
-    // documentado de "sin restricción" para no romper compatibilidad — y
-    // para entonces el kill switch y el cap diario siguen delante.
-    if (process.env.TEST_MODE === "1") return false;
-    return true;
+    // FAIL-CLOSED EN PILOTO (26-08): allowlist vacía significaba "sin
+    // restricción" — lo contrario que TEST_PHONE_ALLOWLIST — y abrir el
+    // kill switch con la lista sin rellenar habría llamado a TODOS. En modo
+    // piloto (el default; sin definir cuenta como ACTIVO), vacía BLOQUEA a
+    // todos. Salir del piloto es una decisión EXPLÍCITA
+    // (calls_pilot_mode='0'), no un efecto colateral de TEST_MODE.
+    return !callsPilotMode();
   }
   return lista.includes(phoneDigits.replace(/[^\d]/g, ""));
 }
