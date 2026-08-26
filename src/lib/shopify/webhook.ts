@@ -23,6 +23,9 @@ import { maxOrderAgeMinutes } from "../safety";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
+/** Anti-ruido: el aviso de "firma con client_secret" sale una vez por arranque. */
+let clientSecretMatchAnunciado = false;
+
 export interface WebhookHeaders {
   hmac: string | null;
   topic: string | null;
@@ -57,14 +60,17 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
   }
-  if (verificacion.matchedWith === "client_secret") {
-    // Rastro de que este webhook vino firmado con el secreto de la app, no
-    // el de la tienda — informativo, nunca cambia la decisión de aceptar.
+  if (verificacion.matchedWith === "client_secret" && !clientSecretMatchAnunciado) {
+    // Rastro de que los webhooks vienen firmados con el secreto de la app,
+    // no el de la tienda — informativo, nunca cambia la decisión de aceptar.
+    // UNA vez por arranque: con decenas de webhooks al día, un evento por
+    // cada uno solo serviría para desplazar del feed lo que sí importa.
+    clientSecretMatchAnunciado = true;
     logIntegrationEvent(
       "shopify",
       "webhook_client_secret_match",
       "info",
-      "webhook validado con SHOPIFY_CLIENT_SECRET (suscripción creada por la app, no desde el admin)"
+      "webhooks validando con SHOPIFY_CLIENT_SECRET (suscripciones creadas por la app, no desde el admin)"
     );
   }
 

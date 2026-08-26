@@ -61,6 +61,9 @@ import type { ShopifyOrderPayload } from "../orders/normalize";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
+/** Anti-ruido: el aviso de "firma con client_secret" sale una vez por arranque. */
+let clientSecretMatchAnunciado = false;
+
 export type OrdersEventTopic = "orders/cancelled" | "orders/fulfilled" | "orders/updated";
 
 const HANDLED_TOPICS: OrdersEventTopic[] = ["orders/cancelled", "orders/fulfilled", "orders/updated"];
@@ -121,12 +124,16 @@ export function processOrdersEventWebhook(
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
   }
-  if (verificacion.matchedWith === "client_secret") {
+  if (verificacion.matchedWith === "client_secret" && !clientSecretMatchAnunciado) {
+    // UNA vez por arranque (anti-ruido): ver el comentario gemelo en
+    // webhook.ts — orders/updated dispara con cualquier cambio de tag y
+    // llenaría el feed de eventos idénticos.
+    clientSecretMatchAnunciado = true;
     logIntegrationEvent(
       "shopify",
       "webhook_client_secret_match",
       "info",
-      "webhook validado con SHOPIFY_CLIENT_SECRET (suscripción creada por la app, no desde el admin)"
+      "webhooks validando con SHOPIFY_CLIENT_SECRET (suscripciones creadas por la app, no desde el admin)"
     );
   }
 
