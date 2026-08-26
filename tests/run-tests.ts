@@ -8572,6 +8572,54 @@ async function main(): Promise<void> {
     });
   });
 
+  await test("DROPI · diagnóstico de vendor: caza exactamente el fallo real del 23-08", () => {
+    const diag = require("../src/lib/suppliers/dropi/diagnostics") as typeof import("../src/lib/suppliers/dropi/diagnostics");
+    // El caso real: vendor "Casamable" cuando la app exige "Dropi PRO".
+    const roto = diag.diagnoseProductVendor({
+      id: 1, title: "Limpiador Ultrasónico", vendor: "Casamable",
+      variants: [{ sku: "LIMPIADOR-24800" }],
+    });
+    assert.equal(roto.vendorOk, false);
+    assert.equal(roto.vendorEsperado, "Dropi PRO");
+
+    const bien = diag.diagnoseProductVendor({
+      id: 2, title: "Limpiador", vendor: "Dropi PRO",
+      variants: [{ sku: "LIMPIADOR-24800" }, { sku: "" }],
+    });
+    assert.equal(bien.vendorOk, true);
+    assert.equal(bien.variantsSinSku, 1, "y además cuenta variantes sin SKU");
+  });
+
+  await test("DROPI · sku=null: distingue los cuatro casos en vez de encogerse de hombros", () => {
+    const diag = require("../src/lib/suppliers/dropi/diagnostics") as typeof import("../src/lib/suppliers/dropi/diagnostics");
+    const pedido = (lineas: unknown[]) => ({ raw_payload: JSON.stringify({ line_items: lineas }) });
+
+    // Campo ausente vs vacío vs presente: en NUESTRA tabla los tres acaban
+    // igual (el parser hace trim||null) — el crudo es la única forma de saber.
+    const d = diag.diagnoseSkuNull(pedido([
+      { title: "Sin campo", product_id: 1, variant_id: 2 },
+      { title: "Vacío", product_id: 1, variant_id: 3, sku: "" },
+      { title: "Con SKU", product_id: 1, variant_id: 4, sku: "10428" },
+      { title: "Seguro de Envío" },
+    ]));
+    assert.equal(d[0].cause, "sku_field_absent");
+    assert.equal(d[1].cause, "variant_sku_empty");
+    assert.match(d[1].detail, /ficha del producto/, "dice DÓNDE se arregla");
+    assert.equal(d[2].cause, "sku_present_parser_dropped");
+    assert.equal(d[3].cause, "service_line_expected", "el seguro sin SKU es lo normal, no un problema");
+
+    assert.equal(diag.diagnoseSkuNull({ raw_payload: null })[0].cause, "no_payload");
+  });
+
+  await test("DROPI · el diagnóstico es SOLO lectura: ni un solo UPDATE ni llamada de escritura", () => {
+    for (const rel of ["src/lib/suppliers/dropi/diagnostics.ts", "scripts/dropi-diagnose.ts"]) {
+      const src = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const pat of [/\bUPDATE\b/i, /\bINSERT\s+INTO\b/i, /\bDELETE\s+FROM\b/i, /method:\s*["'](POST|PUT|PATCH|DELETE)/i, /sendWhatsAppMessage/]) {
+        assert.ok(!pat.test(src), `${rel} no debe contener ${pat}`);
+      }
+    }
+  });
+
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 

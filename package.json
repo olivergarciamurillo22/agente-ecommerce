@@ -35,7 +35,8 @@
     "retention": "tsx scripts/retention.ts",
     "orders:backfill-ordered-at": "tsx scripts/backfill-ordered-at.ts",
     "orders:investigate-skipped-backfill": "tsx scripts/investigate-skipped-backfill.ts",
-    "calls:validate-prompt": "tsx scripts/validate-call-prompt.ts"
+    "calls:validate-prompt": "tsx scripts/validate-call-prompt.ts",
+    "dropi:diagnose": "tsx scripts/dropi-diagnose.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
