@@ -10,7 +10,9 @@
 //   2. Allowlist (TEST_MODE): teléfono fuera de la lista → el pedido NO se
 //      procesa (ni mensaje, ni reminder, ni needs_call operativo).
 //   3. Edad (MAX_ORDER_AGE_MINUTES): pedidos viejos → ignored_old, jamás
-//      se actúa (anti-replay, anti-restos de desarrollo).
+//      se actúa (anti-replay, anti-restos de desarrollo). Medida desde
+//      ordered_at (T2 — fecha REAL de compra), no desde created_at (que es
+//      cuándo se insertó la fila, no cuándo se compró).
 //   4. canSendRealWhatsApp / canWriteToShopify: en safe mode se LOGUEA la
 //      simulación y NO se transiciona estado (nada queda "a medias" que
 //      pudiera dispararse al cambiar la config).
@@ -156,8 +158,12 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
 
       // Pedido antiguo (restos de dev, replay, backfill) → fuera, sin tocar a
-      // nadie. La antigüedad se mide desde la apertura si estuvo en espera.
-      const baseEdad = order.deferred_until ?? order.created_at;
+      // nadie. La antigüedad se mide desde la apertura si estuvo en espera;
+      // si no, desde ordered_at (T2 — fecha REAL de compra en Shopify, de
+      // T1), nunca desde created_at (que es cuándo se insertó la fila, no
+      // cuándo se compró). Solo cae a created_at si ordered_at es NULL — fila
+      // de antes de T1 que el backfill de la columna aún no ha resuelto.
+      const baseEdad = order.deferred_until ?? order.ordered_at ?? order.created_at;
       if (orderTooOld(baseEdad, now)) {
         if (markOrderIgnoredOld(order.id, "ignored_old_order: demasiado antiguo al ir a enviar")) {
           logger.warn(
