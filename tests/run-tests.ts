@@ -7100,6 +7100,71 @@ async function main(): Promise<void> {
     const bodyLive = (await resLive.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
     assert.equal(resLive.status, 200, "informativo: nunca tumba la liveness por esto");
     assert.ok(bodyLive.shopifyWebhookBadSignature24h >= 1);
+  await test("BUG salud: con cloud_api activo, /api/health/live informa de la Cloud API, no de la sesión de Baileys", async () => {
+    const mod = await import("../src/app/api/health/live/route");
+    // Baileys pudo dejar connection_state en "connected" de una sesión vieja
+    // (o nunca haberse usado): con cloud_api activo eso no debe aparecer.
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const res = await mod.GET();
+      const body = (await res.json()) as { ok: boolean; provider: string; whatsapp: string; phone: string | null };
+      assert.equal(res.status, 200, "informativo: nunca tumba la liveness por esto");
+      assert.equal(body.provider, "cloud_api");
+      assert.equal(body.whatsapp, "not_configured");
+      assert.equal(body.phone, null);
+    });
+    await withEnv(
+      {
+        WHATSAPP_PROVIDER: "cloud_api",
+        META_WHATSAPP_API_ENABLED: "1",
+        META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+        META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+      },
+      async () => {
+        const res = await mod.GET();
+        const body = (await res.json()) as { provider: string; whatsapp: string };
+        assert.equal(body.provider, "cloud_api");
+        assert.equal(body.whatsapp, "configured");
+      }
+    );
+  });
+
+  await test("BUG salud: con cloud_api activo, /api/health devuelve 503 si faltan credenciales y 200 si están", async () => {
+    const mod = await import("../src/app/api/health/route");
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const res = await mod.GET();
+      const body = (await res.json()) as { ok: boolean; provider: string; status: string; phone: string | null };
+      assert.equal(res.status, 503);
+      assert.equal(body.ok, false);
+      assert.equal(body.provider, "cloud_api");
+      assert.equal(body.status, "not_configured");
+      assert.equal(body.phone, null, "cloud_api no tiene sesión de la que sacar un número aquí");
+    });
+    await withEnv(
+      {
+        WHATSAPP_PROVIDER: "cloud_api",
+        META_WHATSAPP_API_ENABLED: "1",
+        META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+        META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+      },
+      async () => {
+        const res = await mod.GET();
+        const body = (await res.json()) as { ok: boolean; status: string };
+        assert.equal(res.status, 200);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "configured");
+      }
+    );
+  });
+
+  await test("BUG salud: con baileys (default), los dos endpoints siguen leyendo connection_state como siempre", async () => {
+    const live = await import("../src/app/api/health/live/route");
+    const pub = await import("../src/app/api/health/route");
+    const rLive = await live.GET();
+    const bLive = (await rLive.json()) as { provider: string };
+    assert.equal(bLive.provider, "baileys");
+    const rPub = await pub.GET();
+    const bPub = (await rPub.json()) as { provider: string };
+    assert.equal(bPub.provider, "baileys");
   });
 
   await test("SEGURIDAD · los tres verificadores de firma usan comparación en tiempo constante", () => {
