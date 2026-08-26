@@ -82,7 +82,7 @@ export function claimsSingleOrder(text: string): boolean {
     /\blos dos son iguales\b/.test(n) ||
     /\b(esta|estan) duplicad/.test(n) ||
     /\bpedido duplicado\b/.test(n) ||
-    /\bme (ha|han) (salido|cobrado|llegado) dos\b/.test(n)
+    /\bme (ha|han|habeis) (salido|cobrado|llegado|hecho|puesto|creado|duplicado) dos\b/.test(n)
   );
 }
 

@@ -1897,6 +1897,21 @@ export function getActiveOrdersByPhone(phone: string): OrderRow[] {
 }
 
 /**
+ * Pedidos de este teléfono que YA están en manos humanas (needs_call).
+ * Para una sola cosa: si el cliente escribe "cancelar" cuando el bot ya se
+ * apartó, la petición debe quedar ESTAMPADA para Pedro (urgencia 1 en
+ * Acciones), no perderse en el silencio.
+ */
+export function getNeedsCallOrdersByPhone(phone: string): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders WHERE phone = ? AND status = 'needs_call'
+       ORDER BY created_at DESC, id DESC`
+    )
+    .all(phone) as OrderRow[];
+}
+
+/**
  * Candidatos a duplicado del mismo teléfono para la detección A LA ENTRADA.
  *
  * Distinto de getActiveOrdersByPhone a propósito: aquí SÍ cuentan

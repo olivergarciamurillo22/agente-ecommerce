@@ -9745,6 +9745,95 @@ async function main(): Promise<void> {
     assert.equal(db.getPendingOutbox(500).filter((m) => m.phone === tel).length, antes, "cero contactos nuevos tras confirmar");
   });
 
+  // ============ CLIENTE DIFÍCIL — la conversación caótica termina siempre ============
+  console.log("· Cliente difícil — caos sin bucle y sin cancelaciones automáticas");
+
+  await test("CLIENTE DIFÍCIL · dos pedidos iguales + 'no sé', 'quiero uno', 'me habéis hecho dos', 'cancelar', 'ese no', 'el otro', 'todo correcto': SIEMPRE responde, JAMÁS cancela solo, y o resuelve o escala", () => {
+    const tel = "34698700001";
+    const oA = mkMulti("987001", "8701", tel);
+    const oB = mkMulti("987002", "8702", tel);
+
+    const secuencia = ["no sé", "quiero uno", "me habéis hecho dos", "cancelar", "ese no", "el otro", "todo correcto"];
+    const respuestas: string[] = [];
+    for (const msg of secuencia) {
+      const r = handleOrderReply(tel, msg);
+      const enManosHumanas = ["987001", "987002"].every(
+        (sid) => db.getOrderByShopifyId(sid)!.status === "needs_call"
+      );
+      if (r.handled) {
+        assert.ok(r.reply && r.reply.length > 0, `"${msg}" gestionado siempre lleva respuesta`);
+        respuestas.push(r.reply!);
+      } else {
+        // El silencio SOLO es legítimo cuando el bot ya se apartó (todo en
+        // needs_call = manos humanas). Mientras el bot lleve la
+        // conversación, callar es el bug de la transcripción real.
+        assert.ok(enManosHumanas, `"${msg}" sin respuesta solo vale si TODO está ya en manos humanas`);
+      }
+      // Invariante 4 del contrato: el agente JAMÁS cancela por su cuenta.
+      for (const sid of ["987001", "987002"]) {
+        assert.notEqual(db.getOrderByShopifyId(sid)!.status, "cancelled", `"${msg}" no puede cancelar nada automáticamente`);
+      }
+    }
+
+    // "cancelar" tras la escalada NO se perdió en el silencio: quedó
+    // estampado para Pedro (urgencia 1 en Acciones), sin cancelar nada.
+    assert.ok(
+      ["987001", "987002"].some((sid) => db.getOrderByShopifyId(sid)!.cancellation_requested_at),
+      "la petición de cancelar queda registrada aunque el bot ya se hubiera apartado"
+    );
+
+    // Anti-bucle: la MISMA respuesta no se repite más de MAX_SAME_PROMPT_REPEATS+1
+    // veces seguidas — el bot real de la transcripción repitió el selector 5 veces.
+    let repes = 1, peor = 1;
+    for (let i = 1; i < respuestas.length; i++) {
+      repes = respuestas[i] === respuestas[i - 1] ? repes + 1 : 1;
+      peor = Math.max(peor, repes);
+    }
+    assert.ok(peor <= 3, `ninguna respuesta se repite en bucle (peor racha: ${peor})`);
+
+    // El final es un estado RESUELTO o ESCALADO, nunca el limbo del selector:
+    // cada pedido acabó confirmado, esperando algo concreto o en manos humanas.
+    const finales = ["987001", "987002"].map((sid) => db.getOrderByShopifyId(sid)!.status);
+    for (const st of finales) {
+      assert.ok(
+        ["confirmed", "needs_call", "awaiting_reply", "needs_correction", "awaiting_delivery_note"].includes(st),
+        `estado final coherente, no un limbo: ${st}`
+      );
+    }
+    // Y al menos uno de los dos acabó donde un humano lo verá (needs_call →
+    // Acciones) o confirmado — la conversación no murió en el selector.
+    assert.ok(
+      finales.some((st) => st === "needs_call" || st === "confirmed"),
+      `la conversación caótica escala o resuelve: ${finales.join(", ")}`
+    );
+    // "me habéis hecho dos" con dos pedidos IGUALES: quedaron marcados para
+    // Pedro (nunca cancelados solos).
+    assert.equal(db.getOrderByShopifyId("987001")!.possible_duplicate, 1, "duplicado marcado para revisión humana");
+    assert.equal(db.getOrderByShopifyId("987002")!.possible_duplicate, 1);
+    void oA; void oB;
+  });
+
+  await test("CLIENTE DIFÍCIL · tras escalar a needs_call, más mensajes NO reinician el interrogatorio ni cambian el estado", () => {
+    const tel = "34698700002";
+    mkMulti("987003", "8703", tel);
+    // Dos ambigüedades → needs_call (presupuesto de aclaraciones agotado).
+    handleOrderReply(tel, "eh");
+    handleOrderReply(tel, "mmm");
+    assert.equal(db.getOrderByShopifyId("987003")!.status, "needs_call");
+    // El cliente sigue escribiendo cosas raras: el pedido NO vuelve al
+    // selector ni se cancela; sigue en manos humanas.
+    for (const msg of ["oye", "hola?", "no sé qué hacer"]) {
+      handleOrderReply(tel, msg);
+      assert.equal(db.getOrderByShopifyId("987003")!.status, "needs_call", `"${msg}" no saca el pedido de la cola humana`);
+    }
+    // PERO una respuesta CLARA sí resuelve aunque esté en needs_call: si el
+    // cliente al final dice "1", nadie tiene que llamarle ya.
+    const r = handleOrderReply(tel, "1");
+    void r;
+    const st = db.getOrderByShopifyId("987003")!.status;
+    assert.ok(["confirmed", "needs_call"].includes(st), "una respuesta clara nunca deja el pedido peor de lo que estaba");
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
