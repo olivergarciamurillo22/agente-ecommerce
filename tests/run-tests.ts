@@ -7100,6 +7100,8 @@ async function main(): Promise<void> {
     const bodyLive = (await resLive.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
     assert.equal(resLive.status, 200, "informativo: nunca tumba la liveness por esto");
     assert.ok(bodyLive.shopifyWebhookBadSignature24h >= 1);
+  });
+
   await test("BUG salud: con cloud_api activo, /api/health/live informa de la Cloud API, no de la sesión de Baileys", async () => {
     const mod = await import("../src/app/api/health/live/route");
     // Baileys pudo dejar connection_state en "connected" de una sesión vieja
