@@ -42,7 +42,9 @@
     "local:doctor": "tsx scripts/local-doctor.ts",
     "local:reset": "tsx scripts/local-reset.ts",
     "meta:pilot:simulate": "tsx scripts/meta-pilot-simulate.ts",
-    "calls:pilot:simulate": "tsx scripts/calls-pilot-simulate.ts"
+    "calls:pilot:simulate": "tsx scripts/calls-pilot-simulate.ts",
+    "shopify:doctor": "tsx scripts/shopify-doctor.ts",
+    "local:seed": "tsx scripts/local-seed.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

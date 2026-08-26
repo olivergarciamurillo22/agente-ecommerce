@@ -16,10 +16,10 @@ function arg(nombre: string): string | undefined {
   return p ? p.split("=").slice(1).join("=") : undefined;
 }
 
-/** Enmascara cualquier credencial: solo longitud y prefijo corto. */
+/** Política de secretos: SOLO configurada/falta. Ni longitud ni prefijo —
+ *  cuatro caracteres de una API key ya son una pista que no hace falta dar. */
 function huella(valor: string | undefined): string {
-  if (!valor) return "no configurada";
-  return `configurada (${valor.length} caracteres, empieza por "${valor.slice(0, 4)}…")`;
+  return valor ? "configurada (no se muestra)" : "no configurada";
 }
 
 async function main(): Promise<void> {
