@@ -230,6 +230,68 @@ const shopifyHeaders = (raw: string, extra: Record<string, string | null> = {}) 
   ...extra,
 });
 
+// ============================================================
+// T6 — grafo transitivo de imports (para la salvaguarda estructural de
+// WhatsApp que sigue las importaciones de verdad en vez de mirar solo el
+// texto del fichero de entrada).
+//
+// Las salvaguardas E3/E4/E7/E8 de arriba solo leen SU PROPIO fichero: si
+// backfill.ts importara un módulo C que a su vez importara WhatsApp, esos
+// tests seguirían en verde porque nunca abren C. Esto recorre el grafo de
+// verdad (imports estáticos Y `await import(...)` dinámicos, que es como
+// los scripts cargan sus propios módulos) partiendo de cada entrypoint.
+// ============================================================
+
+const PROJECT_ROOT = path.join(__dirname, "..");
+
+/** Especificadores de `from "..."` (estático) y `import("...")` (dinámico). */
+function extractImportSpecifiers(src: string): string[] {
+  const specs: string[] = [];
+  for (const m of src.matchAll(/\bfrom\s+["']([^"']+)["']/g)) specs.push(m[1]);
+  for (const m of src.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)) specs.push(m[1]);
+  return specs;
+}
+
+/** Resuelve un especificador a un fichero .ts real, o null si es externo (paquete de node_modules). */
+function resolveImportSpecifier(spec: string, fromFile: string): string | null {
+  let base: string;
+  if (spec.startsWith(".")) {
+    base = path.resolve(path.dirname(fromFile), spec);
+  } else if (spec.startsWith("@/")) {
+    base = path.join(PROJECT_ROOT, "src", spec.slice(2));
+  } else {
+    return null; // paquete externo — fuera del alcance de esta salvaguarda
+  }
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, path.join(base, "index.ts"), path.join(base, "index.tsx")]) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+  }
+  return null;
+}
+
+/** BFS del grafo de imports locales alcanzables desde `entryFile` (rutas absolutas). */
+function buildTransitiveImportGraph(entryFile: string): Set<string> {
+  const visited = new Set<string>();
+  const queue = [entryFile];
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const src = fs.readFileSync(file, "utf8");
+    for (const spec of extractImportSpecifiers(src)) {
+      const resolved = resolveImportSpecifier(spec, file);
+      if (resolved && !visited.has(resolved)) queue.push(resolved);
+    }
+  }
+  return visited;
+}
+
+/** true si `fnName(` aparece como LLAMADA en `src` (no como su propia declaración). */
+function containsCallTo(src: string, fnName: string): boolean {
+  const callPattern = new RegExp(`\\b${fnName}\\s*\\(`);
+  const declPattern = new RegExp(`\\bfunction\\s+${fnName}\\s*\\(`);
+  return src.split("\n").some((line) => callPattern.test(line) && !declPattern.test(line));
+}
+
 async function main(): Promise<void> {
   console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
 
@@ -9019,6 +9081,67 @@ async function main(): Promise<void> {
         "sin dato de antigüedad, no se bloquea por una ausencia que no es indicio de nada"
       );
     });
+  });
+
+
+  // ============ T6 · Salvaguarda estructural transitiva de WhatsApp ============
+  console.log("· T6 — salvaguarda estructural transitiva (grafo de imports)");
+
+  await test(
+    "T6 WhatsApp/Baileys no son alcanzables, ni transitivamente, desde ningún entrypoint de backfill/reconciliación",
+    () => {
+      const entrypoints = ["scripts/shopify-backfill.ts", "scripts/dropea-reconcile.ts"];
+
+      const baileysDir = path.join(PROJECT_ROOT, "src", "lib", "baileys");
+      const forbiddenModules = [
+        path.join(PROJECT_ROOT, "src", "lib", "whatsapp.ts"),
+        ...fs.readdirSync(baileysDir).map((f) => path.join(baileysDir, f)),
+      ];
+      const forbiddenCalls = ["sendWhatsAppMessage", "enqueueOutbox", "enqueueOutboxImage"];
+
+      for (const entry of entrypoints) {
+        const entryPath = path.join(PROJECT_ROOT, entry);
+        const graph = buildTransitiveImportGraph(entryPath);
+
+        assert.ok(graph.size > 3, `${entry}: el grafo recorrido parece sospechosamente pequeño (${graph.size} ficheros) — revisa que la resolución de imports (incluidos los "await import(...)" dinámicos) siga funcionando`);
+
+        for (const forbidden of forbiddenModules) {
+          assert.ok(
+            !graph.has(forbidden),
+            `${entry} alcanza transitivamente ${path.relative(PROJECT_ROOT, forbidden)} — esto enviaría WhatsApp de verdad`
+          );
+        }
+
+        for (const file of graph) {
+          const src = fs.readFileSync(file, "utf8");
+          for (const fnName of forbiddenCalls) {
+            assert.ok(
+              !containsCallTo(src, fnName),
+              `${entry} alcanza ${path.relative(PROJECT_ROOT, file)}, que llama a ${fnName}(...) — envío/encolado real de WhatsApp`
+            );
+          }
+        }
+      }
+    }
+  );
+
+  await test("T6 el propio recorrido detecta una fuga transitiva de verdad (fixture aislado, no toca el repo)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t6-fuga-"));
+    try {
+      const whatsappFile = path.join(dir, "whatsapp.ts");
+      const middleFile = path.join(dir, "middle.ts");
+      const entryFile = path.join(dir, "entry.ts");
+      fs.writeFileSync(whatsappFile, `export function sendWhatsAppMessage(a: string, b: string) { return true; }\n`);
+      fs.writeFileSync(middleFile, `export { sendWhatsAppMessage } from "./whatsapp";\n`);
+      fs.writeFileSync(entryFile, `async function main() { const m = await import("./middle"); m.sendWhatsAppMessage("x", "y"); }\nmain();\n`);
+
+      const graph = buildTransitiveImportGraph(entryFile);
+      assert.ok(graph.has(whatsappFile), "el fixture debe demostrar que un import de 2 saltos (entry → middle → whatsapp) SÍ se detecta");
+      assert.ok(containsCallTo(fs.readFileSync(middleFile, "utf8"), "sendWhatsAppMessage") === false, "el re-export por sí solo no es una llamada");
+      assert.ok(containsCallTo(fs.readFileSync(entryFile, "utf8"), "sendWhatsAppMessage"), "la llamada real en entry.ts sí se detecta como llamada");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // ============ Resumen ============
