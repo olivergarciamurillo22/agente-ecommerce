@@ -6,6 +6,7 @@ import ConversationList from "./ConversationList";
 import ConversationPanel from "./ConversationPanel";
 import AmbientBackground from "./AmbientBackground";
 import OrdersPanel from "./OrdersPanel";
+import ActionCenter from "./ActionCenter";
 import SafetyBanner from "./SafetyBanner";
 import SettingsPanel from "./SettingsPanel";
 import SystemPanel from "./SystemPanel";
@@ -27,7 +28,9 @@ export default function Dashboard({ phone }: DashboardProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   // La vista principal del MVP de Pedro son los PEDIDOS, no los chats.
-  const [view, setView] = useState<"orders" | "chats" | "system" | "settings">("orders");
+  // La vista de arranque es la BANDEJA: lo primero que Pedro debe ver es qué
+  // requiere su acción, no la lista completa de pedidos.
+  const [view, setView] = useState<"actions" | "orders" | "chats" | "system" | "settings">("actions");
 
   async function refresh() {
     try {
@@ -62,7 +65,11 @@ export default function Dashboard({ phone }: DashboardProps) {
       <AmbientBackground />
       <DashboardHeader phone={phone} view={view} onViewChange={setView} />
       <SafetyBanner />
-      {view === "orders" ? (
+      {view === "actions" ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <ActionCenter />
+        </div>
+      ) : view === "orders" ? (
         <div className="flex-1 min-h-0 overflow-hidden">
           <OrdersPanel />
         </div>
