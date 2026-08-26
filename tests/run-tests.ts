@@ -9899,6 +9899,87 @@ async function main(): Promise<void> {
     assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-B", nowSec: t0 + 121 }), true, "expirado el lease, el otro proceso lo toma");
   });
 
+  // ============ OPERADOR DIFÍCIL — cada avería dice QUÉ HACER, en cristiano ============
+  console.log("· Operador difícil — el panel explica qué hacer, no solo qué falla");
+
+  await test("OPERADOR · llamadas encendidas sin RETELL_API_KEY → critical con instrucción; el fail-closed de allowlist usa la semántica unificada de TEST_MODE", async () => {
+    const { getCallsHealth } = await import("../src/lib/system/health-integrations");
+    db.setSetting("ai_calls_enabled", "1");
+    db.setSetting("calls_shadow_mode", "0");
+    await withEnv({ RETELL_API_KEY: undefined }, async () => {
+      const h = getCallsHealth();
+      assert.equal(h.status, "critical");
+      assert.match(h.message, /FALTA RETELL_API_KEY/);
+      assert.match(h.message, /\.env|reinicia/, "dice dónde y cómo arreglarlo");
+    });
+    // TEST_MODE sin definir = ACTIVO (fail-closed). El aviso de allowlist
+    // vacía tiene que saltar también sin la variable, no solo con '1'.
+    await withEnv({ RETELL_API_KEY: "key_test_no_real", TEST_MODE: undefined }, async () => {
+      db.setSetting("calls_allowlist", "");
+      const h = getCallsHealth();
+      assert.equal(h.status, "warning");
+      assert.match(h.message, /calls_allowlist/, "dice el campo exacto a rellenar");
+    });
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_allowlist", "");
+  });
+
+  await test("OPERADOR · Meta sin credenciales con cloud_api activo → el panel lo dice sin rodeos", async () => {
+    const { getWhatsAppHealth } = await import("../src/lib/system/health-integrations");
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_ACCESS_TOKEN: undefined, META_WHATSAPP_PHONE_NUMBER_ID: undefined }, async () => {
+      const h = getWhatsAppHealth();
+      assert.equal(h.provider, "cloud_api");
+      assert.match(h.message, /SIN credenciales de Meta/i);
+      assert.match(h.message, /nada puede salir/i, "consecuencia clara, no jerga");
+    });
+  });
+
+  await test("OPERADOR · firma HMAC inválida acumulada → el mensaje dice qué comprobar y con qué comando", async () => {
+    const { getShopifyHealth } = await import("../src/lib/system/health-integrations");
+    const sysRepo = await import("../src/lib/system/repo");
+    sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "firma inválida (test operador)");
+    const h = getShopifyHealth();
+    assert.ok(h.webhookBadSignature24h >= 1);
+    assert.match(h.message, /SHOPIFY_WEBHOOK_SECRET/);
+    assert.match(h.message, /shopify:doctor/, "apunta a la herramienta de diagnóstico");
+  });
+
+  await test("OPERADOR · backup viejo → critical con acción concreta (revisar tarea del NAS, copia a mano)", async () => {
+    const { getBackupHealth } = await import("../src/lib/system/health-core");
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "backup-viejo-"));
+    try {
+      const f = path.join(dir, "messages-2020-01-01.db");
+      // Una DB real (vacía) para que el fallo sea la EDAD, no la integridad.
+      const Database = (await import("better-sqlite3")).default;
+      const tmp = new Database(f);
+      tmp.exec("CREATE TABLE t (id INTEGER)");
+      tmp.close();
+      const viejo = new Date(Date.now() - 100 * 3600 * 1000);
+      fs.utimesSync(f, viejo, viejo);
+      await withEnv({ BACKUP_DIR: dir }, async () => {
+        const h = getBackupHealth();
+        assert.equal(h.status, "critical");
+        assert.match(h.message, /revisar la tarea de backup del NAS/);
+        assert.match(h.message, /copia a mano/);
+      });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("OPERADOR · routing sin regla (vendor/SKU sin mapear) → el pedido explica el motivo y aparece en Acciones con instrucción", async () => {
+    // Ya probado de punta a punta en el golden path; aquí el contrato del
+    // TEXTO: manual_review siempre lleva un motivo legible y una acción.
+    const actionCenter = await import("../src/lib/system/action-center");
+    const o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.supplier_sync_status, "manual_review");
+    assert.ok((o.supplier_last_error ?? "").length > 10, "el motivo no es un código críptico");
+    const item = actionCenter.getActionCenter().items.find((i) => i.orderId === o.id && i.type === "SUPPLIER_ERROR");
+    assert.ok(item);
+    assert.match(item!.whatToDo, /mano|Revisar|Corregir/, "la acción está en imperativo");
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
