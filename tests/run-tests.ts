@@ -9834,6 +9834,71 @@ async function main(): Promise<void> {
     assert.ok(["confirmed", "needs_call"].includes(st), "una respuesta clara nunca deja el pedido peor de lo que estaba");
   });
 
+  // ============ REINICIO y DOS PROCESOS — todo el estado vive en la DB ============
+  console.log("· Reinicio y dos procesos — el estado sobrevive, los envíos no se duplican");
+
+  await test("REINICIO · un pedido a mitad de flujo (selección multi-pedido incluida) sobrevive a un 'reinicio': otra conexión ve TODO y el tick no reenvía nada", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const tel = "34698800001";
+    mkMulti("988001", "8801", tel);
+    mkMulti("988002", "8802", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1", total_price: "36.90" });
+
+    // El cliente selecciona el 8802 y "se apaga el proceso" antes de contestar.
+    const r1 = handleOrderReply(tel, "8802");
+    assert.equal(r1.handled, true);
+
+    // "REINICIO": una conexión NUEVA al MISMO fichero (otro proceso tras el
+    // arranque) tiene que ver el estado completo — colas, contexto, outbox.
+    const conn2 = new Database(db.dbFilePath());
+    try {
+      const ctx2 = conn2.prepare("SELECT selected_order_id FROM conversation_order_context WHERE phone = ?").get(tel) as { selected_order_id: number } | undefined;
+      assert.ok(ctx2?.selected_order_id, "la selección multi-pedido NO vive en memoria: sobrevive al reinicio");
+      const pedidos = conn2.prepare("SELECT status FROM orders WHERE phone = ?").all(tel) as Array<{ status: string }>;
+      assert.equal(pedidos.length, 2, "los pedidos están en el fichero, no en el proceso");
+    } finally {
+      conn2.close();
+    }
+
+    // Tras el "reinicio", el proceso retoma: "todo correcto" usa la selección
+    // persistida y confirma EL 8802 — la conversación no vuelve a empezar.
+    const r2 = handleOrderReply(tel, "todo correcto");
+    assert.equal(r2.handled, true);
+    assert.equal(db.getOrderByShopifyId("988002")!.status, "confirmed", "la selección persistida decide tras el reinicio");
+    assert.equal(db.getOrderByShopifyId("988001")!.status, "awaiting_reply", "el otro pedido no se toca");
+
+    // Y un tick tras el reinicio NO repite el WhatsApp inicial de nadie.
+    const antes = db.getPendingOutbox(500).filter((m) => m.phone === tel).length;
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    assert.equal(db.getPendingOutbox(500).filter((m) => m.phone === tel).length, antes, "reiniciar no reenvía confirmaciones ya mandadas");
+  });
+
+  await test("DOS PROCESOS · mismo SQLite: el claim del outbox lo gana EXACTAMENTE uno; el lease del scheduler, ídem", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const leases = await import("../src/lib/system/leases");
+
+    // --- outbox: dos 'workers' pelean por el mismo mensaje pendiente ---
+    const convo = db.getOrCreateConversation("34698800099", "Test Dos Procesos");
+    db.enqueueOutbox(convo.id, "34698800099", "mensaje único");
+    const item = db.getPendingOutbox(50).find((m) => m.phone === "34698800099")!;
+    const conn2 = new Database(db.dbFilePath());
+    try {
+      // Proceso A (el singleton) y proceso B (conexión cruda) reclaman a la vez.
+      const claimA = db.markOutboxSent(item.id);
+      const claimB = (conn2.prepare("UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ? AND sent = 0").run(item.id).changes ?? 0) > 0;
+      assert.equal(claimA || claimB, true, "alguien lo envía");
+      assert.equal(claimA && claimB, false, "pero SOLO uno: at-most-once con dos procesos");
+    } finally {
+      conn2.close();
+    }
+
+    // --- lease: dos owners distintos, el segundo NO entra hasta que expira ---
+    const t0 = 1_900_000_000;
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-A", nowSec: t0 }), true);
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-B", nowSec: t0 + 10 }), false, "el lease vivo bloquea al segundo proceso");
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-A", nowSec: t0 + 20 }), true, "el dueño renueva sin pelear");
+    assert.equal(leases.acquireLease("test_two_proc", 60, { owner: "proceso-B", nowSec: t0 + 121 }), true, "expirado el lease, el otro proceso lo toma");
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
