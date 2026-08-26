@@ -495,6 +495,41 @@ export function migrateCallOrchestrator(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración T1 (SCHEMA_VERSION 10): separa `ordered_at` (fecha REAL de compra
+ * en Shopify) de `created_at` (que en realidad es `imported_at` — el instante
+ * en que la fila se insertó, ya sea por el webhook o por un backfill). Antes
+ * de esto no había forma de distinguir "el cliente compró hoy" de "hoy se
+ * importó un pedido de hace tres semanas", y eso rompía tanto el orden del
+ * panel como el criterio de antigüedad.
+ *
+ * Aditiva y opcional a propósito: NULL para todas las filas existentes hasta
+ * que algo la rellene (el webhook y el backfill de Shopify la rellenan desde
+ * ya; las filas históricas las rellena `scripts/backfill-ordered-at.ts`,
+ * aparte). Mismo patrón que migrateClosureAxis: comprobar con
+ * PRAGMA table_info antes de añadir, envuelto en try/catch por si otro
+ * proceso la añadió justo entre medias.
+ */
+export function migrateOrderedAt(db: Database.Database): void {
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  if (!currentCols.has("ordered_at")) {
+    try {
+      db.exec("ALTER TABLE orders ADD COLUMN ordered_at INTEGER");
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at DESC)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -586,6 +621,11 @@ export interface OrderRow {
   raw_payload: string | null;
   created_at: number;
   updated_at: number;
+  /** Fecha REAL de compra en Shopify (epoch, segundos). `null` = sin resolver
+   *  todavía (fila anterior a T1 aún no pasada por el backfill de la columna,
+   *  o el payload nunca trajo `created_at`). NUNCA confundir con `created_at`
+   *  de arriba, que es cuándo se insertó la FILA (import), no la compra. */
+  ordered_at: number | null;
 
   // --- Eje de cierre (E1) — ver ClosureStatus más arriba ---
   closure_status: ClosureStatus;
@@ -612,6 +652,9 @@ export interface NewOrderInput {
   customer_note?: string | null;
   last_error?: string | null;
   raw_payload?: string | null;
+  /** Fecha real de compra en Shopify (epoch, segundos). `null`/ausente si el
+   *  payload no la traía — nunca se inventa. */
+  ordered_at?: number | null;
 }
 
 // Columnas de `orders` — ÚNICA fuente de verdad del esquema: la usan el CREATE
@@ -684,6 +727,9 @@ const ORDERS_TABLE_BODY = `
       raw_payload TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      -- Fecha REAL de compra en Shopify (T1). NULL = sin resolver. Distinta
+      -- de created_at de arriba, que es cuándo se insertó la fila (import).
+      ordered_at INTEGER,
       -- Eje de cierre (E1): independiente de status. Ver ClosureStatus.
       -- Arranca en 'unknown' siempre -- nunca se infiere, ni al crear ni al migrar.
       closure_status TEXT NOT NULL DEFAULT 'unknown',
@@ -1077,6 +1123,7 @@ function build() {
   migrateSchedulerLeases(db);
   migrateConversationOrderContext(db);
   migrateOutboxProvider(db);
+  migrateOrderedAt(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1246,7 +1293,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1689,8 +1736,8 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
         shopify_order_id, shopify_order_number, customer_name, phone, email,
         product_summary, total_price, currency,
         address_line1, address_line2, city, province, postal_code, country,
-        status, customer_note, last_error, raw_payload
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, customer_note, last_error, raw_payload, ordered_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.shopify_order_id,
@@ -1710,7 +1757,8 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
       input.status,
       input.customer_note ?? null,
       input.last_error ?? null,
-      input.raw_payload ?? null
+      input.raw_payload ?? null,
+      input.ordered_at ?? null
     );
   const order = getOrderByShopifyId(input.shopify_order_id);
   if (!order) {
