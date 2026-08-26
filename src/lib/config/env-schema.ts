@@ -262,10 +262,20 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "RETELL_AGENT_ID", category: "RETELL_CALLS", secret: false, description: "Agent ID del agente de confirmación.", requiredFor: ["retell-pilot"] },
   { name: "RETELL_FROM_NUMBER", category: "RETELL_CALLS", secret: false, description: "Número desde el que se llama, E.164 (+34950835615).", requiredFor: ["retell-pilot"], validate: phoneE164 },
   {
+    name: "CALLS_PILOT_MODE",
+    category: "RETELL_CALLS",
+    secret: false,
+    description:
+      "Interruptor PROPIO del piloto de llamadas (26-08): '1' o sin definir = fail-closed (allowlist vacía = NADIE); '0' EXPLÍCITO = producción de llamadas (vacía = sin restricción). Desacoplado de TEST_MODE a propósito. PRIORIDAD: settings.calls_pilot_mode.",
+    requiredFor: [],
+    defaultValue: "1",
+    managedBySettings: "calls_pilot_mode",
+  },
+  {
     name: "CALLS_ALLOWLIST",
     category: "RETELL_CALLS",
     secret: false,
-    description: "Teléfonos a los que se puede llamar. Con TEST_MODE=1, vacía = NADIE (fail-closed del 26-08). PRIORIDAD: settings.calls_allowlist (panel) sobre esta variable.",
+    description: "Teléfonos a los que se puede llamar. En modo piloto (calls_pilot_mode, el default), vacía = NADIE (fail-closed del 26-08). PRIORIDAD: settings.calls_allowlist (panel) sobre esta variable.",
     requiredFor: ["retell-pilot"],
     validate: phoneListDigits,
     managedBySettings: "calls_allowlist",
@@ -491,7 +501,7 @@ export function auditEnvironment(profile: Profile, env: NodeJS.ProcessEnv = proc
   }
   if (profile === "retell-pilot" && (env.CALLS_ALLOWLIST ?? "").trim() === "") {
     dangers.push(
-      "NO ACTIVES ai_calls_enabled hasta que este perfil esté verde: sin allowlist, el fail-closed bloqueará todas las llamadas (y así debe ser)."
+      "NO ACTIVES ai_calls_enabled hasta que este perfil esté verde: sin allowlist y en modo piloto (calls_pilot_mode, el default), el fail-closed bloqueará todas las llamadas (y así debe ser)."
     );
   }
   if (profile === "nas-production") {

@@ -8500,31 +8500,40 @@ async function main(): Promise<void> {
   const promptVal = await import("../src/lib/calls/prompt-validator");
   const callsCfg58 = await import("../src/lib/calls/config");
 
-  await test("CALLS · FAIL-CLOSED en piloto: allowlist vacía + TEST_MODE=1 NO llama a nadie", async () => {
+  await test("CALLS · FAIL-CLOSED con interruptor PROPIO: en piloto (default) allowlist vacía = NADIE; TEST_MODE ya NO pinta nada aquí", async () => {
     // La trampa real: CALLS_ALLOWLIST vacía significaba "sin restricción" —
     // lo contrario que TEST_PHONE_ALLOWLIST. Abrir el kill switch con la
     // lista sin rellenar habría llamado a TODOS los clientes.
-    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
+    // Piloto por DEFECTO (calls_pilot_mode sin definir): vacía = nadie.
+    await withEnv({ CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: undefined }, () => {
+      assert.equal(callsCfg58.callsPilotMode(), true, "sin definir = piloto ACTIVO (fail-closed)");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en piloto, vacía = NADIE");
     });
-    // Y con TEST_MODE SIN DEFINIR: safety.ts lo trata como modo prueba
-    // ACTIVO (!== "0"), así que el fail-closed también aplica. Con === "1"
-    // este caso habría reabierto el agujero de "vacía = todos".
-    const backup = process.env.TEST_MODE;
-    delete process.env.TEST_MODE;
-    try {
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "sin definir = también fail-closed");
-    } finally {
-      process.env.TEST_MODE = backup;
-    }
-    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
+    // DESACOPLE (decisión 26-08 noche): TEST_MODE ya no gobierna las
+    // llamadas. Con TEST_MODE=0 y piloto activo, vacía SIGUE bloqueando
+    // (antes se abría); y con TEST_MODE=1 y piloto=0, vacía NO bloquea
+    // (antes bloqueaba). Cambiar TEST_MODE para tocar llamadas movía
+    // cinco sistemas a la vez.
+    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: undefined }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "TEST_MODE=0 ya no abre las llamadas");
+    });
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: "0" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "producción de llamadas EXPLÍCITA: vacía = sin restricción, aunque TEST_MODE=1");
+    });
+    // Con allowlist rellena, restringe SIEMPRE, en piloto o fuera de él.
+    await withEnv({ CALLS_ALLOWLIST: "34600000001", CALLS_PILOT_MODE: "0" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no, ni en producción");
     });
-    // Compatibilidad documentada: en producción real (TEST_MODE=0) vacía
-    // sigue siendo "sin restricción" — con el kill switch y el cap delante.
-    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "" }, () => {
-      assert.equal(callsCfg58.callAllowedByAllowlist("34600000003"), true);
+    // Prioridad settings sobre env (cambiable sin desplegar, como el resto
+    // de llaves de llamadas): el setting gana a la variable.
+    await withEnv({ CALLS_ALLOWLIST: "", CALLS_PILOT_MODE: "1" }, () => {
+      db.setSetting("calls_pilot_mode", "0");
+      try {
+        assert.equal(callsCfg58.callAllowedByAllowlist("34600000009"), true, "settings.calls_pilot_mode=0 gana al env");
+      } finally {
+        db.setSetting("calls_pilot_mode", "");
+      }
     });
   });
 

@@ -46,6 +46,28 @@ export function callsAllowlist(): string[] {
     .filter(Boolean);
 }
 
+/**
+ * MODO PILOTO DE LLAMADAS — interruptor PROPIO, desacoplado de TEST_MODE.
+ *
+ * Decisión del 26-08 (noche, con Pedro): el fail-closed original colgaba de
+ * TEST_MODE, pero TEST_MODE gobierna además WhatsApp, las escrituras en
+ * Shopify y qué pedidos son operativos. Cuando Pedro abrió las llamadas a
+ * clientes reales (con TEST_MODE=1 en el NAS), desbloquearlas habría exigido
+ * TEST_MODE=0: cambiar cinco cosas para arreglar una. Las llamadas tienen su
+ * propia llave desde entonces.
+ *
+ *   '1' o SIN DEFINIR = piloto (fail-closed): allowlist vacía = NADIE.
+ *   '0' EXPLÍCITO     = producción de llamadas: vacía = sin restricción
+ *                       (con el kill switch, el cap diario y la franja
+ *                       horaria SIEMPRE delante).
+ *
+ * Prioridad settings.calls_pilot_mode (cambiable sin desplegar) sobre la
+ * variable CALLS_PILOT_MODE del .env — como el resto de llaves de llamadas.
+ */
+export function callsPilotMode(): boolean {
+  return cfg("calls_pilot_mode", "CALLS_PILOT_MODE", "1") !== "0";
+}
+
 export function callAllowedByAllowlist(phoneDigits: string): boolean {
   const lista = callsAllowlist();
   if (lista.length === 0) {
@@ -53,16 +75,12 @@ export function callAllowedByAllowlist(phoneDigits: string): boolean {
     // esta lista vacía significaba "sin restricción" — exactamente lo
     // CONTRARIO que TEST_PHONE_ALLOWLIST, y a un paso de que abrir
     // ai_calls_enabled con la lista sin rellenar llamara a TODOS los
-    // clientes. Mientras el sistema esté en modo prueba (TEST_MODE=1, que
-    // es como va a estar durante todo el piloto), una lista vacía BLOQUEA a
-    // todos. En producción real (TEST_MODE=0) conserva el significado
-    // documentado de "sin restricción" para no romper compatibilidad — y
-    // para entonces el kill switch y el cap diario siguen delante.
-    // MISMA semántica que safety.ts (testMode() = TEST_MODE !== "0"): sin
-    // definir cuenta como modo prueba ACTIVO. Con === "1", un TEST_MODE
-    // ausente habría reabierto el agujero de "vacía = todos".
-    if (process.env.TEST_MODE !== "0") return false;
-    return true;
+    // clientes. En modo piloto (calls_pilot_mode, POR DEFECTO activo, sin
+    // definir cuenta como ACTIVO), una lista vacía BLOQUEA a todos. Salir
+    // del piloto es una decisión EXPLÍCITA (calls_pilot_mode='0'), no un
+    // efecto colateral de TEST_MODE: entonces vacía recupera el significado
+    // documentado de "sin restricción", con kill switch y cap delante.
+    return !callsPilotMode();
   }
   return lista.includes(phoneDigits.replace(/[^\d]/g, ""));
 }
