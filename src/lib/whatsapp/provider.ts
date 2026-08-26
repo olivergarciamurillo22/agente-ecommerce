@@ -44,7 +44,21 @@ export type OutboundWhatsAppMessage =
   | { kind: "text"; text: string }
   | { kind: "interactive_buttons"; body: string; buttons: ReplyButton[]; footer?: string }
   | { kind: "interactive_list"; body: string; buttonLabel: string; rows: ListRow[]; footer?: string }
-  | { kind: "template"; templateName: string; language: string; bodyParams: string[] };
+  | {
+      kind: "template";
+      templateName: string;
+      language: string;
+      bodyParams: string[];
+      /**
+       * Payload de cada botón de respuesta rápida, EN EL ORDEN en que se
+       * crearon en la plantilla. Meta no fija el payload al aprobar la
+       * plantilla — lo declara quien manda el mensaje, en un componente
+       * `button`/`quick_reply` por botón (ver buildMetaPayload). Sin esto,
+       * los botones se ven pero pulsar uno no manda el payload que
+       * handleOrderButtonReply espera.
+       */
+      buttonPayloads?: string[];
+    };
 
 export interface SendResult {
   ok: boolean;

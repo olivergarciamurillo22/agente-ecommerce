@@ -15,15 +15,18 @@
 import type { OrderRow } from "../db";
 import { BUTTON_PAYLOADS } from "../orders/confirmation";
 import { shortProductLine } from "../orders/multi-order";
+import { buildTemplateMessage } from "./templates";
 import type { OutboundWhatsAppMessage } from "./provider";
 
-function money(o: OrderRow): string {
+/** Exportado: lo reutiliza buildConfirmationOutbound (y cualquier plantilla futura). */
+export function money(o: OrderRow): string {
   const n = parseFloat(o.total_price);
   const importe = Number.isFinite(n) ? n.toFixed(2).replace(".", ",") : o.total_price;
   return `${importe} ${o.currency === "EUR" ? "€" : o.currency}`;
 }
 
-function firstName(o: OrderRow): string {
+/** Exportado: lo reutiliza buildConfirmationOutbound (y cualquier plantilla futura). */
+export function firstName(o: OrderRow): string {
   return (o.customer_name ?? "").trim().split(/\s+/)[0] || "";
 }
 
@@ -56,6 +59,31 @@ export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
     fallbackText:
       `${body}\n\n` +
       `1 — Confirmar\n2 — Cambiar la dirección\n3 — Dejar nota al repartidor`,
+  };
+}
+
+/**
+ * Confirmación inicial, decidiendo INTERACTIVO vs PLANTILLA según la
+ * ventana de 24 h (BUG1: fuera de ventana, un interactivo/texto libre no
+ * es una opción — Meta lo rechaza siempre con outside_24h_window).
+ *
+ * Mapeo mensaje → plantilla (pedido en BUG1, punto 2): de momento una sola
+ * entrada, porque es la única plantilla aprobada hoy
+ * (config/whatsapp-templates.json). El recordatorio, el aviso de
+ * seguimiento, etc. se añaden aquí cuando sus plantillas estén aprobadas
+ * en Meta — no antes, para no fallar por un nombre que la WABA no conoce.
+ */
+export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: boolean): InteractiveSpec {
+  if (withinSessionWindow) return buildConfirmationInteractive(order);
+  return {
+    message: buildTemplateMessage("order_confirmation_request", [
+      firstName(order) || "cliente",
+      shortProductLine(order),
+      money(order),
+    ]),
+    // Mismo texto que el interactivo: es lo que enseña el panel y lo que
+    // sale tal cual si algún día se hace rollback a Baileys con esto en cola.
+    fallbackText: buildConfirmationInteractive(order).fallbackText,
   };
 }
 

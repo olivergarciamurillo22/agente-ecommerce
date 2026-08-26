@@ -110,9 +110,20 @@ export function buildMetaPayload(phone: string, m: OutboundWhatsAppMessage): Rec
     template: {
       name: m.templateName,
       language: { code: m.language },
-      components: m.bodyParams.length
-        ? [{ type: "body", parameters: m.bodyParams.map((p) => ({ type: "text", text: p })) }]
-        : [],
+      components: [
+        ...(m.bodyParams.length
+          ? [{ type: "body", parameters: m.bodyParams.map((p) => ({ type: "text", text: p })) }]
+          : []),
+        // El payload de un botón de plantilla lo declara quien MANDA el
+        // mensaje, no quien la aprobó — sin esto el botón se ve pero pulsarlo
+        // no manda el payload que handleOrderButtonReply espera (BUG1, punto 1).
+        ...(m.buttonPayloads ?? []).map((payload, i) => ({
+          type: "button",
+          sub_type: "quick_reply",
+          index: String(i),
+          parameters: [{ type: "payload", payload }],
+        })),
+      ],
     },
   };
 }

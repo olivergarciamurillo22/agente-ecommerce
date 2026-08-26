@@ -89,10 +89,21 @@ export function sendWhatsAppInteractive(phone: string, spec: InteractiveSpec, op
   insertMessage(convo.id, "assistant", spec.fallbackText);
 
   if (whatsappProviderName() === "cloud_api") {
+    // BUG1: faltaba el caso "template" — caía en "interactive_buttons" por
+    // defecto, así que un mensaje de plantilla se habría guardado con el
+    // message_type equivocado (y sin template_name, que es justo el campo
+    // que confirma que se mandó por plantilla y no por interactivo).
+    const messageType =
+      spec.message.kind === "interactive_list"
+        ? "interactive_list"
+        : spec.message.kind === "template"
+          ? "template"
+          : "interactive_buttons";
     enqueueOutboxRich(convo.id, phone, {
       content: spec.fallbackText,
-      messageType: spec.message.kind === "interactive_list" ? "interactive_list" : "interactive_buttons",
+      messageType,
       payloadJson: JSON.stringify(spec.message),
+      templateName: spec.message.kind === "template" ? spec.message.templateName : null,
       authorized,
     });
   } else {
