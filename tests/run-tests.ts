@@ -9673,6 +9673,78 @@ async function main(): Promise<void> {
     });
   }
 
+  // ============ GOLDEN PATH — el contrato completo, de webhook a panel ============
+  console.log("· Golden path — contrato de docs/GOLDEN-PATH.md");
+
+  await test("golden-path-order-confirmation: webhook firmado → guardado → WhatsApp encolado → '1' → confirmado → routing evaluado → panel y Acciones lo reflejan → fulfilled es in_progress → delivered terminal", async () => {
+    const actionCenter = await import("../src/lib/system/action-center");
+    const { getSystemOverview } = await import("../src/lib/system/overview");
+    const tel = "34698600001";
+
+    // Pasos 1-3 del contrato: llega orders/create FIRMADO y se guarda local.
+    const raw = JSON.stringify(codPayload({
+      id: 986001, order_number: 8601,
+      shipping_address: {
+        name: "Golden Path", address1: "Calle del Contrato 1", address2: null, city: "Sevilla",
+        province: "Sevilla", zip: "41001", country: "Spain", country_code: "ES", phone: "+34 698 600 001",
+      },
+    }));
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    let o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "pending_send", "paso 3: guardado y a la cola de envío");
+    assert.equal(o.possible_duplicate, 0, "sin otro pedido igual, nada de marcas");
+
+    // Paso 4: el scheduler encola el WhatsApp (outbox) y pasa a awaiting_reply.
+    const tNow = Math.floor(Date.now() / 1000);
+    await runSchedulerTick(tNow);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "awaiting_reply", "paso 4: WhatsApp de confirmación en vuelo");
+    const out = db.getPendingOutbox(200).find((m) => m.phone === tel);
+    assert.ok(out, "paso 4: el mensaje está en el outbox (envío at-most-once)");
+    assert.match(out!.content, /1 - Todo correcto/);
+
+    // Paso 5: el cliente responde "1".
+    const reply = handleOrderReply(tel, "1");
+    assert.equal(reply.handled, true);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.status, "confirmed", "paso 5: confirmado");
+    assert.ok(o.confirmed_at, "paso 5: confirmed_at estampado");
+
+    // Paso 6: el siguiente tick evalúa el routing y lo deja ESCRITO.
+    await runSchedulerTick(tNow + 60);
+    o = db.getOrderByShopifyId("986001")!;
+    assert.ok(o.supplier_sync_status, "paso 6: la decisión de routing queda en el pedido");
+    // La fixture (CREMA-01) no tiene regla de routing: revisión humana con
+    // motivo, no una adivinanza. Eso también es contrato.
+    assert.equal(o.supplier_sync_status, "manual_review");
+    assert.ok(o.supplier_last_error, "paso 6: el motivo del bloqueo queda explicado");
+
+    // Paso 7: el panel refleja el pedido y el bloqueo está en Acciones.
+    const ov = getSystemOverview();
+    assert.ok(JSON.stringify(ov).length > 0, "paso 7: overview se construye sin lanzar");
+    assert.ok(!JSON.stringify(ov).includes(tel), "paso 7: el panel jamás enseña el teléfono completo");
+    const ac = actionCenter.getActionCenter();
+    const item = ac.items.find((i) => i.orderId === o.id && i.type === "SUPPLIER_ERROR");
+    assert.ok(item, "paso 7: lo que exige acción humana está en Acciones");
+    assert.match(item!.whatToDo, /./, "cada acción dice qué hacer");
+
+    // Paso 8: Shopify marca fulfilled → in_progress, JAMÁS delivered.
+    assert.ok(db.setOrderClosure(o.id, "in_progress", "shopify", tNow + 3600));
+    o = db.getOrderByShopifyId("986001")!;
+    assert.equal(o.closure_status, "in_progress", "paso 8: fulfilled = despachado, no entregado");
+
+    // Paso 9: la fuente autoritativa cierra; el terminal no se pisa.
+    assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", tNow + 7200));
+    assert.equal(db.setOrderClosure(o.id, "refused", "shopify", tNow + 9999), false, "paso 9: terminal inmutable");
+    assert.equal(db.getOrderByShopifyId("986001")!.closure_status, "delivered");
+
+    // Invariante 1: nada vuelve a contactar a este cliente por esta causa.
+    const antes = db.getPendingOutbox(500).filter((m) => m.phone === tel).length;
+    await runSchedulerTick(tNow + 999_999);
+    assert.equal(db.getPendingOutbox(500).filter((m) => m.phone === tel).length, antes, "cero contactos nuevos tras confirmar");
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
