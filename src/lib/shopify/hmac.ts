@@ -22,25 +22,33 @@ export function verifyShopifyHmac(
 
 export type ShopifyHmacMatch = "webhook_secret" | "client_secret" | "ninguno";
 
+export interface ShopifyHmacVerification {
+  valid: boolean;
+  /** Con cuál de los dos secretos encajó (o "ninguno" si no encajó con ninguno). */
+  matchedWith: ShopifyHmacMatch;
+}
+
 /**
- * DIAGNÓSTICO (BUG2, 26-08). Shopify firma un webhook con uno de DOS
- * secretos distintos según quién creó la suscripción:
+ * Verifica el HMAC contra los DOS secretos de firma que usa Shopify (BUG2,
+ * confirmado en producción el 26-08): Shopify firma un webhook con uno de
+ * dos secretos distintos según quién creó la suscripción:
  *   - creada desde el admin (Configuración → Notificaciones) → el secreto
- *     de webhooks de la tienda (SHOPIFY_WEBHOOK_SECRET, el único que este
- *     código valida hoy);
+ *     de webhooks de la tienda (SHOPIFY_WEBHOOK_SECRET);
  *   - creada por una app vía API → el CLIENT SECRET de esa app
- *     (SHOPIFY_CLIENT_SECRET).
- * La migración del 24-08 (admin-created → app-owned) pudo dejar algunas
- * suscripciones firmando con el segundo mientras el código solo comprueba
- * el primero. Esta función SOLO informa cuál coincide — no acepta nada,
- * no cambia ninguna decisión de la ruta. Nunca devuelve ni loguea un
- * secreto: solo la ETIQUETA de cuál encajó.
+ *     (SHOPIFY_CLIENT_SECRET). Los 4 webhooks de este proyecto los creó la
+ *     app, así que firman con este.
+ * Las dos comparaciones se hacen SIEMPRE (nunca se corta en cuanto una
+ * encaja) para no depender de en qué orden se prueben los secretos.
+ * `verifyShopifyHmac` ya compara en tiempo constante (`timingSafeEqual`)
+ * dentro de cada una.
  */
-export function diagnoseShopifyHmacSecret(
+export function verifyShopifyHmacEitherSecret(
   rawBody: string | Buffer,
   hmacHeader: string | null | undefined
-): ShopifyHmacMatch {
-  if (verifyShopifyHmac(rawBody, hmacHeader, process.env.SHOPIFY_WEBHOOK_SECRET)) return "webhook_secret";
-  if (verifyShopifyHmac(rawBody, hmacHeader, process.env.SHOPIFY_CLIENT_SECRET)) return "client_secret";
-  return "ninguno";
+): ShopifyHmacVerification {
+  const matchesWebhookSecret = verifyShopifyHmac(rawBody, hmacHeader, process.env.SHOPIFY_WEBHOOK_SECRET);
+  const matchesClientSecret = verifyShopifyHmac(rawBody, hmacHeader, process.env.SHOPIFY_CLIENT_SECRET);
+  if (matchesWebhookSecret) return { valid: true, matchedWith: "webhook_secret" };
+  if (matchesClientSecret) return { valid: true, matchedWith: "client_secret" };
+  return { valid: false, matchedWith: "ninguno" };
 }

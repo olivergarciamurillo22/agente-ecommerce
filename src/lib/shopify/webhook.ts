@@ -17,7 +17,7 @@ import {
   gatewayHaystack,
   type ShopifyOrderPayload,
 } from "../orders/normalize";
-import { verifyShopifyHmac, diagnoseShopifyHmacSecret } from "./hmac";
+import { verifyShopifyHmacEitherSecret } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
 import { maxOrderAgeMinutes } from "../safety";
 
@@ -36,27 +36,36 @@ export interface WebhookResult {
 }
 
 export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHeaders): WebhookResult {
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
-  if (!secret) {
-    logger.error("[SHOPIFY] SHOPIFY_WEBHOOK_SECRET no configurado — webhook rechazado");
+  if (!process.env.SHOPIFY_WEBHOOK_SECRET && !process.env.SHOPIFY_CLIENT_SECRET) {
+    logger.error("[SHOPIFY] ni SHOPIFY_WEBHOOK_SECRET ni SHOPIFY_CLIENT_SECRET configurados — webhook rechazado");
     return { status: 500, body: { ok: false, error: "webhook secret no configurado" } };
   }
 
-  if (!verifyShopifyHmac(rawBody, headers.hmac, secret)) {
+  // BUG2 (confirmado en producción el 26-08): los webhooks de esta tienda
+  // los creó la app, así que Shopify los firma con SHOPIFY_CLIENT_SECRET,
+  // no con SHOPIFY_WEBHOOK_SECRET (el de los webhooks creados desde el
+  // admin). Se aceptan los dos.
+  const verificacion = verifyShopifyHmacEitherSecret(rawBody, headers.hmac);
+  if (!verificacion.valid) {
     // topic + webhookId (id de ENTREGA, no de suscripción) para poder
     // correlacionar una racha de rechazos con una entrega/suscripción
-    // concreta. Y el diagnóstico de BUG2: prueba también contra
-    // SHOPIFY_CLIENT_SECRET — la migración admin-created → app-owned del
-    // 24-08 pudo dejar alguna suscripción firmando con el secreto de la
-    // app en vez del de la tienda. Nunca loguea un secreto, solo la
-    // etiqueta de cuál coincidió.
-    const coincideCon = diagnoseShopifyHmacSecret(rawBody, headers.hmac);
+    // concreta.
     logger.warn(
-      `[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}, webhookId=${headers.webhookId ?? "?"}, coincide_con=${coincideCon}, longitud_cuerpo=${rawBody.length}) — rechazado`
+      `[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}, webhookId=${headers.webhookId ?? "?"}, longitud_cuerpo=${rawBody.length}) — rechazado`
     );
     // Al feed: una racha de estos es un secret mal pegado o alguien probando.
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
+  }
+  if (verificacion.matchedWith === "client_secret") {
+    // Rastro de que este webhook vino firmado con el secreto de la app, no
+    // el de la tienda — informativo, nunca cambia la decisión de aceptar.
+    logIntegrationEvent(
+      "shopify",
+      "webhook_client_secret_match",
+      "info",
+      "webhook validado con SHOPIFY_CLIENT_SECRET (suscripción creada por la app, no desde el admin)"
+    );
   }
 
   // Solo procesamos creación de pedidos. Si llega otro topic (webhook mal

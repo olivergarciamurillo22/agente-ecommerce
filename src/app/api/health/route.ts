@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getConnectionState } from "@/lib/db";
+import { getShopifyHealth } from "@/lib/system/health-integrations";
 
 // Endpoint de salud para un monitor externo (UptimeRobot, BetterStack…).
 // Cubre el caso que el watchdog por WhatsApp NO puede cubrir: que el contenedor
@@ -21,6 +22,11 @@ export async function GET(): Promise<NextResponse> {
         // conexión; los últimos dígitos bastan para que Pedro distinga qué
         // número está vinculado sin publicarlo a quien pregunte.
         phone: conn.phone ? `***${String(conn.phone).slice(-4)}` : null,
+        // Informativo (BUG2, 26-08): NO afecta a `ok`/al código de estado —
+        // es una integración distinta a WhatsApp. Antes de esto un rechazo
+        // de HMAC solo dejaba un warning en integration_events que nadie
+        // miraba, y así pasaron días perdiendo cancelaciones sin enterarse.
+        shopifyWebhookBadSignature24h: getShopifyHealth().webhookBadSignature24h,
         time: new Date().toISOString(),
       },
       { status: connected ? 200 : 503 }
