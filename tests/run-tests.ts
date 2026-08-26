@@ -143,7 +143,7 @@ async function main(): Promise<void> {
   const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage } = await import(
     "../src/lib/orders/normalize"
   );
-  const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
+  const { verifyShopifyHmac, diagnoseShopifyHmacSecret } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
@@ -260,6 +260,28 @@ async function main(): Promise<void> {
     assert.equal(verifyShopifyHmac("cuerpo", sign("cuerpo"), undefined), false);
   });
 
+  await test("BUG2 diagnóstico: diagnoseShopifyHmacSecret dice CUÁL de los dos secretos firmó, sin aceptar nada", async () => {
+    const signWith = (secret: string, body: string) => crypto.createHmac("sha256", secret).update(body).digest("base64");
+
+    // Firmado con el secreto de webhooks de la tienda (el que ya se valida hoy).
+    assert.equal(diagnoseShopifyHmacSecret("cuerpo", sign("cuerpo")), "webhook_secret");
+
+    // Firmado con el CLIENT SECRET de la app — el caso sospechoso del BUG2:
+    // una suscripción app-owned firmando con un secreto que el código no
+    // comprueba todavía.
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = signWith("test_client_secret", "cuerpo");
+      assert.equal(diagnoseShopifyHmacSecret("cuerpo", firmaClientSecret), "client_secret");
+    });
+
+    // Ninguno de los dos (firma inventada, o SHOPIFY_CLIENT_SECRET sin configurar).
+    assert.equal(diagnoseShopifyHmacSecret("cuerpo", sign("otro cuerpo")), "ninguno");
+    await withEnv({ SHOPIFY_CLIENT_SECRET: undefined }, () => {
+      const firmaClientSecret = signWith("un-secreto-cualquiera", "cuerpo");
+      assert.equal(diagnoseShopifyHmacSecret("cuerpo", firmaClientSecret), "ninguno");
+    });
+  });
+
   // ============ 4 · Webhook orders/create ============
   console.log("· Webhook");
   await test("pedido COD válido se guarda como pending_send", () => {
@@ -286,6 +308,16 @@ async function main(): Promise<void> {
     const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: sign("manipulado") }));
     assert.equal(res.status, 401);
     assert.equal(db.getOrderByShopifyId("900002"), null);
+  });
+
+  await test("BUG2 diagnóstico: firmado con SHOPIFY_CLIENT_SECRET sigue dando 401 — es diagnóstico, NO acepta un segundo secreto todavía", async () => {
+    const raw = JSON.stringify(codPayload({ id: 900003, order_number: 1103 }));
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: firmaClientSecret }));
+      assert.equal(res.status, 401, "el diagnóstico solo informa — el pedido sigue rechazándose hasta que se decida aceptar los dos secretos");
+    });
+    assert.equal(db.getOrderByShopifyId("900003"), null);
   });
   await test("pedido NO COD se ignora con 200", () => {
     const raw = JSON.stringify(
@@ -4206,6 +4238,20 @@ async function main(): Promise<void> {
       process.env.SHOPIFY_WEBHOOK_SECRET = backup;
     }
     assert.equal(db.getOrderById(o.id)!.closure_status, "unknown");
+  });
+
+  await test("BUG2 diagnóstico en orders-events: firmado con SHOPIFY_CLIENT_SECRET también sigue en 401 — mismo diagnóstico, mismo endpoint compartido por los 3 topics", async () => {
+    const o = mkOrder("990802", "3802", "34600119802");
+    const raw = JSON.stringify(closurePayload({ id: 990802 }));
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
+      const res = processOrdersEventWebhook(
+        raw,
+        shopifyHeaders(raw, { topic: "orders/cancelled", hmac: firmaClientSecret, webhookId: "wh-bug2-clientsecret" })
+      );
+      assert.equal(res.status, 401);
+    });
+    assert.equal(db.getOrderById(o.id)!.closure_status, "unknown", "sin efecto: el diagnóstico no cambia la decisión");
   });
 
   await test("E2 orders/cancelled: closure_status → cancelled, source shopify, closure_at = cancelled_at del payload", () => {
