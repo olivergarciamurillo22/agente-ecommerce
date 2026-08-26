@@ -42,7 +42,8 @@
     "local:doctor": "tsx scripts/local-doctor.ts",
     "local:reset": "tsx scripts/local-reset.ts",
     "casamable:simulate": "tsx scripts/casamable-simulate.ts",
-    "readiness": "tsx scripts/readiness.ts"
+    "readiness": "tsx scripts/readiness.ts",
+    "deploy:precheck": "tsx scripts/deploy-precheck.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
