@@ -5,7 +5,9 @@
 //   npm run shopify:webhooks -- --ensure  # crea las que FALTAN (sin duplicar)
 //
 // Nunca borra ni modifica suscripciones existentes: un topic apuntando a
-// otra URL se AVISA (decidir a mano). API version: SHOPIFY_API_VERSION.
+// otra URL se AVISA (decidir a mano), y un topic con MÁS DE UNA suscripción
+// activa se lista como DUPLICADO (decidir a mano cuál sobra — nunca se
+// borra sola). API version: SHOPIFY_API_VERSION.
 // ============================================================
 
 import "./env-loader";
@@ -35,6 +37,25 @@ async function main(): Promise<void> {
   }
   if (plan.extra.length) {
     console.log(`  · Otras suscripciones ajenas a este sistema: ${plan.extra.map((x) => x.topic).join(", ")}`);
+  }
+  if (plan.duplicates.length) {
+    console.log(
+      "\n  🚨 DUPLICADOS — mismo topic con MÁS DE UNA suscripción activa. Antes esto se veía"
+    );
+    console.log(
+      "     como \"✓ Correctas\" sin más aviso: basta con que UNA copia apunte bien para contar como"
+    );
+    console.log(
+      "     cubierta, pero eso no dice si hay OTRA copia vieja entregando el mismo topic con otro"
+    );
+    console.log("     secreto (típico: una firmada desde el admin y otra desde la app). NO se borra");
+    console.log("     nada aquí — decide a mano cuál sobra mirando id/fecha de creación en Shopify:");
+    for (const d of plan.duplicates) {
+      console.log(`    · ${d.topic} (${d.subscriptions.length} suscripciones):`);
+      for (const s of d.subscriptions) {
+        console.log(`        id ${s.id} → ${s.address} (v${s.api_version ?? "?"})`);
+      }
+    }
   }
 
   if (!ensure) {

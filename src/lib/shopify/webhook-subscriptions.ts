@@ -42,20 +42,50 @@ export interface WebhookPlan {
   mismatched: Array<{ topic: string; expected: string; actual: string }>;
   /** Suscripciones existentes que no pedimos (informativo). */
   extra: ShopifyWebhookSub[];
+  /**
+   * Mismo topic con MÁS DE UNA suscripción activa. Esto es lo que antes se
+   * quedaba invisible: con `existing.find()` (un solo match) una duplicada
+   * nunca aparecía como "extra" (su topic SÍ está en `desired`) ni como
+   * "mismatched" (la primera coincidencia podía apuntar bien). El síntoma
+   * real: Shopify entrega el mismo topic dos veces, una de ellas firmada
+   * con un secreto que el código no conoce (p.ej. una suscripción vieja
+   * creada desde el admin, con el secreto compartido de la tienda, en vez
+   * del secreto de la app) — y esa copia falla HMAC en bucle.
+   * NUNCA se borra sola: hace falta mirar `id`/`address` de cada una y
+   * decidir a mano cuál sobra.
+   */
+  duplicates: Array<{ topic: string; subscriptions: ShopifyWebhookSub[] }>;
 }
 
-/** PURA: qué falta y qué sobra. Testeable sin red. */
+/** PURA: qué falta, qué sobra y qué está duplicado. Testeable sin red. */
 export function planWebhookEnsure(
   existing: ShopifyWebhookSub[],
   desired: Array<{ topic: string; address: string }> = desiredSubscriptions()
 ): WebhookPlan {
-  const plan: WebhookPlan = { ok: [], toCreate: [], mismatched: [], extra: [] };
+  const plan: WebhookPlan = { ok: [], toCreate: [], mismatched: [], extra: [], duplicates: [] };
+
+  const porTopic = new Map<string, ShopifyWebhookSub[]>();
+  for (const e of existing) {
+    const arr = porTopic.get(e.topic) ?? [];
+    arr.push(e);
+    porTopic.set(e.topic, arr);
+  }
+  for (const [topic, subs] of porTopic) {
+    if (subs.length > 1) plan.duplicates.push({ topic, subscriptions: subs });
+  }
+
   for (const want of desired) {
-    const match = existing.find((e) => e.topic === want.topic);
-    if (!match) plan.toCreate.push(want);
-    else if (match.address.replace(/\/+$/, "") !== want.address.replace(/\/+$/, "")) {
-      plan.mismatched.push({ topic: want.topic, expected: want.address, actual: match.address });
-    } else plan.ok.push(want);
+    const matches = existing.filter((e) => e.topic === want.topic);
+    if (matches.length === 0) {
+      plan.toCreate.push(want);
+      continue;
+    }
+    // Con duplicados, basta con que UNA apunte a la URL correcta para
+    // considerar el topic cubierto — el duplicado en sí ya quedó reportado
+    // arriba, independientemente de esto.
+    const coincide = matches.find((m) => m.address.replace(/\/+$/, "") === want.address.replace(/\/+$/, ""));
+    if (coincide) plan.ok.push(want);
+    else plan.mismatched.push({ topic: want.topic, expected: want.address, actual: matches[0].address });
   }
   plan.extra = existing.filter((e) => !desired.some((w) => w.topic === e.topic));
   return plan;
