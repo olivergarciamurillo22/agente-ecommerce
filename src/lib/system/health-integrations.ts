@@ -11,6 +11,8 @@
 // ============================================================
 
 import { getConnectionState, getSetting, systemDbHandle } from "../db";
+import { whatsappProviderName } from "../whatsapp/provider";
+import { metaCloudConfigured } from "../whatsapp/meta-cloud";
 import { canWriteToShopify, emergencyStop, maskPhone, testMode } from "../safety";
 import { shopifyAdminConfigured } from "../shopify/admin";
 import { dropeaCredentialsPresent, dropeaReadEnabled } from "../suppliers/dropea/client";
@@ -40,6 +42,12 @@ export interface WhatsAppHealth {
   testMode: boolean;
   lastError: string | null;
   message: string;
+  /** Proveedor activo: baileys | cloud_api. La UI no habla de QR si es cloud. */
+  provider: "baileys" | "cloud_api";
+  /** Solo en cloud_api: última recepción del webhook de Meta. */
+  metaWebhookLastReceivedAt: number | null;
+  /** Solo en cloud_api: entregados/leídos/fallados en las últimas 24 h. */
+  deliveryStats24h: { delivered: number; read: number; failed: number } | null;
 }
 
 export function getWhatsAppHealth(): WhatsAppHealth {
@@ -57,7 +65,54 @@ export function getWhatsAppHealth(): WhatsAppHealth {
     testMode: testMode(),
     lastError: null,
     message: "",
+    provider: whatsappProviderName(),
+    metaWebhookLastReceivedAt: null,
+    deliveryStats24h: null,
   };
+
+  // ── Proveedor CLOUD API: sin QR ni sesión — otra salud distinta ──
+  if (base.provider === "cloud_api") {
+    try {
+      const db = systemDbHandle();
+      const agg = db
+        .prepare(
+          `SELECT
+             (SELECT MAX(COALESCE(sent_at, created_at)) FROM outbox WHERE sent = 1) AS lastOut,
+             (SELECT MAX(created_at) FROM messages WHERE role = 'user') AS lastIn,
+             (SELECT COUNT(*) FROM outbox WHERE sent = 0) AS pending,
+             (SELECT COUNT(*) FROM outbox WHERE delivered_at >= unixepoch() - 86400) AS d24,
+             (SELECT COUNT(*) FROM outbox WHERE read_at >= unixepoch() - 86400) AS r24,
+             (SELECT COUNT(*) FROM outbox WHERE failed_at >= unixepoch() - 86400) AS f24`
+        )
+        .get() as { lastOut: number | null; lastIn: number | null; pending: number; d24: number; r24: number; f24: number };
+      base.lastOutboundAt = agg.lastOut;
+      base.lastInboundAt = agg.lastIn;
+      base.outboxPending = agg.pending;
+      base.deliveryStats24h = { delivered: agg.d24, read: agg.r24, failed: agg.f24 };
+      const beat = getSetting("meta_webhook_last_received_at");
+      base.metaWebhookLastReceivedAt = beat ? parseInt(beat, 10) || null : null;
+    } catch {
+      /* la parte común de abajo reporta el fallo */
+    }
+    if (!metaCloudConfigured()) {
+      base.status = "warning";
+      base.connectionStatus = "not_configured";
+      base.message = "Cloud API activa como proveedor pero SIN credenciales de Meta: nada puede salir";
+    } else {
+      base.status = "healthy";
+      base.connectionStatus = "configured";
+      base.message = base.sendEnabled
+        ? "API oficial de Meta configurada (conexión por token, sin QR)"
+        : "API oficial de Meta configurada · envíos DESACTIVADOS (safe mode)";
+      if (base.deliveryStats24h && base.deliveryStats24h.failed > 0) {
+        base.status = "warning";
+        base.message = `${base.deliveryStats24h.failed} mensaje(s) fallidos en 24 h — revisar la cola de envíos`;
+      }
+    }
+    base.lastError = getServiceHealth("whatsapp")?.last_error_message ?? null;
+    return base;
+  }
+
   try {
     const conn = getConnectionState();
     base.connectionStatus = conn.status;
@@ -137,6 +192,8 @@ export interface ShopifyHealth {
   lastApiErrorAt: number | null;
   lastApiError: string | null;
   lastTagWriteAt: number | null;
+  /** Webhooks rechazados por HMAC inválido en las últimas 24 h. */
+  webhookBadSignature24h: number;
   message: string;
 }
 
@@ -158,6 +215,7 @@ export function getShopifyHealth(): ShopifyHealth {
     lastApiErrorAt: null,
     lastApiError: null,
     lastTagWriteAt: null,
+    webhookBadSignature24h: countIntegrationEvents("shopify", "webhook_bad_signature", now() - 86400),
     message: "",
   };
 
@@ -187,12 +245,9 @@ export function getShopifyHealth(): ShopifyHealth {
     base.message = base.webhookSecretPresent
       ? "webhook configurado pero sin credenciales de la Admin API (no se puede etiquetar)"
       : "sin configurar";
-    return base;
-  }
-
-  // El estado ACTUAL es el de la fila (cada registro lo actualiza): no se
-  // reconstruye comparando timestamps, que solo tienen resolución de segundo.
-  if (health?.status === "critical" || health?.status === "warning") {
+  } else if (health?.status === "critical" || health?.status === "warning") {
+    // El estado ACTUAL es el de la fila (cada registro lo actualiza): no se
+    // reconstruye comparando timestamps, que solo tienen resolución de segundo.
     base.status = health.status;
     base.message = `último intento con la API falló: ${base.lastApiError ?? "error"}`;
   } else {
@@ -201,6 +256,16 @@ export function getShopifyHealth(): ShopifyHealth {
       ? `API lista (${authMode}) · escrituras permitidas`
       : `API lista (${authMode}) · escrituras BLOQUEADAS por gates`;
   }
+
+  // Firmas inválidas recientes (BUG2, 26-08): un rechazo silencioso en
+  // integration_events es invisible si nadie mira el feed — llevábamos días
+  // perdiendo cancelaciones sin enterarnos. Esto lo hace ruidoso aunque el
+  // resto de la integración esté sana.
+  if (base.webhookBadSignature24h > 0) {
+    base.status = base.status === "critical" ? "critical" : "warning";
+    base.message += ` · ${base.webhookBadSignature24h} webhook(s) con firma inválida en 24 h`;
+  }
+
   return base;
 }
 
@@ -353,6 +418,93 @@ export function getDropiHealth(): DropiHealth {
     base.message = base.statusMapConfigured
       ? "webhook activo"
       : "webhook activo pero sin DROPI_STATUS_MAP: estados tratados como desconocidos";
+  }
+  return base;
+}
+
+// --- Retell / llamadas: salud OPERATIVA (sin inventar billing) ---
+
+export interface CallsHealth {
+  enabled: boolean;
+  shadowMode: boolean;
+  /** true si hay allowlist con números (la protección del piloto). */
+  allowlistActive: boolean;
+  lastAttemptAt: number | null;
+  lastSuccessAt: number | null;
+  lastFailureAt: number | null;
+  consecutiveFailures: number;
+  /** Retell no expone saldo por API que tengamos verificado: se dice la
+   *  verdad ("hay que mirarlo a mano"), nunca un healthy falso. */
+  paymentStatus: "unknown_manual_check_required";
+  status: HealthStatus;
+  message: string;
+}
+
+export function getCallsHealth(): CallsHealth {
+  const base: CallsHealth = {
+    enabled: false,
+    shadowMode: true,
+    allowlistActive: false,
+    lastAttemptAt: null,
+    lastSuccessAt: null,
+    lastFailureAt: null,
+    consecutiveFailures: 0,
+    paymentStatus: "unknown_manual_check_required",
+    status: "unknown",
+    message: "",
+  };
+  try {
+    const db = systemDbHandle();
+    const cfgRow = (k: string) =>
+      (db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined)?.value;
+    base.enabled = (cfgRow("ai_calls_enabled") ?? process.env.AI_CALLS_ENABLED ?? "0") === "1";
+    base.shadowMode = (cfgRow("calls_shadow_mode") ?? process.env.CALLS_SHADOW_MODE ?? "1") === "1";
+    const allow = (cfgRow("calls_allowlist") ?? process.env.CALLS_ALLOWLIST ?? "").trim();
+    base.allowlistActive = allow.length > 0;
+
+    const agg = db
+      .prepare(
+        `SELECT
+           (SELECT MAX(started_at) FROM call_attempts WHERE started_at IS NOT NULL) AS lastAttempt,
+           (SELECT MAX(ended_at) FROM call_attempts WHERE state = 'completed') AS lastSuccess,
+           (SELECT MAX(COALESCE(ended_at, started_at)) FROM call_attempts WHERE state = 'manual_review') AS lastFailure`
+      )
+      .get() as { lastAttempt: number | null; lastSuccess: number | null; lastFailure: number | null };
+    base.lastAttemptAt = agg.lastAttempt;
+    base.lastSuccessAt = agg.lastSuccess;
+    base.lastFailureAt = agg.lastFailure;
+
+    // Fallos consecutivos: intentos recientes en manual_review posteriores al
+    // último completado. Una racha aquí suele ser saldo agotado o credencial.
+    const racha = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM call_attempts
+          WHERE state = 'manual_review'
+            AND COALESCE(ended_at, started_at, scheduled_at) > COALESCE((
+              SELECT MAX(ended_at) FROM call_attempts WHERE state = 'completed'
+            ), 0)`
+      )
+      .get() as { n: number };
+    base.consecutiveFailures = racha.n;
+
+    if (!base.enabled) {
+      base.status = "healthy";
+      base.message = base.shadowMode
+        ? "apagadas (kill switch cerrado) · shadow ON: simula sin llamar"
+        : "apagadas (kill switch cerrado)";
+    } else if (!base.allowlistActive && process.env.TEST_MODE === "1") {
+      base.status = "warning";
+      base.message = "encendidas SIN allowlist en modo prueba: el fail-closed está bloqueando todas las llamadas — rellena calls_allowlist";
+    } else if (base.consecutiveFailures >= 3) {
+      base.status = "critical";
+      base.message = `${base.consecutiveFailures} llamadas seguidas a revisión sin ninguna completada: revisar saldo de Retell y credenciales (el saldo NO se puede comprobar desde aquí)`;
+    } else {
+      base.status = "healthy";
+      base.message = `encendidas${base.shadowMode ? " en shadow" : ""} · allowlist ${base.allowlistActive ? "activa" : "SIN restricción"}`;
+    }
+  } catch (err) {
+    base.status = "warning";
+    base.message = `no se pudo leer: ${err instanceof Error ? err.message : "error"}`;
   }
   return base;
 }

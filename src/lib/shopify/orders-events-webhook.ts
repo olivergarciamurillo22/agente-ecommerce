@@ -54,12 +54,15 @@ import {
   setOrderClosure,
   type ClosureStatus,
 } from "../db";
-import { verifyShopifyHmac } from "./hmac";
+import { verifyShopifyHmacEitherSecret } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
 import { linkDropeaFromShopifyTags } from "../orders/supplier-tags";
 import type { ShopifyOrderPayload } from "../orders/normalize";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
+
+/** Anti-ruido: el aviso de "firma con client_secret" sale una vez por arranque. */
+let clientSecretMatchAnunciado = false;
 
 export type OrdersEventTopic = "orders/cancelled" | "orders/fulfilled" | "orders/updated";
 
@@ -102,16 +105,36 @@ export function processOrdersEventWebhook(
   rawBody: string,
   headers: OrdersEventWebhookHeaders
 ): OrdersEventWebhookResult {
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET;
-  if (!secret) {
-    logger.error("[SHOPIFY] SHOPIFY_WEBHOOK_SECRET no configurado — webhook rechazado");
+  if (!process.env.SHOPIFY_WEBHOOK_SECRET && !process.env.SHOPIFY_CLIENT_SECRET) {
+    logger.error("[SHOPIFY] ni SHOPIFY_WEBHOOK_SECRET ni SHOPIFY_CLIENT_SECRET configurados — webhook rechazado");
     return { status: 500, body: { ok: false, error: "webhook secret no configurado" } };
   }
 
-  if (!verifyShopifyHmac(rawBody, headers.hmac, secret)) {
-    logger.warn(`[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}) — rechazado`);
+  // BUG2 (confirmado en producción el 26-08): los webhooks de esta tienda
+  // los creó la app, así que Shopify los firma con SHOPIFY_CLIENT_SECRET,
+  // no con SHOPIFY_WEBHOOK_SECRET (el de los webhooks creados desde el
+  // admin). Se aceptan los dos.
+  const verificacion = verifyShopifyHmacEitherSecret(rawBody, headers.hmac);
+  if (!verificacion.valid) {
+    // webhookId (id de ENTREGA, no de suscripción) para poder correlacionar
+    // una racha de rechazos con una entrega/suscripción concreta.
+    logger.warn(
+      `[SHOPIFY] HMAC inválido (shop=${headers.shopDomain ?? "?"}, topic=${headers.topic ?? "?"}, webhookId=${headers.webhookId ?? "?"}, longitud_cuerpo=${rawBody.length}) — rechazado`
+    );
     logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
     return { status: 401, body: { ok: false, error: "hmac inválido" } };
+  }
+  if (verificacion.matchedWith === "client_secret" && !clientSecretMatchAnunciado) {
+    // UNA vez por arranque (anti-ruido): ver el comentario gemelo en
+    // webhook.ts — orders/updated dispara con cualquier cambio de tag y
+    // llenaría el feed de eventos idénticos.
+    clientSecretMatchAnunciado = true;
+    logIntegrationEvent(
+      "shopify",
+      "webhook_client_secret_match",
+      "info",
+      "webhooks validando con SHOPIFY_CLIENT_SECRET (suscripciones creadas por la app, no desde el admin)"
+    );
   }
 
   const topic = headers.topic;

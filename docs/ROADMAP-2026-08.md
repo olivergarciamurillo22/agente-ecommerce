@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED — ver `docs/ESTADO-PRODUCCION.md`** (este documento quedó por detrás de la realidad y se conserva como histórico).
+
 # Casamable — Brief de objetivos para la siguiente fase
 
 Contexto y especificación funcional para el desarrollo. Escrito tras el despliegue del Control Center (22-08-2026), la auditoría completa de proveedores y el cierre del modelo de unit economics con datos reales.

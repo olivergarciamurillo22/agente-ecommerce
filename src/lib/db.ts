@@ -66,6 +66,15 @@ export interface OutboxItem {
   /** 1 = envío de un pedido autorizado a mano para el piloto (ver orders.pilot_authorized). */
   authorized: number;
   created_at: number;
+  provider: string | null;
+  provider_message_id: string | null;
+  message_type: string;
+  template_name: string | null;
+  payload_json: string | null;
+  delivered_at: number | null;
+  read_at: number | null;
+  failed_at: number | null;
+  failure_reason: string | null;
 }
 
 // --- Pedidos COD (confirmación por WhatsApp) ---
@@ -205,6 +214,196 @@ export function migrateClosureAxis(db: Database.Database): void {
   }
   try {
     db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure ON orders(closure_status)");
+    // Índice compuesto para la métrica de negocio, que es la consulta caliente
+    // del panel: "cierres de esta ventana, agrupados por estado". Con solo
+    // closure_status, SQLite tenía que recorrer todas las filas de cada
+    // estado para filtrar por fecha. Se justifica porque se ejecuta 3 veces
+    // (hoy/7d/30d) en cada carga del Control Center.
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_closure_at ON orders(closure_status, closure_at)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
+ * Migración (SCHEMA_VERSION 9): el outbox aprende de PROVEEDOR y de ESTADOS.
+ *
+ * Con Baileys, "enviado" era todo lo que se podía saber. La Cloud API de
+ * Meta devuelve un id de mensaje y luego cuenta por webhook si se entregó,
+ * se leyó o falló — cuatro cosas que no son lo mismo y que hasta ahora se
+ * confundían en un único `sent`:
+ *
+ *   encolado  → fila en outbox, sent=0
+ *   enviado   → sent=1 (+ provider_message_id si lo hubo)
+ *   entregado → delivered_at (webhook `delivered`)
+ *   leído     → read_at (webhook `read`)
+ *   fallado   → failed_at + failure_reason (webhook `failed` o error de envío)
+ *
+ * `message_type` y `payload_json` permiten encolar mensajes INTERACTIVOS
+ * (botones, listas) manteniendo `content` como texto de fallback: es lo que
+ * enseña el panel y lo que sale si el proveedor activo no soporta botones.
+ * Aditiva e idempotente, como todas.
+ */
+export function migrateOutboxProvider(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(outbox)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["provider", "TEXT"],
+    ["provider_message_id", "TEXT"],
+    ["message_type", "TEXT NOT NULL DEFAULT 'text'"],
+    ["template_name", "TEXT"],
+    ["payload_json", "TEXT"],
+    ["delivered_at", "INTEGER"],
+    ["read_at", "INTEGER"],
+    ["failed_at", "INTEGER"],
+    ["failure_reason", "TEXT"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE outbox ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_outbox_pmid ON outbox(provider_message_id) WHERE provider_message_id IS NOT NULL"
+    );
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
+ * Migración (SCHEMA_VERSION 8): contexto de conversación multi-pedido.
+ *
+ * Nace de un bug REAL de producción (25-08-2026): un cliente con dos pedidos
+ * escribió "1097" para elegir uno y el bot contestó "Responde 1, 2 o 3";
+ * después escribió "Todo correcto" y el bot volvió a enseñar el selector.
+ * El flujo no tenía MEMORIA: cada mensaje re-resolvía la ambigüedad desde
+ * cero contra getActiveOrdersByPhone(), así que elegir un pedido no servía
+ * de nada en el mensaje siguiente.
+ *
+ * La tabla guarda, POR TELÉFONO: qué pedido está seleccionado (con su fecha,
+ * para caducarlo), qué tipo de mensaje mandamos por última vez y cuántas
+ * veces seguidas (anti-bucle: el mismo selector no se repite eternamente), y
+ * si hay una cancelación pendiente de confirmar.
+ *
+ * En `orders`, dos columnas de señal para Pedro:
+ *   - possible_duplicate: pedidos que parecen el mismo (mismo teléfono,
+ *     producto, importe y dirección en una ventana corta). NUNCA se cancela
+ *     nada automáticamente: solo se marca para que lo vea un humano.
+ *   - cancellation_requested_at: el cliente pidió cancelar. Tampoco se toca
+ *     Shopify: el pedido pasa a needs_call y lo decide Pedro.
+ *
+ * Aditiva e idempotente, como todas.
+ */
+export function migrateConversationOrderContext(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS conversation_order_context (
+      phone TEXT PRIMARY KEY,
+      selected_order_id INTEGER,
+      selected_at INTEGER,
+      last_prompt_type TEXT,
+      same_prompt_count INTEGER NOT NULL DEFAULT 0,
+      pending_cancel_order_id INTEGER,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["possible_duplicate", "INTEGER NOT NULL DEFAULT 0"],
+    ["cancellation_requested_at", "INTEGER"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+}
+
+/**
+ * Migración (SCHEMA_VERSION 7): LEASES de schedulers.
+ *
+ * Los cinco schedulers (confirmaciones, tracking, reconciliación, llamadas,
+ * outbox) se protegían con `if (timer) return` + un flag `ticking`. Eso es
+ * una guarda EN MEMORIA: sirve dentro de un proceso y no sirve para nada si
+ * arrancan dos. Hoy solo el bot los arranca y hay un contenedor, así que no
+ * duplican — pero eso es una propiedad del despliegue, no del código: un
+ * segundo contenedor, o un reinicio solapado con el anterior aún drenando,
+ * duplicaría efectos externos (WhatsApp, llamadas).
+ *
+ * El lease vive en SQLite porque SQLite ya es el punto de sincronización de
+ * todo el sistema: no hace falta Redis ni infraestructura nueva.
+ *
+ * Aditiva e idempotente. La tabla nace vacía: sin lease, nadie ejecuta hasta
+ * que alguien lo adquiera, que es el comportamiento correcto.
+ */
+export function migrateSchedulerLeases(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS scheduler_leases (
+      name TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      -- Epoch segundos hasta cuando este dueño tiene derecho a ejecutar.
+      -- Pasado ese instante, cualquiera puede robarlo: es lo que hace que un
+      -- proceso muerto no bloquee el sistema para siempre.
+      lease_until INTEGER NOT NULL,
+      last_acquired_at INTEGER,
+      last_released_at INTEGER,
+      heartbeat_at INTEGER,
+      acquire_count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+}
+
+/**
+ * Migración (SCHEMA_VERSION 6): `status_axis` en `order_status_history`.
+ *
+ * La tabla mezclaba transiciones de ejes distintos en las mismas columnas
+ * (`previous_status` / `new_status`), así que un `delivered` del eje
+ * LOGÍSTICO y un `delivered` del eje de CIERRE eran indistinguibles al
+ * leerla. Con cuatro máquinas de estado declaradas (ver
+ * docs/MODELO-ESTADOS.md) eso es una ambigüedad que sí importa.
+ *
+ * Aditiva e idempotente, y con BACKFILL NEUTRO: las filas existentes reciben
+ * `'tracking'` porque hasta hoy el ÚNICO escritor de esta tabla era
+ * `processSupplierUpdate` (el eje logístico) — no es inferencia, es el hecho
+ * comprobable de que no había otro. El DEFAULT también es `'tracking'` para
+ * que cualquier inserción antigua que no pase el campo siga siendo correcta.
+ *
+ * Parametrizada por conexión, igual que las anteriores.
+ */
+export function migrateStatusAxis(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(order_status_history)").all() as Array<{ name: string }>).map(
+      (c) => c.name
+    )
+  );
+  if (!cols.has("status_axis")) {
+    try {
+      db.exec(
+        "ALTER TABLE order_status_history ADD COLUMN status_axis TEXT NOT NULL DEFAULT 'tracking'"
+      );
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_osh_axis ON order_status_history(status_axis, occurred_at)"
+    );
   } catch (err) {
     const mensaje = err instanceof Error ? err.message : String(err);
     if (!/already exists/i.test(mensaje)) throw err;
@@ -296,6 +495,41 @@ export function migrateCallOrchestrator(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración T1 (SCHEMA_VERSION 10): separa `ordered_at` (fecha REAL de compra
+ * en Shopify) de `created_at` (que en realidad es `imported_at` — el instante
+ * en que la fila se insertó, ya sea por el webhook o por un backfill). Antes
+ * de esto no había forma de distinguir "el cliente compró hoy" de "hoy se
+ * importó un pedido de hace tres semanas", y eso rompía tanto el orden del
+ * panel como el criterio de antigüedad.
+ *
+ * Aditiva y opcional a propósito: NULL para todas las filas existentes hasta
+ * que algo la rellene (el webhook y el backfill de Shopify la rellenan desde
+ * ya; las filas históricas las rellena `scripts/backfill-ordered-at.ts`,
+ * aparte). Mismo patrón que migrateClosureAxis: comprobar con
+ * PRAGMA table_info antes de añadir, envuelto en try/catch por si otro
+ * proceso la añadió justo entre medias.
+ */
+export function migrateOrderedAt(db: Database.Database): void {
+  const currentCols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  if (!currentCols.has("ordered_at")) {
+    try {
+      db.exec("ALTER TABLE orders ADD COLUMN ordered_at INTEGER");
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_ordered_at ON orders(ordered_at DESC)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -339,6 +573,8 @@ export interface OrderRow {
   supplier_sync_status: string;
   /** Id del pedido en el proveedor. Su presencia BLOQUEA recrearlo (idempotencia). */
   supplier_external_order_id: string | null;
+  possible_duplicate: number;
+  cancellation_requested_at: number | null;
   /** Referencia estable que enviamos al proveedor (nuestro shopify_order_id). */
   supplier_reference: string | null;
   supplier_sync_attempts: number;
@@ -385,6 +621,11 @@ export interface OrderRow {
   raw_payload: string | null;
   created_at: number;
   updated_at: number;
+  /** Fecha REAL de compra en Shopify (epoch, segundos). `null` = sin resolver
+   *  todavía (fila anterior a T1 aún no pasada por el backfill de la columna,
+   *  o el payload nunca trajo `created_at`). NUNCA confundir con `created_at`
+   *  de arriba, que es cuándo se insertó la FILA (import), no la compra. */
+  ordered_at: number | null;
 
   // --- Eje de cierre (E1) — ver ClosureStatus más arriba ---
   closure_status: ClosureStatus;
@@ -411,6 +652,9 @@ export interface NewOrderInput {
   customer_note?: string | null;
   last_error?: string | null;
   raw_payload?: string | null;
+  /** Fecha real de compra en Shopify (epoch, segundos). `null`/ausente si el
+   *  payload no la traía — nunca se inventa. */
+  ordered_at?: number | null;
 }
 
 // Columnas de `orders` — ÚNICA fuente de verdad del esquema: la usan el CREATE
@@ -483,6 +727,9 @@ const ORDERS_TABLE_BODY = `
       raw_payload TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      -- Fecha REAL de compra en Shopify (T1). NULL = sin resolver. Distinta
+      -- de created_at de arriba, que es cuándo se insertó la fila (import).
+      ordered_at INTEGER,
       -- Eje de cierre (E1): independiente de status. Ver ClosureStatus.
       -- Arranca en 'unknown' siempre -- nunca se infiere, ni al crear ni al migrar.
       closure_status TEXT NOT NULL DEFAULT 'unknown',
@@ -541,6 +788,10 @@ function build() {
 
     CREATE INDEX IF NOT EXISTS idx_messages_conv
       ON messages(conversation_id, created_at);
+    -- Retención: el barrido es "todos los mensajes anteriores a X", sin
+    -- conversación. Sin este índice recorría la tabla entera, que es
+    -- precisamente la que más crece.
+    CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at);
 
     CREATE TABLE IF NOT EXISTS connection_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -701,6 +952,10 @@ function build() {
       raw_status TEXT,
       raw_sub_status TEXT,
       source TEXT NOT NULL CHECK(source IN ('webhook','polling','manual','reconciliation')),
+      -- Qué EJE cambió. Sin esto, un 'delivered' logístico y un 'delivered'
+      -- de cierre son indistinguibles al leer la tabla. Ver StatusAxis.
+      status_axis TEXT NOT NULL DEFAULT 'tracking'
+        CHECK(status_axis IN ('confirmation','supplier_sync','tracking','closure')),
       event_id TEXT,
       occurred_at INTEGER NOT NULL,
       recorded_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -864,6 +1119,11 @@ function build() {
 
   migrateClosureAxis(db);
   migrateCallOrchestrator(db);
+  migrateStatusAxis(db);
+  migrateSchedulerLeases(db);
+  migrateConversationOrderContext(db);
+  migrateOutboxProvider(db);
+  migrateOrderedAt(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -944,8 +1204,13 @@ function build() {
   const stmtGetPendingOutbox = db.prepare<[number], OutboxItem>(
     "SELECT * FROM outbox WHERE sent = 0 ORDER BY created_at ASC LIMIT ?"
   );
+  // `AND sent = 0` NO es decorativo: convierte esto en un CLAIM atómico.
+  // Sin esa condición, dos procesos que hubieran leído la misma fila
+  // pendiente la "reclamarían" los dos con éxito y el cliente recibiría el
+  // mismo WhatsApp DOS veces. Con ella, solo uno ve changes=1 y envía.
+  // Mismo patrón que claimTrackingNotification y claimSupplierCreate.
   const stmtMarkOutboxSent = db.prepare(
-    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ?"
+    "UPDATE outbox SET sent = 1, sent_at = unixepoch() WHERE id = ? AND sent = 0"
   );
 
   // --- Borrado de conversaciones (atómico) ---
@@ -1028,7 +1293,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1200,8 +1465,17 @@ export function getPendingOutbox(limit = 20): OutboxItem[] {
   return ctx().stmtGetPendingOutbox.all(limit);
 }
 
-export function markOutboxSent(id: number): void {
-  ctx().stmtMarkOutboxSent.run(id);
+/**
+ * RECLAMA el derecho a enviar este item, de forma atómica.
+ *
+ * Devuelve `true` solo si esta llamada ganó el claim (el item estaba
+ * pendiente). `false` significa que otro proceso ya lo reclamó: quien lo
+ * reciba NO debe enviar nada. Es la barrera que hace que el patrón
+ * claim→send→revert siga siendo at-most-once aunque corriera más de un
+ * proceso de bot a la vez (dos contenedores, o un reinicio solapado).
+ */
+export function markOutboxSent(id: number): boolean {
+  return ctx().stmtMarkOutboxSent.run(id).changes > 0;
 }
 
 /**
@@ -1462,8 +1736,8 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
         shopify_order_id, shopify_order_number, customer_name, phone, email,
         product_summary, total_price, currency,
         address_line1, address_line2, city, province, postal_code, country,
-        status, customer_note, last_error, raw_payload
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, customer_note, last_error, raw_payload, ordered_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.shopify_order_id,
@@ -1483,7 +1757,8 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
       input.status,
       input.customer_note ?? null,
       input.last_error ?? null,
-      input.raw_payload ?? null
+      input.raw_payload ?? null,
+      input.ordered_at ?? null
     );
   const order = getOrderByShopifyId(input.shopify_order_id);
   if (!order) {
@@ -1539,7 +1814,12 @@ export function getOrderByShopifyOrderNumber(orderNumber: string): OrderRow | nu
  * resultado y costaría una migración de esquema, un backfill y un despliegue.
  */
 const ORDERS_ARRIVAL_ORDER =
-  "CAST(shopify_order_number AS INTEGER) DESC, created_at DESC, id DESC";
+  // T3 (26-08): con `ordered_at` disponible (la fecha REAL de compra), esa
+  // manda. COALESCE a created_at para las filas históricas aún sin backfill
+  // de la columna, y el número de pedido como desempate estable — que era el
+  // criterio anterior y sigue siendo correcto entre pedidos del mismo
+  // instante.
+  "COALESCE(ordered_at, created_at) DESC, CAST(shopify_order_number AS INTEGER) DESC, id DESC";
 
 export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
   const db = ctx().db;
@@ -1590,6 +1870,252 @@ export function getActiveOrdersByPhone(phone: string): OrderRow[] {
        ORDER BY created_at DESC, id DESC`
     )
     .all(phone) as OrderRow[];
+}
+
+
+
+// --- Outbox: proveedor, id de mensaje y estados (Cloud API de Meta) ---
+
+/** Encola un mensaje RICO (interactivo o plantilla). `content` es SIEMPRE el
+ *  texto de fallback: lo que enseña el panel y lo que saldría por un
+ *  proveedor sin soporte de botones. */
+export function enqueueOutboxRich(
+  conversationId: number,
+  phone: string,
+  input: {
+    content: string;
+    messageType: "text" | "interactive_buttons" | "interactive_list" | "template";
+    payloadJson?: string | null;
+    templateName?: string | null;
+    authorized?: boolean;
+  }
+): number {
+  const info = ctx()
+    .db.prepare(
+      `INSERT INTO outbox (conversation_id, phone, content, authorized, message_type, template_name, payload_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      conversationId,
+      phone,
+      input.content,
+      input.authorized ? 1 : 0,
+      input.messageType,
+      input.templateName ?? null,
+      input.payloadJson ?? null
+    );
+  return info.lastInsertRowid as number;
+}
+
+/** Tras un envío aceptado por el proveedor: quién lo llevó y con qué id. */
+export function setOutboxProviderResult(id: number, provider: string, providerMessageId: string | null): void {
+  ctx()
+    .db.prepare("UPDATE outbox SET provider = ?, provider_message_id = ? WHERE id = ?")
+    .run(provider, providerMessageId, id);
+}
+
+/**
+ * Fallo TERMINAL de envío: no se reintenta (reintentarlo daría lo mismo).
+ * El item queda marcado como enviado para salir de la cola, pero con
+ * failed_at y el motivo — el panel lo distingue de un envío bueno.
+ */
+export function markOutboxFailedTerminal(id: number, provider: string, reason: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE outbox SET sent = 1, sent_at = unixepoch(), provider = ?,
+        failed_at = unixepoch(), failure_reason = ? WHERE id = ?`
+    )
+    .run(provider, reason.slice(0, 300), id);
+}
+
+/**
+ * Actualiza el estado de un mensaje a partir del webhook de Meta.
+ * Los estados solo AVANZAN (un `read` no se borra si llega un `delivered`
+ * atrasado) y son idempotentes: el mismo webhook dos veces no cambia nada.
+ */
+export function updateOutboxStatusByProviderMessageId(
+  providerMessageId: string,
+  status: "sent" | "delivered" | "read" | "failed",
+  atSec: number,
+  failureReason?: string | null
+): boolean {
+  const db = ctx().db;
+  let info;
+  if (status === "delivered") {
+    info = db
+      .prepare("UPDATE outbox SET delivered_at = COALESCE(delivered_at, ?) WHERE provider_message_id = ?")
+      .run(atSec, providerMessageId);
+  } else if (status === "read") {
+    // Un read implica entregado aunque el webhook `delivered` se perdiera.
+    info = db
+      .prepare(
+        `UPDATE outbox SET read_at = COALESCE(read_at, ?), delivered_at = COALESCE(delivered_at, ?)
+         WHERE provider_message_id = ?`
+      )
+      .run(atSec, atSec, providerMessageId);
+  } else if (status === "failed") {
+    // MONOTONICIDAD: un mensaje ya entregado (o leído) NO puede pasar a
+    // fallado por un webhook atrasado o duplicado. failed es un terminal
+    // ALTERNATIVO a delivered, no un estado posterior.
+    info = db
+      .prepare(
+        `UPDATE outbox SET failed_at = COALESCE(failed_at, ?), failure_reason = COALESCE(failure_reason, ?)
+         WHERE provider_message_id = ? AND delivered_at IS NULL AND read_at IS NULL`
+      )
+      .run(atSec, (failureReason ?? "fallo reportado por Meta").slice(0, 300), providerMessageId);
+  } else {
+    return true; // `sent`: ya lo estampó el propio envío; nada que hacer.
+  }
+  return info.changes > 0;
+}
+
+export function getOutboxByProviderMessageId(providerMessageId: string): OutboxItem | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM outbox WHERE provider_message_id = ?").get(providerMessageId) as
+      | OutboxItem
+      | undefined) ?? null
+  );
+}
+
+/** Conversación por teléfono, SOLO LECTURA (no crea nada). Para chequeos
+ *  como la ventana de 24 h, que no deben tener efectos secundarios. */
+export function getConversationIdByPhone(phone: string): number | null {
+  const row = ctx().db.prepare("SELECT id FROM conversations WHERE phone = ?").get(phone) as
+    | { id: number }
+    | undefined;
+  return row?.id ?? null;
+}
+
+/**
+ * ¿Cuándo fue el último mensaje ENTRANTE de esta conversación?
+ * Es la base de la ventana de 24 h de Meta: fuera de ella, un mensaje libre
+ * está prohibido y hace falta plantilla.
+ */
+export function getLastInboundAt(conversationId: number): number | null {
+  const row = ctx()
+    .db.prepare(
+      "SELECT MAX(created_at) AS t FROM messages WHERE conversation_id = ? AND role = 'user'"
+    )
+    .get(conversationId) as { t: number | null };
+  return row.t ?? null;
+}
+
+// --- Contexto de conversación multi-pedido (bug real del 25-08-2026) ---
+
+export interface ConversationOrderContext {
+  phone: string;
+  selected_order_id: number | null;
+  selected_at: number | null;
+  last_prompt_type: string | null;
+  same_prompt_count: number;
+  pending_cancel_order_id: number | null;
+  updated_at: number;
+}
+
+export function getConversationOrderContext(phone: string): ConversationOrderContext | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM conversation_order_context WHERE phone = ?").get(phone) as
+      | ConversationOrderContext
+      | undefined) ?? null
+  );
+}
+
+/** Guarda qué pedido eligió el cliente. Sobrescribe la selección anterior. */
+export function setSelectedOrderContext(phone: string, orderId: number, nowSec?: number): void {
+  const now = nowSec ?? Math.floor(Date.now() / 1000);
+  ctx()
+    .db.prepare(
+      `INSERT INTO conversation_order_context (phone, selected_order_id, selected_at, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(phone) DO UPDATE SET
+         selected_order_id = excluded.selected_order_id,
+         selected_at = excluded.selected_at,
+         updated_at = excluded.updated_at`
+    )
+    .run(phone, orderId, now, now);
+}
+
+/** Borra la selección (el pedido se resolvió, caducó, o llegó uno nuevo). */
+export function clearSelectedOrderContext(phone: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE conversation_order_context
+       SET selected_order_id = NULL, selected_at = NULL, pending_cancel_order_id = NULL,
+           updated_at = unixepoch()
+       WHERE phone = ?`
+    )
+    .run(phone);
+}
+
+/**
+ * Registra el TIPO de mensaje que estamos a punto de mandar y devuelve
+ * cuántas veces SEGUIDAS hemos mandado ese mismo tipo (contando esta).
+ *
+ * Es el anti-bucle: si el selector de pedidos va a salir por tercera vez
+ * idéntico, quien llama puede cambiar de estrategia en vez de repetirlo.
+ * Mandar un tipo distinto resetea la cuenta.
+ */
+export function recordConversationPrompt(phone: string, promptType: string): number {
+  const db = ctx().db;
+  db.prepare(
+    `INSERT INTO conversation_order_context (phone, last_prompt_type, same_prompt_count, updated_at)
+     VALUES (?, ?, 1, unixepoch())
+     ON CONFLICT(phone) DO UPDATE SET
+       same_prompt_count = CASE WHEN conversation_order_context.last_prompt_type = excluded.last_prompt_type
+                                THEN conversation_order_context.same_prompt_count + 1 ELSE 1 END,
+       last_prompt_type = excluded.last_prompt_type,
+       updated_at = unixepoch()`
+  ).run(phone, promptType);
+  const row = db
+    .prepare("SELECT same_prompt_count FROM conversation_order_context WHERE phone = ?")
+    .get(phone) as { same_prompt_count: number };
+  return row.same_prompt_count;
+}
+
+/** La conversación avanzó: el próximo selector volvería a contar desde 1. */
+export function resetConversationPrompt(phone: string): void {
+  ctx()
+    .db.prepare(
+      `UPDATE conversation_order_context
+       SET last_prompt_type = NULL, same_prompt_count = 0, updated_at = unixepoch()
+       WHERE phone = ?`
+    )
+    .run(phone);
+}
+
+/** Deja armada una cancelación pendiente de confirmación explícita. */
+export function setPendingCancelContext(phone: string, orderId: number | null): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO conversation_order_context (phone, pending_cancel_order_id, updated_at)
+       VALUES (?, ?, unixepoch())
+       ON CONFLICT(phone) DO UPDATE SET
+         pending_cancel_order_id = excluded.pending_cancel_order_id,
+         updated_at = unixepoch()`
+    )
+    .run(phone, orderId);
+}
+
+/** Marca un pedido como posible duplicado (señal para Pedro; nunca cancela). */
+export function markOrderPossibleDuplicate(id: number): void {
+  ctx().db.prepare(`UPDATE orders SET possible_duplicate = 1, ${TOUCH} WHERE id = ?`).run(id);
+}
+
+/**
+ * El cliente pidió cancelar y lo CONFIRMÓ. No se toca Shopify ni el
+ * proveedor: se estampa la petición y el pedido pasa a needs_call para que
+ * Pedro decida. La cancelación real es una acción humana.
+ */
+export function requestOrderCancellation(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET cancellation_requested_at = COALESCE(cancellation_requested_at, unixepoch()), ${TOUCH}
+       WHERE id = ? AND status NOT IN ('confirmed','cancelled','ignored_old')`
+    )
+    .run(id);
+  if (info.changes === 0) return false;
+  markOrderNeedsCall(id);
+  return true;
 }
 
 // --- Colas del scheduler (todo se deriva de la DB: sobrevive reinicios) ---
@@ -1970,6 +2496,15 @@ export function setOrderSupplierPlatformAndExternalId(
 
 export type StatusHistorySource = "webhook" | "polling" | "manual" | "reconciliation";
 
+/**
+ * Cuál de las CUATRO máquinas de estado cambió. Ver docs/MODELO-ESTADOS.md.
+ * No se mezclan: cada eje tiene su vocabulario, su fuente de verdad y sus
+ * reglas de terminalidad.
+ */
+export type StatusAxis = "confirmation" | "supplier_sync" | "tracking" | "closure";
+
+export const STATUS_AXES: StatusAxis[] = ["confirmation", "supplier_sync", "tracking", "closure"];
+
 export interface OrderStatusHistoryRow {
   id: number;
   order_id: number;
@@ -1981,6 +2516,7 @@ export interface OrderStatusHistoryRow {
   raw_status: string | null;
   raw_sub_status: string | null;
   source: StatusHistorySource;
+  status_axis: StatusAxis;
   event_id: string | null;
   occurred_at: number;
   recorded_at: number;
@@ -1996,6 +2532,9 @@ export interface StatusHistoryInput {
   rawStatus: string | null;
   rawSubStatus?: string | null;
   source: StatusHistorySource;
+  /** Qué eje cambió. Por defecto 'tracking': es el único escritor histórico
+   *  de esta tabla, así que omitirlo sigue siendo correcto para ese camino. */
+  statusAxis?: StatusAxis;
   eventId?: string | null;
   /** Epoch segundos. Si no se conoce, ahora. */
   occurredAt?: number | null;
@@ -2030,8 +2569,8 @@ export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
     .prepare(
       `INSERT INTO order_status_history
         (order_id, shopify_order_id, supplier_platform, carrier, previous_status, new_status,
-         raw_status, raw_sub_status, source, event_id, occurred_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         raw_status, raw_sub_status, source, status_axis, event_id, occurred_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       h.orderId,
@@ -2043,6 +2582,7 @@ export function insertOrderStatusHistory(h: StatusHistoryInput): number | null {
       h.rawStatus ?? null,
       h.rawSubStatus ?? null,
       h.source,
+      h.statusAxis ?? "tracking",
       eventId,
       occurredAt
     );
@@ -2229,6 +2769,30 @@ export function upsertSupplierProductMapping(m: {
       m.active === false ? 0 : 1
     );
   return info.lastInsertRowid as number;
+}
+
+/**
+ * Activa o desactiva un mapping sin borrarlo.
+ *
+ * Desactivar en vez de borrar es lo correcto aquí: si un mapping estaba mal,
+ * borrarlo pierde la evidencia de qué se estaba usando y por qué un pedido
+ * se enrutó como se enrutó. Desactivado deja de decidir routing pero sigue
+ * siendo consultable.
+ */
+export function setSupplierProductMappingActive(id: number, active: boolean): boolean {
+  const info = ctx()
+    .db.prepare("UPDATE supplier_product_mapping SET active = ?, updated_at = unixepoch() WHERE id = ?")
+    .run(active ? 1 : 0, id);
+  return info.changes > 0;
+}
+
+/** Un mapping concreto, por id. */
+export function getSupplierProductMapping(id: number): SupplierProductMapping | null {
+  return (
+    (ctx().db.prepare("SELECT * FROM supplier_product_mapping WHERE id = ?").get(id) as
+      | SupplierProductMapping
+      | undefined) ?? null
+  );
 }
 
 export function deleteSupplierProductMapping(id: number): void {
@@ -2452,7 +3016,32 @@ export function setOrderClosure(
   const info = ctx()
     .db.prepare(`UPDATE orders SET closure_status = ?, closure_source = ?, closure_at = ?, ${TOUCH} WHERE id = ?`)
     .run(status, source, at, id);
-  return info.changes > 0;
+  if (info.changes === 0) return false;
+
+  // Rastro en el histórico, marcado como eje de CIERRE. Sin esto, el eje que
+  // manda en el dinero era el único sin auditoría: se veía el valor actual
+  // pero no quién lo puso ni cuándo cambió. Repetir el mismo valor (permitido:
+  // refresca fuente y fecha) no genera fila: no es una transición.
+  if (row.closure_status !== status) {
+    const meta = ctx().db.prepare("SELECT shopify_order_id, supplier_platform, carrier FROM orders WHERE id = ?").get(id) as
+      | { shopify_order_id: string; supplier_platform: string | null; carrier: string | null }
+      | undefined;
+    if (meta) {
+      insertOrderStatusHistory({
+        orderId: id,
+        shopifyOrderId: meta.shopify_order_id,
+        supplierPlatform: meta.supplier_platform,
+        carrier: meta.carrier,
+        previousStatus: row.closure_status,
+        newStatus: status,
+        rawStatus: null,
+        source: source === "llamada_ia" || source === "manual" ? "manual" : "webhook",
+        statusAxis: "closure",
+        occurredAt: at,
+      });
+    }
+  }
+  return true;
 }
 
 /** Marca updated_at sin cambiar nada más (backoff natural de reintentos). */

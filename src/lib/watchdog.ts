@@ -16,6 +16,7 @@
 // ============================================================
 
 import type { WASocket } from "@whiskeysockets/baileys";
+import { acquireLease, LEASE_WATCHDOG } from "./system/leases";
 import pino from "pino";
 import {
   getUnansweredConversations,
@@ -250,7 +251,12 @@ export function startWatchdog(sock: WASocket): void {
   currentSock = sock;
   if (timer) return; // ya estaba corriendo
   logger.info(`[watchdog] activo${ALERT_JID ? "" : " (sin ALERT_WHATSAPP: solo registra en el log)"}`);
-  timer = setInterval(() => void tick(), TICK_MS);
+  timer = setInterval(() => {
+    // LEASE: el watchdog manda avisos por WhatsApp. Dos procesos vigilando
+    // lo mismo = dos alertas idénticas por cada incidencia.
+    if (!acquireLease(LEASE_WATCHDOG, Math.max(120, Math.floor(TICK_MS / 1000) * 3))) return;
+    void tick();
+  }, TICK_MS);
 }
 
 /** Para el watchdog (se llama al desconectar). */

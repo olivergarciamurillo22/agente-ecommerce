@@ -1,5 +1,29 @@
 # Contrato de Dropi PRO — lo confirmado y lo que falta
 
+> ⛔ **DROPI NO DISPONE DE API PÚBLICA SEGÚN SU SOPORTE (videollamada,
+> 25-08-2026). NO CONSTRUIR INTEGRACIÓN API SIN NUEVA EVIDENCIA.**
+> La vía real es su app de Shopify: el vínculo producto↔Dropi se hace con el
+> campo **vendor** del producto en Shopify (debe decir `Dropi PRO`), no con
+> metafields ni SKUs. El andamiaje de `src/lib/suppliers/dropi/` se conserva
+> solo porque el router lo importa y falla cerrado.
+
+## Clasificación del código (auditoría 26-08-2026)
+
+| Fichero | Clasificación | Por qué se conserva |
+|---|---|---|
+| `types.ts` | **useful model** | Tipos que usan el router y los tests |
+| `webhook.ts` | **webhook-only** | Receptor apagado (`DROPIPRO_WEBHOOK_ENABLED=0`, 503); si Dropi algún día notifica, entra por aquí |
+| `index.ts` (provider) | **useful model** | `isConfigured()=false` es lo que hace el fail-closed del router |
+| `create-gate.ts` | **useful model** | El gate que impide crear: se queda |
+| `client.ts` | **dead API scaffold** | ⛔ ninguna API que llamar; solo lanza ProviderNotConfiguredError |
+| `create-order.ts` | **dead API scaffold** | ⛔ ídem |
+| `mapper.ts` | **dead API scaffold** | ⛔ mapea a un esquema que no existe |
+| `status-map.ts` | **dead API scaffold** | ⛔ catálogo vacío de una API inexistente |
+
+Ninguno se borra: todos tienen imports activos y el borrado sin desenredar
+el router rompería el build. Lo que NO puede pasar es que una sesión futura
+los "termine".
+
 Este documento recoge **solo hechos verificados**. Todo lo que no esté aquí
 sigue sin implementarse, a propósito.
 

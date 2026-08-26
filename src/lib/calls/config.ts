@@ -48,7 +48,19 @@ export function callsAllowlist(): string[] {
 
 export function callAllowedByAllowlist(phoneDigits: string): boolean {
   const lista = callsAllowlist();
-  if (lista.length === 0) return true;
+  if (lista.length === 0) {
+    // FAIL-CLOSED EN PILOTO (26-08): la trampa medida en producción era que
+    // esta lista vacía significaba "sin restricción" — exactamente lo
+    // CONTRARIO que TEST_PHONE_ALLOWLIST, y a un paso de que abrir
+    // ai_calls_enabled con la lista sin rellenar llamara a TODOS los
+    // clientes. Mientras el sistema esté en modo prueba (TEST_MODE=1, que
+    // es como va a estar durante todo el piloto), una lista vacía BLOQUEA a
+    // todos. En producción real (TEST_MODE=0) conserva el significado
+    // documentado de "sin restricción" para no romper compatibilidad — y
+    // para entonces el kill switch y el cap diario siguen delante.
+    if (process.env.TEST_MODE === "1") return false;
+    return true;
+  }
   return lista.includes(phoneDigits.replace(/[^\d]/g, ""));
 }
 

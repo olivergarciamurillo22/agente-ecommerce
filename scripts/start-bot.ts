@@ -10,6 +10,17 @@ import { start, watchRestartFlag } from "../src/lib/baileys/client";
 import { startOrderScheduler } from "../src/lib/orders/scheduler";
 import { startTrackingScheduler } from "../src/lib/tracking/scheduler";
 import { startReconcileScheduler } from "../src/lib/shopify/reconcile";
+import { whatsappProviderName } from "../src/lib/whatsapp/provider";
+import { startCloudOutboxLoop } from "../src/lib/whatsapp/cloud-outbox";
+import {
+  releaseLease,
+  LEASE_ORDERS,
+  LEASE_TRACKING,
+  LEASE_RECONCILE,
+  LEASE_CALLS,
+  LEASE_OUTBOX,
+  LEASE_WATCHDOG,
+} from "../src/lib/system/leases";
 import { startCallOrchestrator } from "../src/lib/calls/scheduler";
 import { printSafetyStatus } from "../src/lib/safety";
 import { getPendingOutbox } from "../src/lib/db";
@@ -75,8 +86,17 @@ async function main(): Promise<void> {
   }
 
   try {
-    await start();
-    watchRestartFlag();
+    if (whatsappProviderName() === "cloud_api") {
+      // Proveedor oficial: NO se arranca Baileys (ni QR ni sesión de
+      // WhatsApp Web). La entrada llega por el webhook de Meta (proceso
+      // web) y la salida la drena el loop de Cloud API. El lease del outbox
+      // garantiza que jamás entregan dos loops a la vez.
+      logger.info("[bot] WHATSAPP_PROVIDER=cloud_api — Baileys NO se arranca; entrega por API oficial de Meta");
+      startCloudOutboxLoop();
+    } else {
+      await start();
+      watchRestartFlag();
+    }
     // Scheduler de confirmaciones COD: corre aunque WhatsApp aún no esté
     // vinculado (los envíos esperan a que haya conexión; el estado es SQLite).
     startOrderScheduler();
@@ -85,7 +105,9 @@ async function main(): Promise<void> {
     startTrackingScheduler();
     startReconcileScheduler();
   startCallOrchestrator();
-    logger.info("[bot] esperando QR scan en el dashboard (localhost:3000)...");
+    if (whatsappProviderName() !== "cloud_api") {
+      logger.info("[bot] esperando QR scan en el dashboard (localhost:3000)...");
+    }
   } catch (err) {
     logger.error({ err }, "[bot] error fatal al arrancar");
     process.exit(1);
@@ -98,12 +120,29 @@ main().catch((err) => {
 });
 
 // Graceful shutdown
+//
+// Soltar los leases al salir NO es imprescindible (caducan solos), pero
+// ahorra al siguiente proceso esperar el TTL entero antes de poder trabajar.
+// En un redespliegue eso es la diferencia entre reanudar en segundos o
+// quedarse minutos sin mandar confirmaciones.
+function soltarLeases(): void {
+  for (const n of [LEASE_ORDERS, LEASE_TRACKING, LEASE_RECONCILE, LEASE_CALLS, LEASE_OUTBOX, LEASE_WATCHDOG]) {
+    try {
+      releaseLease(n);
+    } catch {
+      // Mejor esfuerzo: si la DB ya está cerrada, el lease caduca solo.
+    }
+  }
+}
+
 process.on("SIGINT", () => {
   logger.info("[bot] SIGINT recibido, cerrando...");
+  soltarLeases();
   process.exit(0);
 });
 
 process.on("SIGTERM", () => {
   logger.info("[bot] SIGTERM recibido, cerrando...");
+  soltarLeases();
   process.exit(0);
 });

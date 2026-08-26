@@ -1,4 +1,5 @@
 import type { WASocket } from "@whiskeysockets/baileys";
+import { acquireLease, LEASE_OUTBOX } from "../system/leases";
 import pino from "pino";
 import fs from "node:fs";
 import { getPendingOutbox, markOutboxSent, revertOutboxSent, getConversationById } from "../db";
@@ -32,6 +33,12 @@ export function startOutboxLoop(sock: WASocket): void {
   if (outboxTimer) return;
 
   outboxTimer = setInterval(async () => {
+    // LEASE: el claim atómico de cada item ya impide el doble envío, pero el
+    // lease evita además que dos procesos se peleen por la cola entera y
+    // gasten reintentos el uno contra el otro. Defensa en profundidad: si
+    // este lease fallara, el claim sigue siendo la barrera dura.
+    if (!acquireLease(LEASE_OUTBOX, 60)) return;
+
     // Latido para el Control Center (con throttle interno: escribe ~1/min
     // aunque este loop corra cada 2s). Nunca puede romper el envío.
     heartbeat("scheduler:outbox");
@@ -77,7 +84,12 @@ export function startOutboxLoop(sock: WASocket): void {
       // si el claim se pierde sin enviar, la red de seguridad de reminders/
       // needs_call recoge al cliente. WhatsApp no ofrece idempotency key:
       // este es el mejor compromiso posible (documentado en PEDRO-MVP.md).
-      markOutboxSent(item.id);
+      // CLAIM atómico: si otro proceso se lo llevó, aquí no se envía nada.
+      // Sin esta comprobación, dos bots en marcha duplicarían el mensaje.
+      if (!markOutboxSent(item.id)) {
+        logger.info(`[bot] outbox #${item.id} ya reclamado por otro proceso — no se envía`);
+        continue;
+      }
       try {
         if (item.type === "image" && item.media_path) {
           if (!fs.existsSync(item.media_path)) {

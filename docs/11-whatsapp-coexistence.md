@@ -1,3 +1,34 @@
+> ⚠️ **DESACTUALIZADO — corregido el 26-08-2026 con datos verificados en el
+> alta real.** Dos afirmaciones de este documento resultaron falsas:
+>
+> 1. **Coexistence SÍ está disponible en la UE** desde octubre de 2025
+>    (mundial desde mayo de 2026). España está soportada — el alta de
+>    Casamable se hizo el 25-08-2026.
+> 2. **NO hace falta un BSP**: se puede hacer directo con app propia de Meta
+>    + Embedded Signup + Webhook Override, que es exactamente como se hizo.
+>
+> **Lo vigente, en corto** (provenance: guías de integradores 2026 +
+> verificación propia en el alta del 25-08; lo marcado *third-party* no está
+> confirmado con documento first-party de Meta):
+>
+> - **Cloud API directa YA está en uso** con el número de PRUEBAS: webhook
+>   verificado con un evento real (first-party: lo vimos nosotros).
+> - **Coexistence** permitiría conservar el número real de Pedro con la app
+>   del móvil funcionando (third-party: pendiente de verlo en el Embedded
+>   Signup real).
+> - ⚠️ **Baileys es un dispositivo companion y el alta de coexistencia
+>   desvincula los companions** (third-party): la sesión de producción puede
+>   caerse y pedir QR. Por eso coexistencia es un PASO OPERACIONAL SENSIBLE
+>   que **no se ejecuta hasta que el piloto de Cloud API esté limpio** — con
+>   el piloto validado, quedarse sin Baileys unos minutos es molesto; sin
+>   piloto, es quedarse sin canal.
+> - La elección de importar historial (≤6 meses) es **única e irreversible**
+>   (third-party).
+>
+> La referencia vigente es `docs/META-WHATSAPP-MIGRATION.md` (arquitectura y
+> políticas) y `docs/PEDRO-META-WHATSAPP-SETUP.md` (el alta paso a paso).
+> Este archivo se conserva por el contexto histórico de la decisión.
+
 # 11 · WhatsApp Coexistence (API oficial + app a la vez)
 
 > Investigado el 2026-06-02 a raíz de una duda de un alumno: un vídeo de YouTube

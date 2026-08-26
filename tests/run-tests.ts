@@ -119,13 +119,107 @@ function codPayload(overrides: Record<string, unknown> = {}): Record<string, unk
       phone: "+34 611 111 111",
     },
     billing_address: null,
+    // Líneas REALISTAS: la Admin API siempre manda product_id/variant_id y
+    // los campos de fulfillment. Una fixture sin ellos hacía pasar tests que
+    // en producción se habrían comportado distinto.
     line_items: [
-      { title: "Crema facial hidratante", quantity: 2, price: "19.95" },
-      { title: "Sérum vitamina C", quantity: 1, price: "10.00" },
+      {
+        title: "Crema facial hidratante",
+        quantity: 2,
+        price: "19.95",
+        sku: "CREMA-01",
+        product_id: 8100000000001,
+        variant_id: 4100000000001,
+        requires_shipping: true,
+        gift_card: false,
+        fulfillment_service: "manual",
+        fulfillment_status: null,
+        fulfillable_quantity: 2,
+      },
+      {
+        title: "Sérum vitamina C",
+        quantity: 1,
+        price: "10.00",
+        sku: "SERUM-01",
+        product_id: 8100000000002,
+        variant_id: 4100000000002,
+        requires_shipping: true,
+        gift_card: false,
+        fulfillment_service: "manual",
+        fulfillment_status: null,
+        fulfillable_quantity: 1,
+      },
     ],
     note_attributes: [],
     ...overrides,
   };
+}
+
+
+/**
+ * Líneas de pedido REALISTAS para probar fulfillment por línea.
+ *
+ * `fisicasDespachadas` / `fisicasPendientes`: cuántas líneas de mercancía en
+ * cada estado. `seguro`: añade la línea `Seguro de Envío` de Releasit, que es
+ * la que en producción deja el pedido en `partial` para siempre.
+ */
+function lineas(opts: {
+  fisicasDespachadas?: number;
+  fisicasPendientes?: number;
+  seguro?: boolean;
+} = {}): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  let n = 0;
+  for (let i = 0; i < (opts.fisicasDespachadas ?? 0); i++) {
+    n++;
+    out.push({
+      title: `Producto fisico ${n}`,
+      quantity: 1,
+      price: "19.95",
+      sku: `SKU-${n}`,
+      product_id: 8200000000000 + n,
+      variant_id: 4200000000000 + n,
+      requires_shipping: true,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: "fulfilled",
+      fulfillable_quantity: 0,
+    });
+  }
+  for (let i = 0; i < (opts.fisicasPendientes ?? 0); i++) {
+    n++;
+    out.push({
+      title: `Producto fisico ${n}`,
+      quantity: 1,
+      price: "19.95",
+      sku: `SKU-${n}`,
+      product_id: 8200000000000 + n,
+      variant_id: 4200000000000 + n,
+      requires_shipping: true,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: null,
+      fulfillable_quantity: 1,
+    });
+  }
+  if (opts.seguro) {
+    // Tal cual lo manda Releasit: sin SKU ni IDs de catálogo y, sobre todo,
+    // requires_shipping = false. Nadie lo despacha nunca.
+    out.push({
+      title: "Seguro de Envío",
+      quantity: 1,
+      price: "1.95",
+      sku: null,
+      product_id: null,
+      variant_id: null,
+      requires_shipping: false,
+      gift_card: false,
+      fulfillment_service: "manual",
+      fulfillment_status: null,
+      fulfillable_quantity: 1,
+    });
+  }
+  return out;
 }
 
 const shopifyHeaders = (raw: string, extra: Record<string, string | null> = {}) => ({
@@ -136,17 +230,82 @@ const shopifyHeaders = (raw: string, extra: Record<string, string | null> = {}) 
   ...extra,
 });
 
+// ============================================================
+// T6 — grafo transitivo de imports (para la salvaguarda estructural de
+// WhatsApp que sigue las importaciones de verdad en vez de mirar solo el
+// texto del fichero de entrada).
+//
+// Las salvaguardas E3/E4/E7/E8 de arriba solo leen SU PROPIO fichero: si
+// backfill.ts importara un módulo C que a su vez importara WhatsApp, esos
+// tests seguirían en verde porque nunca abren C. Esto recorre el grafo de
+// verdad (imports estáticos Y `await import(...)` dinámicos, que es como
+// los scripts cargan sus propios módulos) partiendo de cada entrypoint.
+// ============================================================
+
+const PROJECT_ROOT = path.join(__dirname, "..");
+
+/** Especificadores de `from "..."` (estático) y `import("...")` (dinámico). */
+function extractImportSpecifiers(src: string): string[] {
+  const specs: string[] = [];
+  for (const m of src.matchAll(/\bfrom\s+["']([^"']+)["']/g)) specs.push(m[1]);
+  for (const m of src.matchAll(/\bimport\(\s*["']([^"']+)["']\s*\)/g)) specs.push(m[1]);
+  return specs;
+}
+
+/** Resuelve un especificador a un fichero .ts real, o null si es externo (paquete de node_modules). */
+function resolveImportSpecifier(spec: string, fromFile: string): string | null {
+  let base: string;
+  if (spec.startsWith(".")) {
+    base = path.resolve(path.dirname(fromFile), spec);
+  } else if (spec.startsWith("@/")) {
+    base = path.join(PROJECT_ROOT, "src", spec.slice(2));
+  } else {
+    return null; // paquete externo — fuera del alcance de esta salvaguarda
+  }
+  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, path.join(base, "index.ts"), path.join(base, "index.tsx")]) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+  }
+  return null;
+}
+
+/** BFS del grafo de imports locales alcanzables desde `entryFile` (rutas absolutas). */
+function buildTransitiveImportGraph(entryFile: string): Set<string> {
+  const visited = new Set<string>();
+  const queue = [entryFile];
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const src = fs.readFileSync(file, "utf8");
+    for (const spec of extractImportSpecifiers(src)) {
+      const resolved = resolveImportSpecifier(spec, file);
+      if (resolved && !visited.has(resolved)) queue.push(resolved);
+    }
+  }
+  return visited;
+}
+
+/** true si `fnName(` aparece como LLAMADA en `src` (no como su propia declaración). */
+function containsCallTo(src: string, fnName: string): boolean {
+  const callPattern = new RegExp(`\\b${fnName}\\s*\\(`);
+  const declPattern = new RegExp(`\\bfunction\\s+${fnName}\\s*\\(`);
+  return src.split("\n").some((line) => callPattern.test(line) && !declPattern.test(line));
+}
+
 async function main(): Promise<void> {
   console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
 
   const db = await import("../src/lib/db");
-  const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage } = await import(
+  const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage, normalizeOrder } = await import(
     "../src/lib/orders/normalize"
   );
-  const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
+  const { verifyShopifyHmac, verifyShopifyHmacEitherSecret } = await import("../src/lib/shopify/hmac");
   const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
+  const backfillOrderedAt = await import("../src/lib/shopify/backfill-ordered-at");
+
+  const investigateSkipped = await import("../src/lib/shopify/investigate-skipped-backfill");
   const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
@@ -260,6 +419,36 @@ async function main(): Promise<void> {
     assert.equal(verifyShopifyHmac("cuerpo", sign("cuerpo"), undefined), false);
   });
 
+  await test("BUG2: verifyShopifyHmacEitherSecret acepta el secreto de webhooks de la tienda", () => {
+    const r = verifyShopifyHmacEitherSecret("cuerpo", sign("cuerpo"));
+    assert.equal(r.valid, true);
+    assert.equal(r.matchedWith, "webhook_secret");
+  });
+
+  await test("BUG2: verifyShopifyHmacEitherSecret acepta el CLIENT SECRET de la app (el caso real: los 4 webhooks son app-owned)", async () => {
+    const signWith = (secret: string, body: string) => crypto.createHmac("sha256", secret).update(body).digest("base64");
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = signWith("test_client_secret", "cuerpo");
+      const r = verifyShopifyHmacEitherSecret("cuerpo", firmaClientSecret);
+      assert.equal(r.valid, true);
+      assert.equal(r.matchedWith, "client_secret");
+    });
+  });
+
+  await test("BUG2: verifyShopifyHmacEitherSecret rechaza una firma que no coincide con ninguno de los dos", async () => {
+    const signWith = (secret: string, body: string) => crypto.createHmac("sha256", secret).update(body).digest("base64");
+    const rInventada = verifyShopifyHmacEitherSecret("cuerpo", sign("otro cuerpo"));
+    assert.equal(rInventada.valid, false);
+    assert.equal(rInventada.matchedWith, "ninguno");
+
+    await withEnv({ SHOPIFY_CLIENT_SECRET: undefined }, () => {
+      const firmaOtroSecreto = signWith("un-secreto-cualquiera", "cuerpo");
+      const r = verifyShopifyHmacEitherSecret("cuerpo", firmaOtroSecreto);
+      assert.equal(r.valid, false);
+      assert.equal(r.matchedWith, "ninguno");
+    });
+  });
+
   // ============ 4 · Webhook orders/create ============
   console.log("· Webhook");
   await test("pedido COD válido se guarda como pending_send", () => {
@@ -286,6 +475,23 @@ async function main(): Promise<void> {
     const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: sign("manipulado") }));
     assert.equal(res.status, 401);
     assert.equal(db.getOrderByShopifyId("900002"), null);
+  });
+
+  await test("BUG2: firmado con SHOPIFY_CLIENT_SECRET se ACEPTA (los 4 webhooks de esta tienda son app-owned) y deja rastro info", async () => {
+    const sysRepo = await import("../src/lib/system/repo");
+    const raw = JSON.stringify(codPayload({ id: 900099, order_number: 1199 }));
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
+      const antes = sysRepo.countIntegrationEvents("shopify", "webhook_client_secret_match", 0);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: firmaClientSecret }));
+      assert.equal(res.status, 200, "BUG2: el client secret es un secreto legítimo de Shopify, no debe rechazarse");
+      assert.equal(
+        sysRepo.countIntegrationEvents("shopify", "webhook_client_secret_match", 0),
+        antes + 1,
+        "queda rastro de que se validó con el secreto de la app, no el de la tienda"
+      );
+    });
+    assert.ok(db.getOrderByShopifyId("900099"), "el pedido SÍ se guarda: la firma es válida");
   });
   await test("pedido NO COD se ignora con 200", () => {
     const raw = JSON.stringify(
@@ -3484,7 +3690,28 @@ async function main(): Promise<void> {
         assert.equal(h.authMode, "static");
         assert.equal(h.status, "critical", "401 reciente → critical");
         sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        // Estado virgen de verdad: sin firmas inválidas heredadas de otros
+        // tests (BUG2 las hace ruidosas a propósito — aquí probamos el
+        // camino sano, no ese).
+        const Database = require("better-sqlite3");
+        const raw = new Database(path.join(tmpDir, "messages.db"));
+        raw.prepare("DELETE FROM integration_events WHERE integration = 'shopify' AND event_type = 'webhook_bad_signature'").run();
+        raw.close();
         assert.equal(sysInteg.getShopifyHealth().status, "healthy");
+      }
+    );
+  });
+
+  await test("BUG2: getShopifyHealth se pone ruidoso (warning) si ha habido webhooks con firma inválida en 24 h", async () => {
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_token_de_prueba", SHOPIFY_STORE_DOMAIN: "x.myshopify.com" },
+      () => {
+        sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
+        const h = sysInteg.getShopifyHealth();
+        assert.ok(h.webhookBadSignature24h >= 1, "un rechazo real ya no puede quedar invisible");
+        assert.equal(h.status, "warning");
+        assert.match(h.message, /firma inválida en 24 h/);
       }
     );
   });
@@ -3721,12 +3948,30 @@ async function main(): Promise<void> {
       assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
       assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma }).status, 200);
     });
+    // El histórico ya distingue EJES: un mismo hecho del proveedor puede
+    // producir una transición logística y otra de cierre, que son cosas
+    // distintas. Lo que se comprueba aquí es que el DUPLICADO no repite
+    // ninguna de las dos, así que se cuenta por eje, no en bruto.
     const h = db.listOrderStatusHistory(o.id);
-    assert.equal(h.length, 1);
-    assert.equal(h[0].source, "webhook");
-    assert.equal(h[0].event_id, "dropea:evt-990004-order.status.changed");
-    assert.equal(h[0].raw_sub_status, "SHIPPED");
-    assert.equal(h[0].occurred_at, Math.floor(Date.parse("2026-08-22T10:00:00.000Z") / 1000), "fecha del hecho según Dropea");
+    const logistico = h.filter((x) => x.status_axis === "tracking");
+    const cierre = h.filter((x) => x.status_axis === "closure");
+
+    assert.equal(logistico.length, 1, "el webhook repetido no duplica la transición logística");
+    assert.equal(logistico[0].source, "webhook");
+    assert.equal(logistico[0].event_id, "dropea:evt-990004-order.status.changed");
+    assert.equal(logistico[0].raw_sub_status, "SHIPPED");
+    assert.equal(
+      logistico[0].occurred_at,
+      Math.floor(Date.parse("2026-08-22T10:00:00.000Z") / 1000),
+      "fecha del hecho según Dropea"
+    );
+
+    // SHIPPED sí cierra a in_progress (el pedido salió), y tampoco se duplica.
+    assert.equal(cierre.length, 1, "el webhook repetido no duplica la transición de cierre");
+    assert.equal(cierre[0].new_status, "in_progress");
+    assert.equal(cierre[0].previous_status, "unknown");
+    assert.equal(db.getOrderById(o.id)!.closure_status, "in_progress");
+    assert.equal(db.getOrderById(o.id)!.closure_source, "dropea");
   });
 
   await test("A3 tasa de entrega: entregados / (entregados + devueltos); en curso NO cuentan", () => {
@@ -3763,7 +4008,21 @@ async function main(): Promise<void> {
     assert.ok((w.bySupplier.find((x) => x.key === "dropea")?.shipped ?? 0) >= 4);
     assert.ok(w.byProduct.length >= 1);
     assert.equal(w.delivered + w.returned + w.pending, w.shipped, "todo enviado está resuelto o pendiente");
-    assert.equal(w.deliveryRate, deliveryMetrics.computeDeliveryRate(w.delivered, w.returned));
+    // CAMBIO DE MODELO (25-08-2026): la tasa de la VENTANA sale del eje de
+    // CIERRE, no de estos contadores logísticos. Estos cuatro pedidos solo
+    // tienen estado de tracking (nadie escribió su cierre), así que su
+    // desenlace de negocio es desconocido y la tasa debe ser null — no 66,7 %.
+    // Decir "no lo sé" es la respuesta correcta; inventar una tasa a partir
+    // del eje equivocado era el bug.
+    assert.equal(w.deliveryRate, w.closure.deliveryRate, "la ventana usa el eje de cierre");
+    // El cálculo logístico sigue existiendo y es correcto por transportista
+    // (GLS-A3 = 66,7 %, comprobado arriba): lo que cambió es QUIÉN manda en
+    // la tasa de la ventana, no que el otro cálculo esté mal.
+    assert.notEqual(
+      w.deliveryRate,
+      deliveryMetrics.computeDeliveryRate(w.delivered, w.returned),
+      "la tasa de negocio ya NO es la tasa logística: son ejes distintos"
+    );
     assert.ok((w.avgHoursToDeliver ?? 0) >= 0);
     // Fuera de la ventana: nada.
     assert.equal(deliveryMetrics.getDeliveryWindow(ahora - 7200, ahora - 3600).shipped, 0);
@@ -3951,8 +4210,8 @@ async function main(): Promise<void> {
   await test("A6 unit economics: sin costes ni ads → incompleto con la lista de lo que falta, cifras reales intactas", () => {
     const ahora = Math.floor(Date.now() / 1000);
     const rows = [
-      { id: 1, status: "delivered", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
-      { id: 2, status: "returned", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 1, status: "delivered", closure: "delivered", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", closure: "refused", total_price: "34.98", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
     ];
     const w = unitEconomics.computeEconomics(rows, [], new Map(), ahora - 86400, ahora);
     assert.equal(w.complete, false);
@@ -3969,8 +4228,8 @@ async function main(): Promise<void> {
   await test("A6 unit economics: con costes y ads → completo; margen y ROAS bruto/neto correctos", () => {
     const ahora = Math.floor(Date.now() / 1000);
     const rows = [
-      { id: 1, status: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
-      { id: 2, status: "returned", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
+      { id: 1, status: "delivered", closure: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
+      { id: 2, status: "returned", closure: "refused", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
     ];
     const costs = [{ sku: "LIMP-001", title: "Limpiador", product_cost: 5, shipping_cost: 4, cod_fee: 1, updated_at: 0 }];
     const hoy = new Date();
@@ -4208,6 +4467,20 @@ async function main(): Promise<void> {
     assert.equal(db.getOrderById(o.id)!.closure_status, "unknown");
   });
 
+  await test("BUG2 en orders-events: firmado con SHOPIFY_CLIENT_SECRET se ACEPTA — mismo endpoint compartido por los 3 topics", async () => {
+    const o = mkOrder("990899", "3899", "34600119899");
+    const raw = JSON.stringify(closurePayload({ id: 990899, cancelled_at: "2026-08-23T10:00:00Z" }));
+    await withEnv({ SHOPIFY_CLIENT_SECRET: "test_client_secret" }, () => {
+      const firmaClientSecret = crypto.createHmac("sha256", "test_client_secret").update(raw).digest("base64");
+      const res = processOrdersEventWebhook(
+        raw,
+        shopifyHeaders(raw, { topic: "orders/cancelled", hmac: firmaClientSecret, webhookId: "wh-bug2-clientsecret" })
+      );
+      assert.equal(res.status, 200, "BUG2: orders/cancelled, orders/fulfilled y orders/updated comparten este endpoint — los tres estaban fallando por lo mismo");
+    });
+    assert.equal(db.getOrderById(o.id)!.closure_status, "cancelled", "ahora SÍ se aplica: antes se perdía toda cancelación firmada con el client secret");
+  });
+
   await test("E2 orders/cancelled: closure_status → cancelled, source shopify, closure_at = cancelled_at del payload", () => {
     const o = mkOrder("990801", "3801", "34600119801");
     const raw = JSON.stringify(
@@ -4356,7 +4629,7 @@ async function main(): Promise<void> {
     assert.equal(a1.signal?.status, "cancelled");
     assert.equal(a1.signal?.at, Math.floor(Date.parse("2026-08-20T10:00:00Z") / 1000), "closure_at es la fecha de Shopify, no now()");
 
-    const despachado = backfillOrder({ id: 995004, fulfillment_status: "fulfilled", updated_at: "2026-08-21T11:00:00Z" });
+    const despachado = backfillOrder({ id: 995004, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-21T11:00:00Z" });
     const a2 = backfill.decideBackfillAction(null, despachado);
     assert.equal(a2.kind, "insert_in_progress");
     assert.notEqual(a2.signal?.status, "delivered", "fulfilled NUNCA es delivered");
@@ -4383,7 +4656,7 @@ async function main(): Promise<void> {
     const pagina = {
       orders: [
         backfillOrder({ id: 995101, cancelled_at: "2026-08-20T09:00:00Z" }),
-        backfillOrder({ id: 995102, fulfillment_status: "fulfilled", updated_at: "2026-08-20T10:00:00Z" }),
+        backfillOrder({ id: 995102, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T10:00:00Z" }),
         backfillOrder({ id: 995103, gateway: "Tarjeta", payment_gateway_names: ["Tarjeta"], tags: "" }),
       ],
       nextCursor: null,
@@ -4405,7 +4678,7 @@ async function main(): Promise<void> {
     const pagina = {
       orders: [
         backfillOrder({ id: 995200, cancelled_at: "2026-08-20T09:00:00Z" }), // NO existe: se inserta
-        backfillOrder({ id: 995201, fulfillment_status: "fulfilled", updated_at: "2026-08-20T11:00:00Z" }), // SÍ existe: se actualiza
+        backfillOrder({ id: 995201, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T11:00:00Z" }), // SÍ existe: se actualiza
       ],
       nextCursor: null,
     };
@@ -5777,58 +6050,244 @@ async function main(): Promise<void> {
     assert.equal(plan2.toCreate.some((x) => x.topic === "orders/create"), false);
   });
 
+  await test("outbox: el claim es ATÓMICO — dos procesos sobre el mismo item, un solo envío", () => {
+    // Reproduce el caso de dos bots vivos a la vez (dos contenedores, o un
+    // reinicio solapado): ambos leen la misma fila pendiente y ambos intentan
+    // reclamarla. Solo uno puede ganar; el otro NO debe enviar.
+    const conv = db.getOrCreateConversation("34600199001", "Cliente Claim");
+    const itemId = db.enqueueOutbox(conv.id, "34600199001", "mensaje que no se puede duplicar");
+    assert.ok(
+      db.getPendingOutbox(500).some((x) => x.id === itemId),
+      "el item está en la cola como pendiente"
+    );
+
+    const ganador = db.markOutboxSent(itemId);
+    const perdedor = db.markOutboxSent(itemId);
+    assert.equal(ganador, true, "el primero gana el claim");
+    assert.equal(perdedor, false, "el segundo NO: el item ya no estaba pendiente");
+
+    // Y el revert del patrón claim→send→revert sigue funcionando: si el
+    // ganador falla al enviar, el item vuelve a estar reclamable.
+    db.revertOutboxSent(itemId);
+    assert.equal(db.markOutboxSent(itemId), true, "tras revertir, se puede reclamar otra vez");
+  });
+
+  await test("BUG2 planWebhookEnsure: dos suscripciones del MISMO topic se detectan como duplicado, aunque una apunte bien", async () => {
+    const { planWebhookEnsure } = await import("../src/lib/shopify/webhook-subscriptions");
+    const deseadas = [
+      { topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+      { topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+    ];
+
+    // El caso real del bug: orders/updated tiene DOS suscripciones — la
+    // nueva (app-owned, URL correcta) y una vieja (admin-created) que quedó
+    // viva tras la migración del 24-08. Con el .find() de antes, esto se
+    // veía como "✓ Correctas" sin más: nunca se enteraba de la segunda.
+    const plan = planWebhookEnsure(
+      [
+        { id: 1, topic: "orders/create", address: "https://x.example/api/webhooks/shopify/orders-create" },
+        { id: 10, topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+        { id: 7, topic: "orders/updated", address: "https://x.example/api/webhooks/shopify/orders-events" },
+      ],
+      deseadas
+    );
+
+    assert.equal(plan.duplicates.length, 1, "orders/updated debe salir como duplicado");
+    assert.equal(plan.duplicates[0].topic, "orders/updated");
+    assert.deepEqual(
+      plan.duplicates[0].subscriptions.map((s) => s.id).sort((a, b) => a - b),
+      [7, 10],
+      "las DOS suscripciones deben listarse, con su id, para decidir a mano cuál sobra"
+    );
+    assert.ok(
+      plan.ok.some((x) => x.topic === "orders/updated"),
+      "sigue contando como cubierto: al menos una de las dos apunta a la URL correcta"
+    );
+    assert.equal(plan.toCreate.some((x) => x.topic === "orders/updated"), false, "nunca crea una tercera copia");
+
+    // Si NINGUNA de las duplicadas apunta a la URL correcta: duplicado Y mismatched a la vez.
+    const planPeor = planWebhookEnsure(
+      [
+        { id: 10, topic: "orders/updated", address: "https://vieja.example/hook" },
+        { id: 7, topic: "orders/updated", address: "https://tambien-vieja.example/hook" },
+      ],
+      deseadas
+    );
+    assert.equal(planPeor.duplicates.length, 1);
+    assert.equal(planPeor.mismatched.some((m) => m.topic === "orders/updated"), true);
+  });
+
   // ============ 45 · Arreglos de fidelidad (lo que el sistema contaba mal) ============
   console.log("\n— Fidelidad: fulfillment parcial y orden de llegada —");
 
-  await test("fulfillment `partial` TAMBIÉN es in_progress (el caso normal en Casamable, no el raro)", () => {
-    // Los pedidos llevan una línea `Seguro de Envío` que no es mercancía y que
-    // el proveedor nunca despacha: el pedido se queda en `partial` para
-    // siempre y jamás llega a `fulfilled`. Mirar solo `fulfilled` dejaba esos
-    // pedidos con el cierre en `unknown`.
-    const parcial = backfillOrder({
-      id: 998001,
-      fulfillment_status: "partial",
-      updated_at: "2026-08-24T12:00:00Z",
-    });
-    const señal = backfill.planClosureFromShopify(parcial);
-    assert.equal(señal?.status, "in_progress");
-    assert.equal(señal?.at, Math.floor(Date.parse("2026-08-24T12:00:00Z") / 1000), "fecha de Shopify, no now()");
-    assert.notEqual(señal?.status, "delivered", "parcial no es entregado, igual que fulfilled no lo es");
+  const ff = await import("../src/lib/orders/fulfillment");
+  const inferir = (li: Array<Record<string, unknown>>, global?: string | null) =>
+    ff.inferPhysicalFulfillment(
+      { line_items: li, fulfillment_status: global ?? null } as never,
+      true
+    );
 
-    // Y sigue funcionando lo que ya funcionaba.
+  await test("FF 1 · CASO CASAMABLE: producto despachado + Seguro de Envío sin despachar → fulfilled", () => {
+    // El caso crítico. Shopify deja el PEDIDO en `partial` para siempre
+    // porque nadie despacha nunca el seguro. La mercancía, en cambio, salió
+    // entera. Decidir con el global sería decidir con un dato falso.
+    const r = inferir(lineas({ fisicasDespachadas: 1, seguro: true }), "partial");
+    assert.equal(r.state, "fulfilled", "toda la MERCANCÍA salió");
+    assert.equal(r.basis, "line_level");
+    assert.equal(r.physicalLines, 1);
+    assert.equal(r.serviceLines, 1, "el seguro no cuenta como mercancía");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), true);
+
+    // Y de punta a punta: el cierre resultante es in_progress, nunca delivered.
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({
+        id: 998101,
+        fulfillment_status: "partial",
+        line_items: lineas({ fisicasDespachadas: 1, seguro: true }),
+        updated_at: "2026-08-24T12:00:00Z",
+      })
+    );
+    assert.equal(señal?.status, "in_progress");
+    assert.notEqual(señal?.status, "delivered", "Shopify NUNCA puede afirmar una entrega");
+  });
+
+  await test("FF 2 · producto físico sin despachar + seguro → not_started", () => {
+    const r = inferir(lineas({ fisicasPendientes: 1, seguro: true }), null);
+    assert.equal(r.state, "not_started");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), false, "no ha salido nada: no es in_progress");
+  });
+
+  await test("FF 3 · dos físicos, uno despachado y otro no → partial", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 1, fisicasPendientes: 1 }), "partial");
+    assert.equal(r.state, "partial");
+    assert.equal(r.physicalLines, 2);
+    assert.equal(r.fulfilledLines, 1);
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), true, "algo salió: sí cuenta como en curso");
+  });
+
+  await test("FF 4 · dos físicos, los dos despachados → fulfilled", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 2 }), "fulfilled");
+    assert.equal(r.state, "fulfilled");
+    assert.equal(r.fulfilledLines, 2);
+  });
+
+  await test("FF 5 · solo Seguro de Envío → no_physical_items (no hay nada que despachar)", () => {
+    const r = inferir(lineas({ seguro: true }), null);
+    assert.equal(r.state, "no_physical_items");
+    assert.equal(r.physicalLines, 0);
+    assert.equal(
+      ff.physicalStateAllowsInProgress(r.state),
+      false,
+      "sin mercancía no se puede afirmar que el pedido esté en curso: va a revisión"
+    );
+  });
+
+  await test("FF 6 · restocked NO implica entregado ni rehusado, y no cierra nada", () => {
+    const r = inferir(lineas({ fisicasDespachadas: 1 }), "restocked");
+    assert.equal(r.state, "restocked");
+    assert.equal(ff.physicalStateAllowsInProgress(r.state), false);
     assert.equal(
       backfill.planClosureFromShopify(
-        backfillOrder({ id: 998002, fulfillment_status: "fulfilled", updated_at: "2026-08-24T12:00:00Z" })
-      )?.status,
-      "in_progress"
-    );
-    assert.equal(backfill.planClosureFromShopify(backfillOrder({ id: 998003 })), null, "sin fulfillment: sin señal");
-
-    // Regla que se mantiene intacta: sin NINGUNA fecha de Shopify no se
-    // escribe señal. Antes que estampar now() y corromper la cronología,
-    // se prefiere no saber.
-    assert.equal(
-      backfill.planClosureFromShopify(backfillOrder({ id: 998007, fulfillment_status: "partial" })),
+        backfillOrder({ id: 998104, fulfillment_status: "restocked", line_items: lineas({ fisicasDespachadas: 1 }) })
+      ),
       null,
-      "parcial pero sin fecha: no se inventa una"
+      "volvió al almacén: el motivo lo dice otra fuente, no Shopify"
     );
   });
 
-  await test("fulfillment `restocked` NO es in_progress: la mercancía volvió al almacén", () => {
+  await test("FF 7 · cancelled de Shopify gana sobre cualquier estado de mercancía", () => {
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({
+        id: 998105,
+        fulfillment_status: "partial",
+        line_items: lineas({ fisicasDespachadas: 1, seguro: true }),
+        cancelled_at: "2026-08-24T09:00:00Z",
+      })
+    );
+    assert.equal(señal?.status, "cancelled");
+    assert.equal(señal?.at, Math.floor(Date.parse("2026-08-24T09:00:00Z") / 1000));
+  });
+
+  await test("FF 8 · la ENTREGA no sale nunca del fulfillment: Shopify solo aporta in_progress/cancelled", () => {
+    // Aunque toda la mercancía esté despachada y haya tracking, `delivered`
+    // pertenece al eje de cierre y solo lo escribe una fuente fiable (Dropea).
+    const o = mkOrder("998106", "8106", "34600198106");
+    const señal = backfill.planClosureFromShopify(
+      backfillOrder({ id: 998106, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 2 }), updated_at: "2026-08-24T12:00:00Z" })
+    );
+    assert.equal(señal?.status, "in_progress");
+    db.setOrderClosure(o.id, señal!.status, "shopify", señal!.at);
+    assert.equal(db.getOrderById(o.id)!.closure_status, "in_progress");
+
+    // Solo Dropea puede afirmar la entrega.
+    assert.equal(db.setOrderClosure(o.id, "delivered", "dropea", señal!.at + 3600), true);
+    assert.equal(db.getOrderById(o.id)!.closure_source, "dropea");
+  });
+
+  await test("FF 9 · línea sin ninguna metadata → falla CERRADO (no se cuenta como mercancía)", () => {
+    const r = inferir([{ title: "Cosa rara", quantity: 1, price: "5.00" }], null);
+    assert.equal(r.physicalLines, 0, "sin señales no se afirma que sea mercancía");
+    assert.equal(r.state, "no_physical_items");
+    // Contarla de más dejaría el pedido "a medias" eternamente; contarla de
+    // menos lo deja en un estado visible que va a revisión.
+    assert.equal(ff.isPhysicalFulfillmentLine({ title: "Cosa rara" }), false);
+    // Una tarjeta regalo es virtual aunque traiga IDs de catálogo.
     assert.equal(
-      backfill.planClosureFromShopify(backfillOrder({ id: 998004, fulfillment_status: "restocked" })),
-      null
+      ff.isPhysicalFulfillmentLine({ title: "Tarjeta", sku: "GC-1", product_id: 1, gift_card: true }),
+      false
     );
-    // Y una cancelación gana sobre cualquier fulfillment, como ya era.
-    const cancelado = backfill.planClosureFromShopify(
-      backfillOrder({ id: 998005, fulfillment_status: "partial", cancelled_at: "2026-08-24T09:00:00Z" })
+    // Y `requires_shipping` manda sobre todo lo demás.
+    assert.equal(
+      ff.isPhysicalFulfillmentLine({ title: "Servicio", sku: "SRV-1", product_id: 1, requires_shipping: false }),
+      false
     );
-    assert.equal(cancelado?.status, "cancelled");
+    assert.equal(ff.isPhysicalFulfillmentLine({ title: "Sin ids", requires_shipping: true }), true);
   });
 
-  await test("backfill: un pedido parcialmente despachado se importa como in_progress", () => {
-    const parcial = backfillOrder({ id: 998006, fulfillment_status: "partial", updated_at: "2026-08-24T12:00:00Z" });
-    assert.equal(backfill.decideBackfillAction(null, parcial).kind, "insert_in_progress");
+  await test("FF 10 · una línea es física aunque NO tenga mapping de proveedor (routing ≠ fulfillment)", () => {
+    // Un SKU sin fila en supplier_product_mapping sigue siendo mercancía: no
+    // saber a qué proveedor mandarlo no lo convierte en un servicio.
+    const linea = {
+      title: "Producto sin mapping",
+      quantity: 1,
+      sku: "SKU-JAMAS-MAPEADO",
+      product_id: 9999999999,
+      variant_id: 8888888888,
+      requires_shipping: true,
+      fulfillment_status: "fulfilled",
+      fulfillable_quantity: 0,
+    };
+    assert.equal(ff.isPhysicalFulfillmentLine(linea), true);
+    assert.equal(db.listSupplierProductMappings("dropea").some((m) => m.shopify_sku === "SKU-JAMAS-MAPEADO"), false);
+    assert.equal(inferir([linea], "fulfilled").state, "fulfilled");
+  });
+
+  await test("FF · fallback legacy: sin datos por línea se distingue de dato fiable", () => {
+    // Pedido histórico: líneas sin campos de fulfillment. Con servicios
+    // presentes, un `partial` global NO permite concluir nada.
+    const legacy = [
+      { title: "Producto viejo", quantity: 1, sku: "OLD-1", product_id: 77 },
+      { title: "Seguro de Envío", quantity: 1 },
+    ];
+    const r = inferir(legacy, "partial");
+    assert.equal(r.basis, "global_fallback");
+    assert.equal(r.state, "unknown", "el global no distingue el seguro: no se afirma nada");
+    assert.match(r.reason, /no distingue|servicio/i);
+
+    // Sin servicios, el global sí sirve como fallback honesto.
+    const soloProducto = [{ title: "Producto viejo", quantity: 1, sku: "OLD-1", product_id: 77 }];
+    const r2 = inferir(soloProducto, "fulfilled");
+    assert.equal(r2.basis, "global_fallback");
+    assert.equal(r2.state, "fulfilled");
+
+    // Y un payload CONGELADO (raw_payload de orders/create) no dice nada del
+    // progreso: se marca insufficient_data en vez de "not_started".
+    const congelado = ff.inferPhysicalFulfillment(
+      { line_items: lineas({ fisicasPendientes: 1 }), fulfillment_status: null } as never,
+      false
+    );
+    assert.equal(congelado.basis, "insufficient_data");
+    assert.equal(congelado.state, "unknown");
   });
 
   await test("orden de llegada: el panel ordena por número de pedido, no por cuándo se insertó la fila", () => {
@@ -5852,6 +6311,2313 @@ async function main(): Promise<void> {
       .filter((o) => mios.has(o.id))
       .map((o) => o.shopify_order_number);
     assert.deepEqual(porEstado, ["990003", "990002", "990001"]);
+  });
+
+  // ============ 46 · Modelo de 4 ejes: cierre como fuente de verdad ============
+  console.log("\n— Modelo de estados: el eje de cierre manda —");
+
+  const closure = await import("../src/lib/orders/closure");
+
+  await test("EJES · la tasa cuenta delivered y refused, y NADA más", () => {
+    assert.equal(closure.countsInDeliveryRate("delivered"), true);
+    assert.equal(closure.countsInDeliveryRate("refused"), true);
+    assert.equal(closure.countsInDeliveryRate("in_progress"), false, "en curso no es un desenlace");
+    assert.equal(closure.countsInDeliveryRate("unknown"), false, "no saber no es fallar");
+    assert.equal(
+      closure.countsInDeliveryRate("cancelled"),
+      false,
+      "un cancelado NUNCA se intentó entregar: en el denominador hundiría la tasa por algo ajeno a la logística"
+    );
+
+    assert.equal(closure.computeClosureDeliveryRate(7, 3), 70);
+    assert.equal(closure.computeClosureDeliveryRate(2, 1), 66.67);
+    assert.equal(closure.computeClosureDeliveryRate(0, 0), null, "sin resueltos → null, no 0 %");
+  });
+
+  await test("EJES · Dropea: DELIVERED y PAID cierran entregado; REFUSED cierra rehusado", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    assert.equal(closure.planClosureFromDropea("FINISH", "DELIVERED", at).plan?.status, "delivered");
+    // En COD, cobrado ES entregado: es la mejor evidencia que existe.
+    assert.equal(closure.planClosureFromDropea("FINISH", "PAID", at).plan?.status, "delivered");
+    assert.equal(closure.planClosureFromDropea("FINISH", "REFUSED", at).plan?.status, "refused");
+    assert.equal(closure.planClosureFromDropea("FINISH", "CANCELLED", at).plan?.status, "cancelled");
+    assert.equal(closure.planClosureFromDropea("FINISH", "REJECTED", at).plan?.status, "cancelled");
+  });
+
+  await test("EJES · `returned` NO implica `refused`: REFUSED_LOST_DAMAGED no cierra y va a revisión", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    // Los dos normalizan a tracking `returned`, pero NO son el mismo hecho de
+    // negocio: uno es el cliente rechazando el COD, el otro un paquete
+    // perdido o roto. Contar el segundo como rehúse infla la métrica que
+    // decide si la publicidad es rentable.
+    const rehuse = closure.planClosureFromDropea("FINISH", "REFUSED", at);
+    const perdido = closure.planClosureFromDropea("FINISH", "REFUSED_LOST_DAMAGED", at);
+
+    assert.equal(rehuse.plan?.status, "refused");
+    assert.equal(rehuse.review, null);
+
+    assert.equal(perdido.plan, null, "no se cierra nada: no fue decisión del cliente");
+    assert.equal(perdido.review?.kind, "returned_not_refused");
+    assert.match(perdido.review!.reason, /no por rehúse|NO por rehúse/i);
+  });
+
+  await test("EJES · una incidencia NUNCA cierra el pedido: el cierre se queda como estaba", () => {
+    const at = Math.floor(Date.parse("2026-08-25T10:00:00Z") / 1000);
+    for (const sub of [
+      "DELIVERY_EXCEPTION",
+      "LOST_DAMAGED",
+      "REVIEW",
+      "TECHNICAL_ERROR",
+      "INSUFFICIENT_STOCK",
+      "CARRIER_VALIDATION_FAILED",
+      "WAREHOUSE_INTEGRATION_FAILED",
+    ]) {
+      const d = closure.planClosureFromDropea("ERROR", sub, at);
+      assert.equal(d.plan, null, `${sub} no debe tocar el eje de cierre`);
+    }
+    // Y la preparación tampoco: aún no ha salido nada, in_progress sería mentira.
+    for (const sub of ["CREATING", "PICKING", "PACKED", "AWAITING_PICKUP", "PENDING_SUPPLIER"]) {
+      assert.equal(closure.planClosureFromDropea("PROCESSING", sub, at).plan, null, sub);
+    }
+    // En manos del transportista SÍ es "en curso".
+    for (const sub of ["SHIPPED", "OUT_FOR_DELIVERY", "DELIVERY_ATTEMPTED"]) {
+      assert.equal(closure.planClosureFromDropea("SHIPPING", sub, at).plan?.status, "in_progress", sub);
+    }
+  });
+
+  await test("EJES · sin fecha de la fuente no se escribe cierre (jamás now())", () => {
+    assert.equal(closure.planClosureFromDropea("FINISH", "DELIVERED", null).plan, null);
+    // Y un par desconocido tampoco inventa nada.
+    assert.equal(closure.planClosureFromDropea("FINISH", "PALABRA_RARA", 1_700_000_000).plan, null);
+    assert.equal(closure.planClosureFromDropea("FINISH", null, 1_700_000_000).plan, null, "FINISH sin sub-estado no afirma entrega");
+  });
+
+  await test("EJES · Dropi no infiere cierre hasta tener su mapa de estados real", () => {
+    // Sin catálogo confirmado, inferir el desenlace económico sería inventarse
+    // el dato más caro del negocio. Fail-closed a propósito.
+    for (const st of ["delivered", "returned", "cancelled", "in_transit"] as const) {
+      assert.equal(closure.planClosureFromTracking(st, "dropi", 1_700_000_000).plan, null, st);
+    }
+  });
+
+  await test("EJES · refused y returned COEXISTEN: son ejes distintos, no sinónimos", () => {
+    const o = mkSynced("991001", "8001", "34600191001");
+    // Logística: el paquete volvió al origen.
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-EJ1", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    // Negocio: sabemos que fue rehúse del COD.
+    assert.equal(db.setOrderClosure(o.id, "refused", "dropea", 1_700_000_000), true);
+
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.supplier_status_normalized, "returned", "el eje logístico dice returned");
+    assert.equal(fila.closure_status, "refused", "el eje de negocio dice refused");
+    assert.equal(fila.closure_source, "dropea");
+  });
+
+  await test("EJES · el histórico distingue qué eje cambió (status_axis)", () => {
+    const o = mkSynced("991002", "8002", "34600191002");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-EJ2", source: "polling" });
+    db.setOrderClosure(o.id, "delivered", "dropea", 1_700_000_100);
+
+    const h = db.listOrderStatusHistory(o.id);
+    const log = h.filter((x) => x.status_axis === "tracking");
+    const cie = h.filter((x) => x.status_axis === "closure");
+    assert.ok(log.length >= 1, "hay transición logística");
+    assert.equal(cie.length, 1, "y exactamente una de cierre");
+    assert.equal(cie[0].new_status, "delivered");
+    assert.equal(cie[0].occurred_at, 1_700_000_100, "fecha del evento en la fuente, no now()");
+  });
+
+  await test("EJES · métricas: el denominador ignora el eje logístico por completo", () => {
+    // Ventana propia, lejos del resto de tests, para contar sin ruido.
+    const base = Math.floor(Date.parse("2026-07-01T12:00:00Z") / 1000);
+    const mk = (id: string, num: string, tel: string, cierre: "delivered" | "refused" | "in_progress" | "cancelled") => {
+      const o = mkSynced(id, num, tel);
+      db.setOrderClosure(o.id, cierre, "dropea", base + 10);
+      return o;
+    };
+    mk("991010", "8010", "34600191010", "delivered");
+    mk("991011", "8011", "34600191011", "delivered");
+    mk("991012", "8012", "34600191012", "delivered");
+    mk("991013", "8013", "34600191013", "refused");
+    mk("991014", "8014", "34600191014", "in_progress");
+    mk("991015", "8015", "34600191015", "cancelled");
+
+    const b = deliveryMetrics.getClosureBreakdown(base, base + 100);
+    assert.equal(b.delivered, 3);
+    assert.equal(b.refused, 1);
+    assert.equal(b.inProgress, 1);
+    assert.equal(b.cancelled, 1);
+    assert.equal(b.resolved, 4, "solo delivered + refused");
+    assert.equal(b.deliveryRate, 75, "3/(3+1) = 75 % — ni el en curso ni el cancelado tocan el denominador");
+  });
+
+  await test("EJES · reconcile de Dropea escribe el eje de cierre con la política central", async () => {
+    // mkOrder (no mkSynced): mkSynced ya deja un id externo propio, y entonces
+    // el reconciliador lo trataría como conflicto de enlace en vez de como el
+    // pedido a cerrar — que es justo lo que se quiere comprobar aquí.
+    const o = mkOrder("991020", "8020", "34600191020");
+    assert.equal(
+      db.setOrderSupplierPlatformAndExternalId(o.id, "dropea", "7770001"),
+      true,
+      "el pedido queda enlazado a 7770001"
+    );
+
+    // La población a reconciliar sale de los webhooks de pedido recibidos.
+    db.claimWebhookEvent("ejes-rec-1", "dropea", "order.status.changed", "7770001");
+
+    const r = await dropeaReconcile.runDropeaReconcile({
+      dryRun: false,
+      resetCheckpoint: true,
+      // Solo este recurso devuelve algo enlazable; el resto de la población
+      // (webhooks de otros tests) sale sin correlación y no toca nada.
+      fetcher: async (id) =>
+        ({
+          id: Number(id),
+          status: id === "7770001" ? "FINISH" : "SHIPPING",
+          sub_status: id === "7770001" ? "DELIVERED" : "SHIPPED",
+          external_order_id: id === "7770001" ? "991020" : null,
+          updated_at: "2026-08-25T09:00:00Z",
+          created_at: "2026-08-20T09:00:00Z",
+        }) as import("../src/lib/suppliers/dropea/types").DropeaOrder,
+    });
+    const mio = r.items.find((i) => i.resourceId === "7770001")!;
+    assert.equal(mio.closureStatus, "delivered");
+    assert.equal(mio.closureApplied, true);
+    const fila = db.getOrderById(o.id)!;
+    assert.equal(fila.closure_status, "delivered");
+    assert.equal(fila.closure_source, "dropea");
+    assert.equal(fila.closure_at, Math.floor(Date.parse("2026-08-25T09:00:00Z") / 1000));
+  });
+
+  // ============ 47 · Leases de scheduler (dos procesos compitiendo) ============
+  console.log("\n— Leases: un solo proceso ejecuta efectos externos —");
+
+  const leases = await import("../src/lib/system/leases");
+
+  await test("LEASE · dos dueños compiten por el mismo scheduler: solo uno gana", () => {
+    const now = 1_700_000_000;
+    assert.equal(leases.acquireLease("test-a", 60, { owner: "proc-1", nowSec: now }), true);
+    assert.equal(
+      leases.acquireLease("test-a", 60, { owner: "proc-2", nowSec: now }),
+      false,
+      "el segundo proceso NO puede ejecutar mientras el lease sea del primero"
+    );
+    assert.equal(leases.holdsLease("test-a", { owner: "proc-1", nowSec: now }), true);
+    assert.equal(leases.holdsLease("test-a", { owner: "proc-2", nowSec: now }), false);
+  });
+
+  await test("LEASE · el dueño renueva sin perderlo, y renovar no cuenta como adquisición nueva", () => {
+    const now = 1_700_001_000;
+    leases.acquireLease("test-b", 60, { owner: "proc-1", nowSec: now });
+    const tras1 = leases.getLease("test-b")!;
+    assert.equal(leases.acquireLease("test-b", 60, { owner: "proc-1", nowSec: now + 10 }), true);
+    const tras2 = leases.getLease("test-b")!;
+    assert.equal(tras2.acquire_count, tras1.acquire_count, "renovar no es adquirir de nuevo");
+    assert.ok(tras2.lease_until > tras1.lease_until, "pero sí extiende el derecho");
+    assert.equal(tras2.last_acquired_at, tras1.last_acquired_at, "la fecha de adquisición no se mueve");
+  });
+
+  await test("LEASE · recuperación tras crash: al caducar, otro proceso lo roba (sin deadlock)", () => {
+    const now = 1_700_002_000;
+    // proc-1 lo coge y se muere sin soltarlo.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-1", nowSec: now }), true);
+    // Antes de caducar, nadie más puede.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-2", nowSec: now + 29 }), false);
+    // Justo al caducar, sí: un proceso muerto NO bloquea el sistema para siempre.
+    assert.equal(leases.acquireLease("test-c", 30, { owner: "proc-2", nowSec: now + 30 }), true);
+    assert.equal(leases.getLease("test-c")!.owner_id, "proc-2");
+    assert.equal(leases.getLease("test-c")!.acquire_count, 2, "cambio de dueño sí cuenta");
+  });
+
+  await test("LEASE · soltar limpiamente cede el turno al instante, y solo puede soltarlo su dueño", () => {
+    const now = 1_700_003_000;
+    leases.acquireLease("test-d", 3600, { owner: "proc-1", nowSec: now });
+    assert.equal(
+      leases.releaseLease("test-d", { owner: "proc-2", nowSec: now }),
+      false,
+      "un proceso no puede soltar el lease de otro"
+    );
+    assert.equal(leases.releaseLease("test-d", { owner: "proc-1", nowSec: now }), true);
+    // Sin esperar la hora de TTL, otro lo coge ya.
+    assert.equal(leases.acquireLease("test-d", 60, { owner: "proc-2", nowSec: now + 1 }), true);
+    assert.ok(leases.getLease("test-d")!.last_released_at !== null);
+  });
+
+  await test("LEASE · withLease no ejecuta NADA si no se tiene el turno", async () => {
+    const now = 1_700_004_000;
+    leases.acquireLease("test-e", 600, { owner: "proc-1", nowSec: now });
+    let ejecutado = 0;
+    const r = await leases.withLease("test-e", 600, () => { ejecutado++; return "hecho"; }, { owner: "proc-2", nowSec: now });
+    assert.equal(r, null, "null = no me tocaba (distinto de 'corrí y no hice nada')");
+    assert.equal(ejecutado, 0, "el efecto externo NO se ejecutó");
+
+    const r2 = await leases.withLease("test-e", 600, () => { ejecutado++; return "hecho"; }, { owner: "proc-1", nowSec: now });
+    assert.equal(r2, "hecho");
+    assert.equal(ejecutado, 1);
+  });
+
+  await test("LEASE · cada scheduler tiene el suyo: uno ocupado no bloquea a los demás", () => {
+    const now = 1_700_005_000;
+    for (const n of [leases.LEASE_ORDERS, leases.LEASE_TRACKING, leases.LEASE_RECONCILE, leases.LEASE_CALLS, leases.LEASE_OUTBOX, leases.LEASE_WATCHDOG]) {
+      assert.equal(leases.acquireLease(n, 60, { owner: "proc-1", nowSec: now }), true, n);
+    }
+    // proc-2 no puede con ninguno...
+    for (const n of [leases.LEASE_ORDERS, leases.LEASE_CALLS]) {
+      assert.equal(leases.acquireLease(n, 60, { owner: "proc-2", nowSec: now }), false, n);
+    }
+    // ...pero un scheduler nuevo sigue libre.
+    assert.equal(leases.acquireLease("otro-distinto", 60, { owner: "proc-2", nowSec: now }), true);
+    assert.ok(leases.listLeases().length >= 6);
+  });
+
+  // ============ 48 · Timezone: política explícita, no el TZ del proceso ============
+  console.log("\n— Timezone: Europe/Madrid explícito —");
+
+  const tzmod = await import("../src/lib/time");
+
+  await test("TZ · el día de negocio NO depende del huso del proceso", () => {
+    // 23:30 UTC del 24 de agosto: en Madrid (verano, UTC+2) ya es el DÍA 25.
+    // Un `new Date().setHours(0,0,0,0)` en un proceso en UTC diría 24.
+    const nocheVerano = Date.parse("2026-08-24T23:30:00Z");
+    assert.equal(tzmod.businessDay(nocheVerano), "2026-08-25", "de noche en verano ya es el día siguiente en Madrid");
+
+    // 23:30 UTC del 10 de enero: en Madrid (invierno, UTC+1) es el DÍA 11.
+    const nocheInvierno = Date.parse("2026-01-10T23:30:00Z");
+    assert.equal(tzmod.businessDay(nocheInvierno), "2026-01-11");
+
+    // 22:30 UTC en invierno: aún es el mismo día (23:30 en Madrid).
+    assert.equal(tzmod.businessDay(Date.parse("2026-01-10T22:30:00Z")), "2026-01-10");
+  });
+
+  await test("TZ · horario de VERANO: la medianoche de Madrid es 22:00 UTC", () => {
+    const t = Date.parse("2026-08-24T15:00:00Z");
+    const inicio = tzmod.startOfBusinessDay(t);
+    assert.equal(new Date(inicio * 1000).toISOString(), "2026-08-23T22:00:00.000Z");
+    assert.equal(tzmod.businessDay(inicio * 1000), "2026-08-24", "ese instante ya pertenece al día 24");
+  });
+
+  await test("TZ · horario de INVIERNO: la medianoche de Madrid es 23:00 UTC", () => {
+    const t = Date.parse("2026-01-10T15:00:00Z");
+    const inicio = tzmod.startOfBusinessDay(t);
+    assert.equal(new Date(inicio * 1000).toISOString(), "2026-01-09T23:00:00.000Z");
+    assert.equal(tzmod.businessDay(inicio * 1000), "2026-01-10");
+  });
+
+  await test("TZ · los días de CAMBIO de hora duran 23 h y 25 h, y la ventana lo respeta", () => {
+    // Último domingo de marzo 2026 = 29-03: se adelanta el reloj, día de 23 h.
+    const marzo = Date.parse("2026-03-29T12:00:00Z");
+    const dMarzo = tzmod.endOfBusinessDay(marzo) - tzmod.startOfBusinessDay(marzo);
+    assert.equal(dMarzo, 23 * 3600, "el día del cambio de primavera dura 23 h");
+
+    // Último domingo de octubre 2026 = 25-10: se atrasa, día de 25 h.
+    const octubre = Date.parse("2026-10-25T12:00:00Z");
+    const dOctubre = tzmod.endOfBusinessDay(octubre) - tzmod.startOfBusinessDay(octubre);
+    assert.equal(dOctubre, 25 * 3600, "el día del cambio de otoño dura 25 h");
+
+    // Un día normal, 24 h.
+    assert.equal(tzmod.endOfBusinessDay(Date.parse("2026-08-24T12:00:00Z")) - tzmod.startOfBusinessDay(Date.parse("2026-08-24T12:00:00Z")), 24 * 3600);
+  });
+
+  await test("TZ · ventanas hoy/7d/30d alineadas a medianoche de Madrid", () => {
+    const t = Date.parse("2026-08-24T15:00:00Z");
+    const hoy = { from: tzmod.startOfBusinessDay(t), to: tzmod.endOfBusinessDay(t) };
+    const w7 = tzmod.lastBusinessDays(7, t);
+    const w30 = tzmod.lastBusinessDays(30, t);
+
+    // Todas terminan en la misma medianoche: el resultado no depende de a qué
+    // hora se mire el panel.
+    assert.equal(w7.to, hoy.to);
+    assert.equal(w30.to, hoy.to);
+    // 7 días naturales = 7 medianoches hacia atrás (168 h salvo cambio de hora).
+    assert.equal(tzmod.businessDay(w7.from * 1000), "2026-08-18");
+    assert.equal(tzmod.businessDay(w30.from * 1000), "2026-07-26");
+    assert.ok(w30.from < w7.from && w7.from < hoy.from);
+  });
+
+  await test("TZ · madridDate acierta el offset real, también en el día del cambio", () => {
+    // Las 10:00 de Madrid del 29-03-2026 (día del salto) son las 08:00 UTC.
+    assert.equal(tzmod.madridDate(2026, 3, 29, 10, 0).toISOString(), "2026-03-29T08:00:00.000Z");
+    // Las 10:00 del día anterior, aún en invierno, son las 09:00 UTC.
+    assert.equal(tzmod.madridDate(2026, 3, 28, 10, 0).toISOString(), "2026-03-28T09:00:00.000Z");
+  });
+
+  await test("TZ · el chequeo de huso avisa en vez de fallar en silencio", () => {
+    const c = tzmod.checkTimezone();
+    assert.ok(typeof c.processTimezone === "string" && c.processTimezone.length > 0);
+    assert.equal(c.businessTimezone, "Europe/Madrid");
+    assert.ok(c.message.length > 0);
+    // Si el proceso NO está en un huso equivalente, el mensaje tiene que ser
+    // explícito sobre la consecuencia (días mal contados), no un "ok".
+    if (!tzmod.processTimezoneMatchesBusiness()) {
+      assert.match(c.message, /EQUIVOCADO|TZ=/);
+    }
+  });
+
+  await test("TZ · formato de presentación siempre en hora de Madrid", () => {
+    // 22:30 UTC en verano = 00:30 del día siguiente en Madrid.
+    assert.equal(tzmod.formatBusinessDateTime(Math.floor(Date.parse("2026-08-24T22:30:00Z") / 1000)), "25/08/2026 00:30");
+    assert.equal(tzmod.formatBusinessDateTime(Math.floor(Date.parse("2026-01-10T22:30:00Z") / 1000)), "10/01/2026 23:30");
+  });
+
+  // ============ 49 · Métricas fail-closed ============
+  console.log("\n— Métricas: '0' y 'no lo sé' no se pintan igual —");
+
+  const MR = await import("../src/lib/system/metric-result");
+
+  await test("FAILCLOSED · una consulta que revienta NO devuelve un número plausible", () => {
+    const m = MR.measure<number>("prueba", () => {
+      throw new Error("no such table: inventada");
+    });
+    assert.equal(m.status, "error");
+    assert.equal(m.value, null, "NUNCA un valor de relleno junto a un error");
+    assert.match(m.error ?? "", /no such table/);
+  });
+
+  await test("FAILCLOSED · 'unknown' (sin datos) y 'error' (algo falló) son distintos", () => {
+    const sinDatos = MR.unknown<number>("todavía no hay pedidos resueltos");
+    assert.equal(sinDatos.status, "unknown");
+    assert.equal(sinDatos.error, null, "no hay error: es que aún no ha pasado nada");
+
+    const roto = MR.failed<number>(new Error("disco lleno"), "prueba");
+    assert.equal(roto.status, "error");
+    assert.ok(roto.error);
+    // "esperar" arregla lo primero; "mirar el log" arregla lo segundo.
+    assert.notEqual(sinDatos.status, roto.status);
+  });
+
+  await test("FAILCLOSED · métrica compuesta: una parte rota degrada, no borra el resto", () => {
+    const m = MR.measureParts("compuesta", {
+      buena: () => 42,
+      rota: () => {
+        throw new Error("columna inexistente");
+      },
+    });
+    assert.equal(m.status, "partial");
+    assert.equal(m.value?.buena, 42, "lo que sí se pudo calcular se conserva");
+    assert.equal(m.degraded.length, 1);
+    assert.match(m.degraded[0], /rota/);
+
+    // Si TODAS las partes fallan, es un error, no un "partial" vacío.
+    const todo = MR.measureParts("compuesta", {
+      a: () => { throw new Error("x"); },
+      b: () => { throw new Error("y"); },
+    });
+    assert.equal(todo.status, "error");
+    assert.equal(todo.value, null);
+  });
+
+  await test("FAILCLOSED · muestra insuficiente degrada la tasa en vez de afirmarla", () => {
+    const m = MR.ok({ rate: 33.3 });
+    // 3 resueltos con mínimo 10: el dato se ve, pero NO se puede concluir.
+    const poco = MR.withMinimumSample(m, 3, 10);
+    assert.equal(poco.status, "partial");
+    assert.match(poco.degraded.join(" "), /muestra insuficiente/);
+    assert.ok(poco.value, "el número sigue visible: se marca, no se oculta");
+
+    const suficiente = MR.withMinimumSample(MR.ok({ rate: 70 }), 12, 10);
+    assert.equal(suficiente.status, "ok");
+  });
+
+  await test("FAILCLOSED · las métricas reales exponen su confianza", () => {
+    const d = deliveryMetrics.getDeliveryMetricsMeasured();
+    assert.ok(["ok", "partial", "unknown", "error"].includes(d.status));
+    // Con la DB de test sana, la métrica se calcula; si la muestra es corta,
+    // llega como partial — nunca como "ok" con una tasa no concluyente.
+    assert.notEqual(d.status, "error");
+    if (d.status === "partial") assert.ok(d.degraded.length > 0, "partial siempre dice POR QUÉ");
+  });
+
+  await test("FAILCLOSED · el overview del sistema viaja con el estado de cada métrica", async () => {
+    const ov = await import("../src/lib/system/overview");
+    const o = ov.getSystemOverview();
+    assert.ok(o.metricStatus, "el panel necesita distinguir 0 de no-disponible");
+    for (const k of ["tracking", "delivery", "economics"] as const) {
+      assert.ok(["ok", "partial", "unknown", "error"].includes(o.metricStatus[k].status), k);
+      assert.equal(o.metricStatus[k].value, null, "el estado no duplica el valor: solo lo califica");
+    }
+  });
+
+  // ============ 50 · Retención y privacidad ============
+  console.log("\n— Retención: la PII no vive eternamente, el negocio sí —");
+
+  const RET = await import("../src/lib/system/retention");
+
+  await test("RETENCIÓN · el payload reducido conserva las líneas y TIRA toda la PII", () => {
+    const original = JSON.stringify({
+      id: 123,
+      order_number: 456,
+      total_price: "39.90",
+      currency: "EUR",
+      tags: "releasit_cod_form, dropea_id:1",
+      fulfillment_status: "fulfilled",
+      email: "cliente@ejemplo.com",
+      phone: "+34600111222",
+      note: "llamar por la tarde",
+      customer: { first_name: "Ana", last_name: "García", phone: "+34600111222" },
+      shipping_address: { address1: "Calle Falsa 1", city: "Madrid", phone: "+34600111222" },
+      billing_address: { address1: "Calle Falsa 1" },
+      note_attributes: [{ name: "¿A qué hora estarás?", value: "por la tarde" }],
+      line_items: [
+        { title: "Cortaúñas", quantity: 1, price: "19.95", sku: "10428", product_id: 1, variant_id: 2, requires_shipping: true, fulfillment_status: "fulfilled", fulfillable_quantity: 0 },
+      ],
+    });
+    const reducido = RET.anonymizeShopifyPayload(original)!;
+    const o = JSON.parse(reducido);
+
+    // Lo que el sistema necesita releer sigue ahí.
+    assert.equal(o.id, 123);
+    assert.equal(o.total_price, "39.90");
+    assert.equal(o.fulfillment_status, "fulfilled");
+    assert.equal(o.line_items.length, 1);
+    assert.equal(o.line_items[0].sku, "10428");
+    assert.equal(o.line_items[0].requires_shipping, true, "el fulfillment por línea sobrevive");
+    assert.equal(o._pii_removed, true, "queda marcado que NO es el payload original");
+
+    // La PII no está por ningún lado, ni siquiera como subcadena.
+    for (const rastro of ["cliente@ejemplo.com", "600111222", "Ana", "García", "Calle Falsa", "Madrid", "llamar por la tarde", "por la tarde"]) {
+      assert.equal(reducido.includes(rastro), false, `queda rastro de PII: ${rastro}`);
+    }
+    assert.equal(o.customer, undefined);
+    assert.equal(o.shipping_address, undefined);
+    assert.equal(o.note_attributes, undefined);
+  });
+
+  await test("RETENCIÓN · lista BLANCA: un campo nuevo de Shopify con PII no se cuela por omisión", () => {
+    const conCampoNuevo = JSON.stringify({
+      id: 1,
+      line_items: [],
+      campo_inventado_por_shopify: { dni: "12345678Z", movil: "+34600000000" },
+    });
+    const reducido = RET.anonymizeShopifyPayload(conCampoNuevo)!;
+    assert.equal(reducido.includes("12345678Z"), false);
+    assert.equal(reducido.includes("campo_inventado"), false, "solo pasa lo listado explícitamente");
+  });
+
+  await test("RETENCIÓN · solo toca pedidos CERRADOS: uno vivo conserva sus datos de contacto", () => {
+    const ahora = 1_800_000_000;
+    const viejo = ahora - 200 * 86400;
+
+    const vivo = mkOrder("993001", "9301", "34600193001");
+    const cerrado = mkOrder("993002", "9302", "34600193002");
+    const payload = JSON.stringify({ id: 993002, customer: { first_name: "Pepe" }, line_items: [] });
+    for (const o of [vivo, cerrado]) {
+      db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ?, updated_at = ? WHERE id = ?")
+        .run(JSON.stringify({ id: Number(o.shopify_order_id), customer: { first_name: "Pepe" }, line_items: [] }), viejo, o.id);
+    }
+    // Solo uno tiene cierre terminal.
+    db.setOrderClosure(cerrado.id, "delivered", "dropea", viejo);
+
+    const n = RET.reduceOldRawPayloads({ nowSec: ahora });
+    assert.ok(n >= 1);
+    assert.equal(
+      db.getOrderById(vivo.id)!.raw_payload!.includes("Pepe"),
+      true,
+      "un pedido vivo puede necesitar sus datos para una corrección o una llamada"
+    );
+    assert.equal(db.getOrderById(cerrado.id)!.raw_payload!.includes("Pepe"), false, "el cerrado sí se reduce");
+    assert.ok(payload.includes("Pepe"));
+  });
+
+  await test("RETENCIÓN · idempotente: correrla dos veces no cambia nada la segunda", () => {
+    const ahora = 1_800_100_000;
+    const primera = RET.runRetention({ nowSec: ahora });
+    const segunda = RET.runRetention({ nowSec: ahora });
+    assert.equal(segunda.rawPayloadsReduced, 0, "ya estaban reducidos");
+    assert.equal(segunda.messagesDeleted, 0);
+    assert.equal(segunda.webhookEventsDeleted, 0);
+    assert.equal(primera.errors.length, 0);
+  });
+
+  await test("RETENCIÓN · el dry-run NO borra ni reduce nada", () => {
+    const ahora = 1_800_200_000;
+    const o = mkOrder("993010", "9310", "34600193010");
+    db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ?, updated_at = ? WHERE id = ?")
+      .run(JSON.stringify({ id: 993010, customer: { first_name: "Lola" }, line_items: [] }), ahora - 300 * 86400, o.id);
+    db.setOrderClosure(o.id, "delivered", "dropea", ahora - 300 * 86400);
+
+    const seco = RET.runRetention({ dryRun: true, nowSec: ahora });
+    assert.ok(seco.rawPayloadsReduced >= 1, "el dry-run CUENTA lo que haría");
+    assert.equal(db.getOrderById(o.id)!.raw_payload!.includes("Lola"), true, "pero no toca nada");
+  });
+
+  await test("RETENCIÓN · el NEGOCIO no se borra nunca: pedido, cierre e histórico intactos", () => {
+    const ahora = 1_800_300_000;
+    const o = mkOrder("993020", "9320", "34600193020");
+    db.setOrderClosure(o.id, "refused", "dropea", ahora - 400 * 86400);
+    const historicoAntes = db.listOrderStatusHistory(o.id).length;
+
+    RET.runRetention({ nowSec: ahora });
+
+    const fila = db.getOrderById(o.id)!;
+    assert.ok(fila, "el pedido sigue existiendo");
+    assert.equal(fila.closure_status, "refused", "el eje de cierre es contabilidad: intocable");
+    assert.equal(fila.closure_source, "dropea");
+    assert.equal(db.listOrderStatusHistory(o.id).length, historicoAntes, "el histórico de estados tampoco se toca");
+  });
+
+  // ============ 51 · Taxonomía de errores ============
+  console.log("\n— Errores: la categoría dice quién y cuándo lo arregla —");
+
+  const ERR = await import("../src/lib/system/errors");
+
+  await test("ERRORES · el código HTTP manda sobre el texto del mensaje", () => {
+    // Un código es una señal estable; el texto lo puede cambiar el tercero
+    // cualquier día sin avisar.
+    assert.equal(ERR.classifyHttpError(401).category, "auth_error");
+    assert.equal(ERR.classifyHttpError(403).category, "auth_error");
+    assert.equal(ERR.classifyHttpError(429).category, "rate_limit");
+    assert.equal(ERR.classifyHttpError(500).category, "retryable");
+    assert.equal(ERR.classifyHttpError(503).category, "retryable");
+    assert.equal(ERR.classifyHttpError(404).category, "non_retryable");
+    assert.equal(ERR.classifyHttpError(422).category, "validation_error");
+    assert.equal(ERR.classifyHttpError(418).category, "external_provider_error");
+  });
+
+  await test("ERRORES · sin código HTTP se usan los códigos de red, no frases traducibles", () => {
+    for (const m of ["ECONNRESET", "ETIMEDOUT", "socket hang up", "ENOTFOUND api.dropea.com"]) {
+      assert.equal(ERR.classifyHttpError(null, new Error(m)).category, "retryable", m);
+    }
+    assert.equal(
+      ERR.classifyHttpError(null, new Error("DROPEA_API_KEY no configurada")).category,
+      "configuration_error"
+    );
+  });
+
+  await test("ERRORES · reintentar o no: 401 NO se reintenta, 429 y 5xx SÍ", () => {
+    // Reintentar un 401 eternamente gasta cupo y no arregla nada; no
+    // reintentar un timeout pierde trabajo que se habría recuperado solo.
+    assert.equal(ERR.isRetryable("auth_error"), false);
+    assert.equal(ERR.isRetryable("validation_error"), false);
+    assert.equal(ERR.isRetryable("non_retryable"), false);
+    assert.equal(ERR.isRetryable("retryable"), true);
+    assert.equal(ERR.isRetryable("rate_limit"), true);
+  });
+
+  await test("ERRORES · lo que necesita un humano queda marcado como tal", () => {
+    for (const c of ["manual_review", "configuration_error", "auth_error", "internal_error"] as const) {
+      assert.equal(ERR.needsHuman(c), true, c);
+    }
+    for (const c of ["retryable", "rate_limit"] as const) {
+      assert.equal(ERR.needsHuman(c), false, c);
+    }
+  });
+
+  await test("ERRORES · severidad: credenciales y configuración son CRÍTICAS", () => {
+    // Sin credencial no funciona nada; un timeout se arregla solo.
+    assert.equal(ERR.categorySeverity("auth_error"), "critical");
+    assert.equal(ERR.categorySeverity("configuration_error"), "critical");
+    assert.equal(ERR.categorySeverity("retryable"), "info");
+    assert.equal(ERR.categorySeverity("rate_limit"), "info");
+    assert.equal(ERR.categorySeverity("manual_review"), "warning");
+  });
+
+  await test("ERRORES · cada categoría tiene texto para Pedro, sin jerga", () => {
+    for (const c of ERR.ERROR_CATEGORIES) {
+      const l = ERR.categoryLabel(c);
+      assert.ok(l.length > 5, c);
+      // Nada de "Bearer", "token success", códigos sueltos ni inglés técnico.
+      assert.equal(/bearer|null|undefined|HTTP \d/i.test(l), false, `jerga en "${l}"`);
+    }
+  });
+
+  await test("ERRORES · problemas de datos del pedido: revisión vs validación", () => {
+    // Sin mapping alguien tiene que decidir; sin localidad alguien tiene que
+    // corregir. Son arreglos distintos y no se pintan igual.
+    assert.equal(ERR.classifyOrderDataError("unmapped_products: sin asociación").category, "manual_review");
+    assert.equal(ERR.classifyOrderDataError("mixed_supplier").category, "manual_review");
+    assert.equal(ERR.classifyOrderDataError("blocked_address: localidad vacía").category, "validation_error");
+  });
+
+  await test("ERRORES · un fallo de SQLite es un fallo NUESTRO, no del proveedor", () => {
+    const c = ERR.classifyInternalError(new Error("SQLITE_BUSY: database is locked"));
+    assert.equal(c.category, "internal_error");
+    assert.match(c.message, /base de datos/);
+    assert.equal(ERR.needsHuman(c.category), true);
+  });
+
+  // ============ 52 · Tracking y outbox: garantías bajo estrés ============
+  console.log("\n— Tracking: los terminales no retroceden —");
+
+  await test("TRACKING · un terminal NO retrocede: returned → shipped se descarta y queda registrado", () => {
+    // Bug real encontrado en la auditoría: `returned`, `cancelled` e
+    // `incident` valían -1 en la tabla de ORDEN, así que quedaban FUERA de la
+    // comparación y cualquier evento posterior los sacaba de ahí. Un webhook
+    // atrasado convertía una devolución en un envío vivo y el pedido volvía
+    // a las colas de seguimiento.
+    const o = mkSynced("994001", "9401", "34600194001");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-T1", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "returned");
+
+    // Llega un evento atrasado que diría "shipped".
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "shipped", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "returned", "sigue devuelto");
+    assert.equal(r.events.length, 0, "no genera eventos: no ha pasado nada");
+  });
+
+  await test("TRACKING · cancelled → delivered tampoco pasa (era el caso más caro)", () => {
+    const o = mkSynced("994002", "9402", "34600194002");
+    tracking.processSupplierUpdate(o, { rawStatus: "cancelled", source: "webhook" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "cancelled");
+
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "cancelled");
+    assert.equal(
+      db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length,
+      antes,
+      "y por tanto tampoco se le escribe al cliente"
+    );
+  });
+
+  await test("TRACKING · delivered → returned se bloquea: el desenlace bueno no se pierde por un evento raro", () => {
+    const o = mkSynced("994003", "9403", "34600194003");
+    tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TRK-T3", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "returned", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+    // Si el proveedor de verdad dice eso, hay algo que entender: queda evento.
+    const eventos = sysRepo.listIntegrationEvents({ integration: "tracking", limit: 500 });
+    assert.ok(eventos.some((e) => e.event_type === "terminal_regression_blocked" && e.order_ref === "9403"));
+  });
+
+  await test("TRACKING · repetir el MISMO terminal sí está permitido (refresco idempotente)", () => {
+    const o = mkSynced("994004", "9404", "34600194004");
+    tracking.processSupplierUpdate(o, { rawStatus: "delivered", source: "polling" });
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+    assert.equal(r.events.length, 0, "sin cambio, sin evento: es idempotente, no un bloqueo");
+  });
+
+  await test("TRACKING · un estado desconocido NO pisa el anterior ni avisa a nadie", () => {
+    const o = mkSynced("994005", "9405", "34600194005");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit", trackingNumber: "TRK-T5", source: "polling" });
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "PALABRA_QUE_NO_EXISTE", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "in_transit");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes);
+  });
+
+  await test("TRACKING · retroceso dentro de la línea normal: out_for_delivery → shipped se ignora", () => {
+    const o = mkSynced("994006", "9406", "34600194006");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery", trackingNumber: "TRK-T6", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "shipped", source: "polling" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+  });
+
+  await test("TRACKING · delivery_attempted puede ir y volver: NO es un retroceso", () => {
+    // El repartidor no encontró al cliente y vuelve a salir al día siguiente.
+    const o = mkSynced("994007", "9407", "34600194007");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery", trackingNumber: "TRK-T7", source: "polling" });
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, {
+      rawStatus: "SHIPPING.DELIVERY_ATTEMPTED",
+      normalizedOverride: "delivery_attempted",
+      source: "webhook",
+    });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivery_attempted");
+    tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery", source: "webhook" });
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery", "vuelve a reparto sin problema");
+  });
+
+  await test("TRACKING · el normalizador reconoce nuestro propio vocabulario por identidad", () => {
+    // `delivery_attempted` y `at_pickup_point` existen en TrackingStatus pero
+    // no estaban en el mapa por defecto: solo en el catálogo de Dropea. Por
+    // cualquier otra vía caían en "unknown" EN SILENCIO.
+    const n = require("../src/lib/tracking/normalizer") as typeof import("../src/lib/tracking/normalizer");
+    assert.equal(n.normalizeSupplierStatus("delivery_attempted"), "delivery_attempted");
+    assert.equal(n.normalizeSupplierStatus("at_pickup_point"), "at_pickup_point");
+    assert.equal(n.normalizeSupplierStatus("DELIVERY_ATTEMPTED"), "delivery_attempted", "sin distinguir mayúsculas");
+    // Y lo que sigue sin significar nada, sigue siendo unknown.
+    assert.equal(n.normalizeSupplierStatus("palabra_inventada"), "unknown");
+  });
+
+  // ============ 53 · Fixtures: escenarios realistas, cero PII ============
+  console.log("\n— Fixtures y escenarios —");
+
+  const FX = await import("./fixtures/index");
+  const { normalizeOrder: normalizeOrderFn } = await import("../src/lib/orders/normalize");
+
+  await test("FIXTURES · ninguna fixture lleva datos de una persona real", () => {
+    const todo = JSON.stringify([
+      ...Object.values(FX.shopifyScenarios).map((f) => f()),
+      ...Object.values(FX.dropeaScenarios).map((f) => f()),
+      ...Object.values(FX.dropiScenarios).map((f) => f()),
+    ]);
+    // Dominios reservados por RFC 2606 y rango de móvil no asignado.
+    assert.ok(todo.includes("example.com"));
+    assert.equal(/@(gmail|hotmail|outlook|yahoo|icloud)\./i.test(todo), false, "sin correos reales");
+    assert.equal(/casamable/i.test(todo), false, "sin datos del negocio real");
+    // Ningún teléfono español que no sea del rango de prueba 600 000 0xx.
+    for (const tel of todo.match(/\+?34[\s\d]{9,}/g) ?? []) {
+      assert.match(tel.replace(/\s/g, ""), /^\+?34600000\d{3}$/, `teléfono no anonimizado: ${tel}`);
+    }
+  });
+
+  await test("FIXTURES · Shopify: los cinco escenarios se comportan como se espera", () => {
+    const ff = require("../src/lib/orders/fulfillment") as typeof import("../src/lib/orders/fulfillment");
+
+    // COD normal: mercancía sin despachar.
+    assert.equal(ff.inferPhysicalFulfillment(FX.shopifyScenarios.codNormal() as never, true).state, "not_started");
+
+    // El caso Casamable: Shopify dice `partial`, la mercancía está entera.
+    const parcial = ff.inferPhysicalFulfillment(FX.shopifyScenarios.partialPorSeguro() as never, true);
+    assert.equal(parcial.state, "fulfilled");
+    assert.equal(parcial.serviceLines, 1);
+
+    // Cancelado: gana sobre cualquier fulfillment.
+    assert.equal(backfill.planClosureFromShopify(FX.shopifyScenarios.cancelado() as never)?.status, "cancelled");
+
+    // Mixto: dos productos físicos + servicio.
+    const mixto = ff.inferPhysicalFulfillment(FX.shopifyScenarios.mixto() as never, true);
+    assert.equal(mixto.physicalLines, 2);
+
+    // Ciudad inválida: el normalizador la limpia y el router la bloqueará.
+    const n = normalizeOrderFn(FX.shopifyScenarios.ciudadInvalida() as never);
+    assert.equal(n.city, "-", "el normalizador conserva el crudo; la validación es del router");
+  });
+
+  await test("FIXTURES · Dropea: cada escenario cae en el cierre correcto", () => {
+    const C = require("../src/lib/orders/closure") as typeof import("../src/lib/orders/closure");
+    const at = 1_800_000_000;
+    const decidir = (o: Record<string, unknown>) =>
+      C.planClosureFromDropea(o.status as string, o.sub_status as string, at);
+
+    assert.equal(decidir(FX.dropeaScenarios.entregado()).plan?.status, "delivered");
+    assert.equal(decidir(FX.dropeaScenarios.cobrado()).plan?.status, "delivered");
+    assert.equal(decidir(FX.dropeaScenarios.rehusado()).plan?.status, "refused");
+    assert.equal(decidir(FX.dropeaScenarios.cancelado()).plan?.status, "cancelled");
+    assert.equal(decidir(FX.dropeaScenarios.intentoFallido()).plan?.status, "in_progress");
+
+    // Los dos que NO deben cerrar nada.
+    assert.equal(decidir(FX.dropeaScenarios.perdidoODanado()).plan, null);
+    assert.equal(decidir(FX.dropeaScenarios.perdidoODanado()).review?.kind, "returned_not_refused");
+    assert.equal(decidir(FX.dropeaScenarios.incidencia()).plan, null);
+    assert.equal(decidir(FX.dropeaScenarios.desconocido()).plan, null, "un estado fuera del catálogo no infiere nada");
+  });
+
+  await test("FIXTURES · Dropi: todo cae en fail-closed, no se inventa semántica", () => {
+    const C = require("../src/lib/orders/closure") as typeof import("../src/lib/orders/closure");
+    // Sin catálogo confirmado, ningún evento de Dropi puede cerrar un pedido.
+    for (const st of ["delivered", "returned", "cancelled"] as const) {
+      assert.equal(C.planClosureFromTracking(st, "dropi", 1_800_000_000).plan, null, st);
+    }
+    // Y su provider sigue sin configurar: cualquier operación real lanza.
+    const dropi = require("../src/lib/suppliers/dropi") as typeof import("../src/lib/suppliers/dropi");
+    assert.equal(dropi.dropiProvider.isConfigured(), false);
+  });
+
+  // ============ 54 · Seguridad y postura ============
+  console.log("\n— Seguridad —");
+
+  const SEC = await import("../src/lib/system/security-posture");
+
+  await test("SEGURIDAD · avisa si el panel no tiene contraseña propia", async () => {
+    await withEnv({ DASHBOARD_PASSWORD: "" }, () => {
+      const items = SEC.getSecurityPosture();
+      const p = items.find((i) => i.key === "dashboard_password")!;
+      assert.equal(p.level, "warning");
+      // El aviso tiene que decir la CONSECUENCIA, no solo "falta una variable".
+      assert.match(p.detail, /red local|pedidos|conversaciones/i);
+    });
+    await withEnv({ DASHBOARD_PASSWORD: "una-clave" }, () => {
+      assert.equal(SEC.getSecurityPosture().find((i) => i.key === "dashboard_password")!.level, "ok");
+    });
+  });
+
+  await test("SEGURIDAD · un secreto de webhook ausente se explica como integración parada, no como agujero", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "" }, () => {
+      const p = SEC.getSecurityPosture().find((i) => i.key === "dropea_webhook_secret")!;
+      assert.equal(p.level, "warning");
+      assert.match(p.detail, /No es un agujero/i);
+    });
+  });
+
+  await test("SEGURIDAD · TEST_MODE se anuncia con lo que significa de verdad", async () => {
+    await withEnv({ TEST_MODE: "1" }, () => {
+      const p = SEC.getSecurityPosture().find((i) => i.key === "test_mode")!;
+      assert.match(p.detail, /no miden nada real|se ignoran/i);
+    });
+    await withEnv({ TEST_MODE: "0" }, () => {
+      assert.equal(SEC.getSecurityPosture().some((i) => i.key === "test_mode"), false);
+    });
+  });
+
+  await test("SEGURIDAD · el endpoint público de salud NO publica el teléfono entero", async () => {
+    const mod = await import("../src/app/api/health/route");
+    const res = await mod.GET();
+    const body = (await res.json()) as { phone: string | null };
+    if (body.phone !== null) {
+      assert.match(body.phone, /^\*\*\*\d{4}$/, "solo los últimos 4 dígitos");
+    }
+  });
+
+  await test("BUG2: /api/health y /api/health/live avisan de webhooks de Shopify con firma inválida, sin cambiar el código de estado por eso", async () => {
+    sysRepo.logIntegrationEvent("shopify", "webhook_bad_signature", "warning", "webhook rechazado por HMAC inválido");
+
+    const pub = await import("../src/app/api/health/route");
+    const resPub = await pub.GET();
+    const bodyPub = (await resPub.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
+    assert.ok(bodyPub.shopifyWebhookBadSignature24h >= 1);
+
+    const live = await import("../src/app/api/health/live/route");
+    const resLive = await live.GET();
+    const bodyLive = (await resLive.json()) as { ok: boolean; shopifyWebhookBadSignature24h: number };
+    assert.equal(resLive.status, 200, "informativo: nunca tumba la liveness por esto");
+    assert.ok(bodyLive.shopifyWebhookBadSignature24h >= 1);
+  });
+
+  await test("BUG salud: con cloud_api activo, /api/health/live informa de la Cloud API, no de la sesión de Baileys", async () => {
+    const mod = await import("../src/app/api/health/live/route");
+    // Baileys pudo dejar connection_state en "connected" de una sesión vieja
+    // (o nunca haberse usado): con cloud_api activo eso no debe aparecer.
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const res = await mod.GET();
+      const body = (await res.json()) as { ok: boolean; provider: string; whatsapp: string; phone: string | null };
+      assert.equal(res.status, 200, "informativo: nunca tumba la liveness por esto");
+      assert.equal(body.provider, "cloud_api");
+      assert.equal(body.whatsapp, "not_configured");
+      assert.equal(body.phone, null);
+    });
+    await withEnv(
+      {
+        WHATSAPP_PROVIDER: "cloud_api",
+        META_WHATSAPP_API_ENABLED: "1",
+        META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+        META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+      },
+      async () => {
+        const res = await mod.GET();
+        const body = (await res.json()) as { provider: string; whatsapp: string };
+        assert.equal(body.provider, "cloud_api");
+        assert.equal(body.whatsapp, "configured");
+      }
+    );
+  });
+
+  await test("BUG salud: con cloud_api activo, /api/health devuelve 503 si faltan credenciales y 200 si están", async () => {
+    const mod = await import("../src/app/api/health/route");
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const res = await mod.GET();
+      const body = (await res.json()) as { ok: boolean; provider: string; status: string; phone: string | null };
+      assert.equal(res.status, 503);
+      assert.equal(body.ok, false);
+      assert.equal(body.provider, "cloud_api");
+      assert.equal(body.status, "not_configured");
+      assert.equal(body.phone, null, "cloud_api no tiene sesión de la que sacar un número aquí");
+    });
+    await withEnv(
+      {
+        WHATSAPP_PROVIDER: "cloud_api",
+        META_WHATSAPP_API_ENABLED: "1",
+        META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+        META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+      },
+      async () => {
+        const res = await mod.GET();
+        const body = (await res.json()) as { ok: boolean; status: string };
+        assert.equal(res.status, 200);
+        assert.equal(body.ok, true);
+        assert.equal(body.status, "configured");
+      }
+    );
+  });
+
+  await test("BUG salud: con baileys (default), los dos endpoints siguen leyendo connection_state como siempre", async () => {
+    const live = await import("../src/app/api/health/live/route");
+    const pub = await import("../src/app/api/health/route");
+    const rLive = await live.GET();
+    const bLive = (await rLive.json()) as { provider: string };
+    assert.equal(bLive.provider, "baileys");
+    const rPub = await pub.GET();
+    const bPub = (await rPub.json()) as { provider: string };
+    assert.equal(bPub.provider, "baileys");
+  });
+
+  await test("SEGURIDAD · los tres verificadores de firma usan comparación en tiempo constante", () => {
+    // Una comparación normal filtra el secreto por el tiempo de respuesta.
+    for (const f of [
+      "src/lib/shopify/hmac.ts",
+      "src/lib/suppliers/dropea/webhook.ts",
+      "src/lib/calls/retell.ts",
+    ]) {
+      const src = fs.readFileSync(path.join(process.cwd(), f), "utf8");
+      assert.ok(src.includes("timingSafeEqual"), `${f} debe comparar en tiempo constante`);
+    }
+    // Y el del panel corre en Edge (sin node:crypto), con su propia versión.
+    const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
+    assert.ok(/safeEqual|timingSafeEqual/.test(proxy));
+  });
+
+  await test("SEGURIDAD · no hay secretos escritos en el repositorio", () => {
+    // Patrones de credencial real: token de Shopify, clave de OpenRouter y
+    // Bearer literal. Las menciones en comentarios y sanitizadores no cuentan.
+    const sospechosos = [/shpat_[A-Za-z0-9]{16,}/, /shpss_[A-Za-z0-9]{16,}/, /sk-or-v1-[A-Za-z0-9]{16,}/];
+    const raiz = process.cwd();
+    const revisar = ["src", "scripts", "tests", "docs"];
+    const pendientes: string[] = revisar.map((d) => path.join(raiz, d));
+    let vistos = 0;
+    while (pendientes.length) {
+      const dir = pendientes.pop()!;
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) {
+          pendientes.push(full);
+          continue;
+        }
+        if (!/\.(ts|tsx|md|json)$/.test(e.name)) continue;
+        vistos++;
+        const c = fs.readFileSync(full, "utf8");
+        for (const pat of sospechosos) {
+          assert.equal(pat.test(c), false, `posible secreto en ${path.relative(raiz, full)}`);
+        }
+      }
+    }
+    assert.ok(vistos > 50, "el barrido tiene que haber mirado ficheros de verdad");
+  });
+
+  // ============ 55 · Mapping: validación de forma ============
+  console.log("\n— Mapping de productos —");
+
+  const MV = await import("../src/lib/suppliers/mapping-validation");
+
+  await test("MAPPING · detecta el error real: pegar el metafield en vez del variant_id", () => {
+    // Pasó de verdad: el metafield `dropea.product_id` de Shopify
+    // (a3f618c76fb450ce890e7189) NO es el variant_id de Dropea (15896).
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "10428",
+      supplier_variant_id: "a3f618c76fb450ce890e7189",
+    });
+    const e = issues.find((i) => i.field === "supplier_variant_id")!;
+    assert.equal(e.level, "error");
+    assert.match(e.message, /metafield/i);
+    assert.equal(MV.mappingIsSavable(issues), false, "un error de forma impide guardar");
+  });
+
+  await test("MAPPING · sin variante del proveedor no se puede enrutar nada", () => {
+    const issues = MV.validateMapping({ supplier_platform: "dropea", shopify_sku: "X", supplier_variant_id: "" });
+    assert.equal(MV.mappingIsSavable(issues), false);
+    assert.match(issues[0].message, /falta el identificador/i);
+  });
+
+  await test("MAPPING · sin SKU se avisa de que el emparejado por título es frágil", () => {
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_title: "Cortaúñas Eléctrico 3 en 1",
+      supplier_variant_id: "15896",
+    });
+    assert.equal(MV.mappingIsSavable(issues), true, "es un aviso, no un error: a veces es lo único que hay");
+    assert.match(issues.map((i) => i.message).join(" "), /renombra|silencio/i);
+  });
+
+  await test("MAPPING · un mapping correcto pasa sin avisos", () => {
+    const issues = MV.validateMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "10428",
+      shopify_title: "Cortaúñas Eléctrico 3 en 1",
+      shopify_product_id: "15964094660938",
+      shopify_variant_id: "62950185173322",
+      supplier_variant_id: "15896",
+      supplier_unit_price: 7.7,
+    });
+    assert.deepEqual(issues, [], "el mapping real de Casamable no debe generar ni un aviso");
+  });
+
+  await test("MAPPING · desactivar NO borra: la fila sigue consultable", () => {
+    const id = db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "TEST-MAP-1",
+      shopify_title: "Producto de prueba",
+      supplier_variant_id: "99999",
+      active: true,
+    });
+    assert.equal(db.setSupplierProductMappingActive(id, false), true);
+    const fila = db.getSupplierProductMapping(id)!;
+    assert.ok(fila, "sigue existiendo");
+    assert.equal(fila.active, 0);
+    // Reactivable.
+    assert.equal(db.setSupplierProductMappingActive(id, true), true);
+    assert.equal(db.getSupplierProductMapping(id)!.active, 1);
+  });
+
+  // ============ 56 · BUG REAL de producción: multi-pedido pierde la selección ============
+  console.log("\n— BUG multi-pedido: '1097' + 'Todo correcto' —");
+
+  /** Pedido ya en awaiting_reply (como si el WhatsApp inicial hubiera salido). */
+  const mkMulti = (
+    shopifyId: string,
+    num: string,
+    tel: string,
+    extra: Partial<{ product_summary: string; total_price: string }> = {}
+  ) =>
+    db.insertOrderIfNew({
+      shopify_order_id: shopifyId,
+      shopify_order_number: num,
+      customer_name: "Cliente Multi",
+      phone: tel,
+      email: null,
+      product_summary: extra.product_summary ?? "Limpiador Ultrasónico Multiusos",
+      total_price: extra.total_price ?? "29.99",
+      currency: "EUR",
+      address_line1: "Calle Real 10",
+      address_line2: null,
+      city: "Vigo",
+      province: "Pontevedra",
+      postal_code: "36201",
+      country: "España",
+      status: "awaiting_reply",
+    }).order;
+
+  await test("BUG REAL · '1097' selecciona el pedido y 'Todo correcto' confirma ESE pedido", () => {
+    // Transcripción real (anonimizada) del 25-08-2026: el cliente escribió
+    // "1097" y el bot contestó "Responde 1, 2 o 3"; después "Todo correcto"
+    // y el bot volvió a enseñar el selector de pedidos. Bucle infinito.
+    const tel = "34600000090";
+    mkMulti("920096", "1096", tel);
+    mkMulti("920097", "1097", tel);
+
+    const r1 = handleOrderReply(tel, "1097");
+    assert.equal(r1.handled, true);
+    // Elegir un pedido por su número JAMÁS puede ser "no te he entendido".
+    assert.notEqual(r1.reply, msgs.MSG_CLARIFY, "'1097' no puede caer en 'Responde 1, 2 o 3'");
+    assert.match(r1.reply ?? "", /1097/, "debe reconocer el pedido elegido");
+
+    const r2 = handleOrderReply(tel, "Todo correcto");
+    assert.equal(r2.handled, true);
+    assert.equal(
+      db.getOrderByShopifyId("920097")!.status,
+      "confirmed",
+      "'Todo correcto' tras elegir 1097 confirma EL 1097, no vuelve al selector"
+    );
+    assert.equal(db.getOrderByShopifyId("920096")!.status, "awaiting_reply", "el otro no se toca");
+  });
+
+  await test("CHAT REAL · la conversación completa se resuelve en 3 mensajes, sin bucle", () => {
+    // La transcripción real, con el comportamiento NUEVO esperado: el bot
+    // real repitió el mismo selector 5 veces y nunca resolvió nada.
+    const tel = "34600000091";
+    mkMulti("921096", "2096", tel); // idénticos: mismo producto, importe, dirección
+    mkMulti("921097", "2097", tel);
+
+    // "Todo bien" → intención de confirmar, pero con 2 pedidos es ambiguo.
+    const r1 = handleOrderReply(tel, "Todo bien");
+    assert.match(r1.reply ?? "", /2096/);
+    assert.match(r1.reply ?? "", /Limpiador/, "el selector enseña el PRODUCTO, no solo números");
+    assert.match(r1.reply ?? "", /Si solo hiciste uno/, "se le abre la puerta a decir que hay un duplicado");
+
+    // "Pues ahora mismo no sé cuál es" → segunda (y última) vez del selector.
+    const r2 = handleOrderReply(tel, "Pues ahora mismo no sé cuál es");
+    assert.match(r2.reply ?? "", /2096/);
+
+    // "Yo solo he pedido el limpiador ultrasonido" → AQUÍ se resuelve: los
+    // dos pedidos son idénticos → duplicado probable → revisión humana.
+    const r3 = handleOrderReply(tel, "Yo solo he pedido el limpiador ultrasonido");
+    assert.match(r3.reply ?? "", /duplicado/i, "se le explica lo que pasa, no se le piden más números");
+    assert.doesNotMatch(r3.reply ?? "", /Dime el número/, "NO es el selector otra vez");
+
+    for (const id of ["921096", "921097"]) {
+      const o = db.getOrderByShopifyId(id)!;
+      assert.equal(o.status, "needs_call", `${id} va a revisión humana`);
+      assert.equal(o.possible_duplicate, 1, `${id} queda marcado como posible duplicado`);
+    }
+
+    // La automatización terminó: nada más que el bot pueda liar.
+    const r4 = handleOrderReply(tel, "1097");
+    assert.equal(r4.handled, false, "sin pedidos activos, el flujo ya no interviene: lo lleva Pedro");
+
+    // Y el evento para el panel quedó registrado, sin PII.
+    const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
+    assert.ok(evs.some((e) => e.event_type === "duplicate_suspected" && e.order_ref === "2096"));
+  });
+
+  await test("CANCELAR · 'No quiero ninguno anular pedido' con 2 pedidos: confirmación segura, jamás automática", () => {
+    const tel = "34600000092";
+    mkMulti("922096", "3096", tel);
+    mkMulti("922097", "3097", tel);
+
+    const r1 = handleOrderReply(tel, "No quiero ninguno, anular pedido");
+    assert.match(r1.reply ?? "", /ambos o solo uno/i, "pregunta cuáles, no repite el selector 1/2/3");
+    assert.match(r1.reply ?? "", /AMBOS/);
+    // NADA cancelado todavía.
+    assert.equal(db.getOrderByShopifyId("922096")!.cancellation_requested_at, null);
+
+    const r2 = handleOrderReply(tel, "AMBOS");
+    assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
+    for (const id of ["922096", "922097"]) {
+      const o = db.getOrderByShopifyId(id)!;
+      assert.equal(o.status, "needs_call", "a revisión: la cancelación real la decide Pedro");
+      assert.ok(o.cancellation_requested_at, "petición estampada");
+      assert.equal(o.closure_status, "unknown", "NADA se toca en Shopify ni en el eje de cierre");
+    }
+  });
+
+  await test("CANCELAR · 'cancelar 4096' cancela SOLO ese; el otro sigue su curso", () => {
+    const tel = "34600000093";
+    mkMulti("923096", "4096", tel);
+    mkMulti("923097", "4097", tel);
+
+    const r = handleOrderReply(tel, "cancelar 4096");
+    assert.equal(r.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.ok(db.getOrderByShopifyId("923096")!.cancellation_requested_at);
+    assert.equal(db.getOrderByShopifyId("923097")!.status, "awaiting_reply", "el otro intacto");
+    assert.equal(db.getOrderByShopifyId("923097")!.cancellation_requested_at, null);
+  });
+
+  await test("CANCELAR · con UN pedido: frase ambigua pide confirmación explícita, dos pasos", () => {
+    const tel = "34600000094";
+    mkMulti("924001", "4201", tel);
+
+    const r1 = handleOrderReply(tel, "no lo quiero, quiero cancelar");
+    assert.match(r1.reply ?? "", /CANCELAR 4201/, "exige el formato explícito");
+    assert.equal(db.getOrderByShopifyId("924001")!.cancellation_requested_at, null, "una frase ambigua NO cancela");
+    assert.equal(db.getOrderByShopifyId("924001")!.status, "awaiting_reply");
+
+    const r2 = handleOrderReply(tel, "CANCELAR 4201");
+    assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.ok(db.getOrderByShopifyId("924001")!.cancellation_requested_at);
+    assert.equal(db.getOrderByShopifyId("924001")!.status, "needs_call");
+  });
+
+  await test("PRODUCTO · 'el cortaúñas' identifica el pedido cuando SOLO uno lo lleva", () => {
+    const tel = "34600000095";
+    mkMulti("925001", "4301", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("925002", "4302", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    const r1 = handleOrderReply(tel, "el cortaúñas");
+    assert.match(r1.reply ?? "", /4301/, "lo resuelve al pedido correcto");
+    assert.match(r1.reply ?? "", /Qué quieres hacer/i, "y pregunta la acción");
+
+    const r2 = handleOrderReply(tel, "1");
+    assert.equal(r2.reply, msgs.MSG_CONFIRMED);
+    assert.equal(db.getOrderByShopifyId("925001")!.status, "confirmed");
+    assert.equal(db.getOrderByShopifyId("925002")!.status, "awaiting_reply");
+  });
+
+  await test("ANTI-BUCLE · a la tercera ambigüedad el selector NO se repite: revisión humana", () => {
+    const tel = "34600000096";
+    // Productos DISTINTOS y sin frases de duplicado: ambigüedad pura.
+    mkMulti("926001", "4401", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("926002", "4402", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    const r1 = handleOrderReply(tel, "hola buenas");
+    assert.match(r1.reply ?? "", /4401/, "primer selector");
+    const r2 = handleOrderReply(tel, "sigo sin saberlo");
+    assert.match(r2.reply ?? "", /4401/, "segundo selector (último permitido)");
+    const r3 = handleOrderReply(tel, "esto no hay quien lo entienda");
+    assert.equal(r3.reply, msgs.MSG_ESCALATE_TO_HUMAN, "el tercero YA NO es el selector");
+    for (const id of ["926001", "926002"]) {
+      assert.equal(db.getOrderByShopifyId(id)!.status, "needs_call");
+    }
+    const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
+    assert.ok(evs.some((e) => e.event_type === "conversation_escalated"));
+  });
+
+  await test("TTL · una selección caducada NO decide: 'todo correcto' 46 min después vuelve a preguntar", () => {
+    const tel = "34600000097";
+    mkMulti("927001", "4501", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("927002", "4502", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    handleOrderReply(tel, "4501"); // selecciona
+    // Envejecer la selección más allá del TTL (45 min por defecto).
+    db.systemDbHandle()
+      .prepare("UPDATE conversation_order_context SET selected_at = selected_at - 2800 WHERE phone = ?")
+      .run(tel);
+
+    const r = handleOrderReply(tel, "todo correcto");
+    assert.notEqual(r.reply, msgs.MSG_CONFIRMED, "no se aplica a una selección de hace una hora");
+    assert.equal(db.getOrderByShopifyId("927001")!.status, "awaiting_reply", "nada confirmado en silencio");
+    assert.match(r.reply ?? "", /4501/, "se vuelve a preguntar");
+  });
+
+  await test("PEDIDO NUEVO · si entra otro pedido tras seleccionar, el siguiente mensaje NO se asume del antiguo", () => {
+    const tel = "34600000098";
+    mkMulti("928001", "4601", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("928002", "4602", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+
+    handleOrderReply(tel, "4601"); // selecciona el cortaúñas
+    // Entra un pedido NUEVO del mismo teléfono (compró otra cosa).
+    const nuevo = mkMulti("928003", "4603", tel, { product_summary: "Plancha de Pelo Iónica" });
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = created_at + 10 WHERE id = ?").run(nuevo.id);
+
+    const r = handleOrderReply(tel, "1");
+    assert.notEqual(r.reply, msgs.MSG_CONFIRMED, "un '1' con un pedido recién llegado vuelve a ser ambiguo");
+    assert.equal(db.getOrderByShopifyId("928001")!.status, "awaiting_reply");
+    assert.match(r.reply ?? "", /4603/, "el selector ya incluye el pedido nuevo");
+  });
+
+  await test("SIN DUPLICADO · 'solo pedí uno' con productos DISTINTOS no marca nada: pide concretar", () => {
+    const tel = "34600000099";
+    mkMulti("929001", "4701", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("929002", "4702", tel, { product_summary: "Espejo Retrovisor Panorámico", total_price: "19.99" });
+
+    const r = handleOrderReply(tel, "solo he pedido uno");
+    assert.match(r.reply ?? "", /4701/, "productos distintos: no es un duplicado, se pide concretar");
+    assert.equal(db.getOrderByShopifyId("929001")!.possible_duplicate, 0);
+    assert.equal(db.getOrderByShopifyId("929002")!.possible_duplicate, 0);
+  });
+
+  await test("CONCURRENCIA · dos mensajes rápidos del mismo teléfono se procesan EN ORDEN", async () => {
+    const { runSerializedByPhone } = await import("../src/lib/baileys/handler");
+    const orden: string[] = [];
+    // El primero tarda (como una nota de voz transcribiéndose); el segundo
+    // llega al instante. Sin la puerta, "b" adelantaría a "a".
+    const lento = runSerializedByPhone("34600000100", async () => {
+      await new Promise((r) => setTimeout(r, 40));
+      orden.push("a");
+    });
+    const rapido = runSerializedByPhone("34600000100", async () => {
+      orden.push("b");
+    });
+    // Otro teléfono NO espera al lento.
+    const otro = runSerializedByPhone("34600000101", async () => {
+      orden.push("otro");
+    });
+    await Promise.all([lento, rapido, otro]);
+    assert.equal(orden.indexOf("a") < orden.indexOf("b"), true, "mismo teléfono: en orden de llegada");
+    assert.equal(orden[0], "otro", "teléfonos distintos no se bloquean entre sí");
+  });
+
+  // ============ 57 · Cloud API de Meta: provider, webhook, botones ============
+  console.log("\n— Meta Cloud API: provider, webhook y botones —");
+
+  const metaProv = await import("../src/lib/whatsapp/meta-cloud");
+  const metaHook = await import("../src/lib/whatsapp/meta-webhook");
+  const metaIn = await import("../src/lib/whatsapp/inbound");
+  const metaOutbox = await import("../src/lib/whatsapp/cloud-outbox");
+  const interactive = await import("../src/lib/whatsapp/interactive");
+  const waTemplates = await import("../src/lib/whatsapp/templates");
+  const waTop = await import("../src/lib/whatsapp");
+  const confirmMod = await import("../src/lib/orders/confirmation");
+
+  const META_ENV = {
+    // La config del PILOTO: el webhook solo ACTÚA con cloud_api activo (con
+    // Baileys activo lo ignora para no procesar el mismo mensaje dos veces).
+    WHATSAPP_PROVIDER: "cloud_api",
+    META_WHATSAPP_API_ENABLED: "1",
+    META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+    META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+    META_WHATSAPP_APP_SECRET: "app-secret-de-prueba",
+    META_WHATSAPP_VERIFY_TOKEN: "verify-token-de-prueba",
+  };
+
+  /** fetch falso: captura la llamada y responde como Meta. */
+  const fakeMetaFetch = (respuestas: Array<{ status: number; body: unknown }>) => {
+    const llamadas: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const fetchImpl = async (url: string, init: RequestInit) => {
+      llamadas.push({ url, body: JSON.parse(String(init.body)) as Record<string, unknown> });
+      const r = respuestas.shift() ?? { status: 200, body: { messages: [{ id: "wamid.TEST" }] } };
+      return new Response(JSON.stringify(r.body), { status: r.status });
+    };
+    return { llamadas, fetchImpl };
+  };
+
+  const firmaMeta = (raw: string) =>
+    "sha256=" + crypto.createHmac("sha256", "app-secret-de-prueba").update(raw, "utf8").digest("hex");
+
+  /** Webhook de Meta con un mensaje entrante. */
+  const metaInboundBody = (msg: Record<string, unknown>, waId: string) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "messages", value: { contacts: [{ wa_id: waId, profile: { name: "Cliente" } }], messages: [msg] } }] }],
+    });
+
+  const metaStatusBody = (st: Record<string, unknown>) =>
+    JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "messages", value: { statuses: [st] } }] }],
+    });
+
+  await test("META · fail-closed: sin habilitar NO se hace ni una llamada de red", async () => {
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv({ META_WHATSAPP_API_ENABLED: "0" }, async () => {
+      const r = await p.send("34600000110", { kind: "text", text: "hola" });
+      assert.equal(r.ok, false);
+      assert.equal(r.retryable, false, "terminal: reintentar sin credenciales da lo mismo");
+      assert.equal(llamadas.length, 0, "CERO llamadas a Meta");
+    });
+  });
+
+  await test("META · ventana de 24 h: texto libre sin mensaje previo del cliente → terminal, plantilla → pasa", async () => {
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      // Este teléfono JAMÁS nos escribió: fuera de ventana por definición.
+      const r = await p.send("34600000111", { kind: "text", text: "hola" });
+      assert.equal(r.ok, false);
+      assert.match(r.error ?? "", /outside_24h_window/);
+      assert.equal(r.retryable, false);
+      assert.equal(llamadas.length, 0, "ni se intenta: Meta lo rechazaría igual");
+
+      // Una PLANTILLA sí puede salir fuera de ventana.
+      const rt = await p.send("34600000111", {
+        kind: "template", templateName: "order_reminder", language: "es", bodyParams: ["Cliente", "pedido"],
+      });
+      assert.equal(rt.ok, true);
+      assert.equal(rt.providerMessageId, "wamid.TEST");
+      assert.equal(llamadas.length, 1);
+    });
+  });
+
+  await test("META · dentro de ventana: texto libre sale y el payload es el de la Graph API", async () => {
+    const tel = "34600000112";
+    const convo = db.getOrCreateConversation(tel, "Cliente Meta");
+    db.insertMessage(convo.id, "user", "hola, soy el cliente"); // abre la ventana
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      const r = await p.send(tel, { kind: "text", text: "gracias por escribir" });
+      assert.equal(r.ok, true);
+      assert.match(llamadas[0].url, /graph\.facebook\.com\/v23\.0\/111222333\/messages/);
+      assert.equal(llamadas[0].body.type, "text");
+      assert.equal((llamadas[0].body.text as { body: string }).body, "gracias por escribir");
+    });
+  });
+
+  await test("META · botones: payload correcto y límites de Meta validados ANTES de gastar la llamada", async () => {
+    const tel = "34600000112"; // ventana ya abierta arriba
+    const { llamadas, fetchImpl } = fakeMetaFetch([]);
+    const p = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+    await withEnv(META_ENV, async () => {
+      const r = await p.send(tel, {
+        kind: "interactive_buttons",
+        body: "¿Está todo correcto?",
+        buttons: [
+          { id: "confirm_order", title: "✅ Confirmar pedido" },
+          { id: "change_address", title: "📍 Cambiar dirección" },
+          { id: "delivery_note", title: "📝 Dejar nota" },
+        ],
+      });
+      assert.equal(r.ok, true);
+      const body = llamadas[0].body as { type: string; interactive: { type: string; action: { buttons: Array<{ reply: { id: string } }> } } };
+      assert.equal(body.type, "interactive");
+      assert.equal(body.interactive.type, "button");
+      assert.equal(body.interactive.action.buttons[0].reply.id, "confirm_order");
+
+      // 4 botones → rechazado LOCALMENTE, sin llamada.
+      const antes = llamadas.length;
+      const r4 = await p.send(tel, {
+        kind: "interactive_buttons",
+        body: "x",
+        buttons: [
+          { id: "a", title: "A" }, { id: "b", title: "B" }, { id: "c", title: "C" }, { id: "d", title: "D" },
+        ],
+      });
+      assert.equal(r4.ok, false);
+      assert.match(r4.error ?? "", /entre 1 y 3/);
+      assert.equal(llamadas.length, antes, "no se gastó la llamada");
+
+      // Título >20 caracteres → igual.
+      const rl = await p.send(tel, {
+        kind: "interactive_buttons", body: "x",
+        buttons: [{ id: "a", title: "Este título es demasiado largo para Meta" }],
+      });
+      assert.equal(rl.ok, false);
+      assert.match(rl.error ?? "", /20/);
+    });
+  });
+
+  await test("META · clasificación de errores: 429/5xx reintentables, 401 terminal", async () => {
+    const tel = "34600000112";
+    await withEnv(META_ENV, async () => {
+      const p429 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 429, body: { error: { message: "rate limit" } } }]).fetchImpl
+      );
+      const r429 = await p429.send(tel, { kind: "text", text: "x" });
+      assert.equal(r429.ok, false);
+      assert.equal(r429.retryable, true, "429 se reintenta");
+
+      const p500 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 500, body: {} }]).fetchImpl
+      );
+      assert.equal((await p500.send(tel, { kind: "text", text: "x" })).retryable, true, "5xx se reintenta");
+
+      const p401 = new metaProv.MetaCloudWhatsAppProvider(
+        fakeMetaFetch([{ status: 401, body: { error: { message: "bad token" } } }]).fetchImpl
+      );
+      const r401 = await p401.send(tel, { kind: "text", text: "x" });
+      assert.equal(r401.retryable, false, "credencial mala: reintentar da lo mismo");
+    });
+  });
+
+  await test("META · plantillas: el catálogo valida nombre y número de variables", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    assert.equal(m.kind, "template");
+    assert.throws(() => waTemplates.buildTemplateMessage("plantilla_inventada", []), /desconocida/);
+    assert.throws(
+      () => waTemplates.buildTemplateMessage("order_confirmation_request", ["solo-una"]),
+      /esperaba 3/
+    );
+    assert.equal(waTemplates.loadTemplateSpecs().length, 6, "las 6 plantillas del plan");
+  });
+
+  await test("BUG1 · buildTemplateMessage incluye los payloads de botón del catálogo, en orden", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    assert.equal(m.kind, "template");
+    if (m.kind !== "template") throw new Error("unreachable");
+    assert.deepEqual(
+      m.buttonPayloads,
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE],
+      "los 3 payloads de order_confirmation_request, en el mismo orden que el catálogo"
+    );
+
+    const rec = waTemplates.buildTemplateMessage("order_reminder", ["Ana", "Limpiador"]);
+    if (rec.kind !== "template") throw new Error("unreachable");
+    assert.deepEqual(
+      rec.buttonPayloads,
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS],
+      "order_reminder solo tiene 2 botones (sin 'dejar nota')"
+    );
+  });
+
+  await test("BUG1 · buildMetaPayload de una plantilla manda un componente button/quick_reply POR CADA botón, con su payload", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    const payload = metaProv.buildMetaPayload("34600000000", m) as {
+      template: { components: Array<{ type: string; sub_type?: string; index?: string; parameters: Array<Record<string, string>> }> };
+    };
+    const botones = payload.template.components.filter((c) => c.type === "button");
+    assert.equal(botones.length, 3, "un componente por cada botón de la plantilla");
+    assert.deepEqual(
+      botones.map((b) => b.parameters[0].payload),
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE]
+    );
+    assert.deepEqual(botones.map((b) => b.index), ["0", "1", "2"], "el índice marca qué botón de la plantilla es cada uno");
+    assert.ok(botones.every((b) => b.sub_type === "quick_reply"));
+
+    // Un mensaje de plantilla SIN buttonPayloads (campo opcional) no debe
+    // reventar ni añadir componentes de botón — solo el body.
+    const sinBotones = metaProv.buildMetaPayload("34600000000", {
+      kind: "template", templateName: "x", language: "es", bodyParams: ["a"],
+    }) as { template: { components: unknown[] } };
+    assert.equal(sinBotones.template.components.filter((c: any) => c.type === "button").length, 0);
+  });
+
+  await test("BUG1 · buildConfirmationOutbound: dentro de ventana manda el interactivo, fuera manda la plantilla con los datos reales del pedido", () => {
+    const o = mkMulti("972501", "7501", "34600177501", { product_summary: "Limpiador Ultrasónico", total_price: "19.99" });
+    const orden = db.getOrderById(o.id)!;
+
+    const dentro = interactive.buildConfirmationOutbound(orden, true);
+    assert.equal(dentro.message.kind, "interactive_buttons", "dentro de ventana: interactivo normal, NUNCA plantilla (coste)");
+
+    const fuera = interactive.buildConfirmationOutbound(orden, false);
+    assert.equal(fuera.message.kind, "template");
+    if (fuera.message.kind !== "template") throw new Error("unreachable");
+    assert.equal(fuera.message.templateName, "order_confirmation_request");
+    assert.deepEqual(fuera.message.bodyParams, ["Cliente", "Limpiador Ultrasónico", "19,99 €"], "nombre, producto e importe, en ese orden");
+    assert.equal(fuera.fallbackText, dentro.fallbackText, "el fallback (panel / rollback) es el mismo texto en los dos casos");
+  });
+
+  await test("BUG1 · sendWhatsAppInteractive con una plantilla guarda message_type='template' y template_name — no 'interactive_buttons'", async () => {
+    const tel = "34600177502";
+    const orden = db.getOrderById(mkMulti("972502", "7502", tel).id)!;
+    const spec = interactive.buildConfirmationOutbound(orden, false); // fuera de ventana → plantilla
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "template", "antes de este fix caía en 'interactive_buttons' por defecto");
+    assert.equal(item.template_name, "order_confirmation_request");
+  });
+
+  await test("WEBHOOK META · verificación inicial: token correcto devuelve el challenge, incorrecto 403, sin configurar 500", async () => {
+    await withEnv(META_ENV, () => {
+      const ok = metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "verify-token-de-prueba", challenge: "reto-123" });
+      assert.equal(ok.status, 200);
+      assert.equal(ok.body, "reto-123", "el challenge vuelve TAL CUAL (texto plano)");
+      assert.equal(metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "otro", challenge: "x" }).status, 403);
+    });
+    await withEnv({ META_WHATSAPP_VERIFY_TOKEN: "" }, () => {
+      assert.equal(metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "a", challenge: "x" }).status, 500);
+    });
+  });
+
+  await test("WEBHOOK META · firma inválida → 401 sin efectos; sin app secret → 500", async () => {
+    const tel = "34600000113";
+    mkMulti("970101", "5001", tel);
+    const raw = metaInboundBody({ from: tel, id: "wamid.in1", timestamp: "1756100000", type: "text", text: { body: "1" } }, tel);
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, "sha256=" + "0".repeat(64));
+      assert.equal(r.status, 401);
+      assert.equal(db.getOrderByShopifyId("970101")!.status, "awaiting_reply", "cero efectos");
+    });
+    await withEnv({ META_WHATSAPP_APP_SECRET: "" }, () => {
+      assert.equal(metaHook.processMetaWebhook(raw, firmaMeta(raw)).status, 500, "error NUESTRO, no de Meta");
+    });
+  });
+
+  await test("WEBHOOK META · botón 'Confirmar' → la MISMA máquina COD: pedido confirmado y respuesta por outbox", async () => {
+    const tel = "34600000113"; // pedido 5001 creado arriba
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.btn1", timestamp: "1756100010", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "✅ Confirmar pedido" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getOrderByShopifyId("970101")!.status, "confirmed", "el payload confirma, sin NLP del título");
+      const out = db.getPendingOutbox(500).filter((x) => x.phone === tel);
+      assert.equal(out.length, 1, "la respuesta salió por el outbox");
+      assert.equal(out[out.length - 1].content, msgs.MSG_CONFIRMED);
+    });
+  });
+
+  await test("WEBHOOK META · el mismo webhook DOS veces: un solo efecto (dedupe por id de mensaje)", async () => {
+    const tel = "34600000114";
+    mkMulti("970102", "5002", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.dup1", timestamp: "1756100020", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      metaHook.processMetaWebhook(raw, firmaMeta(raw)); // reintento de Meta
+      const out = db.getPendingOutbox(500).filter((x) => x.phone === tel);
+      assert.equal(out.length, 1, "una sola respuesta aunque Meta reintente");
+    });
+  });
+
+  await test("WEBHOOK META · botones de dirección y nota → needs_correction y awaiting_delivery_note", async () => {
+    const telA = "34600000115";
+    mkMulti("970103", "5003", telA);
+    const rawA = metaInboundBody(
+      { from: telA, id: "wamid.addr1", timestamp: "1756100030", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "change_address", title: "📍 Cambiar dirección" } } },
+      telA
+    );
+    const telB = "34600000116";
+    mkMulti("970104", "5004", telB);
+    const rawB = metaInboundBody(
+      { from: telB, id: "wamid.note1", timestamp: "1756100031", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "delivery_note", title: "📝 Dejar nota" } } },
+      telB
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(rawA, firmaMeta(rawA));
+      assert.equal(db.getOrderByShopifyId("970103")!.status, "needs_correction");
+      // El siguiente TEXTO es la dirección (mismo flujo de siempre).
+      const rawDir = metaInboundBody(
+        { from: telA, id: "wamid.addr2", timestamp: "1756100032", type: "text", text: { body: "Calle Nueva 5, 2ºA, 36202 Vigo" } },
+        telA
+      );
+      metaHook.processMetaWebhook(rawDir, firmaMeta(rawDir));
+      assert.match(db.getOrderByShopifyId("970103")!.proposed_address ?? "", /Calle Nueva 5/);
+
+      metaHook.processMetaWebhook(rawB, firmaMeta(rawB));
+      assert.equal(db.getOrderByShopifyId("970104")!.status, "awaiting_delivery_note");
+    });
+  });
+
+  await test("WEBHOOK META · multi-pedido por LISTA: list_reply selecciona y el botón confirma ESE pedido", async () => {
+    const tel = "34600000117";
+    mkMulti("970105", "5005", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
+    mkMulti("970106", "5006", tel, { product_summary: "Espejo Retrovisor Panorámico" });
+    await withEnv(META_ENV, () => {
+      const rawSel = metaInboundBody(
+        { from: tel, id: "wamid.list1", timestamp: "1756100040", type: "interactive",
+          interactive: { type: "list_reply", list_reply: { id: "select_order:5006", title: "#5006" } } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawSel, firmaMeta(rawSel));
+      const rawConf = metaInboundBody(
+        { from: tel, id: "wamid.list2", timestamp: "1756100041", type: "interactive",
+          interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawConf, firmaMeta(rawConf));
+      assert.equal(db.getOrderByShopifyId("970106")!.status, "confirmed", "el seleccionado");
+      assert.equal(db.getOrderByShopifyId("970105")!.status, "awaiting_reply", "el otro intacto");
+    });
+  });
+
+  await test("WEBHOOK META · botón 'cancelar' con un pedido → cancellation_requested, sin tocar Shopify", async () => {
+    const tel = "34600000118";
+    mkMulti("970107", "5007", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.cancel1", timestamp: "1756100050", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "cancel_request", title: "❌ Quiero cancelar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      const o = db.getOrderByShopifyId("970107")!;
+      assert.equal(o.status, "needs_call", "a revisión humana");
+      assert.ok(o.cancellation_requested_at, "petición estampada");
+      assert.equal(o.closure_status, "unknown", "Shopify y el cierre, intactos");
+    });
+  });
+
+  await test("ESTADOS META · delivered y read se persisten por provider_message_id; read implica delivered", async () => {
+    const tel = "34600000119";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje con seguimiento");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.status1");
+
+    await withEnv(META_ENV, () => {
+      // Llega el READ antes que el DELIVERED (Meta no garantiza orden).
+      const rawRead = metaStatusBody({ id: "wamid.status1", status: "read", timestamp: "1756100060", recipient_id: tel });
+      metaHook.processMetaWebhook(rawRead, firmaMeta(rawRead));
+      let fila = db.getOutboxByProviderMessageId("wamid.status1")!;
+      assert.equal(fila.read_at, 1756100060);
+      assert.equal(fila.delivered_at, 1756100060, "un read implica entregado aunque el delivered se perdiera");
+
+      // El delivered atrasado NO retrocede nada.
+      const rawDel = metaStatusBody({ id: "wamid.status1", status: "delivered", timestamp: "1756100055", recipient_id: tel });
+      metaHook.processMetaWebhook(rawDel, firmaMeta(rawDel));
+      fila = db.getOutboxByProviderMessageId("wamid.status1")!;
+      assert.equal(fila.read_at, 1756100060, "el read no se pierde");
+      assert.equal(fila.delivered_at, 1756100060, "COALESCE: el primero gana, no se pisa");
+    });
+  });
+
+  await test("ESTADOS META · failed guarda el motivo y queda visible", async () => {
+    const tel = "34600000120";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje que fallará");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.status2");
+    await withEnv(META_ENV, () => {
+      const raw = metaStatusBody({
+        id: "wamid.status2", status: "failed", timestamp: "1756100070", recipient_id: tel,
+        errors: [{ code: 131047, title: "Re-engagement message" }],
+      });
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      const fila = db.getOutboxByProviderMessageId("wamid.status2")!;
+      assert.ok(fila.failed_at);
+      assert.match(fila.failure_reason ?? "", /131047/);
+    });
+  });
+
+  await test("PROVIDER SWITCH · el mismo sendWhatsAppInteractive encola botones en cloud y texto plano en baileys", async () => {
+    const tel = "34600000121";
+    const orden = mkMulti("970108", "5008", tel);
+    const spec = interactive.buildConfirmationInteractive(db.getOrderById(orden.id)!);
+
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.message_type, "interactive_buttons");
+      assert.ok(item.payload_json, "el mensaje interactivo entero viaja en payload_json");
+      assert.match(item.content, /1 — Confirmar/, "content = fallback para el panel");
+    });
+    await withEnv({ WHATSAPP_PROVIDER: "baileys" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.message_type, "text", "Baileys no tiene botones: sale el fallback 1/2/3");
+      assert.equal(item.payload_json, null);
+    });
+  });
+
+  await test("CLOUD OUTBOX · tick: envía, persiste provider_message_id; retryable revierte; terminal marca failed", async () => {
+    const tel = "34600000122";
+    const convo = db.getOrCreateConversation(tel);
+    db.insertMessage(convo.id, "user", "abro ventana");
+
+    // La cola arrastra pendientes de OTROS tests (procesa los 20 más viejos
+    // por tick). El provider falso responde según el destinatario: éxito
+    // para este teléfono, y para los ajenos lo que toque en cada fase — la
+    // DB es desechable, pero los contadores del test son solo de `tel`.
+    let seq = 0;
+    const soloMiTelefono = (fn: () => import("../src/lib/whatsapp/provider").SendResult) => ({
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string) =>
+        to === tel ? fn() : { ok: true, providerMessageId: `wamid.ajeno.${++seq}` },
+    });
+
+    const id1 = db.enqueueOutbox(convo.id, tel, "mensaje uno");
+    const okProv = soloMiTelefono(() => ({ ok: true, providerMessageId: `wamid.tick.${++seq}` }));
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === id1); i++) {
+      await metaOutbox.runCloudOutboxTick(okProv);
+    }
+    const fila1 = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(id1) as {
+      sent: number; provider: string | null; provider_message_id: string | null;
+    };
+    assert.equal(fila1.sent, 1, "enviado");
+    assert.equal(fila1.provider, "cloud_api");
+    assert.match(fila1.provider_message_id ?? "", /^wamid\.tick\./, "el id de Meta queda persistido");
+
+    // Fallo RETRYABLE: vuelve a la cola.
+    const id2 = db.enqueueOutbox(convo.id, tel, "mensaje dos");
+    const provFalla = soloMiTelefono(() => ({ ok: false, providerMessageId: null, error: "ECONNRESET", retryable: true }));
+    for (let i = 0; i < 5; i++) await metaOutbox.runCloudOutboxTick(provFalla);
+    assert.equal(db.getPendingOutbox(500).some((x) => x.id === id2), true, "revertido: se reintenta");
+
+    // Fallo TERMINAL: fuera de la cola CON motivo.
+    const provTerminal = soloMiTelefono(() => ({ ok: false, providerMessageId: null, error: "outside_24h_window", retryable: false }));
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === id2); i++) {
+      await metaOutbox.runCloudOutboxTick(provTerminal);
+    }
+    const fila2 = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(id2) as {
+      sent: number; failed_at: number | null; failure_reason: string | null;
+    };
+    assert.equal(fila2.sent, 1, "fuera de la cola");
+    assert.ok(fila2.failed_at);
+    // T1 §2.5: el motivo ya no es el genérico de Meta sino el DISTINGUIBLE
+    // (sin plantilla equivalente adjunta, el dispatcher lo reclasifica).
+    assert.match(fila2.failure_reason ?? "", /template_not_configured_outside_window/);
+  });
+
+  await test("COEXISTENCIA · con Baileys activo, el webhook de Meta NO actúa: cero doble proceso", async () => {
+    // Durante la transición pueden llegar los MISMOS mensajes por los dos
+    // caminos (la sesión de Baileys y el webhook de Meta), con ids DISTINTOS:
+    // el dedupe por id no cubre esto. Cubre este gate.
+    const tel = "34600000130";
+    mkMulti("971001", "6001", tel);
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.coex1", timestamp: "1756100100", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv({ ...META_ENV, WHATSAPP_PROVIDER: "baileys" }, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200, "a Meta se le responde 200 (si no, reintenta eternamente)");
+      assert.equal(db.getOrderByShopifyId("971001")!.status, "awaiting_reply", "NO se actúa");
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === tel).length, 0, "cero respuestas");
+      const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 100 });
+      assert.ok(evs.some((e) => e.event_type === "meta_inbound_ignored_provider_baileys"), "queda constancia");
+    });
+  });
+
+  await test("VENTANA 24H · el entrante por Cloud ABRE la ventana (el bug que habría matado el piloto)", async () => {
+    // Antes del arreglo, el webhook no insertaba el mensaje en `messages` y
+    // la ventana JAMÁS se abría en modo cloud: todo texto libre fallaba
+    // outside_24h_window incluso respondiendo al cliente en el momento.
+    const tel = "34600000131";
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.win1", timestamp: "1756100110", type: "text", text: { body: "hola" } },
+      tel
+    );
+    await withEnv(META_ENV, async () => {
+      assert.equal(metaProv.isWithinSessionWindow(tel), false, "antes de escribir: fuera");
+      metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(metaProv.isWithinSessionWindow(tel), true, "el entrante abre la ventana");
+
+      // Y un texto libre ya puede salir.
+      const { llamadas, fetchImpl } = fakeMetaFetch([]);
+      const prov = new metaProv.MetaCloudWhatsAppProvider(fetchImpl);
+      const r = await prov.send(tel, { kind: "text", text: "gracias" });
+      assert.equal(r.ok, true);
+      assert.equal(llamadas.length, 1);
+    });
+  });
+
+  await test("VENTANA 24H · frontera exacta: 23h59 dentro, 24h00 y 24h01 fuera", () => {
+    const tel = "34600000132";
+    const convo = db.getOrCreateConversation(tel);
+    const t0 = 1756000000;
+    db.systemDbHandle()
+      .prepare("INSERT INTO messages (conversation_id, role, content, created_at) VALUES (?, 'user', 'hola', ?)")
+      .run(convo.id, t0);
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600 - 60), true, "23h59: dentro");
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600), false, "24h00 exactas: FUERA (conservador)");
+    assert.equal(metaProv.isWithinSessionWindow(tel, t0 + 24 * 3600 + 60), false, "24h01: fuera");
+    // Y comprobar la ventana NO crea conversaciones (solo lectura).
+    const antes = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM conversations").get() as { n: number }).n;
+    metaProv.isWithinSessionWindow("34999999999");
+    const despues = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM conversations").get() as { n: number }).n;
+    assert.equal(despues, antes, "el chequeo es de solo lectura");
+  });
+
+  await test("AMBIGUO · timeout tras enviar NO se reintenta (duplicar es peor que perder); DNS caído SÍ", async () => {
+    const tel = "34600000131"; // ventana abierta arriba
+    await withEnv(META_ENV, async () => {
+      const provTimeout = new metaProv.MetaCloudWhatsAppProvider(async () => {
+        throw new Error("The operation was aborted due to timeout");
+      });
+      const rt = await provTimeout.send(tel, { kind: "text", text: "x" });
+      assert.equal(rt.ok, false);
+      assert.equal(rt.retryable, false, "la petición PUDO llegar a Meta: reenviar duplicaría el WhatsApp");
+      assert.match(rt.error ?? "", /ambiguo/);
+
+      const provDns = new metaProv.MetaCloudWhatsAppProvider(async () => {
+        throw new Error("getaddrinfo ENOTFOUND graph.facebook.com");
+      });
+      const rd = await provDns.send(tel, { kind: "text", text: "x" });
+      assert.equal(rd.retryable, true, "la petición JAMÁS salió: reintentar es seguro");
+    });
+  });
+
+  await test("AMBIGUO · HTTP 200 con cuerpo malformado = ENVIADO sin id, jamás reintento", async () => {
+    const tel = "34600000131";
+    await withEnv(META_ENV, async () => {
+      const prov = new metaProv.MetaCloudWhatsAppProvider(
+        async () => new Response("<html>no soy json</html>", { status: 200 })
+      );
+      const r = await prov.send(tel, { kind: "text", text: "x" });
+      assert.equal(r.ok, true, "Meta ACEPTÓ: darlo por fallido reenviaría un mensaje ya entregado");
+      assert.equal(r.providerMessageId, null, "sin id: los estados no correlarán, que es solo cosmético");
+    });
+  });
+
+  await test("ESTADOS META · monotonicidad: failed NO pisa un delivered previo (webhook atrasado)", async () => {
+    const tel = "34600000133";
+    const convo = db.getOrCreateConversation(tel);
+    const itemId = db.enqueueOutbox(convo.id, tel, "mensaje entregado");
+    db.markOutboxSent(itemId);
+    db.setOutboxProviderResult(itemId, "cloud_api", "wamid.mono1");
+    await withEnv(META_ENV, () => {
+      const rawDel = metaStatusBody({ id: "wamid.mono1", status: "delivered", timestamp: "1756100120", recipient_id: tel });
+      metaHook.processMetaWebhook(rawDel, firmaMeta(rawDel));
+      const rawFail = metaStatusBody({
+        id: "wamid.mono1", status: "failed", timestamp: "1756100121", recipient_id: tel,
+        errors: [{ code: 131026, title: "Undeliverable" }],
+      });
+      metaHook.processMetaWebhook(rawFail, firmaMeta(rawFail));
+      const fila = db.getOutboxByProviderMessageId("wamid.mono1")!;
+      assert.equal(fila.failed_at, null, "un entregado no puede volverse fallido");
+      assert.equal(fila.delivered_at, 1756100120);
+    });
+  });
+
+  await test("CLOUD OUTBOX · una IMAGEN del panel falla con gracia y motivo, jamás sale como texto vacío", async () => {
+    const tel = "34600000134";
+    const convo = db.getOrCreateConversation(tel);
+    const imgId = db.enqueueOutboxImage(convo.id, tel, "/tmp/no-existe.jpg", "");
+    const fakeProv = {
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string) => ({ ok: to === tel ? false : true, providerMessageId: "wamid.x", error: "no debería llamarse para la imagen", retryable: false }),
+    };
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === imgId); i++) {
+      await metaOutbox.runCloudOutboxTick(fakeProv);
+    }
+    const fila = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(imgId) as {
+      sent: number; failed_at: number | null; failure_reason: string | null;
+    };
+    assert.equal(fila.sent, 1);
+    assert.ok(fila.failed_at, "terminal");
+    assert.match(fila.failure_reason ?? "", /imagen no soportada/);
+  });
+
+  await test("AUDIO CLOUD · queda registrado y visible, no rompe el COD, y el cliente puede seguir por texto", async () => {
+    const tel = "34600000135";
+    mkMulti("971002", "6002", tel);
+    await withEnv(META_ENV, () => {
+      const rawAudio = metaInboundBody(
+        { from: tel, id: "wamid.audio1", timestamp: "1756100130", type: "audio", audio: { id: "media1" } },
+        tel
+      );
+      const r = metaHook.processMetaWebhook(rawAudio, firmaMeta(rawAudio));
+      assert.equal(r.status, 200);
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "awaiting_reply", "el pedido no se toca");
+      // Registrado en la conversación (y por tanto abre la ventana de 24 h).
+      assert.equal(metaProv.isWithinSessionWindow(tel), true, "una nota de voz también abre la ventana");
+
+      // El cliente sigue por texto y todo funciona.
+      const rawTxt = metaInboundBody(
+        { from: tel, id: "wamid.audio2", timestamp: "1756100131", type: "text", text: { body: "1" } },
+        tel
+      );
+      metaHook.processMetaWebhook(rawTxt, firmaMeta(rawTxt));
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "confirmed");
+    });
+  });
+
+  await test("BOTÓN OBSOLETO · pulsar 'Confirmar' sin pedidos activos: silencio, sin errores ni respuestas raras", async () => {
+    const tel = "34600000136"; // sin pedidos
+    const raw = metaInboundBody(
+      { from: tel, id: "wamid.stale1", timestamp: "1756100140", type: "interactive",
+        interactive: { type: "button_reply", button_reply: { id: "confirm_order", title: "Confirmar" } } },
+      tel
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === tel).length, 0, "sin respuesta automática");
+    });
+  });
+
+  await test("ROLLBACK · el fallback de un interactivo encolado en cloud sale como texto 1/2/3 por Baileys", async () => {
+    // Escenario real de rollback: hay filas interactivas pendientes cuando
+    // se vuelve a WHATSAPP_PROVIDER=baileys. La política es PROVEEDOR
+    // RESUELTO AL ENVIAR: el loop de Baileys no conoce message_type y manda
+    // `content` — que es EXACTAMENTE el fallback 1/2/3. Nada se pierde, nada
+    // se duplica (el claim es el mismo), y el cliente recibe el flujo viejo.
+    const tel = "34600000137";
+    const orden = mkMulti("971003", "6003", tel);
+    const spec = interactive.buildConfirmationInteractive(db.getOrderById(orden.id)!);
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "encolado como interactivo");
+    assert.match(item.content, /1 — Confirmar/, "y su content ES el fallback: Baileys lo manda tal cual");
+    assert.equal(item.type, "text", "para el loop de Baileys es un texto normal (columna vieja `type`)");
+  });
+
+  /** getOrdersDueInitialSend() procesa como mucho 20 por tick (created_at
+   *  ASC); a esta altura del fichero puede haber otros pending_send más
+   *  viejos sueltos de tests anteriores por delante en la cola. Se repite
+   *  el tick hasta que a ESTE pedido concreto le toque, con un tope de
+   *  seguridad para no colgarse si algo real se rompe. */
+  async function tickHastaQueSalgaDe(orderId: number, estadoInicial: string): Promise<void> {
+    for (let i = 0; i < 25; i++) {
+      if (db.getOrderById(orderId)!.status !== estadoInicial) return;
+      await runSchedulerTick(Math.floor(Date.now() / 1000));
+    }
+    throw new Error(`el pedido ${orderId} sigue en ${estadoInicial} tras 25 ticks`);
+  }
+
+  await test("BOTONES · el scheduler manda la confirmación inicial como interactivo cuando el proveedor activo es cloud_api", async () => {
+    const tel = "34600000138";
+    // BUG1: dentro de la ventana de 24h (el cliente ya escribió) es cuando
+    // corresponde el interactivo — fuera de ventana ahora es una plantilla
+    // (ver los tests "BUG1 ·" más abajo, que cubren ese otro caso).
+    const convoPrevia = db.getOrCreateConversation(tel, "Cliente Botones");
+    db.insertMessage(convoPrevia.id, "user", "hola");
+    const o = mkOrder("971101", "6101", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "cloud_api: la confirmación inicial sale como interactivo");
+    const payload = JSON.parse(item.payload_json!) as {
+      kind: string;
+      buttons: Array<{ id: string; title: string }>;
+    };
+    assert.equal(payload.kind, "interactive_buttons");
+    assert.deepEqual(
+      payload.buttons.map((b) => b.id),
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE],
+      "los tres botones, en los payloads deterministas que interpreta handleOrderButtonReply"
+    );
+    assert.match(
+      item.content,
+      /1 — Confirmar/,
+      "el fallback (panel / rollback) es el de buildConfirmationInteractive, no el texto plano de messages.ts"
+    );
+  });
+
+  await test("BOTONES · con Baileys (proveedor por defecto) la confirmación inicial sigue en texto plano — sin regresión", async () => {
+    const tel = "34600000139";
+    const o = mkOrder("971102", "6102", tel);
+    await tickHastaQueSalgaDe(o.id, "pending_send"); // sin WHATSAPP_PROVIDER: default baileys
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "text", "baileys: sigue siendo texto plano, exactamente como antes de este cambio");
+    assert.equal(item.payload_json, null, "sin payload interactivo para Baileys — nada nuevo que interpretar");
+    assert.match(item.content, /1 - Todo correcto/);
+  });
+
+  await test("COEXISTENCIA · los ECOS del móvil de Pedro jamás disparan el flujo: sin bucles posibles", async () => {
+    // Pregunta abierta de Pedro (CONTEXTO-2026-08-25 §6.2): al activar
+    // coexistencia llegarán smb_message_echoes (lo que el negocio escribe
+    // desde el móvil). DOS capas impiden el bucle:
+    //  1. El parser descarta ENTERO cualquier campo que no sea "messages".
+    const eco = metaIn.parseMetaWebhookPayload({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [{ field: "smb_message_echoes", value: { message_echoes: [{ from: "34641308254", id: "wamid.echo1", type: "text", text: { body: "respuesta manual de Pedro" } }] } }] }],
+    });
+    assert.equal(eco.messages.length, 0, "un eco no produce NINGÚN mensaje entrante");
+    for (const campo of ["smb_app_state_sync", "history"]) {
+      const otro = metaIn.parseMetaWebhookPayload({
+        object: "whatsapp_business_account",
+        entry: [{ changes: [{ field: campo, value: { messages: [{ from: "34600000140", id: "wamid.x", type: "text", text: { body: "1" } }] } }] }],
+      });
+      assert.equal(otro.messages.length, 0, `${campo} se descarta entero`);
+    }
+
+    //  2. Y aunque un eco llegara disfrazado dentro de "messages" con el
+    //     número del PROPIO negocio como remitente: ese número no tiene
+    //     pedidos activos → handled=false → silencio, cero respuestas.
+    const raw = metaInboundBody(
+      { from: "34641308254", id: "wamid.echo2", timestamp: "1756100200", type: "text", text: { body: "todo correcto" } },
+      "34641308254"
+    );
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(raw, firmaMeta(raw));
+      assert.equal(r.status, 200);
+      assert.equal(db.getPendingOutbox(500).filter((x) => x.phone === "34641308254").length, 0, "cero auto-respuestas al propio número");
+    });
+  });
+
+  await test("PLANTILLAS · el estado (APPROVED/REJECTED) llega al feed de eventos, con el rechazo como warning", async () => {
+    // Antes se descartaba en silencio: la única forma de saber si la
+    // plantilla del piloto se aprobó era mirar WhatsApp Manager a mano.
+    const cuerpo = JSON.stringify({
+      object: "whatsapp_business_account",
+      entry: [{ changes: [
+        { field: "message_template_status_update", value: { message_template_name: "order_confirmation_request", event: "APPROVED" } },
+        { field: "message_template_status_update", value: { message_template_name: "order_reminder", event: "REJECTED", reason: "INVALID_FORMAT" } },
+      ] }],
+    });
+    await withEnv(META_ENV, () => {
+      const r = metaHook.processMetaWebhook(cuerpo, firmaMeta(cuerpo));
+      assert.equal(r.status, 200);
+      const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 100 });
+      const aprobada = evs.find((e) => e.event_type === "meta_template_status" && /order_confirmation_request.*APPROVED/.test(e.message));
+      const rechazada = evs.find((e) => e.event_type === "meta_template_status" && /order_reminder.*REJECTED/.test(e.message));
+      assert.ok(aprobada, "la aprobación se ve en el panel");
+      assert.equal(aprobada!.severity, "info");
+      assert.ok(rechazada, "el rechazo también, con su motivo");
+      assert.equal(rechazada!.severity, "warning", "un rechazo bloquea mensajes fuera de ventana: warning");
+      assert.match(rechazada!.message, /INVALID_FORMAT/);
+    });
+  });
+
+  await test("BUG1 · scheduler de punta a punta: pedido nuevo en cloud_api (nunca escribió, fuera de ventana) sale como PLANTILLA, no falla con outside_24h_window", async () => {
+    const tel = "34600177601"; // nunca escribió a este número: fuera de ventana por definición
+    const o = mkOrder("972601", "7601", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "template", "el bug real: antes esto salía como interactive_buttons y fallaba terminal");
+    assert.equal(item.template_name, "order_confirmation_request");
+    assert.equal(item.failure_reason, null, "no debe fallar — es justo el caso que BUG1 arregla");
+    const payload = JSON.parse(item.payload_json!) as { kind: string; buttonPayloads?: string[] };
+    assert.equal(payload.kind, "template");
+    assert.deepEqual(payload.buttonPayloads, [
+      confirmMod.BUTTON_PAYLOADS.CONFIRM,
+      confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS,
+      confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE,
+    ]);
+  });
+
+  await test("BUG1 · scheduler: si el cliente YA escribió (dentro de ventana), sigue mandando el interactivo normal — no gasta plantilla de más", async () => {
+    const tel = "34600177602";
+    const convo = db.getOrCreateConversation(tel, "Cliente Ventana");
+    db.insertMessage(convo.id, "user", "hola, ya he escrito antes"); // abre la ventana
+    const o = mkOrder("972602", "7602", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "dentro de ventana: interactivo normal, la plantilla se cobra y aquí no hace falta");
+    assert.equal(item.template_name, null);
+  });
+
+  await test("T1 · degradación EN ENVÍO: la ventana caduca con la fila en cola → sale la plantilla y la DB dice la verdad", async () => {
+    const tel = "34600177610";
+    const convo = db.getOrCreateConversation(tel, "Cliente Caducado");
+    db.insertMessage(convo.id, "user", "hola"); // dentro de ventana AL ENCOLAR
+
+    const orden = mkMulti("972610", "7610", tel);
+    const spec = interactive.buildConfirmationOutbound(db.getOrderById(orden.id)!, true);
+    assert.equal(spec.message.kind, "interactive_buttons", "dentro de ventana: se encola interactivo");
+    assert.ok(spec.templateFallback, "con su plantilla equivalente adjunta");
+    let itemId = 0;
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+      itemId = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!.id;
+    });
+
+    // El provider falso: el interactivo muere por ventana; la plantilla sale.
+    const enviados: string[] = [];
+    const prov = {
+      name: "cloud_api" as const,
+      isConfigured: () => true,
+      getHealth: () => ({ provider: "cloud_api" as const, configured: true, available: true, detail: "" }),
+      markAsRead: async () => {},
+      send: async (to: string, m: import("../src/lib/whatsapp/provider").OutboundWhatsAppMessage) => {
+        if (to !== tel) return { ok: true, providerMessageId: `wamid.ajenoT1.${enviados.length}` };
+        enviados.push(m.kind);
+        if (m.kind === "template") return { ok: true, providerMessageId: "wamid.degradado1" };
+        return { ok: false, providerMessageId: null, error: "outside_24h_window: sesión caducada", retryable: false };
+      },
+    };
+    for (let i = 0; i < 50 && db.getPendingOutbox(500).some((x) => x.id === itemId); i++) {
+      await metaOutbox.runCloudOutboxTick(prov);
+    }
+
+    assert.deepEqual(enviados, ["interactive_buttons", "template"], "un intento interactivo, luego LA plantilla — jamás dos mensajes al cliente");
+    const fila = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(itemId) as {
+      sent: number; message_type: string; template_name: string | null; provider_message_id: string | null;
+      failure_reason: string | null; failed_at: number | null;
+    };
+    assert.equal(fila.sent, 1);
+    assert.equal(fila.message_type, "template", "la DB dice lo que salió DE VERDAD, no lo que se encoló");
+    assert.equal(fila.template_name, "order_confirmation_request");
+    assert.equal(fila.provider_message_id, "wamid.degradado1");
+    assert.match(fila.failure_reason ?? "", /fallback_reason=outside_24h_window/, "la degradación queda auditada");
+    assert.equal(fila.failed_at, null, "degradado con éxito NO es un fallo");
+  });
+
+  await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {
+    const parsed = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n1", timestamp: "1756100080", type: "button", button: { payload: "confirm_order", text: "Confirmar" } },
+      "34600000123"
+    )));
+    assert.equal(parsed.messages[0].kind, "button_reply", "el botón de PLANTILLA también es button_reply");
+    assert.equal(parsed.messages[0].payload, "confirm_order");
+
+    const audio = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n2", timestamp: "1756100081", type: "audio", audio: {} },
+      "34600000123"
+    )));
+    assert.equal(audio.messages[0].kind, "audio");
+
+    const raro = metaIn.parseMetaWebhookPayload(JSON.parse(metaInboundBody(
+      { from: "34600000123", id: "wamid.n3", timestamp: "1756100082", type: "sticker" },
+      "34600000123"
+    )));
+    assert.equal(raro.messages[0].kind, "unknown", "lo no reconocido es visible, no descartado en silencio");
+    assert.equal(metaIn.parseMetaWebhookPayload({ object: "otra_cosa" }).messages.length, 0);
+  });
+
+  await test("META · builders: límites de Meta respetados en los mensajes reales de Casamable", () => {
+    const tel = "34600000124";
+    const o1 = mkMulti("970109", "5009", tel, { product_summary: "Cortaúñas y Pulidor Eléctrico 3 en 1 Profesional" });
+    const o2 = mkMulti("970110", "5010", tel, { product_summary: "Espejo Retrovisor" });
+
+    const conf = interactive.buildConfirmationInteractive(db.getOrderById(o1.id)!);
+    assert.equal(metaProv.validateOutbound(conf.message), null, "la confirmación pasa los límites");
+    assert.match(conf.fallbackText, /1 — Confirmar/, "el fallback ES el flujo 1/2/3");
+
+    const lista = interactive.buildOrderSelectionList([db.getOrderById(o1.id)!, db.getOrderById(o2.id)!]);
+    assert.equal(metaProv.validateOutbound(lista.message), null, "la lista pasa los límites (título ≤24, desc ≤72)");
+    if (lista.message.kind === "interactive_list") {
+      assert.equal(lista.message.rows[0].id, "select_order:5009", "payload determinista, no texto visible");
+    }
+  });
+
+  await test("T3 · el panel ordena por ordered_at (fecha REAL de compra), no por cuándo se importó", () => {
+    // Un backfill importa HOY un pedido comprado hace días: debe aparecer
+    // DEBAJO de los comprados ayer, aunque su fila sea la más nueva.
+    const tel = "34600177620";
+    const viejoComprado = mkMulti("972620", "9620", tel);   // comprado hace 5 días, importado ahora
+    const nuevoComprado = mkMulti("972621", "9621", tel);   // comprado hace 1 hora
+    const ahora = Math.floor(Date.now() / 1000);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora - 5 * 86400, viejoComprado.id);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(ahora - 3600, nuevoComprado.id);
+
+    const mios = new Set([viejoComprado.id, nuevoComprado.id]);
+    const orden = db.listOrders(undefined, 2000).filter((o) => mios.has(o.id)).map((o) => o.shopify_order_number);
+    assert.deepEqual(orden, ["9621", "9620"], "manda la fecha de compra, no la de import");
+  });
+
+  // ============ 58 · Cierre 26-08: llamadas fail-closed, validador, salud ============
+  console.log("\n— Cierre: llamadas fail-closed y validador de prompt —");
+
+  const promptVal = await import("../src/lib/calls/prompt-validator");
+  const callsCfg58 = await import("../src/lib/calls/config");
+
+  await test("CALLS · FAIL-CLOSED en piloto: allowlist vacía + TEST_MODE=1 NO llama a nadie", async () => {
+    // La trampa real: CALLS_ALLOWLIST vacía significaba "sin restricción" —
+    // lo contrario que TEST_PHONE_ALLOWLIST. Abrir el kill switch con la
+    // lista sin rellenar habría llamado a TODOS los clientes.
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
+    });
+    await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
+    });
+    // Compatibilidad documentada: en producción real (TEST_MODE=0) vacía
+    // sigue siendo "sin restricción" — con el kill switch y el cap delante.
+    await withEnv({ TEST_MODE: "0", CALLS_ALLOWLIST: "" }, () => {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000003"), true);
+    });
+  });
+
+  await test("PROMPT · el validador caza exactamente los fallos del incidente v5", () => {
+    const v5malo =
+      "Hola {{nombre_cliente}}, tu pedido {{numero_pedido | digito a digito}} de {{producto_inventado}} " +
+      "llegará a {direccion} el [fecha_entrega].";
+    const r = promptVal.validatePromptPlaceholders(v5malo);
+    assert.equal(r.ok, false);
+    const kinds = r.issues.map((i) => i.kind).sort();
+    assert.ok(kinds.includes("template_filter"), "el '| dígito a dígito' que el agente leyó en voz alta");
+    assert.ok(kinds.includes("unknown_placeholder"), "variable fuera del contrato");
+    assert.ok(kinds.includes("single_brace"), "{direccion} con una llave no se sustituye");
+    assert.ok(kinds.includes("bracket_placeholder"), "[fecha_entrega] se leería tal cual");
+    assert.deepEqual(r.used, ["nombre_cliente"], "solo la válida cuenta como usada");
+
+    const v6bueno =
+      "Hola {{nombre_cliente}}, llamo de Casamable por tu pedido {{numero_pedido}}: " +
+      "{{unidades}} de {{producto}} por {{importe_total}}, a entregar en {{direccion}}, {{localidad}}.";
+    assert.equal(promptVal.validatePromptPlaceholders(v6bueno).ok, true);
+  });
+
+  await test("PROMPT · contrato sincronizado: las variables del validador SON las de payload.ts", () => {
+    // Si alguien añade una variable al payload sin tocar el validador (o al
+    // revés), esto falla y el desfase se ve aquí, no en una llamada real.
+    const payloadMod = fs.readFileSync(path.join(process.cwd(), "src/lib/calls/payload.ts"), "utf8");
+    const ini = payloadMod.indexOf("variables: {");
+    const fin = payloadMod.indexOf("},", ini);
+    const cuerpo = payloadMod.slice(ini, fin);
+    // Coge tanto `clave: valor` como el shorthand `clave,` (producto, direccion).
+    const delPayload = [...cuerpo.matchAll(/^\s{6}([a-z_]+)[,:]/gm)].map((m) => m[1]).sort();
+    const delValidador = [...promptVal.ALLOWED_PROMPT_VARIABLES].sort();
+    assert.deepEqual(delValidador, delPayload, "payload.ts y prompt-validator.ts deben declarar LAS MISMAS variables");
+  });
+
+  await test("CALLS HEALTH · dice la verdad: kill switch, allowlist del piloto y saldo no comprobable", async () => {
+    const H = await import("../src/lib/system/health-integrations");
+    // Los tests de E7 pueden dejar ajustes en `settings` (tienen prioridad
+    // sobre el env): se fija el estado de partida explícitamente.
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_allowlist", "");
+    const h1 = H.getCallsHealth();
+    assert.equal(h1.enabled, false, "defaults: apagadas");
+    assert.equal(h1.status, "healthy", "apagado a propósito es sano, no un fallo");
+    assert.equal(h1.paymentStatus, "unknown_manual_check_required", "jamás un healthy falso sobre el saldo");
+
+    // Encendidas sin allowlist en modo prueba → warning: el fail-closed está
+    // bloqueando todo y hay que decirlo, no dejar que parezca que funciona.
+    await withEnv({ TEST_MODE: "1" }, () => {
+      db.setSetting("ai_calls_enabled", "1");
+      const h2 = H.getCallsHealth();
+      assert.equal(h2.status, "warning");
+      assert.match(h2.message, /fail-closed|allowlist/i);
+      db.setSetting("ai_calls_enabled", "0"); // dejarlo como estaba
+    });
+  });
+
+  await test("DROPI · diagnóstico de vendor: caza exactamente el fallo real del 23-08", () => {
+    const diag = require("../src/lib/suppliers/dropi/diagnostics") as typeof import("../src/lib/suppliers/dropi/diagnostics");
+    // El caso real: vendor "Casamable" cuando la app exige "Dropi PRO".
+    const roto = diag.diagnoseProductVendor({
+      id: 1, title: "Limpiador Ultrasónico", vendor: "Casamable",
+      variants: [{ sku: "LIMPIADOR-24800" }],
+    });
+    assert.equal(roto.vendorOk, false);
+    assert.equal(roto.vendorEsperado, "Dropi PRO");
+
+    const bien = diag.diagnoseProductVendor({
+      id: 2, title: "Limpiador", vendor: "Dropi PRO",
+      variants: [{ sku: "LIMPIADOR-24800" }, { sku: "" }],
+    });
+    assert.equal(bien.vendorOk, true);
+    assert.equal(bien.variantsSinSku, 1, "y además cuenta variantes sin SKU");
+  });
+
+  await test("DROPI · sku=null: distingue los cuatro casos en vez de encogerse de hombros", () => {
+    const diag = require("../src/lib/suppliers/dropi/diagnostics") as typeof import("../src/lib/suppliers/dropi/diagnostics");
+    const pedido = (lineas: unknown[]) => ({ raw_payload: JSON.stringify({ line_items: lineas }) });
+
+    // Campo ausente vs vacío vs presente: en NUESTRA tabla los tres acaban
+    // igual (el parser hace trim||null) — el crudo es la única forma de saber.
+    const d = diag.diagnoseSkuNull(pedido([
+      { title: "Sin campo", product_id: 1, variant_id: 2 },
+      { title: "Vacío", product_id: 1, variant_id: 3, sku: "" },
+      { title: "Con SKU", product_id: 1, variant_id: 4, sku: "10428" },
+      { title: "Seguro de Envío" },
+    ]));
+    assert.equal(d[0].cause, "sku_field_absent");
+    assert.equal(d[1].cause, "variant_sku_empty");
+    assert.match(d[1].detail, /ficha del producto/, "dice DÓNDE se arregla");
+    assert.equal(d[2].cause, "sku_present_parser_dropped");
+    assert.equal(d[3].cause, "service_line_expected", "el seguro sin SKU es lo normal, no un problema");
+
+    assert.equal(diag.diagnoseSkuNull({ raw_payload: null })[0].cause, "no_payload");
+  });
+
+  await test("DROPI · el diagnóstico es SOLO lectura: ni un solo UPDATE ni llamada de escritura", () => {
+    for (const rel of ["src/lib/suppliers/dropi/diagnostics.ts", "scripts/dropi-diagnose.ts"]) {
+      const src = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const pat of [/\bUPDATE\b/i, /\bINSERT\s+INTO\b/i, /\bDELETE\s+FROM\b/i, /method:\s*["'](POST|PUT|PATCH|DELETE)/i, /sendWhatsAppMessage/]) {
+        assert.ok(!pat.test(src), `${rel} no debe contener ${pat}`);
+      }
+    }
   });
 
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
@@ -6126,6 +8892,511 @@ async function main(): Promise<void> {
       assert.ok(!vistos.includes(id), `${id} no se vuelve a pedir en la segunda pasada`);
     }
     assert.equal(db.getSetting("dropea_reconcile_last_resource_id"), "", "checkpoint limpio al terminar el recorrido completo");
+  });
+
+  // ============ T1 · ordered_at (fecha real de compra vs. fecha de import) ============
+  console.log("\n— T1: ordered_at —");
+
+  await test("T1 migración: aditiva — añade la columna a una tabla orders pre-T1, NULL por defecto", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "t1-empty.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    db.migrateOrderedAt(raw);
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.ok(cols.includes("ordered_at"));
+
+    raw.prepare("INSERT INTO orders (shopify_order_id) VALUES ('t1-empty-1')").run();
+    const fila = raw.prepare("SELECT ordered_at FROM orders WHERE shopify_order_id = 't1-empty-1'").get();
+    assert.equal(fila.ordered_at, null);
+    raw.close();
+  });
+
+  await test("T1 migración: correr dos/tres veces es un no-op — no duplica la columna ni pisa valores ya escritos", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "t1-twice.db"));
+    raw.exec(
+      "CREATE TABLE orders (id INTEGER PRIMARY KEY AUTOINCREMENT, shopify_order_id TEXT UNIQUE NOT NULL, status TEXT NOT NULL DEFAULT 'pending_send')"
+    );
+    raw.prepare("INSERT INTO orders (shopify_order_id) VALUES ('t1-twice-1')").run();
+
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "primera pasada");
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "segunda pasada");
+    assert.doesNotThrow(() => db.migrateOrderedAt(raw), "tercera pasada");
+
+    const cols = raw.prepare("PRAGMA table_info(orders)").all().map((c: { name: string }) => c.name);
+    assert.equal(cols.filter((c: string) => c === "ordered_at").length, 1, "la columna no se duplica");
+
+    raw.prepare("UPDATE orders SET ordered_at = 1700000000 WHERE shopify_order_id = 't1-twice-1'").run();
+    db.migrateOrderedAt(raw);
+    const fila = raw.prepare("SELECT ordered_at FROM orders WHERE shopify_order_id = 't1-twice-1'").get();
+    assert.equal(fila.ordered_at, 1700000000, "un valor ya escrito no se pisa al volver a migrar");
+    raw.close();
+  });
+
+  await test("T1 normalizeOrder: orderedAt sale de created_at (ISO → epoch); ausente o inválido → null", () => {
+    const conFecha = normalizeOrder(codPayload({ id: 991001, order_number: 5001, created_at: "2026-01-15T10:30:00Z" }) as never);
+    assert.equal(conFecha.orderedAt, Math.floor(Date.parse("2026-01-15T10:30:00Z") / 1000));
+
+    const sinFecha = normalizeOrder(codPayload({ id: 991002, order_number: 5002, created_at: undefined }) as never);
+    assert.equal(sinFecha.orderedAt, null);
+
+    const fechaRota = normalizeOrder(codPayload({ id: 991003, order_number: 5003, created_at: "no-es-una-fecha" }) as never);
+    assert.equal(fechaRota.orderedAt, null);
+  });
+
+  await test("T1 webhook orders/create: guarda ordered_at desde el payload, DISTINTO del created_at local (que es cuándo se insertó la fila)", () => {
+    const antesDeInsertar = Math.floor(Date.now() / 1000);
+    const raw = JSON.stringify(
+      codPayload({ id: 991101, order_number: 5101, created_at: "2026-01-01T08:00:00Z" })
+    );
+    processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    const o = db.getOrderByShopifyId("991101")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-01T08:00:00Z") / 1000), "ordered_at = fecha real de compra");
+    assert.ok(o.created_at >= antesDeInsertar, "created_at (local) sigue siendo el instante de inserción, no la fecha de compra");
+    assert.notEqual(o.ordered_at, o.created_at, "en este caso son fechas MUY distintas — no deben confundirse");
+  });
+
+  await test("T1 webhook orders/create: sin created_at en el payload, ordered_at se queda NULL (nunca se inventa)", () => {
+    const payload = codPayload({ id: 991102, order_number: 5102 });
+    delete (payload as Record<string, unknown>).created_at;
+    const raw = JSON.stringify(payload);
+    processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    const o = db.getOrderByShopifyId("991102")!;
+    assert.equal(o.ordered_at, null);
+  });
+
+  await test("T1 backfill (E3) — insert_cancelled: ordered_at también se guarda para un pedido cancelado del histórico", async () => {
+    const cancelado = backfillOrder({
+      id: 991201,
+      order_number: 5201,
+      cancelled_at: "2026-02-01T12:00:00Z",
+      created_at: "2026-01-20T09:00:00Z",
+    });
+    await backfill.runShopifyBackfill({
+      dryRun: false,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      pageFetcher: async () => ({ orders: [cancelado], nextCursor: null }),
+    });
+    const o = db.getOrderByShopifyId("991201")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-20T09:00:00Z") / 1000));
+  });
+
+  await test("T1 backfill (E3) — insert_in_progress de punta a punta: ordered_at queda escrito en el pedido histórico insertado", async () => {
+    const pedido = backfillOrder({
+      id: 991210,
+      order_number: 5210,
+      fulfillment_status: "fulfilled",
+      line_items: lineas({ fisicasDespachadas: 1 }),
+      created_at: "2026-01-10T09:00:00Z",
+      updated_at: "2026-01-12T09:00:00Z",
+    });
+    await backfill.runShopifyBackfill({
+      dryRun: false,
+      scopeFetcher: async () => ["read_orders", "read_all_orders"],
+      pageFetcher: async () => ({ orders: [pedido], nextCursor: null }),
+    });
+    const o = db.getOrderByShopifyId("991210")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-10T09:00:00Z") / 1000));
+  });
+
+  await test("T1 reconciliación (F3): un orders/create perdido también se importa con ordered_at resuelto", async () => {
+    const remoto = backfillOrder({
+      id: 991301,
+      order_number: 5301,
+      fulfillment_status: "fulfilled",
+      created_at: "2026-01-05T09:00:00Z",
+      updated_at: "2026-01-06T09:00:00Z",
+    });
+    await reconcile.runShopifyReconcile({ fetcher: async () => [remoto] });
+    const o = db.getOrderByShopifyId("991301")!;
+    assert.equal(o.ordered_at, Math.floor(Date.parse("2026-01-05T09:00:00Z") / 1000));
+  });
+
+  await test("T1 salvaguarda estructural: el backfill de ordered_at no importa WhatsApp/Baileys, ni de lejos", () => {
+    const prohibido = [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+    ];
+    for (const rel of ["src/lib/shopify/backfill-ordered-at.ts", "scripts/backfill-ordered-at.ts"]) {
+      const contenido = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const patron of prohibido) {
+        assert.ok(!patron.test(contenido), `${rel} no debe contener ${patron}`);
+      }
+    }
+  });
+
+
+  // ============ T4 · Investigación de pedidos saltados por el backfill ============
+  console.log("\n— T4: investigación de skip_has_own_source —");
+
+  await test("T4 listSkippedByOwnSource: incluye closure_source o closure_status≠unknown; excluye los totalmente unknown/null", () => {
+    const conFuente = mkOrder("974001", "3001", "34600199001");
+    db.setOrderClosure(conFuente.id, "in_progress", "shopify", 1_700_000_000);
+
+    const sinFuenteNiTocar = mkOrder("974002", "3002", "34600199002"); // unknown + source null: fuera
+
+    // Caso de borde: status≠unknown pero source NULL (no debería pasar en la
+    // práctica vía setOrderClosure, pero decideBackfillAction también lo
+    // trata como skip_has_own_source — se fuerza por SQL para probar la regla tal cual).
+    const statusSinFuente = mkOrder("974003", "3003", "34600199003");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET closure_status = 'in_progress' WHERE id = ?")
+      .run(statusSinFuente.id);
+
+    const candidatos = investigateSkipped.listSkippedByOwnSource();
+    const idsCandidatos = new Set(candidatos.map((c) => c.id));
+
+    assert.ok(idsCandidatos.has(conFuente.id), "con closure_source: SÍ es candidato");
+    assert.ok(idsCandidatos.has(statusSinFuente.id), "con closure_status≠unknown aunque source sea NULL: SÍ es candidato");
+    assert.ok(!idsCandidatos.has(sinFuenteNiTocar.id), "totalmente unknown/NULL: NO es candidato");
+  });
+
+  await test("T4 compareLocalToLive: match, discrepancia, sin señal (no encontrado), sin señal (Shopify no dice nada nuevo)", () => {
+    const local = (status: import("../src/lib/db").ClosureStatus): import("../src/lib/shopify/investigate-skipped-backfill").SkippedCandidate => ({
+      id: 1,
+      shopifyOrderId: "999001",
+      shopifyOrderNumber: "9001",
+      closureStatus: status,
+      closureSource: "shopify",
+      closureAt: 1_700_000_000,
+    });
+
+    // Match: local dice in_progress, Shopify (fulfilled) también dice in_progress.
+    // Adaptado al fulfillment POR LÍNEA de esta rama (el PR venía de main):
+    // el global "fulfilled" solo cuenta si las líneas físicas salieron.
+    const remotoEnCurso = backfillOrder({ id: 999001, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T10:00:00Z" });
+    const match = investigateSkipped.compareLocalToLive(local("in_progress"), remotoEnCurso, false);
+    assert.equal(match.kind, "match");
+
+    // Discrepancia: local dice in_progress, Shopify AHORA dice cancelled — el
+    // caso sospechoso que motivó T4 (una cancelación que nunca se reflejó).
+    const remotoCancelado = backfillOrder({ id: 999001, cancelled_at: "2026-08-22T10:00:00Z" });
+    const discrepancia = investigateSkipped.compareLocalToLive(local("in_progress"), remotoCancelado, false);
+    assert.equal(discrepancia.kind, "discrepancy");
+    assert.equal(discrepancia.liveSignal?.status, "cancelled");
+
+    // Sin señal: Shopify no devolvió el pedido (borrado, id equivocado...).
+    const noEncontrado = investigateSkipped.compareLocalToLive(local("in_progress"), null, false);
+    assert.equal(noEncontrado.kind, "no_live_signal");
+    assert.equal(noEncontrado.notFoundInShopify, true);
+
+    // Sin señal: Shopify lo devuelve pero no tiene NADA que decir del cierre
+    // (sigue abierto, sin fulfillment ni cancelación) — no es una discrepancia,
+    // es "todavía no hay nada nuevo que comparar".
+    const remotoAbierto = backfillOrder({ id: 999001 });
+    const sinSeñalTodavia = investigateSkipped.compareLocalToLive(local("in_progress"), remotoAbierto, true);
+    assert.equal(sinSeñalTodavia.kind, "no_live_signal");
+    assert.equal(sinSeñalTodavia.notFoundInShopify, undefined, "esto es distinto de 'no encontrado'");
+    assert.equal(sinSeñalTodavia.highlighted, true, "el flag de señalado se propaga tal cual");
+  });
+
+  await test("T4 runInvestigation: orquesta con un fetcher inyectado, cuenta bien, y respeta highlightOrderNumbers", async () => {
+    const a = mkOrder("974101", "3101", "34600199101");
+    db.setOrderClosure(a.id, "in_progress", "shopify", 1_700_000_000); // se le va a llevar la contraria
+
+    const b = mkOrder("974102", "3102", "34600199102");
+    db.setOrderClosure(b.id, "cancelled", "shopify", 1_700_000_000); // va a coincidir
+
+    const vistos: string[] = [];
+    const fetcher: import("../src/lib/shopify/investigate-skipped-backfill").OrdersByIdFetcher = async (ids) => {
+      vistos.push(...ids);
+      return ids
+        .filter((id) => id === "974101" || id === "974102")
+        .map((id) =>
+          id === "974101"
+            ? backfillOrder({ id: 974101, cancelled_at: "2026-08-23T10:00:00Z" }) // discrepancia real
+            : backfillOrder({ id: 974102, cancelled_at: "2026-08-01T10:00:00Z" }) // coincide
+        );
+    };
+
+    const report = await investigateSkipped.runInvestigation({ fetcher, highlightOrderNumbers: ["3101"] });
+
+    assert.ok(vistos.includes("974101") && vistos.includes("974102"), "el fetcher recibe los ids de Shopify, no los locales");
+    const miItemA = report.items.find((i) => i.local.id === a.id)!;
+    const miItemB = report.items.find((i) => i.local.id === b.id)!;
+    assert.equal(miItemA.kind, "discrepancy");
+    assert.equal(miItemA.highlighted, true, "3101 estaba en highlightOrderNumbers");
+    assert.equal(miItemB.kind, "match");
+    assert.equal(miItemB.highlighted, false);
+  });
+
+  await test("T1 resolveOrderedAtFromRawPayload: los cuatro casos puros (resuelto, sin payload, JSON roto, sin fecha utilizable)", () => {
+    const okPayload = JSON.stringify({ created_at: "2026-03-01T10:00:00Z" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(okPayload), {
+      kind: "resolved",
+      orderedAt: Math.floor(Date.parse("2026-03-01T10:00:00Z") / 1000),
+    });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(null), { kind: "unresolved_no_payload" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(""), { kind: "unresolved_no_payload" });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload("{esto no es json"), {
+      kind: "unresolved_unparseable",
+    });
+    assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(JSON.stringify({ id: 1 })), {
+      kind: "unresolved_no_date",
+    });
+    assert.deepEqual(
+      backfillOrderedAt.resolveOrderedAtFromRawPayload(JSON.stringify({ created_at: "no-es-fecha" })),
+      { kind: "unresolved_no_date" }
+    );
+  });
+
+  await test("T1 runBackfillOrderedAt (dry-run): decide todo, no escribe NADA, el desglose cuadra", () => {
+    const conPayloadValido = mkOrder("991401", "5401", "34600119401");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-04-01T10:00:00Z" }), conPayloadValido.id);
+
+    const sinPayload = mkOrder("991402", "5402", "34600119402"); // mkOrder no pone raw_payload
+
+    const conPayloadRoto = mkOrder("991403", "5403", "34600119403");
+    db.systemDbHandle().prepare("UPDATE orders SET raw_payload = ? WHERE id = ?").run("{roto", conPayloadRoto.id);
+
+    const conPayloadSinFecha = mkOrder("991404", "5404", "34600119404");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ id: 1 }), conPayloadSinFecha.id);
+
+    const report = backfillOrderedAt.runBackfillOrderedAt({ dryRun: true });
+    assert.ok(report.total >= 4, "al menos las 4 filas de este test están pendientes");
+    assert.ok(report.resolved >= 1);
+    assert.ok(report.unresolvedNoPayload >= 1);
+    assert.ok(report.unresolvedUnparseable >= 1);
+    assert.ok(report.unresolvedNoDate >= 1);
+
+    // Dry-run de verdad: ninguna de las 4 filas de este test quedó escrita.
+    for (const id of [conPayloadValido.id, sinPayload.id, conPayloadRoto.id, conPayloadSinFecha.id]) {
+      assert.equal(db.getOrderById(id)!.ordered_at, null, `id ${id} no debe tocarse en dry-run`);
+    }
+  });
+
+  await test("T1 runBackfillOrderedAt (aplicado): escribe SOLO las filas resolubles; las demás quedan NULL", () => {
+    const resoluble = mkOrder("991501", "5501", "34600119501");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-05-01T10:00:00Z" }), resoluble.id);
+
+    const irresoluble = mkOrder("991502", "5502", "34600119502"); // sin raw_payload
+
+    const yaResuelta = mkOrder("991503", "5503", "34600119503");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET ordered_at = 1700000000, raw_payload = ? WHERE id = ?")
+      .run(JSON.stringify({ created_at: "2026-06-01T10:00:00Z" }), yaResuelta.id);
+
+    const totalAntes = backfillOrderedAt.runBackfillOrderedAt({ dryRun: true }).total;
+    const report = backfillOrderedAt.runBackfillOrderedAt({ dryRun: false });
+    assert.equal(report.total, totalAntes, "el segundo dry-run de arriba no debe haber tocado nada");
+
+    assert.equal(
+      db.getOrderById(resoluble.id)!.ordered_at,
+      Math.floor(Date.parse("2026-05-01T10:00:00Z") / 1000),
+      "la fila resoluble queda escrita"
+    );
+    assert.equal(db.getOrderById(irresoluble.id)!.ordered_at, null, "sin raw_payload, se queda NULL — no se inventa nada");
+    assert.equal(
+      db.getOrderById(yaResuelta.id)!.ordered_at,
+      1700000000,
+      "una fila que YA tenía ordered_at no se toca ni se recalcula desde su raw_payload"
+    );
+
+    // Repetir con --apply es idempotente: nada nuevo que resolver.
+    const segundaPasada = backfillOrderedAt.runBackfillOrderedAt({ dryRun: false });
+    assert.equal(segundaPasada.resolved, 0, "las filas resolubles ya se resolvieron en la pasada anterior");
+  });
+
+  // ============ T2 · MAX_ORDER_AGE_MINUTES contra ordered_at ============
+  console.log("\n— T2: antigüedad medida por ordered_at, no por created_at —");
+
+  await test("T2 scheduler: ordered_at viejo caduca la fila aunque created_at sea de ahora mismo (import en tiempo real, compra vieja)", async () => {
+    const o = mkOrder("972001", "2801", "34600000200");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // created_at se queda tal cual (recién insertado por mkOrder); solo se
+    // fija ordered_at como una compra muy vieja — el escenario que antes de
+    // T2 el scheduler NO detectaba porque miraba created_at.
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = ? WHERE id = ?").run(nowSec - 999_999, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.equal(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "ordered_at viejo debe caducar la fila aunque created_at (import) sea de ahora mismo"
+    );
+  });
+
+  await test("T2 scheduler: created_at viejo (import tardío) con ordered_at reciente NO caduca — antes de T2 sí habría caducado", async () => {
+    const o = mkOrder("972002", "2802", "34600000201");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // Al revés que el test anterior: la FILA se insertó "hace mucho" (import
+    // tardío / reproceso), pero la compra real fue hace un minuto. Con la
+    // lógica pre-T2 (basada en created_at) esto habría caducado sin motivo.
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET created_at = ?, ordered_at = ? WHERE id = ?")
+      .run(nowSec - 999_999, nowSec - 60, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.notEqual(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "ordered_at reciente: la compra fue hace un minuto, no debe caducar por mucho que la fila llevara tiempo insertada"
+    );
+  });
+
+  await test("T2 scheduler: sin ordered_at (fila de antes de T1, aún sin backfillar) sigue cayendo a created_at — sin regresión", async () => {
+    const o = mkOrder("972003", "2803", "34600000202");
+    const nowSec = Math.floor(Date.now() / 1000);
+    // ordered_at se queda NULL a propósito (no se toca): es exactamente el
+    // comportamiento anterior a T1/T2, que debe seguir intacto.
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = ? WHERE id = ?").run(nowSec - 999_999, o.id);
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(nowSec);
+    });
+    assert.equal(
+      db.getOrderById(o.id)!.status,
+      "ignored_old",
+      "sin ordered_at, debe seguir cayendo al created_at viejo — mismo comportamiento que antes de T2"
+    );
+  });
+
+  await test("T2 webhook: sigue rechazando por anti-replay con created_at antiguo (mismo resultado, ahora vía ordered_at + orderTooOld)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({
+        id: 972101,
+        order_number: 2901,
+        created_at: "2026-01-01T10:00:00+02:00", // muy anterior a hoy
+      });
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.equal(db.getOrderByShopifyId("972101")!.status, "ignored_old");
+    });
+  });
+
+  await test("T2 webhook: created_at reciente NO se marca ignored_old (el refactor a orderTooOld no cambia el caso normal)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({
+        id: 972102,
+        order_number: 2902,
+        created_at: new Date().toISOString(),
+      });
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.notEqual(db.getOrderByShopifyId("972102")!.status, "ignored_old");
+    });
+  });
+
+  await test("T2 webhook: payload SIN created_at no se puede medir → se deja pasar (permisivo, igual que antes de T2)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({ id: 972103, order_number: 2903 });
+      delete (payload as Record<string, unknown>).created_at;
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.notEqual(
+        db.getOrderByShopifyId("972103")!.status,
+        "ignored_old",
+        "sin dato de antigüedad, no se bloquea por una ausencia que no es indicio de nada"
+      );
+    });
+  });
+
+
+  // ============ T6 · Salvaguarda estructural transitiva de WhatsApp ============
+  console.log("· T6 — salvaguarda estructural transitiva (grafo de imports)");
+
+  await test(
+    "T6 WhatsApp/Baileys no son alcanzables, ni transitivamente, desde ningún entrypoint de backfill/reconciliación",
+    () => {
+      const entrypoints = ["scripts/shopify-backfill.ts", "scripts/dropea-reconcile.ts"];
+
+      const baileysDir = path.join(PROJECT_ROOT, "src", "lib", "baileys");
+      const forbiddenModules = [
+        path.join(PROJECT_ROOT, "src", "lib", "whatsapp.ts"),
+        ...fs.readdirSync(baileysDir).map((f) => path.join(baileysDir, f)),
+      ];
+      const forbiddenCalls = ["sendWhatsAppMessage", "enqueueOutbox", "enqueueOutboxImage"];
+
+      for (const entry of entrypoints) {
+        const entryPath = path.join(PROJECT_ROOT, entry);
+        const graph = buildTransitiveImportGraph(entryPath);
+
+        assert.ok(graph.size > 3, `${entry}: el grafo recorrido parece sospechosamente pequeño (${graph.size} ficheros) — revisa que la resolución de imports (incluidos los "await import(...)" dinámicos) siga funcionando`);
+
+        for (const forbidden of forbiddenModules) {
+          assert.ok(
+            !graph.has(forbidden),
+            `${entry} alcanza transitivamente ${path.relative(PROJECT_ROOT, forbidden)} — esto enviaría WhatsApp de verdad`
+          );
+        }
+
+        for (const file of graph) {
+          const src = fs.readFileSync(file, "utf8");
+          for (const fnName of forbiddenCalls) {
+            assert.ok(
+              !containsCallTo(src, fnName),
+              `${entry} alcanza ${path.relative(PROJECT_ROOT, file)}, que llama a ${fnName}(...) — envío/encolado real de WhatsApp`
+            );
+          }
+        }
+      }
+    }
+  );
+
+  await test("T6 el propio recorrido detecta una fuga transitiva de verdad (fixture aislado, no toca el repo)", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "t6-fuga-"));
+    try {
+      const whatsappFile = path.join(dir, "whatsapp.ts");
+      const middleFile = path.join(dir, "middle.ts");
+      const entryFile = path.join(dir, "entry.ts");
+      fs.writeFileSync(whatsappFile, `export function sendWhatsAppMessage(a: string, b: string) { return true; }\n`);
+      fs.writeFileSync(middleFile, `export { sendWhatsAppMessage } from "./whatsapp";\n`);
+      fs.writeFileSync(entryFile, `async function main() { const m = await import("./middle"); m.sendWhatsAppMessage("x", "y"); }\nmain();\n`);
+
+      const graph = buildTransitiveImportGraph(entryFile);
+      assert.ok(graph.has(whatsappFile), "el fixture debe demostrar que un import de 2 saltos (entry → middle → whatsapp) SÍ se detecta");
+      assert.ok(containsCallTo(fs.readFileSync(middleFile, "utf8"), "sendWhatsAppMessage") === false, "el re-export por sí solo no es una llamada");
+      assert.ok(containsCallTo(fs.readFileSync(entryFile, "utf8"), "sendWhatsAppMessage"), "la llamada real en entry.ts sí se detecta como llamada");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("T4 salvaguarda estructural: solo lectura — ni WhatsApp/Baileys, ni un solo UPDATE/INSERT/DELETE, ni un --apply en ninguna parte", () => {
+    const prohibidoEscritura = [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+      /\bUPDATE\s+orders\b/i,
+      /\bINSERT\s+INTO\b/i,
+      /\bDELETE\s+FROM\b/i,
+      /setOrderClosure/,
+      /setOrderSupplier/,
+    ];
+    for (const rel of ["src/lib/shopify/investigate-skipped-backfill.ts", "scripts/investigate-skipped-backfill.ts"]) {
+      const contenido = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const patron of prohibidoEscritura) {
+        assert.ok(!patron.test(contenido), `${rel} no debe contener ${patron} — esto es SOLO LECTURA`);
+      }
+    }
+    // Refuerzo explícito del requisito "sin --apply en ninguna parte" (T4, a
+    // diferencia de E3/E8, no tiene NI SIQUIERA el flag dormido): no hay
+    // siquiera la maquinaria para leer flags de process.argv. Se busca el
+    // patrón de código, no la palabra "--apply" a secas — el comentario de
+    // cabecera del propio script LA MENCIONA a propósito para explicar que
+    // no existe, y no debe hacer fallar este test por eso.
+    const script = fs.readFileSync(path.join(process.cwd(), "scripts/investigate-skipped-backfill.ts"), "utf8");
+    assert.ok(!/hasFlag\s*\(/.test(script), "T4 no debe tener ni la función que lee flags de process.argv");
+    assert.ok(!/process\.argv/.test(script), "T4 no debe leer process.argv en absoluto — no hay nada que activar");
   });
 
   // ============ Resumen ============

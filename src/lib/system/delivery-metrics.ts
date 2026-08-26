@@ -23,6 +23,9 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
+import { measure, withMinimumSample, type Measured } from "./metric-result";
+import { startOfBusinessDay, endOfBusinessDay, lastBusinessDays } from "../time";
+import { computeClosureDeliveryRate } from "../orders/closure";
 import { lineItemsFromPayload } from "../orders/line-items";
 
 const SHIPPED_STATES = [
@@ -48,6 +51,9 @@ export interface DeliveryBucket {
 }
 
 export interface DeliveryWindow extends DeliveryBucket {
+  /** Eje de CIERRE (fuente de verdad de negocio). `deliveryRate` de la
+   *  ventana sale de aquí, no de los contadores logísticos de abajo. */
+  closure: ClosureBreakdown;
   /** Pedidos creados en la ventana (todos, enviados o no). */
   created: number;
   cancelled: number;
@@ -149,6 +155,9 @@ function buildWindow(rows: ShippedRow[], created: number, cancelled: number): De
 
   return {
     ...finishBucket(total),
+    // Placeholder: getDeliveryWindow() lo sustituye por el desglose real del
+    // eje de cierre. buildWindow solo sabe de logística, a propósito.
+    closure: emptyClosure(),
     created,
     cancelled,
     avgHoursToDeliver: nEntregados > 0 ? Math.round((sumaHoras / nEntregados) * 10) / 10 : null,
@@ -163,11 +172,15 @@ export function deliveryRateMinSample(): number {
   return Number.isFinite(v) && v > 0 ? v : 10;
 }
 
-/** Inicio del día local (epoch s). Inyectable para tests. */
+/**
+ * Inicio del día de NEGOCIO (medianoche de Madrid), epoch s.
+ *
+ * Antes era `new Date().setHours(0,0,0,0)`: medianoche del huso del PROCESO.
+ * Con el host del NAS en Europe/Brussels o un script sin TZ, la ventana "hoy"
+ * se desplazaba y los pedidos de la noche contaban en el día equivocado.
+ */
 export function startOfLocalDay(nowMs = Date.now()): number {
-  const d = new Date(nowMs);
-  d.setHours(0, 0, 0, 0);
-  return Math.floor(d.getTime() / 1000);
+  return startOfBusinessDay(nowMs);
 }
 
 /** Envíos con su primer estado de envío y (si hay) su entrega. */
@@ -210,21 +223,135 @@ function countOrders(fromTs: number, toTs: number): { created: number; cancelled
   return { created, cancelled };
 }
 
+
+// ============================================================
+// CIERRE DE NEGOCIO — eje 4 (`orders.closure_status`).
+//
+// FUENTE DE VERDAD de la tasa de entrega desde el 25-08-2026. Antes esta
+// métrica se calculaba sobre `supplier_status_normalized`, que es el eje
+// LOGÍSTICO: el resultado era que todo lo que E5/E8 escribían en el eje de
+// cierre no aparecía por ninguna parte, y la tarjeta seguía diciendo "sin
+// datos" aunque hubiera entregas confirmadas. Los dos ejes nunca se cruzaban.
+//
+// FÓRMULA (acordada, no negociable sin volver a acordarla):
+//
+//     tasa de entrega = delivered / (delivered + refused)
+//
+// `unknown`, `in_progress` y `cancelled` NO entran ni en el numerador ni en
+// el denominador. Un pedido cancelado no es una entrega fallida: nunca se
+// llegó a intentar entregarlo, y meterlo en el denominador hundiría la tasa
+// por razones ajenas a la logística.
+//
+// La ventana se mide por `closure_at` — la fecha del EVENTO en la fuente, no
+// la de proceso — para que "entregados esta semana" signifique lo que dice.
+// ============================================================
+
+export interface ClosureBreakdown {
+  delivered: number;
+  refused: number;
+  inProgress: number;
+  cancelled: number;
+  unknown: number;
+  /** delivered + refused: los únicos que cuentan para la tasa. */
+  resolved: number;
+  /** delivered / (delivered + refused). `null` si no hay ninguno resuelto. */
+  deliveryRate: number | null;
+}
+
+function emptyClosure(): ClosureBreakdown {
+  return {
+    delivered: 0,
+    refused: 0,
+    inProgress: 0,
+    cancelled: 0,
+    unknown: 0,
+    resolved: 0,
+    deliveryRate: null,
+  };
+}
+
+/**
+ * Desglose del eje de cierre en una ventana, por `closure_at`.
+ *
+ * Los `unknown` se cuentan por `created_at`: por definición no tienen
+ * `closure_at`, y aun así hay que poder verlos — son los pedidos de los que
+ * el sistema todavía no sabe nada, y su número es en sí mismo una alerta.
+ */
+export function getClosureBreakdown(fromTs: number, toTs: number): ClosureBreakdown {
+  const db = systemDbHandle();
+  const out = emptyClosure();
+
+  const filas = db
+    .prepare(
+      `SELECT closure_status AS s, COUNT(*) AS n FROM orders
+        WHERE closure_status != 'unknown' AND closure_at >= ? AND closure_at < ?
+        GROUP BY closure_status`
+    )
+    .all(fromTs, toTs) as Array<{ s: string; n: number }>;
+  for (const f of filas) {
+    if (f.s === "delivered") out.delivered = f.n;
+    else if (f.s === "refused") out.refused = f.n;
+    else if (f.s === "in_progress") out.inProgress = f.n;
+    else if (f.s === "cancelled") out.cancelled = f.n;
+  }
+
+  out.unknown = (
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM orders
+          WHERE closure_status = 'unknown' AND created_at >= ? AND created_at < ?`
+      )
+      .get(fromTs, toTs) as { n: number }
+  ).n;
+
+  out.resolved = out.delivered + out.refused;
+  out.deliveryRate = computeClosureDeliveryRate(out.delivered, out.refused);
+  return out;
+}
+
 export function getDeliveryWindow(fromTs: number, toTs: number): DeliveryWindow {
   const rows = listShippedRows(fromTs, toTs);
   const { created, cancelled } = countOrders(fromTs, toTs);
-  return buildWindow(rows, created, cancelled);
+  const ventana = buildWindow(rows, created, cancelled);
+  const closure = getClosureBreakdown(fromTs, toTs);
+  return {
+    ...ventana,
+    closure,
+    // La tasa de la ventana SALE DEL EJE DE CIERRE. Los buckets por producto,
+    // proveedor y transportista siguen siendo logísticos a propósito: ahí lo
+    // que interesa es el comportamiento del envío, no el desenlace económico.
+    deliveryRate: closure.deliveryRate,
+  };
+}
+
+/**
+ * Igual que `getDeliveryMetrics` pero declarando CON QUÉ CONFIANZA responde.
+ *
+ * Es la que debe consumir el Control Center: si una consulta revienta, aquí
+ * llega `status: "error"` con `value: null`, no un puñado de ceros que
+ * parecen datos. Y si hay menos pedidos resueltos que `DELIVERY_RATE_MIN_SAMPLE`,
+ * llega `partial`: la tasa se ve, pero marcada como no concluyente.
+ */
+export function getDeliveryMetricsMeasured(nowMs = Date.now()): Measured<DeliveryMetrics> {
+  const m = measure("delivery-metrics", () => getDeliveryMetrics(nowMs));
+  if (m.status !== "ok" || !m.value) return m;
+  return withMinimumSample(m, m.value.last7d.closure.resolved, m.value.minSample);
 }
 
 export function getDeliveryMetrics(nowMs = Date.now()): DeliveryMetrics {
   const now = Math.floor(nowMs / 1000);
-  const hoy = startOfLocalDay(nowMs);
-  const fin = now + 1;
+  // Ventanas alineadas a MEDIANOCHE DE MADRID, no a "ahora menos N×86400":
+  // así "últimos 7 días" son siete días naturales completos y el resultado no
+  // depende de a qué hora se mire el panel. `lastBusinessDays` sobrevive
+  // además a los días de 23 h y 25 h de los cambios de hora.
+  const hoy = { from: startOfBusinessDay(nowMs), to: endOfBusinessDay(nowMs) };
+  const w7 = lastBusinessDays(7, nowMs);
+  const w30 = lastBusinessDays(30, nowMs);
   return {
     generatedAt: now,
-    today: getDeliveryWindow(hoy, fin),
-    last7d: getDeliveryWindow(now - 7 * 86400, fin),
-    last30d: getDeliveryWindow(now - 30 * 86400, fin),
+    today: getDeliveryWindow(hoy.from, hoy.to),
+    last7d: getDeliveryWindow(w7.from, w7.to),
+    last30d: getDeliveryWindow(w30.from, w30.to),
     minSample: deliveryRateMinSample(),
   };
 }

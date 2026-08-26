@@ -22,6 +22,8 @@
 // ============================================================
 
 import { listDailyAdSpend, listProductCosts, systemDbHandle, type ProductCostRow } from "../db";
+import { measure, type Measured } from "./metric-result";
+import { madridParts } from "../time";
 import { lineItemsFromPayload } from "../orders/line-items";
 import { startOfLocalDay } from "./delivery-metrics";
 
@@ -74,7 +76,10 @@ export interface UnitEconomics {
 
 interface Row {
   id: number;
+  /** Eje LOGÍSTICO (supplier_status_normalized). Solo para contexto. */
   status: string;
+  /** Eje de CIERRE (closure_status). Es el que decide el dinero. */
+  closure: string;
   total_price: string;
   currency: string;
   raw_payload: string | null;
@@ -84,8 +89,11 @@ const r2 = (n: number) => Math.round(n * 100) / 100;
 
 function dayKey(ts: number): string {
   const d = new Date(ts * 1000);
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+  // Día de NEGOCIO (Madrid), no del huso del proceso: si no, el gasto en ads
+  // de la noche se imputaría al día siguiente.
+  const p = madridParts(d);
+  const m = String(p.month).padStart(2, "0");
+  const day = String(p.day).padStart(2, "0");
   return `${d.getFullYear()}-${m}-${day}`;
 }
 
@@ -116,12 +124,19 @@ export function computeEconomics(
     currency = r.currency || currency;
     const total = parseFloat(r.total_price) || 0;
     gross += total;
-    const entregado = r.status === "delivered";
+    // DESENLACE ECONÓMICO: eje de CIERRE, no el logístico.
+    //
+    // `closure_status = 'delivered'` es entrega CONFIRMADA por una fuente
+    // fiable; `'refused'` es el rehúse del COD, que es el evento que cuesta
+    // dinero (~9,37 €). Antes esto se leía de `supplier_status_normalized`,
+    // donde `returned` mezcla el rehúse del cliente con el paquete perdido o
+    // roto — dos cosas con consecuencias económicas distintas.
+    const entregado = r.closure === "delivered";
     if (entregado) {
       deliveredOrders++;
       delivered += total;
     }
-    if (r.status === "returned") returnedOrders++;
+    if (r.closure === "refused") returnedOrders++;
 
     let items: ReturnType<typeof lineItemsFromPayload> = [];
     try {
@@ -204,13 +219,25 @@ function shippedRows(from: number, to: number): Row[] {
   const ph = SHIPPED_STATES.map(() => "?").join(",");
   return systemDbHandle()
     .prepare(
-      `SELECT o.id, o.supplier_status_normalized AS status, o.total_price, o.currency, o.raw_payload
+      `SELECT o.id, o.supplier_status_normalized AS status,
+              o.closure_status AS closure,
+              o.total_price, o.currency, o.raw_payload
        FROM orders o
        JOIN (SELECT order_id, MIN(occurred_at) AS shipped_at FROM order_status_history
              WHERE new_status IN (${ph}) GROUP BY order_id) s ON s.order_id = o.id
        WHERE s.shipped_at >= ? AND s.shipped_at < ?`
     )
     .all(...SHIPPED_STATES, from, to) as Row[];
+}
+
+/**
+ * Economía con estado de confianza. La que debe consumir el panel.
+ *
+ * Un fallo aquí no puede devolver 0 € de margen: sería indistinguible de un
+ * mes que se fue a cero, y son cosas muy distintas.
+ */
+export function getUnitEconomicsMeasured(nowMs = Date.now()): Measured<UnitEconomics> {
+  return measure("unit-economics", () => getUnitEconomics(nowMs));
 }
 
 export function getUnitEconomics(nowMs = Date.now()): UnitEconomics {

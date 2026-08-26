@@ -167,71 +167,82 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**En producción, NAS al día con `main` (`7fa41c8`), esquema 5.** Desplegado en
-dos tandas: la noche del 24-08-2026 entraron E1 (eje de cierre) + E2 (webhooks
-de cierre) + E3 (backfill, corrido con `read_all_orders` verificado: 93
-pedidos, cobertura completa) + E4 (enlace con Dropea por tag) + E5
-(reconciliación cada 6 h) + elegibilidad central (`src/lib/orders/eligibility.ts`)
-+ **E7** (orquestador de llamadas Retell, **apagado**: kill switch OFF, shadow
-ON) + PR #5 (cadencia de reintentos anclada a días de calendario). El 25-08
-entró **E8**. Detalle del despliegue del 24-08 y del diagnóstico que originó E8
-en `docs/CONTEXTO-2026-08-24.md`; snapshot vivo en `docs/ESTADO-PRODUCCION.md`.
+**⚠️ PRODUCCIÓN CORRE LA RAMA `fix/hardening-casamable`, NO `main`.**
+Pedro la desplegó el 25-08-2026 (commit `fe53c9d`+, esquema **9**) porque el
+piloto de Meta dependía de código que solo existía ahí. `main` (`f502168`)
+está 27 commits por detrás de lo desplegado — **mergear `main` es la
+reconciliación pendiente**, decisión de Óliver. Detalle completo y medido de
+esa sesión en `docs/CONTEXTO-2026-08-25.md` (léelo antes de tocar nada de
+Meta, Dropi o llamadas).
 
-**E8 — reconciliador de Dropea por API: desplegado y `--apply` corrido
-(25-08-2026).** Resuelve el hallazgo del 24-08: Dropea procesaba 21 pedidos y
-avisaba de cada cambio de estado, pero solo 3 estaban enlazados localmente
-(el tag de E4 no existe en el 97 % de los pedidos: llevan `dropea_error`, no
-`dropea_id`). El reconciliador empareja por `DropeaOrder.external_order_id`
-—único campo de correlación que expone su API— probando contra las **dos**
-claves locales posibles (`shopify_order_id` y `shopify_order_number`), y el
-desglose dice cuál acertó en vez de asumirlo. Tras enlazar, rellena el eje de
-cierre con el estado actual de Dropea reutilizando la misma llamada.
-`npm run dropea:reconcile`, dry-run por defecto. Solo lectura de Dropea.
+**En la rama de hardening (26-08-2026, 418 tests):** los 4 ejes de estado
+con el cierre como fuente de verdad de negocio · fulfillment por línea ·
+leases de scheduler · retención/PII · métricas fail-closed · timezone
+explícito · taxonomía de errores · máquina multi-pedido con memoria (bug
+real del 25-08) · **WhatsApp Cloud API completa detrás de
+`WHATSAPP_PROVIDER`** (default baileys) con webhook verificado EN PRODUCCIÓN
+con un evento real — el gate de coexistencia funcionó: registró y no
+respondió.
 
-⚠️ **Sin registrar todavía: las cifras del `--apply`** (cuántos enlazó por cada
-clave, ambiguos, conflictos) y, con ellas, si el eje de cierre ya tiene
-entregas y rehúses reales — que era el objetivo. Hasta pegar esa salida en
-`docs/ESTADO-PRODUCCION.md`, la tasa de entrega **sigue sin poder darse por
-fiable**.
+**Estado Meta:** app creada y publicada, webhook vivo, token permanente.
+Número de PRUEBAS (las plantillas creadas ahí NO sirven para el número
+real). `WHATSAPP_PROVIDER` sigue en baileys; `META_WHATSAPP_API_ENABLED` sin
+poner. Piloto pendiente de plantillas aprobadas.
 
-**Tanda de fidelidad (25-08), en `main` y pendiente de desplegar:** tres cosas
-que hacían que el sistema contara mal. (1) `fulfillment_status = "partial"`
-ahora cuenta como `in_progress` — los pedidos llevan una línea `Seguro de
-Envío` que el proveedor nunca despacha, así que Shopify los deja en `partial`
-para siempre y nunca llegan a `fulfilled`; es la causa probable del
-`in_progress = 0` medido. `restocked` sigue sin contar. (2) La lista del panel
-ordena por `shopify_order_number` y no por `created_at`, que era la hora de
-insertar la fila: el backfill metió 93 pedidos en el mismo instante y no había
-orden real. Sin migración. (3) `dropea-doctor` y `dropea:mapping:inspect`
-dejaban de mentir: el primero distingue "no lo sé" de "no hay ninguno", el
-segundo recorre el catálogo entero y avisa si topa.
+**Estado llamadas (E7):** número español real (+34 950 835 615, solo voz,
+solo nacional), trunk SIP por Dublín, Retell conectado al NAS, prompt v5
+SIN validar. Kill switch cerrado, shadow ON, allowlist con el móvil de
+Pedro. Las llamadas salientes por API usan la ÚLTIMA versión guardada del
+agente (verificado en docs de Retell): `is_published:false` no hace sonar
+una versión vieja.
 
-**Abierto, sin tocar desde el 24-08** (detalle en `docs/CONTEXTO-2026-08-24.md`
-§6): qué significa el tag `dropea_error` en 90 de 93 pedidos · ~13 anulados de
-0,00 € con clientes reales · 3 pedidos bloqueados por ciudad `"-"` · ~14
-cancelaciones que el backfill no recoge · `in_progress` en cero pese a haber
-fulfillments reales · la lista del panel sin ordenar por fecha de llegada.
+**Dropi:** causa raíz encontrada (campo *vendor* del producto en Shopify
+debía decir `Dropi PRO`), corregida y verificada. El vínculo NO es visible
+desde Shopify: no "arreglar" lo que parezca mal sin un pedido de prueba.
 
-**Bloqueado por terceros:** número de Twilio en revisión regulatoria (sin él
-E7 no puede llamar aunque se active) y Dropi PRO (app rota, API sin
-documentar).
+**Trampas vigentes** (lista completa en CONTEXTO-2026-08-25 §8):
+`CALLS_ALLOWLIST` vacía = SIN restricción (al revés que
+`TEST_PHONE_ALLOWLIST`) · `cloud_api` apaga Baileys por completo · el alta
+de coexistencia puede desvincular Baileys de forma irreversible · las
+plantillas no se transfieren entre WABAs · con `TEST_MODE=1` las respuestas
+manuales del panel NO salen (responder desde el móvil).
 
-**TEST_MODE sigue ON** (decisión de Pedro): mientras dure, `needs_call` y la
-tasa de respuesta no miden nada real — los pedidos de clientes reales se
-ignoran, no es que no respondan.
-
-**Siguiente: sin épica asignada.** Lo que más valor tiene ahora no es código
-nuevo, sino cerrar las incógnitas de arriba con datos: registrar la salida de
-E8 y averiguar qué es `dropea_error`.
+**PRs abiertos de otras sesiones (#3–#23):** cola priorizada por Pedro en
+CONTEXTO-2026-08-25 §7. No mergear sin su orden.
 
 ---
 
-## 12. Por rellenar (Óliver)
+## 12. Mapa del repo (rellenado el 26-08-2026; antes "Por rellenar")
 
-Este archivo se escribió desde el contexto de negocio y de diseño, no leyendo el árbol del repo. Completa cuando puedas:
+**Directorios de `src/lib/` y qué vive en cada uno:**
 
-- Mapa de directorios y qué vive en cada sitio (más allá de `src/lib/db.ts`).
-- Versión de la API de Shopify fijada y dónde se configura.
-- Lista de las 6 suscripciones de webhook de Dropea y qué hace cada handler.
-- Variables de entorno requeridas (solo nombres, nunca valores).
-- Cómo se levanta el proyecto en local y con qué DB de prueba.
+| Directorio | Qué es |
+|---|---|
+| `orders/` | El corazón COD: normalización del webhook, máquina de confirmación (`confirmation.ts`, con la multi-pedido), mensajes, **política de cierre** (`closure.ts`), **fulfillment por línea** (`fulfillment.ts`), elegibilidad, scheduler |
+| `shopify/` | Admin API (tag), HMAC, webhook `orders/create`, webhook de cierre, backfill E3, reconciliación E5, suscripciones |
+| `suppliers/` | Router por mapping, `dropea/` (adopción, webhook, reconcile E8, status-map), `dropi/` (andamiaje fail-closed), validación de mapping |
+| `tracking/` | Normalizador, `processSupplierUpdate` (con guardas de terminales), avisos postventa, polling |
+| `whatsapp/` + `whatsapp.ts` | `whatsapp.ts` = chokepoint de ENCOLADO; el directorio = proveedores (Baileys/Meta), webhook de Meta, interactivos, plantillas, loop cloud |
+| `baileys/` | Cliente WhatsApp Web, handler entrante (serializado por teléfono), loop del outbox |
+| `calls/` | Orquestador Retell E7: franjas, calendario, payload, resultados, DNC |
+| `system/` | Control Center: salud, métricas (fail-closed), alertas, economía, leases, retención, taxonomía de errores, postura de seguridad |
+| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v9) · safety gates |
+
+**Versión de la API de Shopify:** `SHOPIFY_API_VERSION`, default **`2026-07`**
+(en `shopify/admin.ts`, `backfill.ts` y `reconcile.ts`).
+
+**Las 6 suscripciones de webhook de Dropea** (`suppliers/dropea/types.ts`):
+`order.created` · `order.status.changed` · `order.cancelled` (→ tracking +
+eje de cierre) · `issue.created` · `issue.status.changed` · `issue.resolved`
+(→ revisión humana, jamás mensaje al cliente). Todas entran por
+`/api/webhooks/dropea` con HMAC.
+
+**Variables de entorno:** `.env.example` es el catálogo completo, organizado
+por secciones y con etiquetas REQUERIDA/OPCIONAL/FUTURA/HEREDADA. Está
+sincronizado contra lo que el código lee de verdad (auditado; ojo: muchas se
+leen dinámicamente, no como literal).
+
+**Levantar en local:** `npm run dev:all` (bot + web a la vez; QR en
+`localhost:3000`). La DB vive en `DATA_DIR` (default `./data`). Los tests
+(`npm test`) usan una **SQLite temporal propia** — jamás tocan `data/` ni la
+red, y corren con los safety gates de flujo abiertos y Shopify cerrado.

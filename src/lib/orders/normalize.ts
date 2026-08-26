@@ -34,6 +34,29 @@ export interface ShopifyLineItem {
   sku?: string | null;
   product_id?: number | string | null;
   variant_id?: number | string | null;
+
+  // --- Campos de FULFILLMENT por línea (REST Admin API, recurso Order) ---
+  //
+  // `raw_payload` guarda el cuerpo del webhook VERBATIM, así que estos campos
+  // están físicamente ahí aunque antes no se declararan. Se tipan como
+  // opcionales a propósito: un pedido histórico puede no traerlos, y el
+  // inferidor tiene que poder distinguir "vale 0" de "no viene".
+  //
+  // ⚠️ NO están verificados contra un payload real de Casamable — no hay
+  // ninguna muestra guardada en el repo. Vienen del contrato público de la
+  // API. Por eso todo lo que los consume falla CERRADO: si no están, se dice
+  // "insufficient_data", nunca se asume un valor.
+
+  /** null | "fulfilled" | "partial" — estado de ESTA línea, no del pedido. */
+  fulfillment_status?: string | null;
+  /** Unidades que quedan por despachar. 0 = línea despachada del todo. */
+  fulfillable_quantity?: number | null;
+  /** Quién despacha ("manual", "gift_card", el handle de una app…). */
+  fulfillment_service?: string | null;
+  /** false = no se envía nada físico (servicios, digitales). Señal principal. */
+  requires_shipping?: boolean | null;
+  /** true = tarjeta regalo: virtual, nunca es mercancía. */
+  gift_card?: boolean | null;
 }
 
 export interface ShopifyOrderPayload {
@@ -84,6 +107,20 @@ export interface NormalizedOrder {
   /** Nota del pedido + campos extra del formulario (p.ej. Releasit pregunta
    *  "¿A qué hora estarás en casa?"). Solo informativo para Pedro. */
   customerNote: string | null;
+  /**
+   * Fecha REAL de compra en Shopify (`order.created_at`, epoch en segundos) —
+   * no confundir con la columna local `created_at` de `orders`, que es el
+   * instante en que ESTA fila se insertó (import/backfill), no el de la
+   * compra. `null` si el payload no trae `created_at` o no es parseable.
+   */
+  orderedAt: number | null;
+}
+
+/** ISO 8601 → epoch en segundos. `null` si falta o no es parseable. */
+function toEpochSeconds(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
 }
 
 // --- Detección COD ---
@@ -267,6 +304,7 @@ export function normalizeOrder(order: ShopifyOrderPayload): NormalizedOrder {
     postalCode: addr?.zip ?? null,
     country: addr?.country ?? addr?.country_code ?? null,
     customerNote: customerNote(order),
+    orderedAt: toEpochSeconds(order.created_at),
   };
 }
 

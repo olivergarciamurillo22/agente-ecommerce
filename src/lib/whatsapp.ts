@@ -14,11 +14,28 @@
 // vuelve a comprobar el gate al entregar (defensa en profundidad).
 // ============================================================
 
-import { getOrCreateConversation, insertMessage, enqueueOutbox, getConnectionState } from "./db";
+import {
+  getOrCreateConversation,
+  insertMessage,
+  enqueueOutbox,
+  enqueueOutboxRich,
+  getConnectionState,
+} from "./db";
 import { canSendRealWhatsApp, logBlockedSend } from "./safety";
+import { whatsappProviderName } from "./whatsapp/provider";
+import { metaCloudConfigured } from "./whatsapp/meta-cloud";
+import type { InteractiveSpec } from "./whatsapp/interactive";
 
-/** ¿Está WhatsApp operativo ahora mismo? (sesión vinculada y conectada) */
+/**
+ * ¿Está WhatsApp operativo ahora mismo?
+ *
+ * Depende del proveedor activo:
+ *  - baileys   → sesión de WhatsApp Web vinculada y conectada (QR).
+ *  - cloud_api → credenciales de Meta presentes. No hay sesión que caer:
+ *                la conexión es por token en cada llamada.
+ */
 export function whatsappReady(): boolean {
+  if (whatsappProviderName() === "cloud_api") return metaCloudConfigured();
   return getConnectionState().status === "connected";
 }
 
@@ -47,5 +64,54 @@ export function sendWhatsAppMessage(phone: string, text: string, opts: SendOptio
   // La marca viaja con el mensaje: el loop del outbox revalida los gates
   // justo antes de entregar y necesita saber que este envío está autorizado.
   enqueueOutbox(convo.id, phone, text, authorized);
+  return true;
+}
+
+/**
+ * Envía (encola) un mensaje INTERACTIVO — botones o lista.
+ *
+ * Mismo chokepoint y mismos gates que sendWhatsAppMessage. La diferencia
+ * está en QUÉ se encola según el proveedor activo:
+ *  - cloud_api → el mensaje interactivo entero (payload_json) con su texto
+ *                de fallback en `content` para el panel.
+ *  - baileys   → SOLO el texto de fallback: Baileys no tiene botones, y el
+ *                fallback es exactamente el flujo 1/2/3 que ya funciona.
+ *
+ * Así la lógica de negocio llama a UNA función y no sabe qué proveedor hay.
+ */
+export function sendWhatsAppInteractive(phone: string, spec: InteractiveSpec, opts: SendOptions = {}): boolean {
+  const authorized = opts.orderAuthorized === true;
+  if (!canSendRealWhatsApp(phone, { orderAuthorized: authorized })) {
+    logBlockedSend(`send-${phone}-${spec.fallbackText.slice(0, 24)}`, phone, spec.fallbackText);
+    return false;
+  }
+  const convo = getOrCreateConversation(phone, opts.name);
+  insertMessage(convo.id, "assistant", spec.fallbackText);
+
+  if (whatsappProviderName() === "cloud_api") {
+    // BUG1: faltaba el caso "template" — caía en "interactive_buttons" por
+    // defecto, así que un mensaje de plantilla se habría guardado con el
+    // message_type equivocado (y sin template_name, que es justo el campo
+    // que confirma que se mandó por plantilla y no por interactivo).
+    const messageType =
+      spec.message.kind === "interactive_list"
+        ? "interactive_list"
+        : spec.message.kind === "template"
+          ? "template"
+          : "interactive_buttons";
+    enqueueOutboxRich(convo.id, phone, {
+      content: spec.fallbackText,
+      messageType,
+      // El payload lleva el mensaje Y (si existe) su plantilla equivalente,
+      // para que el loop de entrega pueda degradar si la ventana caduca en
+      // cola. outboundFromItem lee `kind` en la raíz: se aplana el mensaje y
+      // el fallback viaja como campo hermano.
+      payloadJson: JSON.stringify({ ...spec.message, templateFallback: spec.templateFallback ?? undefined }),
+      templateName: spec.message.kind === "template" ? spec.message.templateName : null,
+      authorized,
+    });
+  } else {
+    enqueueOutbox(convo.id, phone, spec.fallbackText, authorized);
+  }
   return true;
 }

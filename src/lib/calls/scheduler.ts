@@ -18,6 +18,7 @@
 // ============================================================
 
 import pino from "pino";
+import { acquireLease, LEASE_CALLS } from "../system/leases";
 import {
   addDncPhone,
   hasManualReviewCallAttempt,
@@ -587,6 +588,14 @@ export function startCallOrchestrator(): void {
   timer = setInterval(() => {
     if (ticking) return;
     ticking = true;
+    // LEASE: sin él, no se ejecuta. La guarda `ticking` de arriba solo
+    // protege dentro de ESTE proceso; el lease protege contra un SEGUNDO
+    // proceso (dos contenedores, reinicio solapado, un `start:bot` a mano).
+    // Lo que duplicarían no son lecturas: son efectos externos.
+    if (!acquireLease(LEASE_CALLS, Math.max(120, cada * 3))) {
+      ticking = false;
+      return;
+    }
     void runInstrumented("scheduler:calls", "system", async () => {
       const r = await runCallOrchestratorTick();
       return { processed: r.dialed + r.eventsProcessed + r.enqueued, errors: 0 };

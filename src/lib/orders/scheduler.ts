@@ -10,7 +10,9 @@
 //   2. Allowlist (TEST_MODE): teléfono fuera de la lista → el pedido NO se
 //      procesa (ni mensaje, ni reminder, ni needs_call operativo).
 //   3. Edad (MAX_ORDER_AGE_MINUTES): pedidos viejos → ignored_old, jamás
-//      se actúa (anti-replay, anti-restos de desarrollo).
+//      se actúa (anti-replay, anti-restos de desarrollo). Medida desde
+//      ordered_at (T2 — fecha REAL de compra), no desde created_at (que es
+//      cuándo se insertó la fila, no cuándo se compró).
 //   4. canSendRealWhatsApp / canWriteToShopify: en safe mode se LOGUEA la
 //      simulación y NO se transiciona estado (nada queda "a medias" que
 //      pudiera dispararse al cambiar la config).
@@ -19,6 +21,7 @@
 // ============================================================
 
 import pino from "pino";
+import { acquireLease, LEASE_ORDERS } from "../system/leases";
 import {
   getOrdersDueInitialSend,
   getOrdersDueReminder,
@@ -31,7 +34,10 @@ import {
   setOrderShopifyTagged,
   touchOrder,
 } from "../db";
-import { sendWhatsAppMessage, whatsappReady } from "../whatsapp";
+import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
+import { whatsappProviderName } from "../whatsapp/provider";
+import { buildConfirmationOutbound } from "../whatsapp/interactive";
+import { isWithinSessionWindow } from "../whatsapp/meta-cloud";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
 import {
@@ -152,8 +158,12 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
 
       // Pedido antiguo (restos de dev, replay, backfill) → fuera, sin tocar a
-      // nadie. La antigüedad se mide desde la apertura si estuvo en espera.
-      const baseEdad = order.deferred_until ?? order.created_at;
+      // nadie. La antigüedad se mide desde la apertura si estuvo en espera;
+      // si no, desde ordered_at (T2 — fecha REAL de compra en Shopify, de
+      // T1), nunca desde created_at (que es cuándo se insertó la fila, no
+      // cuándo se compró). Solo cae a created_at si ordered_at es NULL — fila
+      // de antes de T1 que el backfill de la columna aún no ha resuelto.
+      const baseEdad = order.deferred_until ?? order.ordered_at ?? order.created_at;
       if (orderTooOld(baseEdad, now)) {
         if (markOrderIgnoredOld(order.id, "ignored_old_order: demasiado antiguo al ir a enviar")) {
           logger.warn(
@@ -162,7 +172,34 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         }
         continue;
       }
-      const message = buildConfirmationMessage(order);
+      // Botones de verdad SOLO en cloud_api: Baileys no los tiene, y el
+      // texto de fallback es justo el flujo 1/2/3 de siempre, así que
+      // Baileys sigue mandando lo mismo que manda hoy. El proveedor se
+      // resuelve UNA vez aquí; el resto del bloque (gates, claim, log) no
+      // sabe ni le importa cuál es.
+      //
+      // BUG1: fuera de la ventana de 24h, Meta EXIGE una plantilla aprobada
+      // — un interactivo o texto libre se rechaza siempre con
+      // outside_24h_window. El primer mensaje a un cliente nuevo está
+      // SIEMPRE fuera de ventana (nunca ha escrito), así que sin esto
+      // ninguna confirmación inicial podía salir en cloud_api.
+      let interactive: ReturnType<typeof buildConfirmationOutbound> | null = null;
+      if (whatsappProviderName() === "cloud_api") {
+        try {
+          interactive = buildConfirmationOutbound(order, isWithinSessionWindow(order.phone));
+        } catch (err) {
+          // Solo puede pasar si la plantilla no está en el catálogo local
+          // (config/whatsapp-templates.json) — un error de programación o
+          // de despliegue, no de Meta. Se salta ESTE pedido, no el tick
+          // entero: los demás pedidos de la cola no tienen por qué
+          // bloquearse por esto.
+          logger.error(
+            `[WHATSAPP] #${order.shopify_order_number}: no se pudo construir la confirmación (${err instanceof Error ? err.message : String(err)}) — se reintenta en el siguiente tick`
+          );
+          continue;
+        }
+      }
+      const message = interactive ? interactive.fallbackText : buildConfirmationMessage(order);
       const autorizado = order.pilot_authorized === 1;
       if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         // Simulación (safe mode / flags cerrados): NO transicionar estado.
@@ -171,10 +208,17 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
       // Claim atómico ANTES de encolar: jamás dos mensajes iniciales.
       if (!claimOrderInitialSend(order.id, now)) continue;
-      sendWhatsAppMessage(order.phone, message, {
-        name: order.customer_name ?? undefined,
-        orderAuthorized: autorizado,
-      });
+      if (interactive) {
+        sendWhatsAppInteractive(order.phone, interactive, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      } else {
+        sendWhatsAppMessage(order.phone, message, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      }
       summary.sent++;
       logger.info(`[WHATSAPP] Confirmation sent #${order.shopify_order_number}`);
     }
@@ -258,6 +302,14 @@ export function startOrderScheduler(): void {
   timer = setInterval(() => {
     if (ticking) return; // nunca solapar ticks
     ticking = true;
+    // LEASE: sin él, no se ejecuta. La guarda `ticking` de arriba solo
+    // protege dentro de ESTE proceso; el lease protege contra un SEGUNDO
+    // proceso (dos contenedores, reinicio solapado, un `start:bot` a mano).
+    // Lo que duplicarían no son lecturas: son efectos externos.
+    if (!acquireLease(LEASE_ORDERS, Math.max(120, pollSeconds() * 4))) {
+      ticking = false;
+      return;
+    }
     // Instrumentación best-effort: latido + fila en scheduler_runs si hubo
     // trabajo. Si registrar falla, el tick sigue funcionando igual.
     void runInstrumented("scheduler:orders", "orders", async () => {

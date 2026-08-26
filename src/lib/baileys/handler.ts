@@ -98,6 +98,36 @@ async function enviarFallback(
   }
 }
 
+// ── SERIALIZACIÓN POR TELÉFONO ──────────────────────────────
+// El procesado de un mensaje puede esperar en un `await` (transcribir una
+// nota de voz, describir una imagen). Sin esta puerta, un "1097" mandado en
+// AUDIO seguido de un "todo correcto" en TEXTO se procesarían fuera de
+// orden: el texto adelantaría al audio, y la confirmación llegaría ANTES que
+// la selección de pedido — exactamente la carrera que la máquina de estados
+// multi-pedido no puede permitirse. Cada teléfono procesa sus mensajes en
+// orden de llegada; teléfonos distintos no se bloquean entre sí.
+const colaPorTelefono = new Map<string, Promise<void>>();
+
+/** Encadena `fn` tras el último mensaje pendiente de este teléfono. */
+export async function runSerializedByPhone(phone: string, fn: () => Promise<void>): Promise<void> {
+  const anterior = colaPorTelefono.get(phone) ?? Promise.resolve();
+  let liberar!: () => void;
+  const propio = new Promise<void>((r) => (liberar = r));
+  colaPorTelefono.set(
+    phone,
+    anterior.then(() => propio)
+  );
+  await anterior;
+  try {
+    await fn();
+  } finally {
+    liberar();
+    // Limpieza: si nadie más se encoló detrás, el mapa no crece sin límite.
+    if (colaPorTelefono.get(phone) === propio) colaPorTelefono.delete(phone);
+  }
+}
+
+
 export async function handleIncomingMessages(
   sock: WASocket,
   event: BaileysEventMap["messages.upsert"]
@@ -133,128 +163,132 @@ export async function handleIncomingMessages(
     }
     const pushName = msg.pushName ?? undefined;
 
-    // ¿Este teléfono está en medio de una confirmación? ¿Hay agente IA activo?
-    // SEGURIDAD: un número SIN pedido activo y SIN agente IA es una
-    // conversación personal o desconocida: JAMÁS se le responde nada (ni
-    // "no encuentro tu pedido"). Solo se guarda el texto para el panel.
-    //
-    // El agente IA del kit exige DOBLE opt-in (key + AI_AGENT_ENABLED=1):
-    // tener una OPENROUTER_API_KEY suelta en el .env jamás debe bastar para
-    // que un bot comercial charle con los clientes COD de Casamable.
-    const hasActiveOrders = getActiveOrdersByPhone(phone).length > 0;
-    const aiActive =
-      Boolean(process.env.OPENROUTER_API_KEY) && process.env.AI_AGENT_ENABLED === "1";
+    // Todo lo que sigue corre SERIALIZADO por teléfono (ver arriba).
+    await runSerializedByPhone(phone, async () => {
 
-    // Texto directo o, si es nota de voz, la transcripción.
-    let text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? null;
-    const isAudio = Boolean(msg.message?.audioMessage);
-    const isImage = Boolean(msg.message?.imageMessage);
+      // ¿Este teléfono está en medio de una confirmación? ¿Hay agente IA activo?
+      // SEGURIDAD: un número SIN pedido activo y SIN agente IA es una
+      // conversación personal o desconocida: JAMÁS se le responde nada (ni
+      // "no encuentro tu pedido"). Solo se guarda el texto para el panel.
+      //
+      // El agente IA del kit exige DOBLE opt-in (key + AI_AGENT_ENABLED=1):
+      // tener una OPENROUTER_API_KEY suelta en el .env jamás debe bastar para
+      // que un bot comercial charle con los clientes COD de Casamable.
+      const hasActiveOrders = getActiveOrdersByPhone(phone).length > 0;
+      const aiActive =
+        Boolean(process.env.OPENROUTER_API_KEY) && process.env.AI_AGENT_ENABLED === "1";
 
-    if ((!text || text.trim() === "") && isAudio) {
-      if (!hasActiveOrders && !aiActive) {
-        logger.info(`[bot] nota de voz de ${phoneMasked(phone)} sin pedido activo — ignorada`);
-        continue;
-      }
-      text = await transcribeIncomingAudio(sock, msg, phone);
-      if (text === null) continue; // ya se le pidió por escrito (vía outbox, con gates)
-    }
+      // Texto directo o, si es nota de voz, la transcripción.
+      let text = msg.message?.conversation ?? msg.message?.extendedTextMessage?.text ?? null;
+      const isAudio = Boolean(msg.message?.audioMessage);
+      const isImage = Boolean(msg.message?.imageMessage);
 
-    // Imagen: el agente la "ve" a través de una descripción del modelo de visión.
-    if (isImage) {
-      const caption = msg.message?.imageMessage?.caption?.trim() || undefined;
-      if (!hasActiveOrders && !aiActive) {
-        if (!caption) {
-          logger.info(`[bot] imagen de ${phoneMasked(phone)} sin pedido activo — ignorada`);
-          continue;
+      if ((!text || text.trim() === "") && isAudio) {
+        if (!hasActiveOrders && !aiActive) {
+          logger.info(`[bot] nota de voz de ${phoneMasked(phone)} sin pedido activo — ignorada`);
+          return;
         }
-        text = caption; // se guarda el texto que la acompaña, sin responder nada
-      } else {
-        const desc = await describeIncomingImage(sock, msg);
-        if (desc) {
-          text = caption
-            ? `${caption}\n[El cliente ha enviado una imagen: ${desc}]`
-            : `[El cliente ha enviado una imagen: ${desc}]`;
-        } else if (caption) {
-          text = caption; // no se pudo ver, pero al menos hay texto que la acompaña
+        text = await transcribeIncomingAudio(sock, msg, phone);
+        if (text === null) return; // ya se le pidió por escrito (vía outbox, con gates)
+      }
+
+      // Imagen: el agente la "ve" a través de una descripción del modelo de visión.
+      if (isImage) {
+        const caption = msg.message?.imageMessage?.caption?.trim() || undefined;
+        if (!hasActiveOrders && !aiActive) {
+          if (!caption) {
+            logger.info(`[bot] imagen de ${phoneMasked(phone)} sin pedido activo — ignorada`);
+            return;
+          }
+          text = caption; // se guarda el texto que la acompaña, sin responder nada
         } else {
-          sendWhatsAppMessage(
-            phone,
-            "He recibido tu imagen pero no consigo verla bien. ¿Me cuentas qué es o qué necesitas?",
-            { name: pushName }
-          );
-          continue;
+          const desc = await describeIncomingImage(sock, msg);
+          if (desc) {
+            text = caption
+              ? `${caption}\n[El cliente ha enviado una imagen: ${desc}]`
+              : `[El cliente ha enviado una imagen: ${desc}]`;
+          } else if (caption) {
+            text = caption; // no se pudo ver, pero al menos hay texto que la acompaña
+          } else {
+            sendWhatsAppMessage(
+              phone,
+              "He recibido tu imagen pero no consigo verla bien. ¿Me cuentas qué es o qué necesitas?",
+              { name: pushName }
+            );
+            return;
+          }
         }
       }
-    }
 
-    if (!text || text.trim() === "") {
-      // Sticker, documento, etc. — fuera de alcance por ahora.
-      continue;
-    }
-
-    logger.info(`[bot] ← ${isAudio ? "(voz) " : isImage ? "(imagen) " : ""}mensaje de ${phoneMasked(phone)}: "${text.slice(0, 60)}"`);
-
-    const convo = getOrCreateConversation(phone, pushName, remoteJid);
-
-    // Guardrail de entrada: trunca lo desproporcionado y corta el flood.
-    // En flood simplemente NO respondemos (ni gastamos ni alimentamos abuso).
-    const inbound = guardInbound(convo.id, text);
-    insertMessage(convo.id, "user", inbound.text);
-    logMessage(phone, "user", inbound.text); // espejo a Supabase (best-effort)
-    if (!inbound.allowed) {
-      logger.warn(`[guardrails] entrada bloqueada (${inbound.reason}) — no respondo a ${phoneMasked(phone)}`);
-      continue;
-    }
-
-    // Si un humano tomó la conversación desde el dashboard, el bot calla.
-    const fresh = getConversationById(convo.id);
-    if (!fresh || fresh.mode !== "AI") {
-      logger.info(`[bot] conversación ${convo.id} en modo HUMAN, no respondo`);
-      continue;
-    }
-
-    // --- Confirmación de pedidos COD (determinista, SIN IA, coste 0) ---
-    // Si este teléfono tiene pedidos activos, la respuesta se resuelve aquí al
-    // instante (sin buffer de agrupación) y el flujo de IA no interviene.
-    // Va por el outbox (sendWhatsAppMessage) para heredar sus reintentos.
-    // A propósito NO respeta la pausa global: es transaccional, no el agente.
-    const orderResult = handleOrderReply(phone, inbound.text);
-    if (orderResult.handled) {
-      if (orderResult.reply) {
-        sendWhatsAppMessage(phone, orderResult.reply, {
-          name: pushName,
-          orderAuthorized: orderResult.authorized === true,
-        });
+      if (!text || text.trim() === "") {
+        // Sticker, documento, etc. — fuera de alcance por ahora.
+        return;
       }
-      continue;
-    }
 
-    // Pausa global desde Ajustes: el mensaje se guarda y se ve en el panel,
-    // pero el agente no responde a nadie hasta reanudar.
-    if (getSetting("paused") === "1") {
-      logger.info(`[bot] en PAUSA global — mensaje de ${phoneMasked(phone)} guardado, no respondo`);
-      continue;
-    }
+      logger.info(`[bot] ← ${isAudio ? "(voz) " : isImage ? "(imagen) " : ""}mensaje de ${phoneMasked(phone)}: "${text.slice(0, 60)}"`);
 
-    // Sin doble opt-in (OPENROUTER_API_KEY + AI_AGENT_ENABLED=1) el agente de
-    // IA está desactivado: el mensaje queda guardado y visible en el panel
-    // (pestaña Chats), pero no se responde.
-    if (!aiActive) {
-      logger.info(`[bot] agente IA desactivado — mensaje de ${phoneMasked(phone)} guardado`);
-      continue;
-    }
+      const convo = getOrCreateConversation(phone, pushName, remoteJid);
 
-    // SAFETY GATE: la IA tampoco responde si los gates no permiten enviar a
-    // este teléfono (safe mode, flags, emergency stop, allowlist).
-    if (!canSendRealWhatsApp(phone)) {
-      logOnce(
-        `ai-blocked-${phone}`,
-        `[SAFE MODE] respuesta del agente IA omitida para ${phoneMasked(phone)} (gates cerrados)`
-      );
-      continue;
-    }
+      // Guardrail de entrada: trunca lo desproporcionado y corta el flood.
+      // En flood simplemente NO respondemos (ni gastamos ni alimentamos abuso).
+      const inbound = guardInbound(convo.id, text);
+      insertMessage(convo.id, "user", inbound.text);
+      logMessage(phone, "user", inbound.text); // espejo a Supabase (best-effort)
+      if (!inbound.allowed) {
+        logger.warn(`[guardrails] entrada bloqueada (${inbound.reason}) — no respondo a ${phoneMasked(phone)}`);
+        return;
+      }
 
-    scheduleReply(sock, convo.id, remoteJid, phone);
+      // Si un humano tomó la conversación desde el dashboard, el bot calla.
+      const fresh = getConversationById(convo.id);
+      if (!fresh || fresh.mode !== "AI") {
+        logger.info(`[bot] conversación ${convo.id} en modo HUMAN, no respondo`);
+        return;
+      }
+
+      // --- Confirmación de pedidos COD (determinista, SIN IA, coste 0) ---
+      // Si este teléfono tiene pedidos activos, la respuesta se resuelve aquí al
+      // instante (sin buffer de agrupación) y el flujo de IA no interviene.
+      // Va por el outbox (sendWhatsAppMessage) para heredar sus reintentos.
+      // A propósito NO respeta la pausa global: es transaccional, no el agente.
+      const orderResult = handleOrderReply(phone, inbound.text);
+      if (orderResult.handled) {
+        if (orderResult.reply) {
+          sendWhatsAppMessage(phone, orderResult.reply, {
+            name: pushName,
+            orderAuthorized: orderResult.authorized === true,
+          });
+        }
+        return;
+      }
+
+      // Pausa global desde Ajustes: el mensaje se guarda y se ve en el panel,
+      // pero el agente no responde a nadie hasta reanudar.
+      if (getSetting("paused") === "1") {
+        logger.info(`[bot] en PAUSA global — mensaje de ${phoneMasked(phone)} guardado, no respondo`);
+        return;
+      }
+
+      // Sin doble opt-in (OPENROUTER_API_KEY + AI_AGENT_ENABLED=1) el agente de
+      // IA está desactivado: el mensaje queda guardado y visible en el panel
+      // (pestaña Chats), pero no se responde.
+      if (!aiActive) {
+        logger.info(`[bot] agente IA desactivado — mensaje de ${phoneMasked(phone)} guardado`);
+        return;
+      }
+
+      // SAFETY GATE: la IA tampoco responde si los gates no permiten enviar a
+      // este teléfono (safe mode, flags, emergency stop, allowlist).
+      if (!canSendRealWhatsApp(phone)) {
+        logOnce(
+          `ai-blocked-${phone}`,
+          `[SAFE MODE] respuesta del agente IA omitida para ${phoneMasked(phone)} (gates cerrados)`
+        );
+        return;
+      }
+
+      scheduleReply(sock, convo.id, remoteJid, phone);
+    });
   }
 }
 

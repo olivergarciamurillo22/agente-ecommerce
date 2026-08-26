@@ -18,7 +18,15 @@
 
 import pino from "pino";
 import {
+  clearSelectedOrderContext,
   getActiveOrdersByPhone,
+  getConversationOrderContext,
+  markOrderPossibleDuplicate,
+  recordConversationPrompt,
+  requestOrderCancellation,
+  resetConversationPrompt,
+  setPendingCancelContext,
+  setSelectedOrderContext,
   markOrderConfirmed,
   markOrderNeedsCorrection,
   markOrderNeedsCall,
@@ -33,6 +41,12 @@ import {
 import { tagOrderConfirmed } from "../shopify/admin";
 import { orderActionAllowed } from "../safety";
 import {
+  buildCancelConfirmPrompt,
+  buildCancelMultiPrompt,
+  buildDuplicateReviewMessage,
+  buildOrderActionMenu,
+  MSG_CANCEL_RECEIVED,
+  MSG_ESCALATE_TO_HUMAN,
   MSG_CONFIRMED,
   MSG_ASK_ADDRESS,
   MSG_ADDRESS_SAVED,
@@ -42,6 +56,15 @@ import {
   MSG_WILL_CALL,
   buildDisambiguationMessage,
 } from "./messages";
+import {
+  claimsSingleOrder,
+  findPossibleDuplicates,
+  isCancelIntent,
+  isExplicitCancelConfirmation,
+  matchOrderByProduct,
+  saysBoth,
+} from "./multi-order";
+import { logIntegrationEvent } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -264,10 +287,94 @@ function matchOrderByNumber(orders: OrderRow[], rawText: string): { order: Order
   return matches.length === 1 ? matches[0] : null;
 }
 
+// --- Contexto de conversación (memoria entre mensajes) ---
+
+function selectedOrderTtlMinutes(): number {
+  const v = parseInt(process.env.SELECTED_ORDER_TTL_MINUTES ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : 45;
+}
+
+function maxSamePromptRepeats(): number {
+  const v = parseInt(process.env.MAX_SAME_PROMPT_REPEATS ?? "", 10);
+  return Number.isFinite(v) && v > 0 ? v : 2;
+}
+
+interface LoadedContext {
+  /** Fila cruda (para last_prompt_type y pending_cancel). */
+  raw: ReturnType<typeof getConversationOrderContext>;
+  /** El pedido seleccionado, SOLO si la selección sigue siendo válida. */
+  selectedOrder: OrderRow | null;
+}
+
+/**
+ * Carga el contexto y VALIDA la selección. Una selección deja de valer si:
+ *  - caducó (SELECTED_ORDER_TTL_MINUTES, 45 min por defecto): media hora
+ *    después, "sí" ya no puede referirse en silencio a aquel pedido;
+ *  - el pedido ya no está activo (se confirmó, se canceló, escaló);
+ *  - llegó un pedido NUEVO después de seleccionar: el siguiente mensaje del
+ *    cliente podría hablar del nuevo, así que se vuelve a preguntar en vez
+ *    de asumir que sigue hablando del antiguo.
+ */
+function loadValidContext(phone: string, active: OrderRow[]): LoadedContext {
+  const raw = getConversationOrderContext(phone);
+  if (!raw) return { raw: null, selectedOrder: null };
+
+  let selectedOrder: OrderRow | null = null;
+  if (raw.selected_order_id !== null && raw.selected_at !== null) {
+    const now = Math.floor(Date.now() / 1000);
+    const dentroDeTtl = now - raw.selected_at <= selectedOrderTtlMinutes() * 60;
+    const sigueActivo = active.find((o) => o.id === raw.selected_order_id) ?? null;
+    const llegoUnoNuevo = active.some((o) => o.created_at > (raw.selected_at ?? 0));
+    if (dentroDeTtl && sigueActivo && !llegoUnoNuevo) {
+      selectedOrder = sigueActivo;
+    } else {
+      clearSelectedOrderContext(phone);
+    }
+  }
+  return { raw, selectedOrder };
+}
+
+/**
+ * Ejecuta una petición de cancelación CONFIRMADA. "Ejecutar" aquí es marcar:
+ * cancellation_requested_at + needs_call. NUNCA se toca Shopify ni el
+ * proveedor desde una conversación de WhatsApp — la cancelación real la
+ * decide Pedro viendo el pedido. Como el pedido deja de estar confirmado,
+ * tampoco puede entrar en ningún envío al proveedor mientras tanto.
+ */
+function executeCancellation(phone: string, orders: OrderRow[]): OrderReplyResult {
+  for (const o of orders) {
+    requestOrderCancellation(o.id);
+    logger.info(`[ORDER] #${o.shopify_order_number} -> cancelación solicitada por el cliente (needs_call)`);
+    logIntegrationEvent(
+      "whatsapp",
+      "cancellation_requested",
+      "warning",
+      "el cliente pidió cancelar por WhatsApp: pedido marcado para revisión, sin tocar Shopify",
+      o.shopify_order_number
+    );
+  }
+  clearSelectedOrderContext(phone);
+  resetConversationPrompt(phone);
+  return {
+    handled: true,
+    reply: MSG_CANCEL_RECEIVED,
+    authorized: orders.some((o) => o.pilot_authorized === 1),
+  };
+}
+
 /**
  * Punto de entrada: procesa un mensaje entrante de este teléfono.
  * Devuelve handled=false si el teléfono no tiene pedidos activos (y entonces
  * el mensaje sigue su curso normal: IA si está configurada, o nada).
+ *
+ * MÁQUINA DE ESTADOS REAL desde el 25-08-2026 (bug de producción): el flujo
+ * multi-pedido tiene MEMORIA. "1097" selecciona; "todo correcto" después se
+ * aplica a ESE pedido. Antes cada mensaje re-resolvía la ambigüedad desde
+ * cero y elegir un pedido no servía de nada.
+ *
+ * La comprensión es flexible (número, producto, frases de cancelación); la
+ * ejecución es determinista: sin coincidencia inequívoca no se actúa, y
+ * cancelar exige SIEMPRE verbo + número de pedido explícitos.
  */
 export function handleOrderReply(phone: string, text: string): OrderReplyResult {
   // Solo pedidos sobre los que PODEMOS actuar: en TEST_MODE, los de la
@@ -276,46 +383,246 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
   if (active.length === 0) return { handled: false };
 
-  // La respuesta hereda la autorización del pedido concreto al que afecta.
   const authorized = (r: OrderReplyResult, order: OrderRow): OrderReplyResult => ({
     ...r,
     authorized: order.pilot_authorized === 1,
   });
 
   const intent = classifyOrderReply(text);
+  const quiereCancelar = isCancelIntent(text);
+  const context = loadValidContext(phone, active);
 
   // --- Caso simple: un único pedido activo ---
   if (active.length === 1) {
-    return authorized(routeToOrder(active[0], text, intent), active[0]);
+    const order = active[0];
+    if (quiereCancelar) {
+      // Formato explícito (verbo + número) → se registra la petición. Menos
+      // que eso ("no lo quiero", "cancelar") → confirmación primero: una
+      // frase ambigua jamás cancela.
+      if (isExplicitCancelConfirmation(text, order.shopify_order_number)) {
+        return executeCancellation(phone, [order]);
+      }
+      setPendingCancelContext(phone, order.id);
+      return authorized({ handled: true, reply: buildCancelConfirmPrompt(order) }, order);
+    }
+    return authorized(routeToOrder(order, text, intent), order);
   }
 
   // --- Varios pedidos activos del mismo teléfono ---
-  // 1) ¿Menciona un número de pedido concreto? → operamos sobre ese.
+
+  // 1) Menciona un número de pedido concreto.
   const byNumber = matchOrderByNumber(active, text);
   if (byNumber) {
-    return authorized(
-      routeToOrder(byNumber.order, byNumber.rest.trim(), classifyOrderReply(byNumber.rest)),
-      byNumber.order
+    const order = byNumber.order;
+    const rest = byNumber.rest.trim();
+    const restIntent = classifyOrderReply(rest);
+    resetConversationPrompt(phone);
+
+    // "cancelar 1097": verbo + número = el formato explícito que exigimos.
+    if (quiereCancelar) {
+      return executeCancellation(phone, [order]);
+    }
+
+    const capturando = order.status === "needs_correction" || order.status === "awaiting_delivery_note";
+
+    // EL BUG REAL: "1097" a secas era "no te he entendido". Elegir un pedido
+    // por su número es una SELECCIÓN: se recuerda y se pregunta qué hacer.
+    if (!capturando && restIntent === "unknown") {
+      setSelectedOrderContext(phone, order.id);
+      logIntegrationEvent(
+        "whatsapp",
+        "order_selected",
+        "info",
+        "el cliente eligió un pedido por su número en una conversación multi-pedido",
+        order.shopify_order_number
+      );
+      return authorized({ handled: true, reply: buildOrderActionMenu(order) }, order);
+    }
+
+    // Número + acción ("1097 1") → directo, y queda seleccionado para
+    // los mensajes siguientes mientras el pedido siga activo.
+    setSelectedOrderContext(phone, order.id);
+    const r = authorized(routeToOrder(order, rest, restIntent), order);
+    if (restIntent === "confirm") clearSelectedOrderContext(phone);
+    return r;
+  }
+
+  // 2) Hay un pedido SELECCIONADO válido: los mensajes son sobre él.
+  if (context.selectedOrder) {
+    const sel = context.selectedOrder;
+    if (quiereCancelar) {
+      setPendingCancelContext(phone, sel.id);
+      return authorized({ handled: true, reply: buildCancelConfirmPrompt(sel) }, sel);
+    }
+    resetConversationPrompt(phone);
+    const r = authorized(routeToOrder(sel, text, intent), sel);
+    if (intent === "confirm") clearSelectedOrderContext(phone);
+    return r;
+  }
+
+  // 3) "Ambos" tras haber preguntado "¿cancelar ambos o solo uno?".
+  if (saysBoth(text) && context.raw?.last_prompt_type === "cancel_multi") {
+    return executeCancellation(phone, active);
+  }
+
+  // 4) Quiere cancelar sin decir cuál: JAMÁS se cancelan todos por una frase.
+  if (quiereCancelar) {
+    setPendingCancelContext(phone, null);
+    const veces = recordConversationPrompt(phone, "cancel_multi");
+    if (veces > maxSamePromptRepeats()) {
+      // No entramos en bucle tampoco aquí: a revisión humana.
+      for (const o of active) markOrderNeedsCall(o.id);
+      logIntegrationEvent("whatsapp", "conversation_escalated", "warning",
+        "cancelación multi-pedido sin resolver tras varios intentos: a revisión humana");
+      resetConversationPrompt(phone);
+      return {
+        handled: true,
+        reply: MSG_ESCALATE_TO_HUMAN,
+        authorized: active.some((o) => o.pilot_authorized === 1),
+      };
+    }
+    return {
+      handled: true,
+      reply: buildCancelMultiPrompt(active),
+      authorized: active.some((o) => o.pilot_authorized === 1),
+    };
+  }
+
+  // 5) "Solo he pedido uno" + pedidos que parecen el MISMO → duplicado
+  //    probable. No se obliga al cliente a manejar números internos: se
+  //    marca todo para revisión y se le tranquiliza. Nada se cancela solo.
+  if (claimsSingleOrder(text)) {
+    const grupos = findPossibleDuplicates(active);
+    if (grupos.length > 0) {
+      for (const grupo of grupos) {
+        for (const o of grupo) {
+          markOrderPossibleDuplicate(o.id);
+          markOrderNeedsCall(o.id);
+          logIntegrationEvent(
+            "whatsapp",
+            "duplicate_suspected",
+            "warning",
+            "el cliente dice que solo hizo un pedido y hay dos idénticos: marcados para revisión",
+            o.shopify_order_number
+          );
+        }
+      }
+      clearSelectedOrderContext(phone);
+      resetConversationPrompt(phone);
+      return {
+        handled: true,
+        reply: buildDuplicateReviewMessage(grupos[0]),
+        authorized: active.some((o) => o.pilot_authorized === 1),
+      };
+    }
+  }
+
+  // 6) Menciona un producto que identifica UN pedido sin ambigüedad
+  //    ("el cortauñas" cuando solo un pedido lo lleva). Si los dos venden lo
+  //    mismo, esto no resuelve nada y se sigue de largo.
+  const byProduct = matchOrderByProduct(active, text);
+  if (byProduct) {
+    resetConversationPrompt(phone);
+    setSelectedOrderContext(phone, byProduct.id);
+    logIntegrationEvent(
+      "whatsapp",
+      "order_selected",
+      "info",
+      "pedido identificado por el producto mencionado en una conversación multi-pedido",
+      byProduct.shopify_order_number
     );
+    if (intent !== "unknown") {
+      const r = authorized(routeToOrder(byProduct, text, intent), byProduct);
+      if (intent === "confirm") clearSelectedOrderContext(phone);
+      return r;
+    }
+    return authorized({ handled: true, reply: buildOrderActionMenu(byProduct) }, byProduct);
   }
 
-  // 2) Texto libre y EXACTAMENTE un pedido espera texto (dirección o nota):
-  //    el mensaje es para ese. Con dos esperando, jamás adivinamos.
-  const capturing = active.filter(
-    (o) => o.status === "needs_correction" || o.status === "awaiting_delivery_note"
-  );
-  if (capturing.length === 1 && intent === "unknown") {
-    return authorized(routeToOrder(capturing[0], text, intent), capturing[0]);
-  }
-
-  // 3) Ambiguo de verdad: pedimos que concrete. JAMÁS adivinamos el pedido.
+  // 7) Ambiguo de verdad: selector — pero NUNCA en bucle. A la tercera vez
+  //    consecutiva sin resolver, esto pasa a un humano. Repetir el mismo
+  //    mensaje una quinta vez a alguien que ya dijo tres veces que no lo
+  //    entiende no es insistencia: es un bucle (pasó de verdad).
   for (const o of active) setOrderCustomerReplied(o.id);
+  const veces = recordConversationPrompt(phone, "disambiguation");
+  if (veces > maxSamePromptRepeats()) {
+    for (const o of active) markOrderNeedsCall(o.id);
+    logIntegrationEvent(
+      "whatsapp",
+      "conversation_escalated",
+      "warning",
+      `conversación multi-pedido sin resolver tras ${veces - 1} selectores: a revisión humana`
+    );
+    resetConversationPrompt(phone);
+    return {
+      handled: true,
+      reply: MSG_ESCALATE_TO_HUMAN,
+      authorized: active.some((o) => o.pilot_authorized === 1),
+    };
+  }
+  if (veces === 1) {
+    logIntegrationEvent("whatsapp", "multiple_orders_detected", "info",
+      `respuesta ambigua con ${active.length} pedidos activos: se pide concretar`);
+  }
   logger.info(`[ORDER] respuesta ambigua con ${active.length} pedidos activos — pido nº de pedido`);
   return {
     handled: true,
     reply: buildDisambiguationMessage(active),
-    // Basta con que uno de los pedidos activos esté autorizado para poder
-    // contestarle: el mensaje solo enumera sus propios pedidos.
     authorized: active.some((o) => o.pilot_authorized === 1),
   };
+}
+
+// --- Botones de la Cloud API → la MISMA máquina de estados ---
+
+/** Payloads deterministas de los botones. El texto visible es presentación. */
+export const BUTTON_PAYLOADS = {
+  CONFIRM: "confirm_order",
+  CHANGE_ADDRESS: "change_address",
+  DELIVERY_NOTE: "delivery_note",
+  CANCEL_REQUEST: "cancel_request",
+  /** Prefijo de selección en listas multi-pedido: select_order:1097 */
+  SELECT_ORDER: "select_order:",
+} as const;
+
+/**
+ * Traduce el payload de un botón a la ENTRADA EQUIVALENTE de la máquina de
+ * texto y la reutiliza entera. Cero lógica nueva de estados: un botón es
+ * exactamente lo mismo que escribir la respuesta, pero sin ambigüedad.
+ *
+ * `cancel_request` es el único con tratamiento propio: pulsar un botón que
+ * dice "Quiero cancelar" ya es una acción deliberada, así que con UN pedido
+ * inequívoco se registra directamente (la "ejecución" sigue siendo solo
+ * marcar + needs_call: Shopify no se toca jamás). Con varios pedidos y sin
+ * selección, entra en el flujo seguro de "¿ambos o solo uno?".
+ */
+export function handleOrderButtonReply(phone: string, payload: string): OrderReplyResult {
+  const p = payload.trim();
+
+  if (p.startsWith(BUTTON_PAYLOADS.SELECT_ORDER)) {
+    const num = p.slice(BUTTON_PAYLOADS.SELECT_ORDER.length).replace(/[^0-9]/g, "");
+    if (!num) return { handled: false };
+    return handleOrderReply(phone, num);
+  }
+
+  if (p === BUTTON_PAYLOADS.CONFIRM) return handleOrderReply(phone, "1");
+  if (p === BUTTON_PAYLOADS.CHANGE_ADDRESS) return handleOrderReply(phone, "2");
+  if (p === BUTTON_PAYLOADS.DELIVERY_NOTE) return handleOrderReply(phone, "3");
+
+  if (p === BUTTON_PAYLOADS.CANCEL_REQUEST) {
+    const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+    if (active.length === 0) return { handled: false };
+    if (active.length === 1) {
+      // Botón deliberado + pedido inequívoco = confirmación suficiente.
+      return handleOrderReply(phone, `cancelar ${active[0].shopify_order_number}`);
+    }
+    const context = loadValidContext(phone, active);
+    if (context.selectedOrder) {
+      return handleOrderReply(phone, `cancelar ${context.selectedOrder.shopify_order_number}`);
+    }
+    return handleOrderReply(phone, "cancelar"); // → "¿ambos o solo uno?"
+  }
+
+  // Payload desconocido: no se adivina nada. Visible en logs, sin respuesta.
+  logger.warn(`[ORDER] payload de botón desconocido: "${p.slice(0, 40)}"`);
+  return { handled: false };
 }

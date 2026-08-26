@@ -18,6 +18,7 @@
 // ============================================================
 
 import pino from "pino";
+import { acquireLease, LEASE_TRACKING } from "../system/leases";
 import { getOrdersForTrackingPolling, setOrderSupplierReview, type OrderRow } from "../db";
 import { emergencyStop } from "../safety";
 import { getProvider, supplierSyncEnabled } from "../suppliers/service";
@@ -129,6 +130,14 @@ export function startTrackingScheduler(): void {
   timer = setInterval(() => {
     if (ticking) return;
     ticking = true;
+    // LEASE: sin él, no se ejecuta. La guarda `ticking` de arriba solo
+    // protege dentro de ESTE proceso; el lease protege contra un SEGUNDO
+    // proceso (dos contenedores, reinicio solapado, un `start:bot` a mano).
+    // Lo que duplicarían no son lecturas: son efectos externos.
+    if (!acquireLease(LEASE_TRACKING, Math.max(120, cada * 3))) {
+      ticking = false;
+      return;
+    }
     // Instrumentación best-effort (latido + scheduler_runs). "checked" es el
     // trabajo real; los skipped no cuentan como procesado.
     void runInstrumented("scheduler:tracking", "tracking", async () => {

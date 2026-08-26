@@ -60,6 +60,15 @@ async function main(): Promise<void> {
   console.log(`    · no es COD            : ${report.counts.skip_not_cod}`);
   console.log(`    · sin señal de cierre  : ${report.counts.skip_no_signal}`);
   console.log(`    · ya tenía fuente propia (webhook) : ${report.counts.skip_has_own_source}`);
+  console.log("\n──────── Mercancía: cómo se leyó cada pedido ────────");
+  console.log(`  por LÍNEA (fiable)        : ${report.fulfillmentBasis.line_level}`);
+  console.log(`  por fulfillment global    : ${report.fulfillmentBasis.global_fallback}${report.fulfillmentBasis.global_fallback > 0 ? "   ← el global no distingue el Seguro de Envío" : ""}`);
+  console.log(`  sin datos suficientes     : ${report.fulfillmentBasis.insufficient_data}`);
+  const estados = Object.entries(report.fulfillmentState).sort((a, b) => b[1] - a[1]);
+  if (estados.length) {
+    console.log("  estado de la mercancía:");
+    for (const [k, n] of estados) console.log(`    · ${k.padEnd(18)}: ${n}`);
+  }
   console.log("\n──────── Enlace con Dropea (E4, eje independiente) ────────");
   console.log(`  ${apply ? "enlazados" : "se enlazarían"} por tag dropea_id : ${apply ? report.dropeaLinked : report.dropeaLink.link}`);
   if (apply && report.dropeaLinked !== report.dropeaLink.link) {

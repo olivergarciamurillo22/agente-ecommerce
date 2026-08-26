@@ -27,6 +27,8 @@ export interface OrderItem {
   customer_note: string | null;
   pilot_authorized: number;
   deferred_until: number | null;
+  possible_duplicate: number;
+  cancellation_requested_at: number | null;
   supplier_platform: string | null;
   supplier_sync_status: string;
   supplier_external_order_id: string | null;
@@ -369,6 +371,16 @@ export default function OrdersPanel() {
                         🕘
                       </span>
                     )}
+                    {o.possible_duplicate === 1 && (
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 align-middle">
+                        POSIBLE DUPLICADO
+                      </span>
+                    )}
+                    {o.cancellation_requested_at && (
+                      <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 align-middle">
+                        PIDE CANCELAR
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-3 max-w-[140px] truncate" title={o.customer_name ?? ""}>
                     {o.customer_name ?? "—"}
@@ -477,6 +489,16 @@ export default function OrdersPanel() {
               <div>
                 <div className="font-display text-xl font-bold text-brand-text">
                   Pedido <span className="text-brand-gold">#{detail.shopify_order_number}</span>
+                  {detail.possible_duplicate === 1 && (
+                    <span className="ml-2 px-2 py-0.5 rounded text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                      POSIBLE DUPLICADO
+                    </span>
+                  )}
+                  {detail.cancellation_requested_at && (
+                    <span className="ml-2 px-2 py-0.5 rounded text-[11px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30">
+                      EL CLIENTE PIDE CANCELAR
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-brand-muted mt-1">
                   Shopify ID {detail.shopify_order_id} · creado {fmtTime(detail.created_at)}

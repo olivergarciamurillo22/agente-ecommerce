@@ -13,6 +13,7 @@
 // ============================================================
 
 import pino from "pino";
+import { TRACKING_STATUSES } from "./types";
 import type { TrackingStatus } from "./types";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -116,6 +117,15 @@ export function normalizeSupplierStatus(rawStatus: string | null | undefined): T
 
   const encontrado = mapa[clave] ?? mapa[conGuionBajo];
   if (encontrado) return encontrado;
+
+  // Identidad: si el proveedor manda EXACTAMENTE una palabra de nuestro
+  // propio vocabulario, significa eso y no hace falta mapa. Cubre huecos como
+  // `delivery_attempted` y `at_pickup_point`, que existen en TrackingStatus
+  // pero no estaban en el mapa por defecto — solo en el catálogo de Dropea,
+  // así que cualquier otra vía los dejaba en "unknown" en silencio.
+  if ((TRACKING_STATUSES as string[]).includes(conGuionBajo)) {
+    return conGuionBajo as TrackingStatus;
+  }
 
   logger.warn(
     `[TRACKING] estado desconocido del proveedor: "${rawStatus}". ` +
