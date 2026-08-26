@@ -157,6 +157,13 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 10. Cómo trabajar aquí
 
+- **Credenciales:** antes de pedirle nada a Óliver, ejecuta
+  `npm run env:doctor -- --profile <perfil>` y dile EXACTAMENTE qué variable
+  falta y en qué archivo va (`.env.local` en el Mac). Jamás pidas el `.env`
+  completo, jamás pidas que pegue un secreto en el chat, jamás leas su
+  `.env.local`. La fuente de verdad de variables es
+  `src/lib/config/env-schema.ts`.
+
 - **Una tarea = una rama = un PR.** Si una tarea depende del **esquema** de otra pero no de su **código**, sácala como rama **hermana**, no encadenada: apilar tres ramas convierte un rebase en rehacerlo todo.
 - **No amplíes el alcance por tu cuenta.** Si al implementar te falta una decisión (qué campos sincronizar, qué valor de estado usar), **pregunta antes de escribir código**. Inventar el alcance es el fallo más caro en este repo.
 - **Cero efectos externos sin permiso explícito**: no despliegues, no suscribas webhooks reales, no llames a APIs de terceros, no mandes WhatsApp. Los tests no salen a la red.
