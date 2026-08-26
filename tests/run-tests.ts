@@ -4293,7 +4293,8 @@ async function main(): Promise<void> {
     await withEnv({ SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_secreto_faseA", DROPEA_API_KEY: "dropea-key-faseA", DROPIPRO_API_KEY: "dropi-key-faseA" }, () => {
       const ov = sysOverview.getSystemOverview();
       assert.ok(ov.business.delivery.last7d);
-      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 6);
+      // 8 = las 6 originales + cancelaciones pendientes + duplicados pendientes (watchdog del cierre operativo)
+      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 8);
       assert.ok(ov.business.economics.last30d);
       const json = JSON.stringify(ov);
       for (const s of ["shpat_secreto_faseA", "dropea-key-faseA", "dropi-key-faseA", "34600119021", "Calle Ejemplo"]) {
@@ -9547,6 +9548,130 @@ async function main(): Promise<void> {
     assert.ok(!/hasFlag\s*\(/.test(script), "T4 no debe tener ni la función que lee flags de process.argv");
     assert.ok(!/process\.argv/.test(script), "T4 no debe leer process.argv en absoluto — no hay nada que activar");
   });
+
+  // ============ Cierre operativo — Action Center, duplicados en entrada y watchdog ============
+  console.log("· Cierre operativo — Action Center y watchdog");
+  {
+    const actionCenter = await import("../src/lib/system/action-center");
+    const businessAlerts = await import("../src/lib/system/business-alerts");
+    const sysRepo = await import("../src/lib/system/repo");
+
+    await test("v11 action_resolutions: migración idempotente — correr dos veces no falla ni duplica", () => {
+      // La tabla ya existe (build inicial); volver a migrar debe ser un no-op.
+      db.migrateActionResolutions(db.systemDbHandle());
+      db.migrateActionResolutions(db.systemDbHandle());
+      const cols = db.systemDbHandle().prepare("PRAGMA table_info(action_resolutions)").all() as Array<{ name: string }>;
+      assert.deepEqual(cols.map((c) => c.name).sort(), ["action_type", "id", "note", "order_id", "resolved_at"]);
+    });
+
+    await test("Action Center: cancelación pedida → aparece PRIMERO, con qué hacer en imperativo y teléfono enmascarado", () => {
+      const o = mkOrder("985001", "8501", "34698500001");
+      db.markOrderNeedsCall(o.id); // también hay un needs_call para comprobar el orden
+      db.requestOrderCancellation(o.id);
+      const ac = actionCenter.getActionCenter();
+      const item = ac.items.find((i) => i.orderId === o.id && i.type === "CANCEL_REQUEST");
+      assert.ok(item, "debe existir el elemento CANCEL_REQUEST");
+      assert.equal(ac.items[0].type, "CANCEL_REQUEST", "una cancelación pendiente va la primera");
+      assert.match(item!.whatToDo, /Shopify/);
+      assert.match(item!.customer, /\*\*\*0001/);
+      assert.ok(!JSON.stringify(ac).includes("34698500001"), "el teléfono completo no puede salir de la bandeja");
+      // Con cancelación pedida NO se duplica como NEEDS_CALL: una sola decisión, un solo elemento.
+      assert.ok(!ac.items.some((i) => i.orderId === o.id && i.type === "NEEDS_CALL"));
+    });
+
+    await test("Action Center: marcar resuelto lo saca de la bandeja SIN tocar el pedido; repetir la resolución es upsert", () => {
+      const o = db.getOrderByShopifyId("985001")!;
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "hablado con el cliente, mantiene el pedido");
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "nota corregida"); // upsert, no UNIQUE violation
+      assert.ok(db.isActionResolved(o.id, "CANCEL_REQUEST"));
+      const ac = actionCenter.getActionCenter();
+      assert.ok(!ac.items.some((i) => i.orderId === o.id && i.type === "CANCEL_REQUEST"));
+      const despues = db.getOrderByShopifyId("985001")!;
+      assert.ok(despues.cancellation_requested_at, "resolver NO borra la marca del pedido");
+      assert.equal(despues.status, "needs_call", "resolver NO cambia el estado operativo");
+      const notas = db.listActionResolutions().filter((r) => r.order_id === o.id);
+      assert.equal(notas.length, 1, "upsert: una sola fila por (pedido, tipo)");
+      assert.equal(notas[0].note, "nota corregida");
+    });
+
+    await test("Duplicados EN LA ENTRADA: mismo teléfono+producto+importe+dirección en 48 h → ambos marcados + evento; el webhook nunca falla por esto", () => {
+      const base = {
+        shipping_address: {
+          name: "Lucía Pérez", address1: "Av. del Puerto 9", address2: null, city: "Valencia",
+          province: "Valencia", zip: "46021", country: "Spain", country_code: "ES", phone: "+34 698 500 111",
+        },
+      };
+      const raw1 = JSON.stringify(codPayload({ id: 985002, order_number: 8502, ...base }));
+      assert.equal(processOrdersCreateWebhook(raw1, shopifyHeaders(raw1)).status, 200);
+      const raw2 = JSON.stringify(codPayload({ id: 985003, order_number: 8503, ...base }));
+      assert.equal(processOrdersCreateWebhook(raw2, shopifyHeaders(raw2)).status, 200);
+      const o1 = db.getOrderByShopifyId("985002")!;
+      const o2 = db.getOrderByShopifyId("985003")!;
+      assert.equal(o1.possible_duplicate, 1, "el pedido ORIGINAL también se marca");
+      assert.equal(o2.possible_duplicate, 1, "el nuevo se marca");
+      assert.equal(o1.status, "pending_send", "marcar duplicado JAMÁS cancela ni bloquea");
+      const evs = sysRepo.listIntegrationEvents({ limit: 50 }).filter((e) => e.event_type === "duplicate_suspected_on_create");
+      assert.ok(evs.length >= 1, "queda rastro en integration_events");
+      const ac = actionCenter.getActionCenter();
+      assert.ok(ac.items.some((i) => i.orderId === o2.id && i.type === "POSSIBLE_DUPLICATE"));
+    });
+
+    await test("Duplicados EN LA ENTRADA: pedido distinto (otro importe) del mismo teléfono NO se marca", () => {
+      const raw = JSON.stringify(codPayload({
+        id: 985004, order_number: 8504, total_price: "19.95",
+        line_items: [{
+          title: "Crema facial hidratante", quantity: 1, price: "19.95", sku: "CREMA-01",
+          product_id: 8100000000001, variant_id: 4100000000001, requires_shipping: true,
+          gift_card: false, fulfillment_service: "manual", fulfillment_status: null, fulfillable_quantity: 1,
+        }],
+        shipping_address: {
+          name: "Lucía Pérez", address1: "Av. del Puerto 9", address2: null, city: "Valencia",
+          province: "Valencia", zip: "46021", country: "Spain", country_code: "ES", phone: "+34 698 500 111",
+        },
+      }));
+      assert.equal(processOrdersCreateWebhook(raw, shopifyHeaders(raw)).status, 200);
+      assert.equal(db.getOrderByShopifyId("985004")!.possible_duplicate, 0);
+    });
+
+    await test("Watchdog: cancelaciones y duplicados pendientes disparan warning; resolverlos en el Action Center los apaga", () => {
+      const snap1 = businessAlerts.readBusinessSnapshot();
+      assert.ok(snap1.possibleDuplicatesPending >= 2, "los dos duplicados de arriba cuentan");
+      const res1 = businessAlerts.getBusinessAlerts(undefined, snap1);
+      const dup = res1.alerts.find((a) => a.id === "possible_duplicates_pending")!;
+      assert.equal(dup.status, "warning");
+      assert.match(dup.message, /Acciones/, "la alerta dice DÓNDE actuar");
+      // Resolver ambos desde la bandeja → dejan de contar (delta exacto de 2;
+      // el total no es 0 porque tests anteriores de la suite dejan otros
+      // duplicados marcados en la misma DB compartida — a propósito).
+      db.resolveActionItem(db.getOrderByShopifyId("985002")!.id, "POSSIBLE_DUPLICATE", "eran el mismo, cancelado el 8503 en Shopify");
+      db.resolveActionItem(db.getOrderByShopifyId("985003")!.id, "POSSIBLE_DUPLICATE", "eran el mismo, cancelado el 8503 en Shopify");
+      const snap2 = businessAlerts.readBusinessSnapshot();
+      assert.equal(snap2.possibleDuplicatesPending, snap1.possibleDuplicatesPending - 2);
+    });
+
+    await test("Watchdog: cancelación pendiente ya resuelta arriba NO cuenta; una nueva sí", () => {
+      const snapA = businessAlerts.readBusinessSnapshot();
+      const antes = snapA.cancelRequestsPending;
+      const o = mkOrder("985005", "8505", "34698500005");
+      db.requestOrderCancellation(o.id);
+      const snapB = businessAlerts.readBusinessSnapshot();
+      assert.equal(snapB.cancelRequestsPending, antes + 1);
+      assert.equal(businessAlerts.getBusinessAlerts(undefined, snapB).alerts.find((a) => a.id === "cancel_requests_pending")!.status, "warning");
+      db.resolveActionItem(o.id, "CANCEL_REQUEST", "gestionada");
+    });
+
+    await test("Action Center: los pedidos ignored_old NUNCA aparecen aunque tengan marcas", () => {
+      const antes = businessAlerts.readBusinessSnapshot();
+      const viejo = mkOrder("985006", "8506", "34698500006");
+      db.systemDbHandle().prepare("UPDATE orders SET status='ignored_old', possible_duplicate=1, cancellation_requested_at=unixepoch() WHERE id = ?").run(viejo.id);
+      const ac = actionCenter.getActionCenter();
+      assert.ok(!ac.items.some((i) => i.orderId === viejo.id), "un pedido antiguo no genera trabajo para Pedro");
+      // Y tampoco cuenta para el watchdog: mismos contadores que antes de crearlo.
+      const despues = businessAlerts.readBusinessSnapshot();
+      assert.equal(despues.possibleDuplicatesPending, antes.possibleDuplicatesPending);
+      assert.equal(despues.cancelRequestsPending, antes.cancelRequestsPending);
+    });
+  }
 
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
