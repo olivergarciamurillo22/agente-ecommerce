@@ -1,42 +1,42 @@
 # Checklist del día del piloto — WhatsApp Cloud API
 
-> Imprimible. Todo lo demás está en `PEDRO-META-WHATSAPP-SETUP.md` (alta) y
-> `META-WHATSAPP-MIGRATION.md` (arquitectura). Fuera de 10:00–21:00.
+> Actualizada el 26-08-2026 tras T1: **el primer mensaje a un cliente nuevo
+> sale como PLANTILLA** (está siempre fuera de la ventana de 24 h porque
+> nunca escribió). Los interactivos con botones llegan DESPUÉS de que
+> responda. Fuera de 10:00–21:00. **Coexistence NO se toca hoy.**
 
-## Antes de tocar nada
+## Antes de encender
 
-- [ ] Backup: `docker compose exec casamable-agent npm run backup`
-- [ ] Credenciales de Meta en el `.env` del NAS (5 variables, paso 3-4 de la guía)
-- [ ] Webhook verificado en Meta (el panel dice "webhook vivo" tras el primer evento)
-- [ ] Las 6 plantillas en estado **APPROVED** en WhatsApp Manager
-- [ ] `TEST_MODE=1` y **solo** el móvil de Pedro en `TEST_PHONE_ALLOWLIST`
+1. [ ] Backup: `docker compose exec casamable-agent npm run backup`
+2. [ ] `npm run db:health` → esquema **10**, integridad ok
+3. [ ] Confirmar que el proveedor sigue en Baileys (`WHATSAPP_PROVIDER` sin tocar aún)
+4. [ ] Plantilla `order_confirmation_request` **APPROVED** en WhatsApp Manager (y verificar que es **UTILITY** — el catálogo local declara la intención, no la aprobación)
+5. [ ] Cloud API apuntando SOLO al número de prueba (Phone Number ID del número de test)
+6. [ ] `TEST_MODE=1` y solo Pedro/Óliver en `TEST_PHONE_ALLOWLIST`
 
 ## Encender
 
-- [ ] `.env`: `WHATSAPP_PROVIDER=cloud_api`
-- [ ] Reiniciar contenedor → el log debe decir "Baileys NO se arranca; entrega por API oficial"
-- [ ] Panel → Sistema → WhatsApp: "API oficial de Meta configurada", sin hablar de QR
+7. [ ] `.env`: `WHATSAPP_PROVIDER=cloud_api` + `META_WHATSAPP_API_ENABLED=1` → reiniciar. El log debe decir "Baileys NO se arranca"
 
-## Probar (con el móvil de Pedro)
+## Probar
 
-- [ ] Pedido de prueba → llega el mensaje **con 3 botones**
-- [ ] **✅ Confirmar** → panel: `confirmed` · llega "¡Pedido confirmado!"
-- [ ] Segundo pedido → **📍 Cambiar dirección** → escribir una dirección → aparece en `proposed_address`
-- [ ] Tercer pedido → **📝 Dejar nota** → escribir la nota → guardada, pide 1/2
-- [ ] Escribir "CANCELAR nnnn" → pedido a "pendiente de llamada" con insignia PIDE CANCELAR
-- [ ] Cola de envíos: los mensajes marcan **entregado** y **leído** (webhook de estados vivo)
-- [ ] Mandar una nota de voz → queda registrada en Chats, nada se rompe
-- [ ] Esperar >5 min sin escribir y crear otro pedido → sale igualmente (dentro de ventana)
+8. [ ] Crear pedido de prueba al móvil de Pedro
+9. [ ] **El primer mensaje llega como PLANTILLA** (con botones de plantilla). En la cola de envíos: `message_type=template`, `template_name=order_confirmation_request`
+10. [ ] Pedro responde cualquier cosa → la ventana de 24 h se abre
+11. [ ] Los siguientes mensajes ya pueden ser **interactivos** normales
+12. [ ] Crear segundo pedido → ahora sí llega el interactivo (dentro de ventana) → **✅ Confirmar** → panel `confirmed`
+13. [ ] Botón **📍 Cambiar dirección** → escribir dirección → `proposed_address`
+14. [ ] Botón **📝 Dejar nota** → escribir nota → guardada
+15. [ ] Cola de envíos: **entregado** marca; ⚠️ **leído puede no llegar** (en coexistencia las confirmaciones de lectura se desactivan — validar hasta `delivered` basta)
+16. [ ] Escribir "CANCELAR nnnn" → pedido con insignia PIDE CANCELAR
 
-## Si algo va mal
+## Salir
 
-- [ ] `.env`: `WHATSAPP_PROVIDER=baileys` → reiniciar → todo vuelve a hoy
-- [ ] Si Baileys pide QR (puede pasar tras el alta de coexistencia): escanear desde el panel
-- [ ] Los mensajes pendientes NO se pierden: el loop de Baileys manda su texto de fallback
-- [ ] Anotar el error exacto de la cola de envíos (lleva el código de Meta) y mandárselo a Óliver
+17. [ ] Rollback: `WHATSAPP_PROVIDER=baileys` → reiniciar → WhatsApp de siempre (si pide QR, escanear del panel)
+18. [ ] Comprobar que NO hay mensajes duplicados en la conversación de prueba ni filas raras en la cola
 
-## Qué NO hacer hoy
+## Si algo falla
 
-- Clientes reales (TEST_MODE=1 se queda puesto)
-- Borrar `auth/` de Baileys
-- Tocar plantillas aprobadas
+- El error de la cola lleva el código de Meta (`[code 131047]…`) — copiarlo entero para Óliver.
+- `template_not_configured_outside_window` = falta plantilla aprobada para ese mensaje.
+- Nada de esto toca clientes reales: `TEST_MODE=1` + allowlist lo impiden en tres capas.

@@ -4,7 +4,16 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
-**Última actualización: 26-08-2026.**
+**Última actualización: 26-08-2026 (cierre de sesión).**
+
+> **Rama de código candidato al cierre:** `fix/hardening-casamable` = `main`
+> (reconciliados por merge explícito el 26-08; el NAS sigue en la rama y no
+> se ha tocado). Esquema del CÓDIGO: **10** (`ordered_at`); el NAS quedará en
+> 10 en su próximo despliegue — hoy corre 9. Novedades del cierre en
+> `docs/CONTEXTO-2026-08-26.md`: T1 (plantilla fuera de ventana — el bug que
+> bloqueaba la migración a Cloud API), HMAC contra ambos secretos con salud
+> visible, llamadas fail-closed en piloto, validador de prompt, diagnóstico
+> Dropi, y 7 PRs de la cola integrados.
 
 > ⚠️ **PRODUCCIÓN CORRE `fix/hardening-casamable` (commit `fe53c9d`+, esquema
 > 9), NO `main`.** Desplegada por Pedro el 25-08 con backup y baseline

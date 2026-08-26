@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED — ver `docs/ESTADO-PRODUCCION.md`** (este documento quedó por detrás de la realidad y se conserva como histórico).
+
 # Casamable NAS Control Center — Smoke Test Report
 
 Despliegue y validación de la rama `feat/dropi-dropea` en el NAS real de producción (UGREEN DXP2800, `192.168.2.109`). Ejecutado el **22-08-2026** entre las 19:41 y las 20:32 (hora de Madrid), guiado paso a paso y con verificación antes/después de cada acción con efecto.

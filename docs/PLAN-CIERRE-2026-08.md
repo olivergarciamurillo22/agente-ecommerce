@@ -1,3 +1,5 @@
+> ⚠️ **SUPERSEDED — ver `docs/ESTADO-PRODUCCION.md`** (este documento quedó por detrás de la realidad y se conserva como histórico).
+
 # Plan de cierre — todo lo que queda (23-08-2026)
 
 > **Estado a 23-08-2026: FASE A IMPLEMENTADA E INTEGRADA EN `main`**
