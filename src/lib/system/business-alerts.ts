@@ -171,12 +171,28 @@ export function evalTrackingNotifyFailures(count24h: number, t: Pick<Thresholds,
 // --- Lectura de cifras ---
 
 export interface BusinessSnapshot {
+  /** Cancelaciones pedidas por el cliente y aún sin resolver por Pedro. */
+  cancelRequestsPending: number;
+  /** Posibles duplicados marcados y aún sin revisar. */
+  possibleDuplicatesPending: number;
   needsCallTotal: number;
   needsCallStale: number;
   openIncidents: number;
   supplierFailures24h: number;
   trackingNotifyFailures24h: number;
   trackingStale: number;
+}
+
+function evalCancelRequestsPending(n: number): BusinessAlert {
+  const base = { id: "cancel_requests_pending", category: "operations" as const, label: "Cancelaciones sin gestionar", value: n, threshold: 0 };
+  if (n > 0) return { ...base, status: "warning", message: `${n} cliente(s) pidieron cancelar y esperan respuesta — pestaña Acciones` };
+  return { ...base, status: "healthy", message: "sin cancelaciones pendientes" };
+}
+
+function evalPossibleDuplicatesPending(n: number): BusinessAlert {
+  const base = { id: "possible_duplicates_pending", category: "operations" as const, label: "Posibles duplicados sin revisar", value: n, threshold: 0 };
+  if (n > 0) return { ...base, status: "warning", message: `${n} pedido(s) parecen repetidos: decide cuál va antes de que salgan los dos — pestaña Acciones` };
+  return { ...base, status: "healthy", message: "sin duplicados pendientes" };
 }
 
 export function readBusinessSnapshot(nowS = Math.floor(Date.now() / 1000), staleHoursNeedsCall = businessThresholds().needsCallStaleHours): BusinessSnapshot {
@@ -220,7 +236,27 @@ export function readBusinessSnapshot(nowS = Math.floor(Date.now() / 1000), stale
     )
     .get(...activos, nowS - trackingStaleHours() * 3600) as { n: number };
 
+  // Pendiente = marcado en el pedido Y sin fila de resolución en
+  // action_resolutions: "Marcar resuelto" en el Action Center lo saca de
+  // aquí sin borrar nada del pedido.
+  const cancelRequestsPending = (
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM orders o
+        WHERE o.cancellation_requested_at IS NOT NULL AND o.status != 'ignored_old'
+          AND NOT EXISTS (SELECT 1 FROM action_resolutions r WHERE r.order_id = o.id AND r.action_type = 'CANCEL_REQUEST')`
+    ).get() as { n: number }
+  ).n;
+  const possibleDuplicatesPending = (
+    db.prepare(
+      `SELECT COUNT(*) AS n FROM orders o
+        WHERE o.possible_duplicate = 1 AND o.status != 'ignored_old'
+          AND NOT EXISTS (SELECT 1 FROM action_resolutions r WHERE r.order_id = o.id AND r.action_type = 'POSSIBLE_DUPLICATE')`
+    ).get() as { n: number }
+  ).n;
+
   return {
+    cancelRequestsPending,
+    possibleDuplicatesPending,
     needsCallTotal: needsCall.total ?? 0,
     needsCallStale: needsCall.stale ?? 0,
     openIncidents: incidencias.n,
@@ -247,6 +283,12 @@ export function getBusinessAlerts(
   const w = metrics.last7d;
   const alerts: BusinessAlert[] = [
     evalDeliveryRate(w.deliveryRate, w.delivered + w.returned, t),
+    // §11 del cierre: nada puede depender de que Pedro "se acuerde de
+    // mirar". Una cancelación sin gestionar es un cliente esperando; un
+    // duplicado sin revisar puede acabar en dos envíos (~9,37 € cada
+    // rehusado). Con CUALQUIER pendiente: warning que apunta a Acciones.
+    evalCancelRequestsPending(snapshot.cancelRequestsPending),
+    evalPossibleDuplicatesPending(snapshot.possibleDuplicatesPending),
     evalNeedsCall(snapshot.needsCallStale, snapshot.needsCallTotal, t),
     evalOpenIncidents(snapshot.openIncidents, t),
     evalSupplierFailures(snapshot.supplierFailures24h, t),
