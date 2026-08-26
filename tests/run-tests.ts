@@ -304,6 +304,8 @@ async function main(): Promise<void> {
   const { processOrdersEventWebhook } = await import("../src/lib/shopify/orders-events-webhook");
   const backfill = await import("../src/lib/shopify/backfill");
   const backfillOrderedAt = await import("../src/lib/shopify/backfill-ordered-at");
+
+  const investigateSkipped = await import("../src/lib/shopify/investigate-skipped-backfill");
   const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
@@ -8902,6 +8904,101 @@ async function main(): Promise<void> {
     }
   });
 
+
+  // ============ T4 · Investigación de pedidos saltados por el backfill ============
+  console.log("\n— T4: investigación de skip_has_own_source —");
+
+  await test("T4 listSkippedByOwnSource: incluye closure_source o closure_status≠unknown; excluye los totalmente unknown/null", () => {
+    const conFuente = mkOrder("974001", "3001", "34600199001");
+    db.setOrderClosure(conFuente.id, "in_progress", "shopify", 1_700_000_000);
+
+    const sinFuenteNiTocar = mkOrder("974002", "3002", "34600199002"); // unknown + source null: fuera
+
+    // Caso de borde: status≠unknown pero source NULL (no debería pasar en la
+    // práctica vía setOrderClosure, pero decideBackfillAction también lo
+    // trata como skip_has_own_source — se fuerza por SQL para probar la regla tal cual).
+    const statusSinFuente = mkOrder("974003", "3003", "34600199003");
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET closure_status = 'in_progress' WHERE id = ?")
+      .run(statusSinFuente.id);
+
+    const candidatos = investigateSkipped.listSkippedByOwnSource();
+    const idsCandidatos = new Set(candidatos.map((c) => c.id));
+
+    assert.ok(idsCandidatos.has(conFuente.id), "con closure_source: SÍ es candidato");
+    assert.ok(idsCandidatos.has(statusSinFuente.id), "con closure_status≠unknown aunque source sea NULL: SÍ es candidato");
+    assert.ok(!idsCandidatos.has(sinFuenteNiTocar.id), "totalmente unknown/NULL: NO es candidato");
+  });
+
+  await test("T4 compareLocalToLive: match, discrepancia, sin señal (no encontrado), sin señal (Shopify no dice nada nuevo)", () => {
+    const local = (status: import("../src/lib/db").ClosureStatus): import("../src/lib/shopify/investigate-skipped-backfill").SkippedCandidate => ({
+      id: 1,
+      shopifyOrderId: "999001",
+      shopifyOrderNumber: "9001",
+      closureStatus: status,
+      closureSource: "shopify",
+      closureAt: 1_700_000_000,
+    });
+
+    // Match: local dice in_progress, Shopify (fulfilled) también dice in_progress.
+    // Adaptado al fulfillment POR LÍNEA de esta rama (el PR venía de main):
+    // el global "fulfilled" solo cuenta si las líneas físicas salieron.
+    const remotoEnCurso = backfillOrder({ id: 999001, fulfillment_status: "fulfilled", line_items: lineas({ fisicasDespachadas: 1 }), updated_at: "2026-08-20T10:00:00Z" });
+    const match = investigateSkipped.compareLocalToLive(local("in_progress"), remotoEnCurso, false);
+    assert.equal(match.kind, "match");
+
+    // Discrepancia: local dice in_progress, Shopify AHORA dice cancelled — el
+    // caso sospechoso que motivó T4 (una cancelación que nunca se reflejó).
+    const remotoCancelado = backfillOrder({ id: 999001, cancelled_at: "2026-08-22T10:00:00Z" });
+    const discrepancia = investigateSkipped.compareLocalToLive(local("in_progress"), remotoCancelado, false);
+    assert.equal(discrepancia.kind, "discrepancy");
+    assert.equal(discrepancia.liveSignal?.status, "cancelled");
+
+    // Sin señal: Shopify no devolvió el pedido (borrado, id equivocado...).
+    const noEncontrado = investigateSkipped.compareLocalToLive(local("in_progress"), null, false);
+    assert.equal(noEncontrado.kind, "no_live_signal");
+    assert.equal(noEncontrado.notFoundInShopify, true);
+
+    // Sin señal: Shopify lo devuelve pero no tiene NADA que decir del cierre
+    // (sigue abierto, sin fulfillment ni cancelación) — no es una discrepancia,
+    // es "todavía no hay nada nuevo que comparar".
+    const remotoAbierto = backfillOrder({ id: 999001 });
+    const sinSeñalTodavia = investigateSkipped.compareLocalToLive(local("in_progress"), remotoAbierto, true);
+    assert.equal(sinSeñalTodavia.kind, "no_live_signal");
+    assert.equal(sinSeñalTodavia.notFoundInShopify, undefined, "esto es distinto de 'no encontrado'");
+    assert.equal(sinSeñalTodavia.highlighted, true, "el flag de señalado se propaga tal cual");
+  });
+
+  await test("T4 runInvestigation: orquesta con un fetcher inyectado, cuenta bien, y respeta highlightOrderNumbers", async () => {
+    const a = mkOrder("974101", "3101", "34600199101");
+    db.setOrderClosure(a.id, "in_progress", "shopify", 1_700_000_000); // se le va a llevar la contraria
+
+    const b = mkOrder("974102", "3102", "34600199102");
+    db.setOrderClosure(b.id, "cancelled", "shopify", 1_700_000_000); // va a coincidir
+
+    const vistos: string[] = [];
+    const fetcher: import("../src/lib/shopify/investigate-skipped-backfill").OrdersByIdFetcher = async (ids) => {
+      vistos.push(...ids);
+      return ids
+        .filter((id) => id === "974101" || id === "974102")
+        .map((id) =>
+          id === "974101"
+            ? backfillOrder({ id: 974101, cancelled_at: "2026-08-23T10:00:00Z" }) // discrepancia real
+            : backfillOrder({ id: 974102, cancelled_at: "2026-08-01T10:00:00Z" }) // coincide
+        );
+    };
+
+    const report = await investigateSkipped.runInvestigation({ fetcher, highlightOrderNumbers: ["3101"] });
+
+    assert.ok(vistos.includes("974101") && vistos.includes("974102"), "el fetcher recibe los ids de Shopify, no los locales");
+    const miItemA = report.items.find((i) => i.local.id === a.id)!;
+    const miItemB = report.items.find((i) => i.local.id === b.id)!;
+    assert.equal(miItemA.kind, "discrepancy");
+    assert.equal(miItemA.highlighted, true, "3101 estaba en highlightOrderNumbers");
+    assert.equal(miItemB.kind, "match");
+    assert.equal(miItemB.highlighted, false);
+  });
+
   await test("T1 resolveOrderedAtFromRawPayload: los cuatro casos puros (resuelto, sin payload, JSON roto, sin fecha utilizable)", () => {
     const okPayload = JSON.stringify({ created_at: "2026-03-01T10:00:00Z" });
     assert.deepEqual(backfillOrderedAt.resolveOrderedAtFromRawPayload(okPayload), {
@@ -9142,6 +9239,37 @@ async function main(): Promise<void> {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  await test("T4 salvaguarda estructural: solo lectura — ni WhatsApp/Baileys, ni un solo UPDATE/INSERT/DELETE, ni un --apply en ninguna parte", () => {
+    const prohibidoEscritura = [
+      /from\s+["'].*\/whatsapp["']/,
+      /from\s+["'].*\/baileys/,
+      /from\s+["'].*\/orders\/messages["']/,
+      /from\s+["'].*\/orders\/confirmation["']/,
+      /sendWhatsAppMessage/,
+      /enqueueOutbox/,
+      /\bUPDATE\s+orders\b/i,
+      /\bINSERT\s+INTO\b/i,
+      /\bDELETE\s+FROM\b/i,
+      /setOrderClosure/,
+      /setOrderSupplier/,
+    ];
+    for (const rel of ["src/lib/shopify/investigate-skipped-backfill.ts", "scripts/investigate-skipped-backfill.ts"]) {
+      const contenido = fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+      for (const patron of prohibidoEscritura) {
+        assert.ok(!patron.test(contenido), `${rel} no debe contener ${patron} — esto es SOLO LECTURA`);
+      }
+    }
+    // Refuerzo explícito del requisito "sin --apply en ninguna parte" (T4, a
+    // diferencia de E3/E8, no tiene NI SIQUIERA el flag dormido): no hay
+    // siquiera la maquinaria para leer flags de process.argv. Se busca el
+    // patrón de código, no la palabra "--apply" a secas — el comentario de
+    // cabecera del propio script LA MENCIONA a propósito para explicar que
+    // no existe, y no debe hacer fallar este test por eso.
+    const script = fs.readFileSync(path.join(process.cwd(), "scripts/investigate-skipped-backfill.ts"), "utf8");
+    assert.ok(!/hasFlag\s*\(/.test(script), "T4 no debe tener ni la función que lee flags de process.argv");
+    assert.ok(!/process\.argv/.test(script), "T4 no debe leer process.argv en absoluto — no hay nada que activar");
   });
 
   // ============ Resumen ============

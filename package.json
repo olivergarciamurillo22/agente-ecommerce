@@ -33,7 +33,8 @@
     "shopify:webhooks": "tsx scripts/shopify-webhooks.ts",
     "dropea:reconcile": "tsx scripts/dropea-reconcile.ts",
     "retention": "tsx scripts/retention.ts",
-    "orders:backfill-ordered-at": "tsx scripts/backfill-ordered-at.ts"
+    "orders:backfill-ordered-at": "tsx scripts/backfill-ordered-at.ts",
+    "orders:investigate-skipped-backfill": "tsx scripts/investigate-skipped-backfill.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
