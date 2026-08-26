@@ -9879,7 +9879,8 @@ async function main(): Promise<void> {
     // --- outbox: dos 'workers' pelean por el mismo mensaje pendiente ---
     const convo = db.getOrCreateConversation("34698800099", "Test Dos Procesos");
     db.enqueueOutbox(convo.id, "34698800099", "mensaje único");
-    const item = db.getPendingOutbox(50).find((m) => m.phone === "34698800099")!;
+    const item = db.getPendingOutbox(10_000).find((m) => m.phone === "34698800099")!;
+    assert.ok(item, "el mensaje encolado tiene que aparecer entre los pendientes");
     const conn2 = new Database(db.dbFilePath());
     try {
       // Proceso A (el singleton) y proceso B (conexión cruda) reclaman a la vez.

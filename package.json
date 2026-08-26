@@ -41,7 +41,8 @@
     "env:init": "tsx scripts/env-init.ts",
     "local:doctor": "tsx scripts/local-doctor.ts",
     "local:reset": "tsx scripts/local-reset.ts",
-    "casamable:simulate": "tsx scripts/casamable-simulate.ts"
+    "casamable:simulate": "tsx scripts/casamable-simulate.ts",
+    "readiness": "tsx scripts/readiness.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
