@@ -8506,6 +8506,16 @@ async function main(): Promise<void> {
     await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "en modo prueba, vacía = NADIE");
     });
+    // Y con TEST_MODE SIN DEFINIR: safety.ts lo trata como modo prueba
+    // ACTIVO (!== "0"), así que el fail-closed también aplica. Con === "1"
+    // este caso habría reabierto el agujero de "vacía = todos".
+    const backup = process.env.TEST_MODE;
+    delete process.env.TEST_MODE;
+    try {
+      assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), false, "sin definir = también fail-closed");
+    } finally {
+      process.env.TEST_MODE = backup;
+    }
     await withEnv({ TEST_MODE: "1", CALLS_ALLOWLIST: "34600000001" }, () => {
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000001"), true, "el permitido pasa");
       assert.equal(callsCfg58.callAllowedByAllowlist("34600000002"), false, "el resto no");
@@ -8646,9 +8656,15 @@ async function main(): Promise<void> {
   await test("ENV · cloud-pilot: exige credenciales Meta, provider, TEST_MODE y allowlist NO vacía", () => {
     const sinNada = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({}));
     assert.equal(sinNada.ready, false);
-    for (const v of ["META_WHATSAPP_ACCESS_TOKEN", "META_WHATSAPP_APP_SECRET", "META_WHATSAPP_PHONE_NUMBER_ID", "TEST_PHONE_ALLOWLIST", "WHATSAPP_PROVIDER", "TEST_MODE"]) {
+    for (const v of ["META_WHATSAPP_ACCESS_TOKEN", "META_WHATSAPP_APP_SECRET", "META_WHATSAPP_PHONE_NUMBER_ID", "TEST_PHONE_ALLOWLIST", "WHATSAPP_PROVIDER"]) {
       assert.ok(sinNada.missingRequired.includes(v), `${v} debe faltar`);
     }
+    // TEST_MODE sin definir NO falta: el código lo trata como ACTIVO
+    // (safety.ts, !== "0") y el schema refleja esa semántica. Lo que sí se
+    // señala es un 0 EXPLÍCITO, que es la única forma de apagarlo.
+    assert.equal(sinNada.missingRequired.includes("TEST_MODE"), false, "sin definir = activo = válido para el piloto");
+    const apagado = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({ TEST_MODE: "0" }));
+    assert.ok(apagado.missingRequired.includes("TEST_MODE"), "TEST_MODE=0 explícito sí se rechaza en el piloto");
     const completo = envSchema.auditEnvironment("whatsapp-cloud-pilot", entorno({
       WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", TEST_MODE: "1",
       TEST_PHONE_ALLOWLIST: "34600000001", META_WHATSAPP_PHONE_NUMBER_ID: "12345",
