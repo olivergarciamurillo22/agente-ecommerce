@@ -8409,6 +8409,7 @@ async function main(): Promise<void> {
       id: 991210,
       order_number: 5210,
       fulfillment_status: "fulfilled",
+      line_items: lineas({ fisicasDespachadas: 1 }),
       created_at: "2026-01-10T09:00:00Z",
       updated_at: "2026-01-12T09:00:00Z",
     });
