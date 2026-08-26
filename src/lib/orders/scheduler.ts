@@ -34,7 +34,8 @@ import {
 } from "../db";
 import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
 import { whatsappProviderName } from "../whatsapp/provider";
-import { buildConfirmationInteractive } from "../whatsapp/interactive";
+import { buildConfirmationOutbound } from "../whatsapp/interactive";
+import { isWithinSessionWindow } from "../whatsapp/meta-cloud";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
 import {
@@ -166,11 +167,32 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         continue;
       }
       // Botones de verdad SOLO en cloud_api: Baileys no los tiene, y el
-      // texto de fallback de buildConfirmationInteractive() es justo el
-      // flujo 1/2/3 de siempre, así que Baileys sigue mandando lo mismo que
-      // manda hoy. El proveedor se resuelve UNA vez aquí; el resto del
-      // bloque (gates, claim, log) no sabe ni le importa cuál es.
-      const interactive = whatsappProviderName() === "cloud_api" ? buildConfirmationInteractive(order) : null;
+      // texto de fallback es justo el flujo 1/2/3 de siempre, así que
+      // Baileys sigue mandando lo mismo que manda hoy. El proveedor se
+      // resuelve UNA vez aquí; el resto del bloque (gates, claim, log) no
+      // sabe ni le importa cuál es.
+      //
+      // BUG1: fuera de la ventana de 24h, Meta EXIGE una plantilla aprobada
+      // — un interactivo o texto libre se rechaza siempre con
+      // outside_24h_window. El primer mensaje a un cliente nuevo está
+      // SIEMPRE fuera de ventana (nunca ha escrito), así que sin esto
+      // ninguna confirmación inicial podía salir en cloud_api.
+      let interactive: ReturnType<typeof buildConfirmationOutbound> | null = null;
+      if (whatsappProviderName() === "cloud_api") {
+        try {
+          interactive = buildConfirmationOutbound(order, isWithinSessionWindow(order.phone));
+        } catch (err) {
+          // Solo puede pasar si la plantilla no está en el catálogo local
+          // (config/whatsapp-templates.json) — un error de programación o
+          // de despliegue, no de Meta. Se salta ESTE pedido, no el tick
+          // entero: los demás pedidos de la cola no tienen por qué
+          // bloquearse por esto.
+          logger.error(
+            `[WHATSAPP] #${order.shopify_order_number}: no se pudo construir la confirmación (${err instanceof Error ? err.message : String(err)}) — se reintenta en el siguiente tick`
+          );
+          continue;
+        }
+      }
       const message = interactive ? interactive.fallbackText : buildConfirmationMessage(order);
       const autorizado = order.pilot_authorized === 1;
       if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {

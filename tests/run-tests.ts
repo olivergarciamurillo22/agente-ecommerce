@@ -7687,6 +7687,74 @@ async function main(): Promise<void> {
     assert.equal(waTemplates.loadTemplateSpecs().length, 6, "las 6 plantillas del plan");
   });
 
+  await test("BUG1 · buildTemplateMessage incluye los payloads de botón del catálogo, en orden", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    assert.equal(m.kind, "template");
+    if (m.kind !== "template") throw new Error("unreachable");
+    assert.deepEqual(
+      m.buttonPayloads,
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE],
+      "los 3 payloads de order_confirmation_request, en el mismo orden que el catálogo"
+    );
+
+    const rec = waTemplates.buildTemplateMessage("order_reminder", ["Ana", "Limpiador"]);
+    if (rec.kind !== "template") throw new Error("unreachable");
+    assert.deepEqual(
+      rec.buttonPayloads,
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS],
+      "order_reminder solo tiene 2 botones (sin 'dejar nota')"
+    );
+  });
+
+  await test("BUG1 · buildMetaPayload de una plantilla manda un componente button/quick_reply POR CADA botón, con su payload", () => {
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    const payload = metaProv.buildMetaPayload("34600000000", m) as {
+      template: { components: Array<{ type: string; sub_type?: string; index?: string; parameters: Array<Record<string, string>> }> };
+    };
+    const botones = payload.template.components.filter((c) => c.type === "button");
+    assert.equal(botones.length, 3, "un componente por cada botón de la plantilla");
+    assert.deepEqual(
+      botones.map((b) => b.parameters[0].payload),
+      [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE]
+    );
+    assert.deepEqual(botones.map((b) => b.index), ["0", "1", "2"], "el índice marca qué botón de la plantilla es cada uno");
+    assert.ok(botones.every((b) => b.sub_type === "quick_reply"));
+
+    // Un mensaje de plantilla SIN buttonPayloads (campo opcional) no debe
+    // reventar ni añadir componentes de botón — solo el body.
+    const sinBotones = metaProv.buildMetaPayload("34600000000", {
+      kind: "template", templateName: "x", language: "es", bodyParams: ["a"],
+    }) as { template: { components: unknown[] } };
+    assert.equal(sinBotones.template.components.filter((c: any) => c.type === "button").length, 0);
+  });
+
+  await test("BUG1 · buildConfirmationOutbound: dentro de ventana manda el interactivo, fuera manda la plantilla con los datos reales del pedido", () => {
+    const o = mkMulti("972501", "7501", "34600177501", { product_summary: "Limpiador Ultrasónico", total_price: "19.99" });
+    const orden = db.getOrderById(o.id)!;
+
+    const dentro = interactive.buildConfirmationOutbound(orden, true);
+    assert.equal(dentro.message.kind, "interactive_buttons", "dentro de ventana: interactivo normal, NUNCA plantilla (coste)");
+
+    const fuera = interactive.buildConfirmationOutbound(orden, false);
+    assert.equal(fuera.message.kind, "template");
+    if (fuera.message.kind !== "template") throw new Error("unreachable");
+    assert.equal(fuera.message.templateName, "order_confirmation_request");
+    assert.deepEqual(fuera.message.bodyParams, ["Cliente", "Limpiador Ultrasónico", "19,99 €"], "nombre, producto e importe, en ese orden");
+    assert.equal(fuera.fallbackText, dentro.fallbackText, "el fallback (panel / rollback) es el mismo texto en los dos casos");
+  });
+
+  await test("BUG1 · sendWhatsAppInteractive con una plantilla guarda message_type='template' y template_name — no 'interactive_buttons'", async () => {
+    const tel = "34600177502";
+    const orden = db.getOrderById(mkMulti("972502", "7502", tel).id)!;
+    const spec = interactive.buildConfirmationOutbound(orden, false); // fuera de ventana → plantilla
+    await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
+      waTop.sendWhatsAppInteractive(tel, spec);
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "template", "antes de este fix caía en 'interactive_buttons' por defecto");
+    assert.equal(item.template_name, "order_confirmation_request");
+  });
+
   await test("WEBHOOK META · verificación inicial: token correcto devuelve el challenge, incorrecto 403, sin configurar 500", async () => {
     await withEnv(META_ENV, () => {
       const ok = metaHook.verifyMetaWebhookSubscription({ mode: "subscribe", token: "verify-token-de-prueba", challenge: "reto-123" });
@@ -8133,6 +8201,11 @@ async function main(): Promise<void> {
 
   await test("BOTONES · el scheduler manda la confirmación inicial como interactivo cuando el proveedor activo es cloud_api", async () => {
     const tel = "34600000138";
+    // BUG1: dentro de la ventana de 24h (el cliente ya escribió) es cuando
+    // corresponde el interactivo — fuera de ventana ahora es una plantilla
+    // (ver los tests "BUG1 ·" más abajo, que cubren ese otro caso).
+    const convoPrevia = db.getOrCreateConversation(tel, "Cliente Botones");
+    db.insertMessage(convoPrevia.id, "user", "hola");
     const o = mkOrder("971101", "6101", tel);
     await withEnv(META_ENV, async () => {
       await tickHastaQueSalgaDe(o.id, "pending_send");
@@ -8220,6 +8293,38 @@ async function main(): Promise<void> {
       assert.equal(rechazada!.severity, "warning", "un rechazo bloquea mensajes fuera de ventana: warning");
       assert.match(rechazada!.message, /INVALID_FORMAT/);
     });
+  });
+
+  await test("BUG1 · scheduler de punta a punta: pedido nuevo en cloud_api (nunca escribió, fuera de ventana) sale como PLANTILLA, no falla con outside_24h_window", async () => {
+    const tel = "34600177601"; // nunca escribió a este número: fuera de ventana por definición
+    const o = mkOrder("972601", "7601", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "template", "el bug real: antes esto salía como interactive_buttons y fallaba terminal");
+    assert.equal(item.template_name, "order_confirmation_request");
+    assert.equal(item.failure_reason, null, "no debe fallar — es justo el caso que BUG1 arregla");
+    const payload = JSON.parse(item.payload_json!) as { kind: string; buttonPayloads?: string[] };
+    assert.equal(payload.kind, "template");
+    assert.deepEqual(payload.buttonPayloads, [
+      confirmMod.BUTTON_PAYLOADS.CONFIRM,
+      confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS,
+      confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE,
+    ]);
+  });
+
+  await test("BUG1 · scheduler: si el cliente YA escribió (dentro de ventana), sigue mandando el interactivo normal — no gasta plantilla de más", async () => {
+    const tel = "34600177602";
+    const convo = db.getOrCreateConversation(tel, "Cliente Ventana");
+    db.insertMessage(convo.id, "user", "hola, ya he escrito antes"); // abre la ventana
+    const o = mkOrder("972602", "7602", tel);
+    await withEnv(META_ENV, async () => {
+      await tickHastaQueSalgaDe(o.id, "pending_send");
+    });
+    const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
+    assert.equal(item.message_type, "interactive_buttons", "dentro de ventana: interactivo normal, la plantilla se cobra y aquí no hace falta");
+    assert.equal(item.template_name, null);
   });
 
   await test("META · normalización: interactivos, plantilla-botón, audio e imagen salen tipados", () => {

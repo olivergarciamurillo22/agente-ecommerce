@@ -55,5 +55,13 @@ export function buildTemplateMessage(name: string, params: string[]): OutboundWh
       `plantilla "${name}": esperaba ${spec.variables.length} variable(s) (${spec.variables.join(", ")}) y llegaron ${params.length}`
     );
   }
-  return { kind: "template", templateName: spec.name, language: spec.language, bodyParams: params };
+  return {
+    kind: "template",
+    templateName: spec.name,
+    language: spec.language,
+    bodyParams: params,
+    // Los payloads viven en el catálogo local (config/whatsapp-templates.json),
+    // no se inventan aquí — así no pueden desincronizarse de BUTTON_PAYLOADS.
+    buttonPayloads: spec.buttons.map((b) => b.payload),
+  };
 }
