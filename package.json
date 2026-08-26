@@ -43,7 +43,8 @@
     "local:reset": "tsx scripts/local-reset.ts",
     "casamable:simulate": "tsx scripts/casamable-simulate.ts",
     "readiness": "tsx scripts/readiness.ts",
-    "deploy:precheck": "tsx scripts/deploy-precheck.ts"
+    "deploy:precheck": "tsx scripts/deploy-precheck.ts",
+    "calls:mode": "tsx scripts/calls-mode.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

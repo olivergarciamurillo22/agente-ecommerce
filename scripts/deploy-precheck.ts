@@ -96,6 +96,8 @@ async function main(): Promise<void> {
   let aiCalls = process.env.AI_CALLS_ENABLED ?? "0";
   let allowlist = (process.env.CALLS_ALLOWLIST ?? "").trim();
   let shadow = process.env.CALLS_SHADOW_MODE ?? "1";
+  let pilotMode = process.env.CALLS_PILOT_MODE ?? "1";
+  let dailyCap = process.env.CALLS_DAILY_CAP ?? "30";
   if (fs.existsSync(dbPath)) {
     try {
       const Database = (await import("better-sqlite3")).default;
@@ -105,6 +107,8 @@ async function main(): Promise<void> {
       aiCalls = lee("ai_calls_enabled") ?? aiCalls;
       allowlist = (lee("calls_allowlist") ?? allowlist).trim();
       shadow = lee("calls_shadow_mode") ?? shadow;
+      pilotMode = lee("calls_pilot_mode") ?? pilotMode;
+      dailyCap = lee("calls_daily_cap") ?? dailyCap;
       db.close();
     } catch {
       /* sin settings legibles: se queda el env */
@@ -116,8 +120,14 @@ async function main(): Promise<void> {
     push("llamadas Retell", "warn", "ENCENDIDAS en shadow (simulan sin llamar) — revisar que sea intencionado");
   } else if (allowlist) {
     push("llamadas Retell", "warn", "ENCENDIDAS con allowlist — piloto en marcha; el deploy lo mantiene, no lo amplía");
+  } else if (pilotMode !== "0") {
+    // Piloto (default) sin allowlist: nada llamará. No bloquea el deploy,
+    // pero hay que saberlo ANTES de las 9:00, no después.
+    push("llamadas Retell", "warn", "encendidas SIN allowlist y en modo PILOTO: el fail-closed bloqueará TODAS las llamadas. Rellena calls_allowlist, o calls_pilot_mode=0 si la decisión es producción");
   } else {
-    push("llamadas Retell", "block", "encendidas SIN shadow y SIN allowlist: un deploy jamás debe salir así. Cerrar el kill switch o poner allowlist antes");
+    // Producción de llamadas declarada EXPLÍCITAMENTE (26-08): se avisa con
+    // el tope diario a la vista, no se bloquea una decisión de negocio.
+    push("llamadas Retell", "warn", `EN PRODUCCIÓN sin restricción (calls_pilot_mode=0, decisión explícita) · cap diario ${dailyCap} · franja y kill switch siguen delante`);
   }
 
   // ── 5. Escrituras a proveedores ──

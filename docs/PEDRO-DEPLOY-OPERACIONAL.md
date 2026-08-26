@@ -73,13 +73,26 @@ docker compose exec casamable-agent npm run db:health
 # Si pide QR: escanéalo una vez; si lo vuelve a pedir → rollback.
 ```
 
+**Llamadas (IMPORTANTE, antes de las 9:00):** el código nuevo trae el
+interruptor propio del piloto. Como tus llamadas están EN PRODUCCIÓN
+(decisión del 26-08), decláralo explícitamente o el fail-closed las
+bloqueará a las 9:00:
+
+```bash
+docker compose exec casamable-agent npm run calls:mode -- production
+docker compose exec casamable-agent npm run calls:mode   # verificar: "PRODUCCIÓN" y a quién se llamará
+```
+
+(Para volver al modo seguro en cualquier momento: `npm run calls:mode -- pilot`.
+Nada de esto toca TEST_MODE, WhatsApp ni Shopify.)
+
 En el navegador, `agente.casamable.es`:
 
 1. La vista por defecto ahora es **Acciones** (tu bandeja de trabajo).
 2. Si hay cancelaciones/duplicados reales pendientes, salen ordenados con
    qué hacer. Marca UNO como resuelto con nota → refresca → sigue resuelto.
 3. Pestaña Sistema: sin rojos nuevos; Shopify sin "firma inválida" nueva.
-4. Llamadas: apagadas (así deben seguir).
+4. Llamadas: pestaña Sistema en verde con \"EN PRODUCCIÓN... cap diario 10\" (o lo que digas en calls:mode).
 
 ## 7 · Observación: 30 minutos
 

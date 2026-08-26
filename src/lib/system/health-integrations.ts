@@ -497,15 +497,15 @@ export function getCallsHealth(): CallsHealth {
       // panel en verde mientras ninguna llamada podía salir.
       base.status = "critical";
       base.message = "encendidas pero FALTA RETELL_API_KEY: ninguna llamada puede salir — pégala en el .env del NAS y reinicia el contenedor";
-    } else if (!base.allowlistActive && process.env.TEST_MODE !== "0") {
+    } else if (!base.allowlistActive && (cfgRow("calls_pilot_mode") ?? process.env.CALLS_PILOT_MODE ?? "1") !== "0") {
       base.status = "warning";
-      base.message = "encendidas SIN allowlist en modo prueba: el fail-closed está bloqueando todas las llamadas — rellena calls_allowlist";
+      base.message = "encendidas SIN allowlist en modo PILOTO: el fail-closed bloquea todas las llamadas — rellena calls_allowlist, o calls_pilot_mode=0 si la decisión es producción sin restricción";
     } else if (base.consecutiveFailures >= 3) {
       base.status = "critical";
       base.message = `${base.consecutiveFailures} llamadas seguidas a revisión sin ninguna completada: revisar saldo de Retell y credenciales (el saldo NO se puede comprobar desde aquí)`;
     } else {
       base.status = "healthy";
-      base.message = `encendidas${base.shadowMode ? " en shadow" : ""} · allowlist ${base.allowlistActive ? "activa" : "SIN restricción"}`;
+      base.message = `encendidas${base.shadowMode ? " en shadow" : ""} · allowlist ${base.allowlistActive ? "activa" : "SIN restricción (producción de llamadas, calls_pilot_mode=0)"}`;
     }
   } catch (err) {
     base.status = "warning";

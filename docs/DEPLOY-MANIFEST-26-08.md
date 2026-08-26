@@ -9,7 +9,7 @@
 | Rama a desplegar | `main` |
 | Commit objetivo (merge del cierre) | `73884b13b89f669ac955eef6fe97ac236efa5ac3` |
 | Contenido | `feat/operational-closure` @ `cadaaae7472a912d28c799949b90dcb55721f7e2` (main y fix/hardening-casamable **contenidos**: grafo lineal, cero commits de producción fuera) |
-| Rama que corre HOY el NAS | `fix/hardening-casamable` @ `c6cc2260dbfa1b933321a16ccb035bc1ba92c7f5` o anterior (**apuntar el commit real con `git rev-parse HEAD` ANTES de tocar nada** — es el commit de rollback) |
+| Rama que corre HOY el NAS | `fix/hardening-casamable` @ `c6cc2260dbfa1b933321a16ccb035bc1ba92c7f5` (confirmado por el equipo de Pedro el 26-08 noche: esquema 10, backfill ordered_at 85/85). Apuntar igualmente `git rev-parse HEAD` antes de tocar nada — es el commit de rollback |
 | Esquema objetivo | **v11** (el NAS está en v9 o v10 según el commit real) |
 | Tests | 493 OK · typecheck ✓ · build ✓ · simulate 10/10 · readiness LOCAL READY |
 
@@ -33,7 +33,7 @@ Ninguna migración borra, renombra ni transforma datos. Ninguna necesita backfil
 ## Qué NO cambia con este deploy
 
 - Proveedor de WhatsApp: sigue **Baileys** (`WHATSAPP_PROVIDER` no se toca; el precheck bloquea cambios no intencionados).
-- Llamadas Retell: kill switch **cerrado**; el deploy no abre nada.
+- Llamadas Retell: el deploy **no cambia su estado**. Realidad del NAS (26-08 noche): EN PRODUCCIÓN (`ai_calls_enabled=1`, shadow 0, cap 10, allowlist vacía). Con el código nuevo, mantener las llamadas de producción exige el paso explícito `npm run calls:mode -- production` (ver §Llamadas de la guía); sin él, el fail-closed del piloto las bloquea a las 9:00.
 - Dropea: escrituras **bloqueadas** (createOrder desactivado a propósito).
 - Dropi: fail-closed, sin API.
 - La máquina de estados operativa (`status`) y su CHECK SQL: intactos.
@@ -83,7 +83,7 @@ No declarar estable antes. Vigilar (pestaña Sistema + terminal):
 4. Schedulers: latido reciente (pestaña Sistema), leases sin dueños zombis.
 5. Acciones: carga y responde (marcar/desmarcar de prueba con nota "test deploy").
 6. Shopify: si llega un webhook en la ventana, entra sin `bad_signature`.
-7. Llamadas: **0 intentos** (kill switch cerrado — si aparece uno, STOP).
+7. Llamadas: el comportamiento coincide con `npm run calls:mode` — en producción, ninguna llamada fuera de franja ni por encima del cap; en piloto sin allowlist, CERO llamadas.
 8. DB: `db:health` una vez al final de la ventana.
 9. Ni un WARNING nuevo sin explicación; ningún CRITICAL.
 
@@ -99,6 +99,6 @@ No declarar estable antes. Vigilar (pestaña Sistema + terminal):
 
 ## Bloqueos externos conocidos (no bloquean ESTE deploy)
 
-- Plantilla de Meta sin aprobar en la WABA real (solo afecta al futuro piloto cloud).
-- Prompt de Retell v6 sin validar; saldo sin comprobar (kill switch cerrado).
+- Coexistence del número real pendiente (el circuito Cloud API completo YA está validado con la plantilla `order_confirmation_request` APPROVED y un ciclo entero real; el NAS volvió a baileys a propósito).
+- Retell: **método de pago pendiente** (crédito de prueba; al agotarse las llamadas se paran sin aviso claro — lo más urgente de la lista externa). Prompt v6 YA validado con llamada real.
 - Backfill histórico con `read_all_orders` pendiente de verificar en NAS.

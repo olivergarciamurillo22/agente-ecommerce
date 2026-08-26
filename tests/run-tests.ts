@@ -9922,13 +9922,28 @@ async function main(): Promise<void> {
       assert.match(h.message, /FALTA RETELL_API_KEY/);
       assert.match(h.message, /\.env|reinicia/, "dice dónde y cómo arreglarlo");
     });
-    // TEST_MODE sin definir = ACTIVO (fail-closed). El aviso de allowlist
-    // vacía tiene que saltar también sin la variable, no solo con '1'.
-    await withEnv({ RETELL_API_KEY: "key_test_no_real", TEST_MODE: undefined }, async () => {
+    // Modo piloto sin definir = ACTIVO (fail-closed propio de llamadas,
+    // desacoplado de TEST_MODE): el aviso salta sin la variable puesta y
+    // ofrece las DOS salidas (rellenar allowlist o declarar producción).
+    await withEnv({ RETELL_API_KEY: "key_test_no_real", CALLS_PILOT_MODE: undefined }, async () => {
       db.setSetting("calls_allowlist", "");
       const h = getCallsHealth();
       assert.equal(h.status, "warning");
       assert.match(h.message, /calls_allowlist/, "dice el campo exacto a rellenar");
+      assert.match(h.message, /calls_pilot_mode/, "y la salida explícita a producción");
+    });
+    // Producción de llamadas EXPLÍCITA (la situación real del NAS del
+    // 26-08 por la noche): sin allowlist pero con calls_pilot_mode=0 —
+    // healthy y diciendo claramente que no hay restricción.
+    await withEnv({ RETELL_API_KEY: "key_test_no_real" }, async () => {
+      db.setSetting("calls_pilot_mode", "0");
+      try {
+        const h = getCallsHealth();
+        assert.equal(h.status, "healthy");
+        assert.match(h.message, /SIN restricción/);
+      } finally {
+        db.setSetting("calls_pilot_mode", "");
+      }
     });
     db.setSetting("ai_calls_enabled", "0");
     db.setSetting("calls_shadow_mode", "1");

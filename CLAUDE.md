@@ -219,8 +219,10 @@ debía decir `Dropi PRO`), corregida y verificada. El vínculo NO es visible
 desde Shopify: no "arreglar" lo que parezca mal sin un pedido de prueba.
 
 **Trampas vigentes** (lista completa en CONTEXTO-2026-08-25 §8):
-`CALLS_ALLOWLIST` vacía = SIN restricción (al revés que
-`TEST_PHONE_ALLOWLIST`) · `cloud_api` apaga Baileys por completo · el alta
+`CALLS_ALLOWLIST` vacía = NADIE en modo piloto (`calls_pilot_mode`, el
+default) y SIN restricción solo con `calls_pilot_mode=0` explícito
+(interruptor propio del 26-08, desacoplado de TEST_MODE; `npm run
+calls:mode`) · `cloud_api` apaga Baileys por completo · el alta
 de coexistencia puede desvincular Baileys de forma irreversible · las
 plantillas no se transfieren entre WABAs · con `TEST_MODE=1` las respuestas
 manuales del panel NO salen (responder desde el móvil).
