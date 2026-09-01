@@ -2796,7 +2796,13 @@ export function claimTrackingNotification(id: number, kind: TrackingNotification
   return info.changes > 0;
 }
 
-/** Devuelve el sello (solo para tests o si el envío se descarta después). */
+/**
+ * Devuelve el sello. Lo usa notifyTrackingEvent cuando el claim se ganó
+ * pero el envío no llegó a salir de verdad (bloqueo de safety gates o una
+ * excepción real al encolar) — sin esto, el claim quedaba quemado para
+ * siempre y ese aviso no se reenviaba jamás aunque el gate se abriera
+ * después.
+ */
 export function releaseTrackingNotification(id: number, kind: TrackingNotificationKind): void {
   ctx().db.prepare(`UPDATE orders SET ${COLUMNA_SELLO[kind]} = NULL WHERE id = ?`).run(id);
 }
