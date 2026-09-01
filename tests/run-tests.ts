@@ -9407,6 +9407,216 @@ async function main(): Promise<void> {
     assert.ok(!/process\.argv/.test(script), "T4 no debe leer process.argv en absoluto — no hay nada que activar");
   });
 
+  // ============ notify-delay: aviso de retraso "Ultras"/"gafa" ============
+  console.log("\n— notify-delay: aviso de retraso 'Ultras'/'gafa' —");
+
+  const notifyDelay = await import("../src/lib/orders/notify-delay");
+
+  let ndSeq = 800000;
+  const mkConfirmedOrder = (
+    overrides: Partial<{ phone: string; product_summary: string; shopify_order_id: string; closure_status: import("../src/lib/db").ClosureStatus }> = {}
+  ) => {
+    const seq = ndSeq++;
+    const { order } = db.insertOrderIfNew({
+      shopify_order_id: overrides.shopify_order_id ?? `nd-${seq}`,
+      shopify_order_number: `${seq}`,
+      customer_name: "Cliente Ultras",
+      phone: overrides.phone ?? `346${String(700000 + seq).padStart(6, "0")}`,
+      email: null,
+      product_summary: overrides.product_summary ?? "1x Ultrasonic Cleaner",
+      total_price: "39.90",
+      currency: "EUR",
+      address_line1: "Calle Falsa 1",
+      address_line2: null,
+      city: "Madrid",
+      province: "Madrid",
+      postal_code: "28001",
+      country: "España",
+      status: "pending_send",
+    });
+    db.markOrderConfirmed(order.id, false);
+    if (overrides.closure_status) db.setOrderClosure(order.id, overrides.closure_status, "shopify");
+    return db.getOrderById(order.id)!;
+  };
+
+  await test("notify-delay: isDelayNotificationEligible — confirmado + 'ultras' o 'gafa' en el producto, ni un carácter menos", () => {
+    const ultras = mkConfirmedOrder({ product_summary: "1x Ultrasonic Cleaner Pro" });
+    const gafa = mkConfirmedOrder({ product_summary: "1x Gafas de Sol Polarizadas" });
+    const otro = mkConfirmedOrder({ product_summary: "1x Cortaúñas" });
+    assert.equal(notifyDelay.isDelayNotificationEligible(ultras), true);
+    assert.equal(notifyDelay.isDelayNotificationEligible(gafa), true);
+    assert.equal(notifyDelay.isDelayNotificationEligible(otro), false);
+
+    const noConfirmado = { ...ultras, status: "pending_send" as const };
+    assert.equal(notifyDelay.isDelayNotificationEligible(noConfirmado), false, "solo pedidos confirmed");
+  });
+
+  await test("notify-delay: sendDelayNotificationForOrder — no elegible / sin teléfono / sin fecha / envío real con payloads contextuales", () => {
+    const noElegible = mkConfirmedOrder({ product_summary: "1x Cortaúñas" });
+    const r1 = notifyDelay.sendDelayNotificationForOrder(noElegible, "2026-09-15");
+    assert.equal(r1.ok, false);
+    assert.equal(r1.status, 409);
+
+    const sinTelefono = mkConfirmedOrder({ product_summary: "1x Ultras Sin Tel", phone: "" });
+    const r2 = notifyDelay.sendDelayNotificationForOrder(sinTelefono, "2026-09-15");
+    assert.equal(r2.ok, false);
+    assert.equal(r2.status, 409);
+
+    const sinFecha = mkConfirmedOrder({ product_summary: "1x Ultras Sin Fecha" });
+    const r3 = notifyDelay.sendDelayNotificationForOrder(sinFecha, "  ");
+    assert.equal(r3.ok, false);
+    assert.equal(r3.status, 400);
+
+    const o = mkConfirmedOrder({ product_summary: "1x Ultras Real" });
+    const r4 = notifyDelay.sendDelayNotificationForOrder(o, "2026-09-15");
+    assert.equal(r4.ok, true);
+  });
+
+  await test("notify-delay: listOrdersForDelayNotification — confirmado, con teléfono, sin cierre cancelado, sin pedidos TEST-", () => {
+    const bueno = mkConfirmedOrder({ product_summary: "1x Ultras Seleccion" });
+    const cancelado = mkConfirmedOrder({ product_summary: "1x Ultras Cancelado", closure_status: "cancelled" });
+    const sinTelefono = mkConfirmedOrder({ product_summary: "1x Ultras SinTel2", phone: "" });
+    const prueba = mkConfirmedOrder({ product_summary: "1x Ultras Prueba", shopify_order_id: `TEST-${ndSeq++}` });
+
+    const ids = db.listOrdersForDelayNotification({}).map((o) => o.id);
+    assert.ok(ids.includes(bueno.id));
+    assert.ok(!ids.includes(cancelado.id));
+    assert.ok(!ids.includes(sinTelefono.id));
+    assert.ok(!ids.includes(prueba.id));
+  });
+
+  await test("notify-delay: excludeOrderIds excluye ids concretos", () => {
+    const excluido = mkConfirmedOrder({ product_summary: "1x Ultras Excluido" });
+    const incluido = mkConfirmedOrder({ product_summary: "1x Ultras Incluido" });
+    const ids = db.listOrdersForDelayNotification({ excludeOrderIds: [excluido.id] }).map((o) => o.id);
+    assert.ok(!ids.includes(excluido.id));
+    assert.ok(ids.includes(incluido.id));
+  });
+
+  await test("notify-delay: migrateNotifyDelaySends es aditiva — correr dos veces no rompe nada", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    db.migrateNotifyDelaySends(raw);
+    db.migrateNotifyDelaySends(raw);
+    const cols = raw.prepare("PRAGMA table_info(notify_delay_sends)").all() as Array<{ name: string }>;
+    assert.ok(cols.some((c) => c.name === "order_id"));
+    raw.close();
+  });
+
+  await test("notify-delay: planDelayNotificationBatch filtra por elegibilidad real, detecta teléfonos compartidos y ya enviados", () => {
+    const telefono = `346088880${ndSeq++}`;
+    const a = mkConfirmedOrder({ product_summary: "1x Ultras Compartido A", phone: telefono });
+    const b = mkConfirmedOrder({ product_summary: "1x Ultras Compartido B", phone: telefono });
+    const noProducto = mkConfirmedOrder({ product_summary: "1x Cortaúñas Plan" });
+    db.recordNotifyDelaySend(a.id, "batch-test", "sent");
+
+    const plan = notifyDelay.planDelayNotificationBatch({});
+    const ids = plan.items.map((i) => i.order.id);
+    assert.ok(!ids.includes(noProducto.id), "el plan también filtra por elegibilidad, no solo por la SQL amplia");
+    const itemA = plan.items.find((i) => i.order.id === a.id)!;
+    const itemB = plan.items.find((i) => i.order.id === b.id)!;
+    assert.equal(itemA.alreadySent, true);
+    assert.equal(itemB.alreadySent, false);
+    assert.ok(itemA.phoneSharedWith.includes(b.shopify_order_number));
+  });
+
+  await test("notify-delay: planDelayNotificationBatch con --only restringe el lote a esos ids", () => {
+    const a = mkConfirmedOrder({ product_summary: "1x Ultras Only A" });
+    const b = mkConfirmedOrder({ product_summary: "1x Ultras Only B" });
+    const plan = notifyDelay.planDelayNotificationBatch({ onlyOrderIds: [a.id] });
+    const ids = plan.items.map((i) => i.order.id);
+    assert.ok(ids.includes(a.id));
+    assert.ok(!ids.includes(b.id));
+  });
+
+  await test("notify-delay: sendDelayNotificationBatchItem — dry-run no escribe, real envía y registra, relanzar no reenvía", () => {
+    const o = mkConfirmedOrder({ product_summary: "1x Ultras SendTest" });
+    const dry = notifyDelay.sendDelayNotificationBatchItem(o, "2026-09-15", "batch-1", true);
+    assert.equal(dry.outcome, "would_send");
+    assert.equal(db.wasDelayNotificationSent(o.id), false, "dry-run no escribe nada");
+
+    const real = notifyDelay.sendDelayNotificationBatchItem(o, "2026-09-15", "batch-1", false);
+    assert.equal(real.outcome, "sent");
+    assert.equal(db.wasDelayNotificationSent(o.id), true);
+
+    const relanzado = notifyDelay.sendDelayNotificationBatchItem(o, "2026-09-15", "batch-2", false);
+    assert.equal(relanzado.outcome, "already_sent", "relanzar el script no reenvía a quien ya recibió");
+  });
+
+  await test("notify-delay: sendDelayNotificationBatchItem respeta el gate — bloqueado sin allowlist, se reintenta si cambian las condiciones", async () => {
+    const o = mkConfirmedOrder({ product_summary: "1x Ultras Gate" });
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "" }, () => {
+      const r = notifyDelay.sendDelayNotificationBatchItem(o, "2026-09-15", "batch-gate", false);
+      assert.equal(r.outcome, "blocked");
+      assert.equal(db.wasDelayNotificationSent(o.id), false);
+    });
+    const r2 = notifyDelay.sendDelayNotificationBatchItem(o, "2026-09-15", "batch-gate-2", false);
+    assert.equal(r2.outcome, "sent", "un bloqueo anterior SÍ se reintenta cuando las condiciones cambian");
+  });
+
+  await test("notify-delay: la acción notify_delay del panel exige replenishmentDate, y usa la MISMA función que el batch", async () => {
+    const actionMod = await import("../src/app/api/orders/[orderId]/action/route");
+    const fakeReq = (body: unknown) => ({ json: async () => body }) as unknown as Parameters<typeof actionMod.POST>[0];
+
+    const o = mkConfirmedOrder({ product_summary: "1x Ultras Panel" });
+    const resSinFecha = await actionMod.POST(fakeReq({ action: "notify_delay" }), {
+      params: Promise.resolve({ orderId: String(o.id) }),
+    });
+    assert.equal(resSinFecha.status, 400);
+    assert.equal(db.wasDelayNotificationSent(o.id), false);
+
+    const res = await actionMod.POST(fakeReq({ action: "notify_delay", replenishmentDate: "2026-09-20" }), {
+      params: Promise.resolve({ orderId: String(o.id) }),
+    });
+    assert.equal(res.status, 200);
+  });
+
+  await test("notify-delay: runDelayNotificationBatch cuenta sent/skipped/failed y aborta a los 3 fallos SEGUIDOS", async () => {
+    const p = `346099970${ndSeq++}`;
+    const o1 = mkConfirmedOrder({ product_summary: "1x Ultras Batch1", phone: p + "1" });
+    const o2 = mkConfirmedOrder({ product_summary: "1x Ultras Batch2", phone: p + "2" });
+    const o3 = mkConfirmedOrder({ product_summary: "1x Ultras Batch3", phone: p + "3" });
+    const o4 = mkConfirmedOrder({ product_summary: "1x Ultras Batch4", phone: p + "4" });
+    const o5 = mkConfirmedOrder({ product_summary: "1x Ultras Batch5", phone: p + "5" });
+
+    let sleeps = 0;
+    const idsQueFallan = new Set([o1.id, o2.id, o3.id]);
+    const report = await notifyDelay.runDelayNotificationBatch({
+      excludeOrderIds: [],
+      replenishmentDate: "2026-09-15",
+      batchId: "batch-abort-test",
+      dryRun: false,
+      sleep: async () => {
+        sleeps++;
+      },
+      sendFn: (order, date, batchId, dryRun) => {
+        if (idsQueFallan.has(order.id)) {
+          return {
+            orderId: order.id,
+            orderNumber: order.shopify_order_number,
+            phoneMasked: "***test",
+            outcome: "error",
+            error: "fallo forzado por el test",
+          };
+        }
+        return notifyDelay.sendDelayNotificationBatchItem(order, date, batchId, dryRun);
+      },
+    });
+
+    // La selección comparte tabla con el resto de tests de esta sección, así
+    // que no se asume un total exacto — solo que o1/o2/o3 fallan SEGUIDOS y
+    // el aborto para el lote justo ahí, antes de llegar a o4/o5 (últimos por id).
+    assert.equal(report.aborted, true);
+    const procesados = report.results.map((r) => r.orderId);
+    assert.ok(procesados.includes(o1.id) && procesados.includes(o2.id) && procesados.includes(o3.id));
+    assert.ok(!procesados.includes(o4.id) && !procesados.includes(o5.id), "el aborto para ANTES de o4/o5");
+    const ultimosTres = report.results.slice(-3);
+    assert.ok(ultimosTres.every((r) => r.outcome === "error"));
+    assert.equal(db.wasDelayNotificationSent(o4.id), false);
+    assert.equal(db.wasDelayNotificationSent(o5.id), false);
+    assert.ok(sleeps > 0, "el ritmo entre envíos reales sí se respeta (sleep inyectado, sin esperar de verdad)");
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
