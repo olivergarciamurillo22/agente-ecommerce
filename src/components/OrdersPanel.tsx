@@ -240,12 +240,20 @@ export default function OrdersPanel() {
 
   async function doAction(
     order: OrderItem,
-    action: "confirm" | "needs_call" | "resend" | "cancel" | "authorize_pilot" | "revoke_pilot"
+    action: "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot"
   ) {
     if (busy !== null) return; // anti doble-click: una acción externa a la vez
     const confirmations: Record<string, string> = {
       confirm: `¿Marcar el pedido #${order.shopify_order_number} como CONFIRMADO? Se añadirá el tag WA_CONFIRMED en Shopify (si las escrituras están habilitadas).`,
+      call_now:
+        `Vas a realizar una LLAMADA REAL ahora mismo:\n\n` +
+        `Cliente: ${order.customer_name ?? "—"}\n` +
+        `Teléfono: +${order.phone}\n` +
+        `Pedido: #${order.shopify_order_number}\n\n` +
+        `Retell llamará únicamente a este pedido. No se activan llamadas automáticas.\n\n` +
+        `¿LLAMAR AHORA?`,
       cancel: `¿Descartar el pedido #${order.shopify_order_number} de este flujo? (No cambia nada en Shopify)`,
+      notify_delay: `¿Enviar el aviso REAL de retraso al pedido #${order.shopify_order_number}?`,
       // Acción externa sensible: confirmación explícita con todos los datos.
       authorize_pilot:
         `AUTORIZAR PILOTO para este pedido:\n\n` +
@@ -444,11 +452,11 @@ export default function OrdersPanel() {
                           >
                             ✓
                           </button>
-                          {o.status !== "needs_call" && (
+                          {o.phone && (
                             <button
-                              title="Marcar para llamar"
+                              title="Llamar ahora"
                               disabled={busy === o.id}
-                              onClick={() => doAction(o, "needs_call")}
+                              onClick={() => doAction(o, "call_now")}
                               className="px-2 py-1 rounded-md border border-red-500/40 text-red-300 hover:bg-red-500/10 text-xs disabled:opacity-50"
                             >
                               📞
@@ -701,6 +709,30 @@ export default function OrdersPanel() {
                     🔓 Autorizar piloto
                   </button>
                 ))}
+              {detail.status === "confirmed" &&
+
+                detail.phone &&
+
+                ((detail.product_summary ?? "").toLowerCase().includes("ultras") ||
+
+                  (detail.product_summary ?? "").toLowerCase().includes("gafa")) && (
+
+                  <button
+
+                    disabled={busy === detail.id}
+
+                    onClick={() => doAction(detail, "notify_delay")}
+
+                    className="px-3.5 py-2 rounded-lg border border-amber-500/40 text-amber-300 hover:bg-amber-500/15 text-sm font-semibold disabled:opacity-50"
+
+                  >
+
+                    ⚠ Avisar retraso
+
+                  </button>
+
+                )}
+
               {!["confirmed", "cancelled", "ignored_old"].includes(detail.status) && (
                 <>
                   <button
@@ -710,13 +742,13 @@ export default function OrdersPanel() {
                   >
                     ✓ Marcar confirmado
                   </button>
-                  {detail.status !== "needs_call" && (
+                  {detail.phone && (
                     <button
                       disabled={busy === detail.id}
-                      onClick={() => doAction(detail, "needs_call")}
+                      onClick={() => doAction(detail, "call_now")}
                       className="px-3.5 py-2 rounded-lg bg-red-500/10 border border-red-500/40 text-red-300 hover:bg-red-500/20 text-sm font-semibold disabled:opacity-50"
                     >
-                      📞 Marcar para llamar
+                      📞 Llamar ahora
                     </button>
                   )}
                   {detail.phone && (

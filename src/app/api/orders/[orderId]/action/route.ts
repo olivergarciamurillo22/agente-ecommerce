@@ -8,7 +8,9 @@ import {
   revokeOrderPilotAuthorization,
 } from "@/lib/db";
 import { confirmOrder } from "@/lib/orders/confirmation";
+import { sendDelayNotificationForOrder } from "@/lib/orders/notify-delay";
 import { canOperateOnOrderManually, orderActionAllowed } from "@/lib/safety";
+import { manualDialOrder } from "@/lib/calls/manual";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,8 +21,10 @@ interface RouteContext {
 
 const ACTIONS = new Set([
   "confirm",
+  "call_now",
   "needs_call",
   "resend",
+  "notify_delay",
   "cancel",
   "authorize_pilot",
   "revoke_pilot",
@@ -45,9 +49,9 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
   }
 
-  let body: { action?: string };
+  let body: { action?: string; replenishmentDate?: string };
   try {
-    body = (await req.json()) as { action?: string };
+    body = (await req.json()) as { action?: string; replenishmentDate?: string };
   } catch {
     return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
   }
@@ -80,7 +84,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
 
   // Gate de TEST_MODE para acciones con efecto externo: pasa si el teléfono
   // está en la allowlist O si este pedido concreto está autorizado.
-  if (action === "confirm" || action === "resend") {
+  if (action === "confirm" || action === "resend" || action === "notify_delay") {
     if (!orderActionAllowed(order)) {
       const gate = canOperateOnOrderManually(order.phone);
       return NextResponse.json(
@@ -106,6 +110,29 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
       );
     }
     confirmOrder(order, "manual");
+  } else if (action === "call_now") {
+    const result = await manualDialOrder(id);
+    if (!result.ok) {
+      return NextResponse.json(
+        { ok: false, error: result.error ?? "no se pudo iniciar la llamada" },
+        { status: 409 }
+      );
+    }
+    return NextResponse.json({
+      ok: true,
+      order: getOrderById(id),
+      providerCallId: result.providerCallId,
+    });
+  } else if (action === "notify_delay") {
+    // Construcción y envío EXACTAMENTE en src/lib/orders/notify-delay.ts —
+    // el botón del panel y el script de campaña (npm run notify:delay-ultras)
+    // llaman a la misma función, nada se duplica aquí.
+    const replenishmentDate = (body.replenishmentDate ?? "").trim();
+    const result = sendDelayNotificationForOrder(order, replenishmentDate);
+    if (!result.ok) {
+      return NextResponse.json({ ok: false, error: result.error }, { status: result.status ?? 409 });
+    }
+    return NextResponse.json({ ok: true, order: getOrderById(id) });
   } else if (action === "needs_call") {
     if (!markOrderNeedsCall(id)) {
       return NextResponse.json(

@@ -553,6 +553,25 @@ export function migrateOrderedAt(db: Database.Database): void {
   }
 }
 
+/**
+ * Migración (SCHEMA_VERSION 11): idempotencia de los envíos masivos de aviso
+ * (el batch de retraso de reposición "Ultras"/"gafa"). Un pedido, una fila:
+ * relanzar el script no reenvía a quien ya recibió. `order_id UNIQUE` es la
+ * clave de idempotencia; un intento bloqueado por los safety gates también
+ * deja fila (`status != 'sent'`) para que el informe lo explique, y SÍ se
+ * reintenta en el siguiente lanzamiento (UPSERT en recordNotifyDelaySend).
+ */
+export function migrateNotifyDelaySends(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notify_delay_sends (
+      order_id INTEGER PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      status TEXT NOT NULL
+    );
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1148,6 +1167,7 @@ function build() {
   migrateOutboxProvider(db);
   migrateActionResolutions(db);
   migrateOrderedAt(db);
+  migrateNotifyDelaySends(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1857,6 +1877,63 @@ export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
     .all(limit) as OrderRow[];
 }
 
+/**
+ * Candidatos amplios para un aviso masivo tipo "retraso de reposición":
+ * confirmados, con teléfono, sin cierre cancelado, sin pedidos de prueba
+ * (`shopify_order_id LIKE 'TEST-%'`). El filtro de PRODUCTO (qué pedidos
+ * son de verdad elegibles) NO vive aquí — vive en
+ * isDelayNotificationEligible (orders/notify-delay.ts), la misma función
+ * que usa el botón manual del panel, para que las dos vías compartan un
+ * único criterio de elegibilidad.
+ */
+export function listOrdersForDelayNotification(opts: { excludeOrderIds?: number[] } = {}): OrderRow[] {
+  const db = ctx().db;
+  const excluded = opts.excludeOrderIds ?? [];
+  const placeholders = excluded.length > 0 ? excluded.map(() => "?").join(",") : null;
+  return db
+    .prepare(
+      `SELECT * FROM orders
+       WHERE status = 'confirmed'
+         AND phone != ''
+         AND closure_status != 'cancelled'
+         AND shopify_order_id NOT LIKE 'TEST-%'
+         ${placeholders ? `AND id NOT IN (${placeholders})` : ""}
+       ORDER BY id`
+    )
+    .all(...excluded) as OrderRow[];
+}
+
+/** Ids de pedido con un aviso YA entregado (status='sent') — idempotencia del batch (lectura en bloque, para el informe). */
+export function getNotifyDelaySentOrderIds(): Set<number> {
+  const rows = ctx()
+    .db.prepare("SELECT order_id FROM notify_delay_sends WHERE status = 'sent'")
+    .all() as Array<{ order_id: number }>;
+  return new Set(rows.map((r) => r.order_id));
+}
+
+/** Mismo dato que getNotifyDelaySentOrderIds pero para UN pedido — la guarda antes de enviar de verdad. */
+export function wasDelayNotificationSent(orderId: number): boolean {
+  const row = ctx()
+    .db.prepare("SELECT 1 FROM notify_delay_sends WHERE order_id = ? AND status = 'sent'")
+    .get(orderId);
+  return row !== undefined;
+}
+
+/**
+ * Deja constancia del resultado de un intento (UPSERT: una fila por pedido).
+ * Un intento bloqueado por los safety gates NO cuenta como "sent" — se
+ * reintenta en el siguiente lanzamiento si las condiciones cambian.
+ */
+export function recordNotifyDelaySend(orderId: number, batchId: string, status: string): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO notify_delay_sends (order_id, batch_id, sent_at, status)
+       VALUES (?, ?, unixepoch(), ?)
+       ON CONFLICT(order_id) DO UPDATE SET batch_id = excluded.batch_id, sent_at = excluded.sent_at, status = excluded.status`
+    )
+    .run(orderId, batchId, status);
+}
+
 export interface OrderCounts {
   today: number; // pedidos entrados hoy (hora local)
   confirmedToday: number; // confirmados hoy
@@ -2199,6 +2276,27 @@ export function requestOrderCancellation(id: number): boolean {
   if (info.changes === 0) return false;
   markOrderNeedsCall(id);
   return true;
+}
+
+/**
+ * Cancelación solicitada DESPUÉS de confirmar el pedido.
+ * Solo la deja para gestión humana: NO toca Shopify ni proveedor.
+ */
+export function requestConfirmedOrderCancellation(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders
+       SET cancellation_requested_at = COALESCE(cancellation_requested_at, unixepoch()),
+           status = 'needs_call',
+           needs_call_at = COALESCE(needs_call_at, unixepoch()),
+           ${TOUCH}
+       WHERE id = ?
+         AND status = 'confirmed'
+         AND COALESCE(closure_status, 'unknown')
+             NOT IN ('cancelled','delivered','refused')`
+    )
+    .run(id);
+  return info.changes > 0;
 }
 
 // --- Colas del scheduler (todo se deriva de la DB: sobrevive reinicios) ---

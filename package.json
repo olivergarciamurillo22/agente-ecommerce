@@ -37,14 +37,15 @@
     "orders:investigate-skipped-backfill": "tsx scripts/investigate-skipped-backfill.ts",
     "calls:validate-prompt": "tsx scripts/validate-call-prompt.ts",
     "dropi:diagnose": "tsx scripts/dropi-diagnose.ts",
-    "env:doctor": "tsx scripts/env-doctor.ts",
+"env:doctor": "tsx scripts/env-doctor.ts",
     "env:init": "tsx scripts/env-init.ts",
     "local:doctor": "tsx scripts/local-doctor.ts",
     "local:reset": "tsx scripts/local-reset.ts",
     "casamable:simulate": "tsx scripts/casamable-simulate.ts",
     "readiness": "tsx scripts/readiness.ts",
     "deploy:precheck": "tsx scripts/deploy-precheck.ts",
-    "calls:mode": "tsx scripts/calls-mode.ts"
+    "calls:mode": "tsx scripts/calls-mode.ts",
+    "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
