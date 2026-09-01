@@ -51,16 +51,72 @@ export function phoneAllowlist(): string[] {
     .filter(Boolean);
 }
 
+// ============================================================
+// RAMPA DE ROLLOUT de WhatsApp automático (02-09).
+//
+// Pedro quiere pasar de "solo la allowlist" a "todos los clientes" SIN un
+// salto al vacío (TEST_MODE=0 abre cinco sistemas a la vez). La rampa vive
+// en settings (cambiable desde Ajustes sin desplegar):
+//
+//   whatsapp_rollout_percent = 'pilot' | '25' | '50' | '100'
+//
+//   pilot (default y cualquier valor raro) → comportamiento actual EXACTO:
+//                                            solo allowlist. FAIL-CLOSED.
+//   25/50/100 → además de la allowlist, entran los teléfonos cuyo bucket
+//               DETERMINISTA (hash del número, 0-99) sea < N.
+//
+// Determinista a propósito: el mismo cliente siempre cae en el mismo lado
+// de la rampa — subir de 25 a 50 AÑADE clientes, nunca cambia los que ya
+// estaban dentro. Nada de Math.random().
+// ============================================================
+
+/** Bucket estable 0-99 por teléfono (FNV-1a sobre los dígitos). */
+export function rolloutBucket(phone: string): number {
+  const digits = normalizePhone(phone ?? "");
+  let h = 0x811c9dc5;
+  for (let i = 0; i < digits.length; i++) {
+    h ^= digits.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0) % 100;
+}
+
+/** La rampa configurada. Cualquier cosa que no sea 25/50/100 = 'pilot'. */
+export function whatsappRolloutPercent(): number {
+  try {
+    // Import perezoso inevitable: safety.ts se carga antes que la DB en
+    // algunos scripts; sin DB, la rampa es 'pilot' (fail-closed).
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { getSetting } = require("./db") as typeof import("./db");
+    const v = (getSetting("whatsapp_rollout_percent") ?? "").trim();
+    if (v === "25" || v === "50" || v === "100") return parseInt(v, 10);
+    return 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** ¿La rampa deja pasar a este teléfono? (0/'pilot' → nunca amplía nada). */
+export function rolloutAllows(phone: string): boolean {
+  const pct = whatsappRolloutPercent();
+  if (pct <= 0) return false;
+  const normalized = normalizePhone(phone ?? "");
+  if (!normalized) return false;
+  return rolloutBucket(normalized) < pct;
+}
+
 /**
  * ¿Puede el sistema actuar sobre este teléfono?
- * Con TEST_MODE=1 (default) SOLO los de TEST_PHONE_ALLOWLIST son elegibles;
- * el resto de pedidos se guardan pero no provocan ninguna acción.
+ * Con TEST_MODE=1 (default) SOLO los de TEST_PHONE_ALLOWLIST son elegibles
+ * — más los que entren por la RAMPA de rollout si Pedro la ha subido desde
+ * Ajustes (whatsapp_rollout_percent; default 'pilot' = sin cambio alguno).
  */
 export function phoneAllowed(phone: string): boolean {
   if (!testMode()) return true;
   const normalized = normalizePhone(phone ?? "");
   if (!normalized) return false; // sin teléfono válido, jamás elegible
-  return phoneAllowlist().includes(normalized);
+  if (phoneAllowlist().includes(normalized)) return true;
+  return rolloutAllows(normalized);
 }
 
 /**

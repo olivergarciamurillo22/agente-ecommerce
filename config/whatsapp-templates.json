@@ -227,5 +227,28 @@
       "buttons": [],
       "fallback": "Plantilla aprobada en Meta"
     }
+  ],
+  "_mappings_readme": [
+    "provider_mappings: la VERDAD sobre qué plantilla REAL de la WABA responde",
+    "a cada clave LÓGICA del dominio. El dominio pide ORDER_CONFIRMATION_REQUEST;",
+    "Meta recibe el nombre real aprobado (p.ej. 'pedido'). NINGÚN mapping se usa",
+    "sin verificar: npm run whatsapp:templates:doctor comprueba contra la Graph",
+    "API (read-only) nombre, idioma, aridad y botones, y cachea la verificación",
+    "en settings. Sin verificación, el envío queda BLOQUEADO con motivo visible",
+    "(jamás un 404/132001 en producción).",
+    "params: qué variables del builder local van a la plantilla real, EN ORDEN."
+  ],
+  "provider_mappings": [
+    {
+      "logicalKey": "order_confirmation_request",
+      "providerTemplate": "pedido",
+      "language": "es",
+      "params": [
+        "nombre",
+        "producto",
+        "importe"
+      ],
+      "note": "Candidata real de la WABA para la confirmación inicial COD. Verificar antes de usar: si su cuerpo/botones no encajan semánticamente con 'tienes este pedido, ¿lo confirmas?', NO forzarla — bloqueante FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED."
+    }
   ]
 }

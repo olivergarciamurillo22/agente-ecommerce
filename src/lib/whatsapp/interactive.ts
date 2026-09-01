@@ -15,7 +15,7 @@
 import type { OrderRow } from "../db";
 import { BUTTON_PAYLOADS } from "../orders/confirmation";
 import { shortProductLine } from "../orders/multi-order";
-import { buildTemplateMessage } from "./templates";
+import { buildApprovedTemplateMessage } from "./templates";
 import type { OutboundWhatsAppMessage } from "./provider";
 
 /** Exportado: lo reutiliza buildConfirmationOutbound (y cualquier plantilla futura). */
@@ -87,7 +87,13 @@ export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: 
     const spec = buildConfirmationInteractive(order);
     // La ventana puede caducar con la fila EN la cola: se adjunta la
     // plantilla equivalente para que el loop de entrega pueda degradar.
-    return { ...spec, templateFallback: confirmationTemplate(order) };
+    // Si la plantilla aún no está verificada, el INTERACTIVO sale igual
+    // (estamos dentro de ventana): solo se pierde la degradación tardía.
+    try {
+      return { ...spec, templateFallback: confirmationTemplate(order) };
+    } catch {
+      return spec;
+    }
   }
   return {
     message: confirmationTemplate(order),
@@ -98,13 +104,16 @@ export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: 
 }
 
 /** La plantilla de confirmación con las MISMAS variables que el interactivo
- *  (una sola fuente de datos: el pedido). */
+ *  (una sola fuente de datos: el pedido). Resuelve la clave LÓGICA al
+ *  nombre REAL de la WABA vía provider_mappings; si el mapping no está
+ *  verificado y APPROVED, lanza TemplateNotReadyError (incidente 132001:
+ *  jamás se envía un nombre que Meta no conozca). */
 function confirmationTemplate(order: OrderRow): Extract<OutboundWhatsAppMessage, { kind: "template" }> {
-  return buildTemplateMessage("order_confirmation_request", [
-      firstName(order) || "cliente",
-    shortProductLine(order),
-    money(order),
-  ]);
+  return buildApprovedTemplateMessage("order_confirmation_request", {
+    nombre: firstName(order) || "cliente",
+    producto: shortProductLine(order),
+    importe: money(order),
+  });
 }
 
 /** Selector multi-pedido como LISTA (en vez de pedir números por texto). */

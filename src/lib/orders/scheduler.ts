@@ -37,6 +37,7 @@ import {
 import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
 import { whatsappProviderName } from "../whatsapp/provider";
 import { buildConfirmationOutbound } from "../whatsapp/interactive";
+import { TemplateNotReadyError } from "../whatsapp/templates";
 import { isWithinSessionWindow } from "../whatsapp/meta-cloud";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
@@ -56,7 +57,7 @@ import {
 import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvaluation } from "../db";
 import { evaluateOrderForSupplier } from "../suppliers/service";
 import { isConfirmationEligible } from "./eligibility";
-import { runInstrumented } from "../system/repo";
+import { logIntegrationEvent, runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -188,13 +189,25 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         try {
           interactive = buildConfirmationOutbound(order, isWithinSessionWindow(order.phone));
         } catch (err) {
-          // Solo puede pasar si la plantilla no está en el catálogo local
-          // (config/whatsapp-templates.json) — un error de programación o
-          // de despliegue, no de Meta. Se salta ESTE pedido, no el tick
-          // entero: los demás pedidos de la cola no tienen por qué
-          // bloquearse por esto.
+          // Dos causas posibles, ninguna de Meta:
+          //  · TemplateNotReadyError — el mapping lógico→WABA no está
+          //    verificado/aprobado (incidente 132001). El pedido NO se
+          //    consume: en cuanto el doctor verifique la plantilla, el
+          //    siguiente tick lo envía. Y se deja RASTRO VISIBLE: sin esto,
+          //    producción estuvo días reintentando 404 en silencio.
+          //  · cualquier otra — error de catálogo local (programación).
+          const esBloqueo = err instanceof TemplateNotReadyError;
           logger.error(
             `[WHATSAPP] #${order.shopify_order_number}: no se pudo construir la confirmación (${err instanceof Error ? err.message : String(err)}) — se reintenta en el siguiente tick`
+          );
+          logIntegrationEvent(
+            "whatsapp",
+            esBloqueo ? "template_not_ready" : "template_build_failed",
+            "warning",
+            esBloqueo
+              ? `confirmación inicial BLOQUEADA (${(err as TemplateNotReadyError).blocker}): ${err instanceof Error ? err.message : ""}`.slice(0, 300)
+              : `no se pudo construir la confirmación: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300),
+            order.shopify_order_number
           );
           continue;
         }

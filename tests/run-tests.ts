@@ -7803,6 +7803,14 @@ async function main(): Promise<void> {
     assert.equal(sinBotones.template.components.filter((c: any) => c.type === "button").length, 0);
   });
 
+  // V3 (incidente 132001): estos tests del flujo BUG1 necesitan el mapping
+  // lógico→WABA VERIFICADO — es la nueva condición para que salga una
+  // plantilla. Se siembra la verificación de "pedido" como hará el doctor.
+  db.setSetting(
+    "wa_tpl_verified:order_confirmation_request",
+    JSON.stringify({ provider: "pedido", language: "es", status: "APPROVED", paramCount: 3, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
+  );
+
   await test("BUG1 · buildConfirmationOutbound: dentro de ventana manda el interactivo, fuera manda la plantilla con los datos reales del pedido", () => {
     const o = mkMulti("972501", "7501", "34600177501", { product_summary: "Limpiador Ultrasónico", total_price: "19.99" });
     const orden = db.getOrderById(o.id)!;
@@ -7813,7 +7821,7 @@ async function main(): Promise<void> {
     const fuera = interactive.buildConfirmationOutbound(orden, false);
     assert.equal(fuera.message.kind, "template");
     if (fuera.message.kind !== "template") throw new Error("unreachable");
-    assert.equal(fuera.message.templateName, "order_confirmation_request");
+    assert.equal(fuera.message.templateName, "pedido", "V3: viaja el nombre REAL aprobado en la WABA, no el borrador local");
     assert.deepEqual(fuera.message.bodyParams, ["Cliente", "Limpiador Ultrasónico", "19,99 €"], "nombre, producto e importe, en ese orden");
     assert.equal(fuera.fallbackText, dentro.fallbackText, "el fallback (panel / rollback) es el mismo texto en los dos casos");
   });
@@ -7827,7 +7835,7 @@ async function main(): Promise<void> {
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "template", "antes de este fix caía en 'interactive_buttons' por defecto");
-    assert.equal(item.template_name, "order_confirmation_request");
+    assert.equal(item.template_name, "pedido");
   });
 
   await test("WEBHOOK META · verificación inicial: token correcto devuelve el challenge, incorrecto 403, sin configurar 500", async () => {
@@ -8380,7 +8388,7 @@ async function main(): Promise<void> {
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "template", "el bug real: antes esto salía como interactive_buttons y fallaba terminal");
-    assert.equal(item.template_name, "order_confirmation_request");
+    assert.equal(item.template_name, "pedido", "V3: el nombre REAL de la WABA");
     assert.equal(item.failure_reason, null, "no debe fallar — es justo el caso que BUG1 arregla");
     const payload = JSON.parse(item.payload_json!) as { kind: string; buttonPayloads?: string[] };
     assert.equal(payload.kind, "template");
@@ -8444,7 +8452,7 @@ async function main(): Promise<void> {
     };
     assert.equal(fila.sent, 1);
     assert.equal(fila.message_type, "template", "la DB dice lo que salió DE VERDAD, no lo que se encoló");
-    assert.equal(fila.template_name, "order_confirmation_request");
+    assert.equal(fila.template_name, "pedido");
     assert.equal(fila.provider_message_id, "wamid.degradado1");
     assert.match(fila.failure_reason ?? "", /fallback_reason=outside_24h_window/, "la degradación queda auditada");
     assert.equal(fila.failed_at, null, "degradado con éxito NO es un fallo");
@@ -10484,6 +10492,170 @@ async function main(): Promise<void> {
       const sinBreakEven = alerts.evalDeliveryVsBreakEven(75, null, 100);
       assert.equal(sinBreakEven.status, "unknown");
     });
+  }
+
+  // ============ V3 FASE A · WhatsApp: mapping lógico→WABA (incidente 132001) ============
+  console.log("\n— V3 · WhatsApp: plantillas reales de la WABA —");
+  {
+    const tpl = await import("../src/lib/whatsapp/templates");
+    const { buildConfirmationOutbound } = await import("../src/lib/whatsapp/interactive");
+    const sysRepo = await import("../src/lib/system/repo");
+    const VERIF_KEY = "wa_tpl_verified:order_confirmation_request";
+    const limpiarVerificacion = () => {
+      db.systemDbHandle().prepare("DELETE FROM settings WHERE key = ?").run(VERIF_KEY);
+    };
+    const verificar = (over: Partial<import("../src/lib/whatsapp/templates").VerifiedTemplate> = {}) =>
+      tpl.storeVerifiedTemplate("order_confirmation_request", {
+        provider: "pedido",
+        language: "es",
+        status: "APPROVED",
+        paramCount: 3,
+        buttonCount: 3,
+        buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"],
+        category: "UTILITY",
+        verifiedAt: Math.floor(Date.now() / 1000),
+        ...over,
+      });
+
+    await test("132001 ROJO: sin verificación, la confirmación NO se construye — y el bloqueante es explícito", () => {
+      limpiarVerificacion();
+      const r = tpl.getTemplateReadiness("order_confirmation_request");
+      assert.equal(r.ready, false);
+      assert.equal(r.blocker, "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED");
+      assert.match(r.detail, /whatsapp:templates:doctor/, "el bloqueante dice QUÉ ejecutar");
+      assert.throws(
+        () => tpl.buildApprovedTemplateMessage("order_confirmation_request", { nombre: "Marta", producto: "Limpiador", importe: "29,99 €" }),
+        (e: unknown) => e instanceof tpl.TemplateNotReadyError && e.blocker === "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED"
+      );
+    });
+
+    await test("132001 VERDE: verificada 'pedido' (es, 3 vars) → el mensaje sale con el nombre REAL de la WABA, jamás el borrador local", () => {
+      verificar();
+      const o = mkOrder("v3wa-1", "94101", "34600994101");
+      const spec = buildConfirmationOutbound(o, false); // fuera de ventana → plantilla
+      assert.equal(spec.message.kind, "template");
+      const m = spec.message as Extract<import("../src/lib/whatsapp/provider").OutboundWhatsAppMessage, { kind: "template" }>;
+      assert.equal(m.templateName, "pedido", "el nombre que viaja a Meta es el APROBADO");
+      assert.notEqual(m.templateName, "order_confirmation_request", "el nombre del borrador local JAMÁS sale");
+      assert.equal(m.language, "es");
+      assert.equal(m.bodyParams.length, 3);
+      assert.equal(m.bodyParams[0], "Cliente", "nombre de pila");
+      assert.equal((m.buttonPayloads ?? []).length, 3, "payloads locales para los 3 botones reales");
+    });
+
+    await test("132001: dentro de ventana SIN verificación, el interactivo sale igual (solo se pierde la degradación tardía)", () => {
+      limpiarVerificacion();
+      const o = mkOrder("v3wa-2", "94102", "34600994102");
+      const spec = buildConfirmationOutbound(o, true);
+      assert.equal(spec.message.kind, "interactive_buttons", "dentro de ventana no hace falta plantilla");
+      assert.equal(spec.templateFallback, undefined, "sin plantilla verificada no se adjunta fallback");
+    });
+
+    await test("132001: aridad distinta, estado no APPROVED o verificación obsoleta → BLOQUEADO con su motivo exacto", () => {
+      verificar({ paramCount: 1 });
+      assert.equal(tpl.getTemplateReadiness("order_confirmation_request").blocker, "TEMPLATE_ARITY_MISMATCH");
+      verificar({ status: "PENDING" });
+      assert.equal(tpl.getTemplateReadiness("order_confirmation_request").blocker, "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED");
+      verificar({ provider: "pedido_confirmado" });
+      assert.equal(tpl.getTemplateReadiness("order_confirmation_request").blocker, "TEMPLATE_VERIFICATION_STALE");
+      verificar({ buttonCount: 1, buttonTypes: ["URL"] });
+      assert.equal(tpl.getTemplateReadiness("order_confirmation_request").blocker, "TEMPLATE_BUTTONS_MISMATCH");
+      verificar(); // dejar verificada para los siguientes
+      assert.equal(tpl.getTemplateReadiness("order_confirmation_request").ready, true);
+    });
+
+    await test("132001: el scheduler en cloud_api con plantilla bloqueada NO consume el pedido y deja rastro visible", async () => {
+      limpiarVerificacion();
+      const telefono = "34600994103";
+      const o = mkOrder("v3wa-3", "94103", telefono);
+      const eventosAntes = sysRepo.listIntegrationEvents({ limit: 200 }).filter((e) => e.event_type === "template_not_ready").length;
+      await withEnv(
+        {
+          WHATSAPP_PROVIDER: "cloud_api",
+          META_WHATSAPP_API_ENABLED: "1",
+          META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+          META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+          APP_MODE: "production",
+          WHATSAPP_SEND_ENABLED: "1",
+          TEST_MODE: "1",
+          TEST_PHONE_ALLOWLIST: telefono,
+          WHATSAPP_WINDOW_ENABLED: "0",
+          EMERGENCY_STOP: "0",
+        },
+        async () => {
+          const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
+          await runSchedulerTick();
+        }
+      );
+      const despues = db.getOrderById(o.id)!;
+      assert.equal(despues.status, "pending_send", "el pedido NO se consume: se enviará cuando la plantilla esté verificada");
+      assert.equal(despues.whatsapp_sent_at, null, "no hay sello de envío");
+      const eventos = sysRepo.listIntegrationEvents({ limit: 200 }).filter((e) => e.event_type === "template_not_ready");
+      assert.ok(eventos.length > eventosAntes, "queda un evento template_not_ready (nada de 404 silenciosos en bucle)");
+      assert.match(eventos[0].message, /FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED/);
+      // Y con la plantilla verificada, el MISMO pedido sale en el siguiente tick.
+      verificar();
+      await withEnv(
+        {
+          WHATSAPP_PROVIDER: "cloud_api",
+          META_WHATSAPP_API_ENABLED: "1",
+          META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+          META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+          APP_MODE: "production",
+          WHATSAPP_SEND_ENABLED: "1",
+          TEST_MODE: "1",
+          TEST_PHONE_ALLOWLIST: telefono,
+          WHATSAPP_WINDOW_ENABLED: "0",
+          EMERGENCY_STOP: "0",
+        },
+        async () => {
+          const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
+          await runSchedulerTick();
+        }
+      );
+      const enviado = db.getOrderById(o.id)!;
+      assert.ok(enviado.whatsapp_sent_at !== null, "verificada la plantilla, el pedido bloqueado SALE sin tocar nada más");
+      assert.equal(enviado.status, "awaiting_reply");
+    });
+
+    await test("rollout: bucket determinista y monotónico — subir la rampa AÑADE clientes, nunca cambia a los que ya estaban", async () => {
+      const safety2 = await import("../src/lib/safety");
+      const b1 = safety2.rolloutBucket("+34 600 11 12 22");
+      const b2 = safety2.rolloutBucket("34600111222");
+      assert.equal(b1, b2, "el mismo teléfono en distinto formato cae en el MISMO bucket");
+      assert.ok(b1 >= 0 && b1 < 100);
+      // Monotonía: quien entra al 25% sigue dentro al 50% y al 100%.
+      const telefonos = Array.from({ length: 200 }, (_, i) => `346${String(10000000 + i)}`);
+      const dentro25 = telefonos.filter((t) => safety2.rolloutBucket(t) < 25);
+      const dentro50 = new Set(telefonos.filter((t) => safety2.rolloutBucket(t) < 50));
+      for (const t of dentro25) assert.ok(dentro50.has(t), "25% ⊂ 50%");
+      // Y reparte de verdad (ni 0% ni 100% con umbral 25).
+      assert.ok(dentro25.length > 20 && dentro25.length < 80, `reparto razonable (${dentro25.length}/200 al 25%)`);
+    });
+
+    await test("rollout: default 'pilot' = comportamiento EXACTO de hoy; 100 abre a todos; solo settings lo cambia", async () => {
+      const safety2 = await import("../src/lib/safety");
+      db.systemDbHandle().prepare("DELETE FROM settings WHERE key = 'whatsapp_rollout_percent'").run();
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, () => {
+        assert.equal(safety2.phoneAllowed("34600111222"), true, "la allowlist sigue mandando");
+        assert.equal(safety2.phoneAllowed("34699999999"), false, "sin rampa, fuera de allowlist = NO (fail-closed)");
+      });
+      db.setSetting("whatsapp_rollout_percent", "100");
+      try {
+        await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, () => {
+          assert.equal(safety2.phoneAllowed("34699999999"), true, "al 100%, cualquier teléfono válido entra");
+          assert.equal(safety2.phoneAllowed(""), false, "sin teléfono válido, jamás");
+        });
+        db.setSetting("whatsapp_rollout_percent", "porcentaje-raro");
+        await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "" }, () => {
+          assert.equal(safety2.phoneAllowed("34699999999"), false, "un valor raro = pilot (fail-closed), no un número a medias");
+        });
+      } finally {
+        db.systemDbHandle().prepare("DELETE FROM settings WHERE key = 'whatsapp_rollout_percent'").run();
+      }
+    });
+
+    limpiarVerificacion();
   }
 
   // ============ Resumen ============
