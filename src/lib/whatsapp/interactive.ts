@@ -107,6 +107,46 @@ function confirmationTemplate(order: OrderRow): Extract<OutboundWhatsAppMessage,
   ]);
 }
 
+/**
+ * Aviso de retraso de reposición de stock (campaña "Ultras" y el botón
+ * manual del panel — MISMA función para las dos, para que no puedan
+ * desincronizarse). Los payloads de botón son CONTEXTUALES por pedido
+ * (delay_ok:<id>, delay_cancel:<id>): a diferencia de la confirmación
+ * inicial, este aviso ya sabe de qué pedido habla — el cliente no elige
+ * nada, solo confirma o pide cancelar ESE pedido.
+ *
+ * Solo plantilla: este aviso lo inicia la empresa y siempre está fuera de
+ * ventana (nadie escribió por un retraso que aún no le hemos contado), así
+ * que exige cloud_api — no tiene interactivo equivalente en Baileys hoy.
+ */
+export function buildDelayNotificationTemplate(
+  order: OrderRow,
+  replenishmentDate: string
+): Extract<OutboundWhatsAppMessage, { kind: "template" }> {
+  const base = buildTemplateMessage("retraso_pedido", [
+    firstName(order) || "cliente",
+    shortProductLine(order),
+    order.shopify_order_number,
+    replenishmentDate,
+  ]);
+  return {
+    ...base,
+    buttonPayloads: [`delay_ok:${order.id}`, `delay_cancel:${order.id}`],
+  };
+}
+
+/** El InteractiveSpec completo (lo que espera sendWhatsAppInteractive): la
+ *  plantilla de arriba + su texto equivalente para el panel de Chats. */
+export function buildDelayNotificationSpec(order: OrderRow, replenishmentDate: string): InteractiveSpec {
+  return {
+    message: buildDelayNotificationTemplate(order, replenishmentDate),
+    fallbackText:
+      `Hola${firstName(order) ? ` ${firstName(order)}` : ""} 👋 Tu pedido #${order.shopify_order_number} ` +
+      `(${shortProductLine(order)}) sufre un pequeño retraso: la reposición está prevista para ${replenishmentDate}. ` +
+      `Lo despacharemos en cuanto recibamos la reposición. Gracias por tu paciencia.`,
+  };
+}
+
 /** Selector multi-pedido como LISTA (en vez de pedir números por texto). */
 export function buildOrderSelectionList(orders: OrderRow[]): InteractiveSpec {
   const filas = orders.slice(0, 10).map((o) => ({

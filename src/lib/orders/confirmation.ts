@@ -21,8 +21,10 @@ import {
   clearSelectedOrderContext,
   getActiveOrdersByPhone,
   getConversationOrderContext,
+  getOrderById,
   markOrderPossibleDuplicate,
   recordConversationPrompt,
+  requestConfirmedOrderCancellation,
   requestOrderCancellation,
   resetConversationPrompt,
   setPendingCancelContext,
@@ -39,6 +41,7 @@ import {
   type OrderRow,
 } from "../db";
 import { tagOrderConfirmed } from "../shopify/admin";
+import { normalizePhone } from "./normalize";
 import { orderActionAllowed } from "../safety";
 import {
   buildCancelConfirmPrompt,
@@ -46,6 +49,7 @@ import {
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
   MSG_CANCEL_RECEIVED,
+  MSG_DELAY_ACKNOWLEDGED,
   MSG_ESCALATE_TO_HUMAN,
   MSG_CONFIRMED,
   MSG_ASK_ADDRESS,
@@ -582,7 +586,63 @@ export const BUTTON_PAYLOADS = {
   CANCEL_REQUEST: "cancel_request",
   /** Prefijo de selección en listas multi-pedido: select_order:1097 */
   SELECT_ORDER: "select_order:",
+  /** Prefijos de la plantilla retraso_pedido: contextuales por pedido (id interno, no shopify_order_number). */
+  DELAY_OK: "delay_ok:",
+  DELAY_CANCEL: "delay_cancel:",
 } as const;
+
+/**
+ * Botón "No hay problema" de un aviso de retraso: solo un acuse — el pedido
+ * NO cambia de estado. A diferencia del resto de botones, este payload trae
+ * el id del pedido directamente (delay_ok:<id>), así que NO se reutiliza
+ * handleOrderReply (que resuelve por CONTEXTO de teléfono, no por id): se
+ * verifica que el pedido exista y sea de ESTE teléfono, y punto.
+ */
+function handleDelayOk(phone: string, orderId: number): OrderReplyResult {
+  const order = getOrderById(orderId);
+  if (!order || normalizePhone(order.phone) !== normalizePhone(phone)) {
+    logger.warn(`[ORDER] delay_ok: pedido ${orderId} no existe o no es de este teléfono — ignorado`);
+    return { handled: false };
+  }
+  logIntegrationEvent(
+    "whatsapp",
+    "delay_accepted",
+    "info",
+    "el cliente aceptó el retraso de reposición: sin cambios en el pedido",
+    order.shopify_order_number
+  );
+  return { handled: true, reply: MSG_DELAY_ACKNOWLEDGED, authorized: order.pilot_authorized === 1 };
+}
+
+/**
+ * Botón "Cancelar pedido" de un aviso de retraso, sobre un pedido YA
+ * CONFIRMADO. Usa requestConfirmedOrderCancellation (no
+ * requestOrderCancellation, que EXCLUYE 'confirmed' a propósito): mismo
+ * efecto que cualquier otra cancelación pedida por WhatsApp — needs_call,
+ * NUNCA Shopify ni el proveedor tocados desde aquí.
+ */
+function handleDelayCancel(phone: string, orderId: number): OrderReplyResult {
+  const order = getOrderById(orderId);
+  if (!order || normalizePhone(order.phone) !== normalizePhone(phone)) {
+    logger.warn(`[ORDER] delay_cancel: pedido ${orderId} no existe o no es de este teléfono — ignorado`);
+    return { handled: false };
+  }
+  if (!requestConfirmedOrderCancellation(orderId)) {
+    // Ya no estaba 'confirmed' (p.ej. Pedro ya lo movió a mano): no hay
+    // nada que hacer, pero tampoco es un error — se informa igual.
+    logger.info(`[ORDER] #${order.shopify_order_number}: delay_cancel sin efecto (ya no estaba confirmed)`);
+    return { handled: true, reply: MSG_CANCEL_RECEIVED, authorized: order.pilot_authorized === 1 };
+  }
+  logger.info(`[ORDER] #${order.shopify_order_number} -> cancelación solicitada tras aviso de retraso (needs_call)`);
+  logIntegrationEvent(
+    "whatsapp",
+    "cancellation_requested",
+    "warning",
+    "el cliente pidió cancelar tras un aviso de retraso: pedido marcado para revisión, sin tocar Shopify",
+    order.shopify_order_number
+  );
+  return { handled: true, reply: MSG_CANCEL_RECEIVED, authorized: order.pilot_authorized === 1 };
+}
 
 /**
  * Traduce el payload de un botón a la ENTRADA EQUIVALENTE de la máquina de
@@ -602,6 +662,17 @@ export function handleOrderButtonReply(phone: string, payload: string): OrderRep
     const num = p.slice(BUTTON_PAYLOADS.SELECT_ORDER.length).replace(/[^0-9]/g, "");
     if (!num) return { handled: false };
     return handleOrderReply(phone, num);
+  }
+
+  if (p.startsWith(BUTTON_PAYLOADS.DELAY_OK)) {
+    const id = parseInt(p.slice(BUTTON_PAYLOADS.DELAY_OK.length), 10);
+    if (Number.isNaN(id)) return { handled: false };
+    return handleDelayOk(phone, id);
+  }
+  if (p.startsWith(BUTTON_PAYLOADS.DELAY_CANCEL)) {
+    const id = parseInt(p.slice(BUTTON_PAYLOADS.DELAY_CANCEL.length), 10);
+    if (Number.isNaN(id)) return { handled: false };
+    return handleDelayCancel(phone, id);
   }
 
   if (p === BUTTON_PAYLOADS.CONFIRM) return handleOrderReply(phone, "1");

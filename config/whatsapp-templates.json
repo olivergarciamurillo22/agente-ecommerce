@@ -67,6 +67,19 @@
       "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)"
     },
     {
+      "name": "retraso_pedido",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Aviso de retraso de reposición de stock (p.ej. campaña 'Ultras'). Payloads de botón CONTEXTUALES por pedido (delay_ok:<id> / delay_cancel:<id>), no los de esta lista — ver buildDelayNotificationTemplate en whatsapp/interactive.ts. ⚠️ El orden de las 4 variables de abajo es una SUPOSICIÓN (nombre/producto/número/fecha, mismo patrón que order_confirmation_request) sin confirmar contra la plantilla real aprobada en Meta Business Manager — verificar antes de --execute con clientes reales. Solo el nombre y el CONTEO de variables afectan a si la Cloud API acepta el envío (Meta ya guarda el body real); si el orden aquí no coincide con el aprobado, el cliente vería los datos en el sitio equivocado.",
+      "variables": ["nombre", "producto", "numero_pedido", "fecha_reposicion"],
+      "draft_body": "Hola {{1}} 👋 Tu pedido {{3}} ({{2}}) sufre un pequeño retraso: la reposición está prevista para {{4}}. Lo despacharemos en cuanto recibamos la reposición. Gracias por tu paciencia.",
+      "buttons": [
+        { "type": "QUICK_REPLY", "text": "No hay problema", "payload": "delay_ok" },
+        { "type": "QUICK_REPLY", "text": "Cancelar pedido", "payload": "delay_cancel" }
+      ],
+      "fallback": "sin equivalente en Baileys todavía: esta campaña requiere cloud_api (ver notify-delay.ts)"
+    },
+    {
       "name": "manual_attention_required",
       "language": "es",
       "category": "UTILITY",

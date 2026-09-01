@@ -8,6 +8,7 @@ import {
   revokeOrderPilotAuthorization,
 } from "@/lib/db";
 import { confirmOrder } from "@/lib/orders/confirmation";
+import { sendDelayNotification } from "@/lib/orders/notify-delay";
 import { canOperateOnOrderManually, orderActionAllowed } from "@/lib/safety";
 
 export const runtime = "nodejs";
@@ -24,6 +25,7 @@ const ACTIONS = new Set([
   "cancel",
   "authorize_pilot",
   "revoke_pilot",
+  "notify_delay",
 ]);
 
 /**
@@ -45,9 +47,9 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
   }
 
-  let body: { action?: string };
+  let body: { action?: string; replenishmentDate?: string };
   try {
-    body = (await req.json()) as { action?: string };
+    body = (await req.json()) as { action?: string; replenishmentDate?: string };
   } catch {
     return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
   }
@@ -80,7 +82,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
 
   // Gate de TEST_MODE para acciones con efecto externo: pasa si el teléfono
   // está en la allowlist O si este pedido concreto está autorizado.
-  if (action === "confirm" || action === "resend") {
+  if (action === "confirm" || action === "resend" || action === "notify_delay") {
     if (!orderActionAllowed(order)) {
       const gate = canOperateOnOrderManually(order.phone);
       return NextResponse.json(
@@ -133,6 +135,24 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
         { status: 409 }
       );
     }
+  } else if (action === "notify_delay") {
+    if (!order.phone) {
+      return NextResponse.json({ ok: false, error: "el pedido no tiene teléfono" }, { status: 409 });
+    }
+    const replenishmentDate = (body.replenishmentDate ?? "").trim();
+    if (!replenishmentDate) {
+      return NextResponse.json(
+        { ok: false, error: "falta replenishmentDate (la fecha prevista de reposición)" },
+        { status: 400 }
+      );
+    }
+    // batchId "manual:<orderId>": distingue este disparo a mano del batch de
+    // campaña en notify_delay_sends, sin inventar una tabla aparte.
+    const result = sendDelayNotification(order, replenishmentDate, `manual:${id}`, false);
+    if (result.outcome === "error") {
+      return NextResponse.json({ ok: false, error: result.error ?? "fallo al enviar" }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, order: getOrderById(id), notifyDelay: result });
   }
 
   return NextResponse.json({ ok: true, order: getOrderById(id) });

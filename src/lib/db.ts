@@ -530,6 +530,27 @@ export function migrateOrderedAt(db: Database.Database): void {
   }
 }
 
+/**
+ * Migración (SCHEMA_VERSION 11): idempotencia de los envíos masivos de aviso
+ * (p.ej. el retraso de reposición de "Ultras"). Un pedido, una fila: relanzar
+ * el script no reenvía a quien ya recibió. `order_id UNIQUE` es justo eso —
+ * la clave de idempotencia — pero un intento BLOQUEADO por los safety gates
+ * (TEST_MODE, allowlist…) también deja fila (`status != 'sent'`) para que el
+ * informe lo explique, y SÍ se reintenta en el siguiente lanzamiento si las
+ * condiciones cambian (por eso el UPSERT en recordNotifyDelaySend, no un
+ * INSERT a secas).
+ */
+export function migrateNotifyDelaySends(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notify_delay_sends (
+      order_id INTEGER PRIMARY KEY,
+      batch_id TEXT NOT NULL,
+      sent_at INTEGER NOT NULL,
+      status TEXT NOT NULL
+    );
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1124,6 +1145,7 @@ function build() {
   migrateConversationOrderContext(db);
   migrateOutboxProvider(db);
   migrateOrderedAt(db);
+  migrateNotifyDelaySends(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1293,7 +1315,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1833,6 +1855,69 @@ export function listOrders(status?: OrderStatus, limit = 200): OrderRow[] {
     .all(limit) as OrderRow[];
 }
 
+/**
+ * Selección para un aviso masivo por producto (p.ej. el retraso de "Ultras").
+ * Confirmados, con ese producto, sin cierre cancelado, con teléfono, y sin
+ * pedidos de prueba (`shopify_order_id LIKE 'TEST-%'`) ni los excluidos a
+ * mano (despachados, cancelados en Shopify pero aún no reflejado aquí…).
+ * `status != 'ignored_old'` es redundante con `status = 'confirmed'` (un
+ * pedido no puede tener los dos a la vez) — se deja explícito porque así se
+ * pidió, como cinturón y tirantes.
+ */
+export function listOrdersForDelayNotification(opts: {
+  productLike: string;
+  excludeOrderIds?: number[];
+}): OrderRow[] {
+  const db = ctx().db;
+  const excluded = opts.excludeOrderIds ?? [];
+  const placeholders = excluded.length > 0 ? excluded.map(() => "?").join(",") : null;
+  const rows = db
+    .prepare(
+      `SELECT * FROM orders
+       WHERE status = 'confirmed'
+         AND status != 'ignored_old'
+         AND product_summary LIKE ?
+         AND closure_status != 'cancelled'
+         AND phone != ''
+         AND shopify_order_id NOT LIKE 'TEST-%'
+         ${placeholders ? `AND id NOT IN (${placeholders})` : ""}
+       ORDER BY id`
+    )
+    .all(`%${opts.productLike}%`, ...excluded) as OrderRow[];
+  return rows;
+}
+
+/** Ids de pedido con un aviso YA entregado (status='sent') — idempotencia del batch (lectura en bloque, para el informe). */
+export function getNotifyDelaySentOrderIds(): Set<number> {
+  const rows = ctx()
+    .db.prepare("SELECT order_id FROM notify_delay_sends WHERE status = 'sent'")
+    .all() as Array<{ order_id: number }>;
+  return new Set(rows.map((r) => r.order_id));
+}
+
+/** Mismo dato que getNotifyDelaySentOrderIds pero para UN pedido — la guarda antes de enviar de verdad. */
+export function wasDelayNotificationSent(orderId: number): boolean {
+  const row = ctx()
+    .db.prepare("SELECT 1 FROM notify_delay_sends WHERE order_id = ? AND status = 'sent'")
+    .get(orderId);
+  return row !== undefined;
+}
+
+/**
+ * Deja constancia del resultado de un intento (UPSERT: una fila por pedido).
+ * Un intento bloqueado por los safety gates NO cuenta como "sent" — se
+ * reintenta en el siguiente lanzamiento si las condiciones cambian.
+ */
+export function recordNotifyDelaySend(orderId: number, batchId: string, status: string): void {
+  ctx()
+    .db.prepare(
+      `INSERT INTO notify_delay_sends (order_id, batch_id, sent_at, status)
+       VALUES (?, ?, unixepoch(), ?)
+       ON CONFLICT(order_id) DO UPDATE SET batch_id = excluded.batch_id, sent_at = excluded.sent_at, status = excluded.status`
+    )
+    .run(orderId, batchId, status);
+}
+
 export interface OrderCounts {
   today: number; // pedidos entrados hoy (hora local)
   confirmedToday: number; // confirmados hoy
@@ -2116,6 +2201,26 @@ export function requestOrderCancellation(id: number): boolean {
   if (info.changes === 0) return false;
   markOrderNeedsCall(id);
   return true;
+}
+
+/**
+ * Cancelación pedida por el cliente sobre un pedido YA CONFIRMADO (p.ej. tras
+ * un aviso de retraso). `requestOrderCancellation`/`markOrderNeedsCall`
+ * excluyen `confirmed` a propósito — un pedido confirmado ya sigue su curso
+ * normal. Aquí SÍ se permite, porque es una petición explícita y deliberada
+ * del cliente, pero el efecto es idéntico a cualquier otra cancelación
+ * pedida por WhatsApp: needs_call + cancellation_requested_at. NUNCA se toca
+ * Shopify ni el proveedor desde aquí — la cancelación real la decide Pedro.
+ */
+export function requestConfirmedOrderCancellation(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET status = 'needs_call', needs_call_at = unixepoch(),
+         cancellation_requested_at = COALESCE(cancellation_requested_at, unixepoch()), ${TOUCH}
+       WHERE id = ? AND status = 'confirmed'`
+    )
+    .run(id);
+  return info.changes > 0;
 }
 
 // --- Colas del scheduler (todo se deriva de la DB: sobrevive reinicios) ---

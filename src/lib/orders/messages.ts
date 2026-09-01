@@ -198,3 +198,7 @@ export function buildCancelMultiPrompt(orders: OrderRow[]): string {
 export const MSG_CANCEL_RECEIVED =
   "Anotado ✅ Dejamos tu pedido marcado para cancelar y te contactamos para confirmarlo. " +
   "Mientras tanto no se te enviará nada.";
+
+/** El cliente aceptó esperar tras un aviso de retraso: solo un acuse, el pedido no cambia. */
+export const MSG_DELAY_ACKNOWLEDGED =
+  "Gracias por avisarnos 🙌 Dejamos tu pedido como está y te escribimos en cuanto tengamos noticias.";
