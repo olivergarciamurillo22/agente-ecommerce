@@ -116,4 +116,11 @@ export interface SupplierUpdate {
   occurredAt?: number | null;
   /** Punto de recogida, si el proveedor lo reporta. */
   pickupPoint?: PickupPointInfo | null;
+  /**
+   * true → este update actualiza estado, histórico y cierre pero NO encola
+   * ningún WhatsApp de postventa. Lo usa la reconciliación de Beeping
+   * mientras sus avisos no estén habilitados (BEEPING_NOTIFICATIONS_ENABLED):
+   * los safety gates siguen detrás, esto es una capa EXTRA deliberada.
+   */
+  suppressNotifications?: boolean;
 }

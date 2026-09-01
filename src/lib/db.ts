@@ -2851,9 +2851,9 @@ export type StatusHistorySource = "webhook" | "polling" | "manual" | "reconcilia
  * No se mezclan: cada eje tiene su vocabulario, su fuente de verdad y sus
  * reglas de terminalidad.
  */
-export type StatusAxis = "confirmation" | "supplier_sync" | "tracking" | "closure";
+export type StatusAxis = "confirmation" | "supplier_sync" | "tracking" | "closure" | "beeping_release";
 
-export const STATUS_AXES: StatusAxis[] = ["confirmation", "supplier_sync", "tracking", "closure"];
+export const STATUS_AXES: StatusAxis[] = ["confirmation", "supplier_sync", "tracking", "closure", "beeping_release"];
 
 export interface OrderStatusHistoryRow {
   id: number;

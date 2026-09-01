@@ -179,10 +179,15 @@ export function processSupplierUpdate(order: OrderRow, update: SupplierUpdate): 
   }
 
   // 3. Avisar. Cada notificación tiene su propio sello anti-duplicado.
+  //    Con suppressNotifications, el estado se actualiza igual pero no se
+  //    encola nada: el aviso NO queda pendiente para más tarde (el sello
+  //    anti-duplicado no se reclama), es un silencio deliberado.
   const fresco = getOrderById(order.id) ?? order;
   const notified: TrackingEvent[] = [];
-  for (const evento of events) {
-    if (notifyTrackingEvent(fresco, evento)) notified.push(evento);
+  if (!update.suppressNotifications) {
+    for (const evento of events) {
+      if (notifyTrackingEvent(fresco, evento)) notified.push(evento);
+    }
   }
 
   // 4. Las incidencias y devoluciones piden intervención humana: se marcan
