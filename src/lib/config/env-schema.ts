@@ -41,6 +41,8 @@ export type EnvCategory =
   | "RETELL_CALLS"
   | "DROPEA"
   | "DROPI"
+  | "BEEPING"
+  | "META_ADS"
   | "TRACKING"
   | "SYSTEM"
   | "LEGACY";
@@ -302,6 +304,52 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   },
 
   // ── DROPEA ──
+  // ── BEEPING (fulfillment propio) — todo fail-closed ──
+  {
+    name: "BEEPING_BASIC_AUTH",
+    category: "BEEPING",
+    secret: true,
+    description: "Credencial Basic YA codificada. Se genera EN LOCAL con `npm run beeping:auth:init` (jamás pegarla de una web). Equivale a la contraseña de Beeping: máximo cuidado.",
+    requiredFor: [],
+  },
+  {
+    name: "BEEPING_BASE_URL",
+    category: "BEEPING",
+    secret: false,
+    description: "URL base de la API. El default del código es la documentada; no rellenar salvo cambio de contrato.",
+    requiredFor: [],
+    defaultValue: "https://app.gobeeping.com",
+  },
+  { name: "BEEPING_ENABLED", category: "BEEPING", secret: false, description: "1 = lectura de Beeping (doctor, sync, gate). Sin definir = apagado.", requiredFor: [], defaultValue: "0", validate: bool01 },
+  { name: "BEEPING_WRITE_ENABLED", category: "BEEPING", secret: false, description: "1 = escrituras (mark-to-send/cancel/update). Capa aparte de la lectura; a 0 hasta el piloto real.", requiredFor: [], defaultValue: "0", validate: bool01 },
+  { name: "BEEPING_AUTO_RELEASE_CONFIRMED", category: "BEEPING", secret: false, description: "1 = liberar automáticamente al confirmar. HOY SIEMPRE 0: el modo acordado es LIBERACIÓN MANUAL.", requiredFor: [], defaultValue: "0", validate: bool01, status: "FUTURE" },
+  { name: "BEEPING_NOTIFICATIONS_ENABLED", category: "BEEPING", secret: false, description: "1 = la sync de Beeping puede encolar WhatsApps de postventa. A 0 en desarrollo (actualiza estados sin mandar nada).", requiredFor: [], defaultValue: "0", validate: bool01 },
+
+  // ── META ADS (Marketing API) — solo lectura de insights ──
+  {
+    name: "META_ADS_ACCESS_TOKEN",
+    category: "META_ADS",
+    secret: true,
+    description: "Token con permiso ads_read. INDEPENDIENTE del de WhatsApp Cloud API.",
+    requiredFor: [],
+  },
+  {
+    name: "META_ADS_ACCOUNT_ID",
+    category: "META_ADS",
+    secret: false,
+    description: "Id numérico de la cuenta publicitaria (con o sin prefijo act_).",
+    requiredFor: [],
+  },
+  {
+    name: "META_ADS_API_VERSION",
+    category: "META_ADS",
+    secret: false,
+    description: "Versión de la Graph API para Ads. Default en código: v26.0 (vigente, verificada 01-09-2026). El doctor avisa si va por detrás.",
+    requiredFor: [],
+    defaultValue: "v26.0",
+    validate: graphVersion,
+  },
+
   { name: "DROPEA_API_KEY", category: "DROPEA", secret: true, description: "API key de solo lectura (sin orders:create, a propósito).", requiredFor: [] },
   { name: "DROPEA_MARKET", category: "DROPEA", secret: false, description: "Mercado (es).", requiredFor: [], defaultValue: "es" },
   { name: "DROPEA_API_ENABLED", category: "DROPEA", secret: false, description: "1 = lectura de la API habilitada.", requiredFor: [], defaultValue: "0", validate: bool01 },
