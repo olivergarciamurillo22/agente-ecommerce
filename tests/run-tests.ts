@@ -10743,6 +10743,41 @@ async function main(): Promise<void> {
     });
   }
 
+  // ============ V3 FASE C · Shopify lifecycle: la cadena de exclusión completa ============
+  console.log("\n— V3 · Shopify: cancelado no dispara NADA, en ningún canal —");
+
+  await test("§13: pedido CANCELADO en Shopify → jamás WhatsApp inicial, jamás llamada, jamás liberación a Beeping", async () => {
+    const beepingRelease = await import("../src/lib/beeping/release");
+    const callsSched = await import("../src/lib/calls/scheduler");
+    const elig = await import("../src/lib/orders/eligibility");
+    const tel = "34600994301";
+    const o = mkOrder("v3sh-1", "94301", tel);
+    // Cancelación vía el eje de cierre (lo que escribe el webhook orders/cancelled).
+    assert.equal(db.setOrderClosure(o.id, "cancelled", "shopify", Math.floor(Date.now() / 1000)), true);
+    const cancelado = db.getOrderById(o.id)!;
+
+    // 1) WhatsApp: no elegible para confirmación (ni inicial ni recordatorio ni needs_call).
+    const e = elig.isConfirmationEligible(cancelado);
+    assert.equal(e.eligible, false);
+    assert.match(e.detail, /cancelad/i);
+
+    // 2) Llamadas: enqueueDueOrders jamás lo encola aunque el resto de llaves estén abiertas.
+    db.setSetting("calls_allowlist", tel);
+    db.setSetting("calls_shadow_mode", "0");
+    db.setSetting("ai_calls_enabled", "1");
+    db.systemDbHandle().prepare("UPDATE orders SET status = 'needs_call', needs_call_at = unixepoch() - 3600 WHERE id = ?").run(o.id);
+    callsSched.enqueueDueOrders({ now: new Date(), isHoliday: () => false });
+    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "un cancelado NUNCA entra en la cola de llamadas");
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+
+    // 3) Beeping: el gate de liberación lo bloquea con el motivo exacto.
+    db.systemDbHandle().prepare("UPDATE orders SET status = 'confirmed' WHERE id = ?").run(o.id);
+    const gate = beepingRelease.evaluateLocalReleaseGate(db.getOrderById(o.id)!);
+    assert.equal(gate.ok, false);
+    assert.ok(gate.reasons.some((r) => /cancelado en Shopify/.test(r)));
+  });
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
