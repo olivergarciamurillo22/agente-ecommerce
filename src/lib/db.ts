@@ -2118,6 +2118,27 @@ export function requestOrderCancellation(id: number): boolean {
   return true;
 }
 
+/**
+ * Cancelación solicitada DESPUÉS de confirmar el pedido.
+ * Solo la deja para gestión humana: NO toca Shopify ni proveedor.
+ */
+export function requestConfirmedOrderCancellation(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders
+       SET cancellation_requested_at = COALESCE(cancellation_requested_at, unixepoch()),
+           status = 'needs_call',
+           needs_call_at = COALESCE(needs_call_at, unixepoch()),
+           ${TOUCH}
+       WHERE id = ?
+         AND status = 'confirmed'
+         AND COALESCE(closure_status, 'unknown')
+             NOT IN ('cancelled','delivered','refused')`
+    )
+    .run(id);
+  return info.changes > 0;
+}
+
 // --- Colas del scheduler (todo se deriva de la DB: sobrevive reinicios) ---
 
 export function getOrdersDueInitialSend(limit = 20): OrderRow[] {

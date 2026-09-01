@@ -27,7 +27,8 @@ import {
 } from "../db";
 import { logIntegrationEvent } from "../system/repo";
 import { formatMoney } from "../orders/messages";
-import { sendWhatsAppMessage } from "../whatsapp";
+import { sendWhatsAppInteractive, sendWhatsAppMessage } from "../whatsapp";
+import { buildTemplateMessage } from "../whatsapp/templates";
 import type { TrackingEvent } from "./types";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -149,6 +150,42 @@ export function buildPickupPointMessage(order: OrderRow): string {
   );
 }
 
+
+function trackingOrderNumber(order: OrderRow): string {
+  const value = String(order.shopify_order_number ?? "").trim();
+  if (!value) return "pedido";
+  return value.startsWith("#") ? value : `#${value}`;
+}
+
+function trackingCarrier(order: OrderRow): string {
+  return (order.carrier ?? "").trim() || "el transportista";
+}
+
+function buildTrackingAvailableOutbound(order: OrderRow) {
+  return {
+    message: buildTemplateMessage("pedido_confirmado_casamable", [
+      firstName(order) || "cliente",
+      trackingOrderNumber(order),
+      trackingCarrier(order),
+      (order.tracking_number ?? "").trim() || "No disponible",
+      (order.tracking_url ?? "").trim() || "No disponible",
+    ]),
+    fallbackText: buildTrackingAvailableMessage(order),
+  };
+}
+
+function buildOutForDeliveryOutbound(order: OrderRow) {
+  return {
+    message: buildTemplateMessage("reparto_hoy", [
+      firstName(order) || "cliente",
+      trackingOrderNumber(order),
+      trackingCarrier(order),
+      formatMoney(order.total_price, order.currency),
+    ]),
+    fallbackText: buildOutForDeliveryMessage(order),
+  };
+}
+
 // --- Envío ---
 
 const EVENTO_A_SELLO: Partial<Record<TrackingEvent, TrackingNotificationKind>> = {
@@ -254,11 +291,27 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
 
   // Vía outbox (nunca Baileys directo): hereda reintentos y safety gates.
   let encolado: boolean;
-  try {
-    encolado = sendWhatsAppMessage(order.phone, texto, {
-      name: order.customer_name ?? undefined,
-      orderAuthorized: order.pilot_authorized === 1,
-    });
+  try {      const opts = {
+        name: order.customer_name ?? undefined,
+        orderAuthorized: order.pilot_authorized === 1,
+      };
+
+      if (event === "TRACKING_AVAILABLE") {
+        encolado = sendWhatsAppInteractive(
+          order.phone,
+          buildTrackingAvailableOutbound(order),
+          opts
+        );
+      } else if (event === "OUT_FOR_DELIVERY") {
+        encolado = sendWhatsAppInteractive(
+          order.phone,
+          buildOutForDeliveryOutbound(order),
+          opts
+        );
+      } else {
+        // Los demás eventos conservan por ahora el comportamiento anterior.
+        encolado = sendWhatsAppMessage(order.phone, texto, opts);
+      }
   } catch (err) {
     // Fallo real (excepción al encolar, no un bloqueo deliberado): SÍ cuenta
     // para la alerta "avisos de tracking fallidos" del Control Center.

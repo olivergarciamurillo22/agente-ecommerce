@@ -14,12 +14,28 @@
       "language": "es",
       "category": "UTILITY",
       "use": "Primer mensaje del flujo COD cuando el cliente no ha escrito nunca (siempre fuera de ventana por definición).",
-      "variables": ["nombre", "producto", "importe"],
+      "variables": [
+        "nombre",
+        "producto",
+        "importe"
+      ],
       "draft_body": "Hola {{1}} 👋 Tenemos tu pedido de Casamable: {{2}} por {{3}}, a pagar al recibirlo. ¿Está todo correcto?",
       "buttons": [
-        { "type": "QUICK_REPLY", "text": "Confirmar pedido", "payload": "confirm_order" },
-        { "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" },
-        { "type": "QUICK_REPLY", "text": "Dejar una nota", "payload": "delivery_note" }
+        {
+          "type": "QUICK_REPLY",
+          "text": "Confirmar pedido",
+          "payload": "confirm_order"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "Cambiar dirección",
+          "payload": "change_address"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "Dejar una nota",
+          "payload": "delivery_note"
+        }
       ],
       "fallback": "el mensaje de confirmación de texto actual (orders/messages.ts)"
     },
@@ -28,11 +44,22 @@
       "language": "es",
       "category": "UTILITY",
       "use": "Recordatorio si no contestó al primer mensaje y la ventana de 24 h ya venció.",
-      "variables": ["nombre", "producto"],
+      "variables": [
+        "nombre",
+        "producto"
+      ],
       "draft_body": "Hola {{1}}, seguimos esperando tu confirmación del pedido {{2}} para poder enviarlo. Responde cuando puedas.",
       "buttons": [
-        { "type": "QUICK_REPLY", "text": "Confirmar pedido", "payload": "confirm_order" },
-        { "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" }
+        {
+          "type": "QUICK_REPLY",
+          "text": "Confirmar pedido",
+          "payload": "confirm_order"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "Cambiar dirección",
+          "payload": "change_address"
+        }
       ],
       "fallback": "buildReminderMessage (orders/messages.ts)"
     },
@@ -41,7 +68,10 @@
       "language": "es",
       "category": "UTILITY",
       "use": "El pedido ya tiene número de seguimiento (suele ser días después de confirmar: fuera de ventana casi siempre).",
-      "variables": ["producto", "tracking_url"],
+      "variables": [
+        "producto",
+        "tracking_url"
+      ],
       "draft_body": "Tu pedido {{1}} ya está en camino 🚚 Puedes seguirlo aquí: {{2}}",
       "buttons": [],
       "fallback": "buildTrackingAvailableMessage (tracking/notifications.ts)"
@@ -51,7 +81,10 @@
       "language": "es",
       "category": "UTILITY",
       "use": "Sale a reparto HOY: recordar el importe en efectivo (clave en COD).",
-      "variables": ["producto", "importe"],
+      "variables": [
+        "producto",
+        "importe"
+      ],
       "draft_body": "Tu pedido {{1}} sale a reparto hoy. Recuerda tener {{2}} en efectivo para pagar al repartidor.",
       "buttons": [],
       "fallback": "buildOutForDeliveryMessage (tracking/notifications.ts)"
@@ -61,9 +94,17 @@
       "language": "es",
       "category": "UTILITY",
       "use": "El repartidor no encontró al cliente. Es el aviso que más pedidos recupera.",
-      "variables": ["nombre"],
+      "variables": [
+        "nombre"
+      ],
       "draft_body": "Hola {{1}}, el repartidor ha intentado entregar tu pedido de Casamable y no ha podido. Volverá a pasar; si no vas a estar o prefieres otra dirección, respóndenos a este mensaje.",
-      "buttons": [{ "type": "QUICK_REPLY", "text": "Cambiar dirección", "payload": "change_address" }],
+      "buttons": [
+        {
+          "type": "QUICK_REPLY",
+          "text": "Cambiar dirección",
+          "payload": "change_address"
+        }
+      ],
       "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)"
     },
     {
@@ -71,10 +112,120 @@
       "language": "es",
       "category": "UTILITY",
       "use": "Hace falta hablar con el cliente (incidencia, dirección inválida) y la ventana venció.",
-      "variables": ["nombre"],
+      "variables": [
+        "nombre"
+      ],
       "draft_body": "Hola {{1}}, necesitamos confirmar un detalle de tu pedido de Casamable. Respóndenos a este mensaje cuando puedas y lo resolvemos en un momento.",
       "buttons": [],
       "fallback": "mensaje libre equivalente, dentro de ventana"
+    },
+    {
+      "name": "pedido_confirmado",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Aviso de pedido confirmado.",
+      "variables": [
+        "nombre",
+        "numero_pedido",
+        "importe"
+      ],
+      "draft_body": "Hola {{1}} 👋 Somos Casamable.\n\nHemos recibido correctamente tu pedido {{2}} ✅\n\nTu pedido ya está confirmado y comenzaremos a prepararlo para su envío 📦\n\nRecuerda que es un pedido contra reembolso y deberás abonar {{3}} en efectivo al repartidor 💶\n\nTe avisaremos cuando tu pedido esté en camino.\n\n¡Gracias por confiar en Casamable! ❤️",
+      "buttons": [],
+      "fallback": "Plantilla aprobada en Meta"
+    },
+    {
+      "name": "pedido_confirmado_casamable",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Aviso de pedido enviado con seguimiento.",
+      "variables": [
+        "nombre",
+        "numero_pedido",
+        "transportista",
+        "numero_seguimiento",
+        "tracking_url"
+      ],
+      "draft_body": "Hola {{1}}, tu pedido {{2}} de Casamable ya está en camino.\n\nTransportista: {{3}}\nNúmero de seguimiento: {{4}}\n\nPuedes seguir el estado de tu envío aquí:\n{{5}}\n\nGracias por confiar en Casamable.",
+      "buttons": [],
+      "fallback": "buildTrackingAvailableMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "reparto_hoy",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Aviso de pedido en reparto.",
+      "variables": [
+        "nombre",
+        "numero_pedido",
+        "transportista",
+        "importe"
+      ],
+      "draft_body": "Hola {{1}}, tu pedido {{2}} de Casamable está hoy en reparto.\n\nEl transportista {{3}} intentará realizar la entrega durante el día.\n\nRecuerda que es un pedido contra reembolso y deberás abonar {{4}} en efectivo al repartidor.\n\nGracias.",
+      "buttons": [],
+      "fallback": "buildOutForDeliveryMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "entrega_fallida",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Intento de entrega fallido. Automatización todavía desactivada.",
+      "variables": [
+        "nombre",
+        "numero_pedido"
+      ],
+      "draft_body": "Hola {{1}}, el transportista ha intentado entregar tu pedido {{2}} de Casamable y no ha podido completar la entrega.\n\nSi necesitas modificar la dirección o indicarnos alguna información para la entrega, responde a este mensaje y te ayudamos.",
+      "buttons": [
+        {
+          "type": "QUICK_REPLY",
+          "text": "Intentar otro intento de reparto",
+          "payload": "retry_delivery"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "Necesito hablar con el soporte",
+          "payload": "need_help"
+        }
+      ],
+      "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)"
+    },
+    {
+      "name": "retraso_pedido",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Aviso de retraso o rotura de stock.",
+      "variables": [
+        "nombre",
+        "numero_pedido",
+        "producto",
+        "fecha_reposicion"
+      ],
+      "draft_body": "Hola {{1}}, te escribimos de Casamable por tu pedido {{2}}.\n\nDebido a una rotura puntual de stock de {{3}}, la reposición está prevista para {{4}}.\n\nHemos reservado las unidades correspondientes a tu pedido y lo despacharemos en cuanto recibamos la reposición.\n\nSentimos las molestias y gracias por tu paciencia.",
+      "buttons": [
+        {
+          "type": "QUICK_REPLY",
+          "text": "No hay problema",
+          "payload": "delay_ok"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "Cancelar pedido",
+          "payload": "cancel_request"
+        }
+      ],
+      "fallback": "Plantilla aprobada en Meta"
+    },
+    {
+      "name": "pedido_cancelado",
+      "language": "en",
+      "category": "UTILITY",
+      "use": "Confirmación de cancelación. Meta la aprobó con idioma en.",
+      "variables": [
+        "nombre",
+        "numero_pedido"
+      ],
+      "draft_body": "Hola {{1}}, te confirmamos que tu pedido {{2}} de Casamable ha sido cancelado correctamente.\n\nNo se realizará ningún envío ni ningún cobro asociado a este pedido.\n\nSi necesitas ayuda, puedes responder a este mensaje.",
+      "buttons": [],
+      "fallback": "Plantilla aprobada en Meta"
     }
   ]
 }
