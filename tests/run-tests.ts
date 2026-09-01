@@ -7749,7 +7749,12 @@ async function main(): Promise<void> {
       () => waTemplates.buildTemplateMessage("order_confirmation_request", ["solo-una"]),
       /esperaba 3/
     );
-    assert.equal(waTemplates.loadTemplateSpecs().length, 6, "las 6 plantillas del plan");
+    assert.equal(
+      waTemplates.loadTemplateSpecs().length,
+      12,
+      "las 12 plantillas: 6 del plan original + 6 recuperadas del NAS (30-08): pedido_confirmado, " +
+        "pedido_confirmado_casamable, reparto_hoy, entrega_fallida, retraso_pedido, pedido_cancelado"
+    );
   });
 
   await test("BUG1 · buildTemplateMessage incluye los payloads de botón del catálogo, en orden", () => {
@@ -8632,50 +8637,44 @@ async function main(): Promise<void> {
   // ============ 44 · PRUEBA DE REALIDAD FINAL (flujo completo) ============
   console.log("· Prueba de realidad — ciclo de vida completo");
 
-  await test("REALIDAD: pedido COD → WhatsApp → 15 min → llamada → no contesta → retry → confirma por WhatsApp → retry cancelado → fulfillment → cero contactos más", async () => {
+  await test("REALIDAD: pedido COD → WhatsApp → 15 min → MANUAL-ONLY (hotfix NAS 30-08): jamás llama sola → confirma por WhatsApp → fulfillment → cero contactos más", async () => {
     const tel = "34600117900";
     // 1. Pedido nuevo, WhatsApp de confirmación enviado hace 20 min sin respuesta.
+    //    Antes del hotfix del 30-08 esto habría entrado en cola y Retell
+    //    (mock) habría marcado — MANUAL-ONLY lo desactivó a propósito:
+    //    runCallOrchestratorTick sigue procesando resultados/revisiones,
+    //    pero enqueueDueOrders/dialDueAttempts están fijados a cero. Solo el
+    //    botón "Llamar ahora" del panel (manualDialOrder) puede iniciar una
+    //    llamada ahora.
     const o = mkCallable("997900", "4900", tel, 20);
     db.setSetting("calls_allowlist", tel);
     db.setSetting("calls_shadow_mode", "0");
     db.setSetting("ai_calls_enabled", "1");
     db.setSetting("calls_daily_cap", "500");
 
-    // 2. Tick dentro de franja: entra en cola y Retell (mock) marca.
     const { provider, created } = mkProvider();
     await calls.runCallOrchestratorTick({ now: enFranja, provider, isHoliday: noHoliday });
-    assert.equal(created.filter((c) => c.toNumber === "+" + tel).length, 1, "una llamada real");
-    const a1 = db.getActiveCallAttemptForOrder(o.id)!;
-    assert.equal(a1.state, "in_flight");
+    assert.equal(created.length, 0, "MANUAL-ONLY: cero llamadas automáticas, aunque el pedido sea elegible");
+    assert.equal(db.getActiveCallAttemptForOrder(o.id), null);
 
-    // 3. No contesta → retry planificado en franja legal, contacto 2.
-    calls.applyCallAnalysis(a1, analyzedEvent(a1.provider_call_id!, { resultado: "no_contesta" }), enFranja, noHoliday);
-    const a2 = db.getActiveCallAttemptForOrder(o.id)!;
-    assert.equal(a2.contact_number, 2);
-    assert.ok(sched.insideCallWindow(new Date(a2.scheduled_at * 1000), noHoliday));
-
-    // 4. ANTES del retry, el cliente confirma por WhatsApp (carrera §58).
+    // 2. El resto del ciclo no depende de llamadas y sigue igual: el
+    //    cliente confirma por WhatsApp, Shopify marca fulfillment (E2)
+    //    — closure in_progress, JAMÁS delivered — y sigue sin haber
+    //    ningún contacto (automático ni manual).
     db.markOrderConfirmed(o.id, true);
-    const cuandoToca = new Date(a2.scheduled_at * 1000);
-    const antes = created.length;
-    await calls.runCallOrchestratorTick({ now: cuandoToca, provider, isHoliday: noHoliday });
-    assert.equal(created.length, antes, "el retry NO llama: reevaluó elegibilidad justo antes");
-    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "retry cancelado");
-
-    // 5. El ciclo de proveedor sigue; Shopify marca fulfillment (E2):
-    //    closure in_progress — JAMÁS delivered — y cero contactos más.
-    assert.ok(db.setOrderClosure(o.id, "in_progress", "shopify", Math.floor(cuandoToca.getTime() / 1000) + 60));
+    const despues = new Date(enFranja.getTime() + 3600_000);
+    assert.ok(db.setOrderClosure(o.id, "in_progress", "shopify", Math.floor(despues.getTime() / 1000) - 3540));
     const fila = db.getOrderById(o.id)!;
     assert.equal(fila.closure_status, "in_progress");
     assert.notEqual(fila.closure_status, "delivered", "fulfilled nunca es delivered");
-    await calls.runCallOrchestratorTick({ now: new Date(cuandoToca.getTime() + 3600_000), provider, isHoliday: noHoliday });
-    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "ningún contacto nuevo tras fulfillment");
-    assert.equal(created.length, antes);
+    await calls.runCallOrchestratorTick({ now: despues, provider, isHoliday: noHoliday });
+    assert.equal(db.getActiveCallAttemptForOrder(o.id), null, "sigue sin haber ningún contacto tras fulfillment");
+    assert.equal(created.length, 0);
 
-    // 6. La entrega real la dictará la fuente autoritativa (Dropea) y el
+    // 3. La entrega real la dictará la fuente autoritativa (Dropea) y el
     //    terminal no podrá ser pisado por nadie (ya probado en E1/E7).
-    assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", Math.floor(cuandoToca.getTime() / 1000) + 7200));
-    assert.equal(db.setOrderClosure(o.id, "cancelled", "llamada_ia", Math.floor(cuandoToca.getTime() / 1000) + 9000), false);
+    assert.ok(db.setOrderClosure(o.id, "delivered", "dropea", Math.floor(despues.getTime() / 1000) + 7200));
+    assert.equal(db.setOrderClosure(o.id, "cancelled", "llamada_ia", Math.floor(despues.getTime() / 1000) + 9000), false);
     resetCallCfg();
   });
 

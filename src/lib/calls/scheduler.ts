@@ -344,10 +344,17 @@ export function classifyStaleInFlight(now: Date, isHoliday: HolidayCalendar): nu
       transitionCallAttempt(a.id, ["in_flight"], "completed", {
         result,
         retry_consumed: RESULT_OUTCOMES[result].consume ? 1 : 0,
-        reason: "sin call_analyzed: clasificado por estado técnico",
+        reason:
+          a.reason === "manual_button"
+            ? "manual_button"
+            : "sin call_analyzed: clasificado por estado técnico",
       })
     ) {
-      planNextAfterResult(order, a, result, now, isHoliday, null);
+      // MANUAL-ONLY absoluto: incluso si Retell nunca manda call_analyzed,
+      // una llamada iniciada por botón termina aquí y JAMÁS crea un retry.
+      if (a.reason !== "manual_button") {
+        planNextAfterResult(order, a, result, now, isHoliday, null);
+      }
       n++;
     }
   }
@@ -506,7 +513,14 @@ export function applyCallAnalysis(
     toManualReview({ ...attempt, state: "completed" } as CallAttemptRow, `resultado ${result}: requiere gestión humana`);
   }
 
-  // ¿Siguiente intento?
+  // MANUAL-ONLY: una llamada iniciada expresamente con el botón jamás
+  // programa otra llamada por sí sola, sea cual sea el resultado.
+  if (attempt.reason === "manual_button") {
+    return;
+  }
+
+  // Flujo legacy/automático conservado para compatibilidad histórica/tests,
+  // pero el orquestador ya no crea ni marca estos intentos por sí solo.
   const rellamada = analysis["momento_rellamada"];
   const rellamadaS =
     typeof rellamada === "number"
@@ -563,8 +577,9 @@ export async function runCallOrchestratorTick(deps: CallTickDeps = {}): Promise<
   const eventsProcessed = processCallEvents(now, isHoliday);
   const reviews = reviewStuckDialing(now);
   classifyStaleInFlight(now, isHoliday);
-  const enqueued = enqueueDueOrders({ now, isHoliday });
-  const dial = await dialDueAttempts({ now, provider, isHoliday });
+  // MANUAL-ONLY: procesa resultados/revisiones, pero nunca crea ni marca llamadas.
+  const enqueued = 0;
+  const dial = { dialed: 0, shadowLogged: 0, cancelled: 0, reviews: 0 };
 
   return {
     enqueued,

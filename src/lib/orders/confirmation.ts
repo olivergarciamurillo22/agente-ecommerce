@@ -20,10 +20,12 @@ import pino from "pino";
 import {
   clearSelectedOrderContext,
   getActiveOrdersByPhone,
+  getOrderById,
   getConversationOrderContext,
   markOrderPossibleDuplicate,
   recordConversationPrompt,
   requestOrderCancellation,
+  requestConfirmedOrderCancellation,
   resetConversationPrompt,
   setPendingCancelContext,
   setSelectedOrderContext,
@@ -620,6 +622,53 @@ export function handleOrderButtonReply(phone: string, payload: string): OrderRep
       return handleOrderReply(phone, `cancelar ${context.selectedOrder.shopify_order_number}`);
     }
     return handleOrderReply(phone, "cancelar"); // → "¿ambos o solo uno?"
+  }
+
+  // Botones del aviso de retraso: llevan SIEMPRE el id exacto del pedido.
+  const delayOk = /^delay_ok:(\d+)$/.exec(p);
+  if (delayOk) {
+    const order = getOrderById(Number(delayOk[1]));
+    if (!order || order.phone !== phone) return { handled: false };
+
+    logIntegrationEvent(
+      "whatsapp",
+      "delay_accepted",
+      "info",
+      "cliente acepta esperar la reposición",
+      order.shopify_order_number
+    );
+
+    return {
+      handled: true,
+      reply: "Gracias por tu comprensión. Te avisaremos en cuanto tu pedido salga de nuestro almacén.",
+      authorized: order.pilot_authorized === 1,
+    };
+  }
+
+  const delayCancel = /^delay_cancel:(\d+)$/.exec(p);
+  if (delayCancel) {
+    const order = getOrderById(Number(delayCancel[1]));
+    if (!order || order.phone !== phone) return { handled: false };
+
+    const changed = requestConfirmedOrderCancellation(order.id);
+
+    logIntegrationEvent(
+      "whatsapp",
+      "delay_cancellation_requested",
+      changed ? "warning" : "info",
+      changed
+        ? "cliente solicita cancelar tras aviso de retraso; requiere gestión humana"
+        : "solicitud de cancelación postventa ya no aplicable",
+      order.shopify_order_number
+    );
+
+    return {
+      handled: true,
+      reply: changed
+        ? "Hemos registrado tu solicitud de cancelación. Nuestro equipo la revisará antes de realizar cualquier envío."
+        : "Tu solicitud ha quedado registrada para revisión.",
+      authorized: order.pilot_authorized === 1,
+    };
   }
 
   // Payload desconocido: no se adivina nada. Visible en logs, sin respuesta.

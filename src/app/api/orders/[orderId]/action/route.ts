@@ -9,6 +9,9 @@ import {
 } from "@/lib/db";
 import { confirmOrder } from "@/lib/orders/confirmation";
 import { canOperateOnOrderManually, orderActionAllowed } from "@/lib/safety";
+import { manualDialOrder } from "@/lib/calls/manual";
+import { sendWhatsAppInteractive } from "@/lib/whatsapp";
+import { buildTemplateMessage } from "@/lib/whatsapp/templates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,8 +22,10 @@ interface RouteContext {
 
 const ACTIONS = new Set([
   "confirm",
+  "call_now",
   "needs_call",
   "resend",
+  "notify_delay",
   "cancel",
   "authorize_pilot",
   "revoke_pilot",
@@ -45,9 +50,9 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
   }
 
-  let body: { action?: string };
+  let body: { action?: string; replenishmentDate?: string };
   try {
-    body = (await req.json()) as { action?: string };
+    body = (await req.json()) as { action?: string; replenishmentDate?: string };
   } catch {
     return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
   }
@@ -80,7 +85,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
 
   // Gate de TEST_MODE para acciones con efecto externo: pasa si el teléfono
   // está en la allowlist O si este pedido concreto está autorizado.
-  if (action === "confirm" || action === "resend") {
+  if (action === "confirm" || action === "resend" || action === "notify_delay") {
     if (!orderActionAllowed(order)) {
       const gate = canOperateOnOrderManually(order.phone);
       return NextResponse.json(
@@ -106,6 +111,83 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
       );
     }
     confirmOrder(order, "manual");
+  } else if (action === "call_now") {
+    const result = await manualDialOrder(id);
+    if (!result.ok) {
+      return NextResponse.json(
+        { ok: false, error: result.error ?? "no se pudo iniciar la llamada" },
+        { status: 409 }
+      );
+    }
+    return NextResponse.json({
+      ok: true,
+      order: getOrderById(id),
+      providerCallId: result.providerCallId,
+    });
+  } else if (action === "notify_delay") {
+    const product = (order.product_summary ?? "").toLowerCase();
+    if (
+      order.status !== "confirmed" ||
+      (!product.includes("ultras") && !product.includes("gafa"))
+    ) {
+      return NextResponse.json(
+        { ok: false, error: "el aviso de retraso solo está habilitado para limpiadores ultrasónicos confirmados" },
+        { status: 409 }
+      );
+    }
+
+    if (!order.phone) {
+      return NextResponse.json({ ok: false, error: "el pedido no tiene teléfono" }, { status: 409 });
+    }
+
+    const replenishmentDate = (body.replenishmentDate ?? "").trim();
+    if (!replenishmentDate) {
+      return NextResponse.json({ ok: false, error: "falta la fecha de reposición" }, { status: 400 });
+    }
+
+    const name =
+      (order.customer_name ?? "").trim().split(/\s+/)[0] || "cliente";
+    const orderNumber = String(order.shopify_order_number).startsWith("#")
+      ? String(order.shopify_order_number)
+      : `#${order.shopify_order_number}`;
+
+    const message = buildTemplateMessage("retraso_pedido", [
+      name,
+      orderNumber,
+      "Limpiador Ultrasónico Multiusos",
+      replenishmentDate,
+    ]);
+
+    message.buttonPayloads = [
+      `delay_ok:${order.id}`,
+      `delay_cancel:${order.id}`,
+    ];
+
+    const fallbackText =
+      `Hola ${name}, te escribimos de Casamable por tu pedido ${orderNumber}.\n\n` +
+      `Debido a una rotura puntual de stock de Limpiador Ultrasónico Multiusos, ` +
+      `la reposición está prevista para ${replenishmentDate}.\n\n` +
+      `Hemos reservado las unidades correspondientes a tu pedido y lo despacharemos ` +
+      `en cuanto recibamos la reposición.\n\n` +
+      `Sentimos las molestias y gracias por tu paciencia.`;
+
+    const queued = sendWhatsAppInteractive(
+      order.phone,
+      { message, fallbackText },
+      {
+        name: order.customer_name ?? undefined,
+        orderAuthorized: order.pilot_authorized === 1,
+      }
+    );
+
+    if (!queued) {
+      return NextResponse.json(
+        { ok: false, error: "envío bloqueado por los safety gates actuales" },
+        { status: 409 }
+      );
+    }
+
+    return NextResponse.json({ ok: true, order: getOrderById(id) });
   } else if (action === "needs_call") {
     if (!markOrderNeedsCall(id)) {
       return NextResponse.json(
