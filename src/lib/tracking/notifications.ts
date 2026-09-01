@@ -21,6 +21,7 @@
 import pino from "pino";
 import {
   claimTrackingNotification,
+  releaseTrackingNotification,
   setOrderSupplierReview,
   type OrderRow,
   type TrackingNotificationKind,
@@ -290,31 +291,34 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
             : buildDeliveredMessage(order);
 
   // Vía outbox (nunca Baileys directo): hereda reintentos y safety gates.
+  //
+  // El claim se ganó ARRIBA, antes de saber si esto va a poder salir de
+  // verdad. Si no sale (gate cerrado o una excepción real al encolar), nada
+  // quedó en el outbox — así que el claim se DEVUELVE aquí abajo. Sin esto,
+  // un bloqueo de TEST_MODE/allowlist/EMERGENCY_STOP quemaba el sello para
+  // siempre y ese aviso no se reenviaba jamás, aunque el gate se abriera
+  // después (evidencia real: pedido #1131, notification_skipped_by_gate).
   let encolado: boolean;
-  try {      const opts = {
-        name: order.customer_name ?? undefined,
-        orderAuthorized: order.pilot_authorized === 1,
-      };
+  try {
+    const opts = {
+      name: order.customer_name ?? undefined,
+      orderAuthorized: order.pilot_authorized === 1,
+    };
 
-      if (event === "TRACKING_AVAILABLE") {
-        encolado = sendWhatsAppInteractive(
-          order.phone,
-          buildTrackingAvailableOutbound(order),
-          opts
-        );
-      } else if (event === "OUT_FOR_DELIVERY") {
-        encolado = sendWhatsAppInteractive(
-          order.phone,
-          buildOutForDeliveryOutbound(order),
-          opts
-        );
-      } else {
-        // Los demás eventos conservan por ahora el comportamiento anterior.
-        encolado = sendWhatsAppMessage(order.phone, texto, opts);
-      }
+    if (event === "TRACKING_AVAILABLE") {
+      encolado = sendWhatsAppInteractive(order.phone, buildTrackingAvailableOutbound(order), opts);
+    } else if (event === "OUT_FOR_DELIVERY") {
+      encolado = sendWhatsAppInteractive(order.phone, buildOutForDeliveryOutbound(order), opts);
+    } else {
+      // Los demás eventos conservan por ahora el comportamiento anterior.
+      encolado = sendWhatsAppMessage(order.phone, texto, opts);
+    }
   } catch (err) {
     // Fallo real (excepción al encolar, no un bloqueo deliberado): SÍ cuenta
-    // para la alerta "avisos de tracking fallidos" del Control Center.
+    // para la alerta "avisos de tracking fallidos" del Control Center. Nada
+    // llegó al outbox (la excepción corta antes del `return true` de
+    // sendWhatsApp*), así que el claim se devuelve para poder reintentar.
+    releaseTrackingNotification(order.id, sello);
     const motivo = err instanceof Error ? err.message : String(err);
     logger.error(`[WHATSAPP] #${order.shopify_order_number} ${event}: fallo al encolar — ${motivo}`);
     logIntegrationEvent("tracking", "notification_failed", "warning", `aviso ${event} falló al encolar: ${motivo}`, order.shopify_order_number);
@@ -328,6 +332,9 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
     // Bloqueo deliberado (TEST_MODE, fuera de allowlist, safe mode,
     // EMERGENCY_STOP...): se registra para trazabilidad pero NO cuenta como
     // fallo operativo — no debe disparar la alerta de "avisos fallidos".
+    // El claim se devuelve: cuando el gate se abra, el próximo tick vuelve
+    // a intentarlo — no es una pérdida silenciosa.
+    releaseTrackingNotification(order.id, sello);
     logIntegrationEvent("tracking", "notification_skipped_by_gate", "info", `aviso ${event} bloqueado por safety gates`, order.shopify_order_number);
   }
   return encolado;

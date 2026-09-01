@@ -4189,6 +4189,52 @@ async function main(): Promise<void> {
     );
   });
 
+  await test("Claim de tracking: gate cerrado NO quema el sello — se devuelve, y no cuenta como fallo real (evidencia: pedido #1131)", async () => {
+    const o = mkSynced("990710", "3710", "34600119710");
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34699999999" }, () => {
+      const ok = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+      assert.equal(ok, false, "bloqueado por el gate: nada se encoló");
+    });
+    assert.equal(
+      db.getOrderById(o.id)!.tracking_notification_sent_at,
+      null,
+      "el claim se devolvió: el sello NO queda quemado para siempre"
+    );
+    const antesFallos = businessAlerts.readBusinessSnapshot().trackingNotifyFailures24h;
+    assert.equal(
+      businessAlerts.readBusinessSnapshot().trackingNotifyFailures24h,
+      antesFallos,
+      "un bloqueo deliberado del gate no es un fallo real"
+    );
+  });
+
+  await test("Claim de tracking: con el gate cerrado y luego abierto, el aviso SÍ se reenvía en el siguiente intento", async () => {
+    const o = mkSynced("990711", "3711", "34600119711");
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34699999999" }, () => {
+      assert.equal(trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE"), false, "1er intento: gate cerrado");
+    });
+    // Mismo evento, mismo pedido, el gate ahora abierto (TEST_MODE=0, el
+    // default de estos tests) — como en el siguiente tick del poller real.
+    const ok = trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "TRACKING_AVAILABLE");
+    assert.equal(ok, true, "2º intento: el gate abierto SÍ deja salir el aviso");
+    const msg = db.getPendingOutbox(999).find((x) => x.phone === "34600119711");
+    assert.ok(msg, "el mensaje quedó encolado de verdad en el outbox");
+    assert.ok(
+      db.getOrderById(o.id)!.tracking_notification_sent_at !== null,
+      "tras el envío real, el sello SÍ queda consumido (no se reenvía una tercera vez)"
+    );
+  });
+
+  await test("Claim de tracking: dos workers sobre el mismo pedido y evento → un solo envío, nunca dos", () => {
+    const o = mkSynced("990712", "3712", "34600119712");
+    const r1 = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+    const r2 = trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "TRACKING_AVAILABLE");
+    assert.equal(r1, true, "el primer worker gana el claim y envía");
+    assert.equal(r2, false, "el segundo ve el sello ya puesto: no reenvía");
+    const mensajes = db.getPendingOutbox(999).filter((x) => x.phone === "34600119712");
+    assert.equal(mensajes.length, 1, "un solo mensaje en el outbox, nunca dos, aunque dos workers lo intentaran");
+  });
+
   await test("A5 alertas: needs_call atrasado se lee de la DB (needs_call_at) y umbrales por env", async () => {
     const o = mkSent("990030", "3030");
     const Database = require("better-sqlite3");
