@@ -17,10 +17,11 @@
 //     EMERGENCY_STOP — esos son "notification_skipped_by_gate", no fallos)
 // ============================================================
 
-import { systemDbHandle } from "../db";
+import { getSetting, systemDbHandle } from "../db";
 import { countIntegrationEvents } from "./repo";
 import { getDeliveryMetrics, type DeliveryMetrics } from "./delivery-metrics";
 import { trackingStaleHours } from "./tracking-overview";
+import type { EconomicsWindow } from "./unit-economics";
 import type { HealthStatus } from "./types";
 
 export type BusinessAlertCategory = "business" | "operations";
@@ -41,6 +42,17 @@ function envNum(name: string, def: number): number {
   return Number.isFinite(v) && v >= 0 ? v : def;
 }
 
+/** settings (cambiable sin desplegar) → env → default. Para umbrales nuevos. */
+function settingNum(key: string, envName: string, def: number): number {
+  try {
+    const s = parseFloat(getSetting(key) ?? "");
+    if (Number.isFinite(s) && s >= 0) return s;
+  } catch {
+    /* sin DB (test puro): cae al env */
+  }
+  return envNum(envName, def);
+}
+
 export function businessThresholds() {
   return {
     deliveryWarn: envNum("DELIVERY_RATE_WARN", 70),
@@ -51,6 +63,10 @@ export function businessThresholds() {
     supplierFailuresWarn: Math.max(1, Math.floor(envNum("SUPPLIER_FAILURES_WARN", 3))),
     openIncidentsWarn: Math.max(1, Math.floor(envNum("OPEN_INCIDENTS_WARN", 1))),
     trackingNotifyFailWarn: Math.max(1, Math.floor(envNum("TRACKING_NOTIFY_FAIL_WARN", 5))),
+    /** Confirmado y sin despachar más de X h → warning (§36 del cierre). */
+    confirmedDispatchStaleHours: settingNum("business_confirmed_dispatch_stale_hours", "CONFIRMED_DISPATCH_STALE_HOURS", 6),
+    /** Desviación del coste por pedido entregado (7d vs 30d) → warning. */
+    costDeviationPct: settingNum("business_cost_deviation_pct", "COST_PER_DELIVERED_DEVIATION_PCT", 15),
   };
 }
 
@@ -168,6 +184,57 @@ export function evalTrackingNotifyFailures(count24h: number, t: Pick<Thresholds,
   return { ...base, status: "healthy", value: count24h, threshold: t.trackingNotifyFailWarn, message: count24h ? `${count24h} aviso(s) fallidos, dentro del umbral` : "todos los avisos de envío salieron o se bloquearon a propósito" };
 }
 
+/** Confirmados por el cliente y sin despachar en más de X horas (§36). */
+export function evalConfirmedNotDispatched(staleCount: number, t: Pick<Thresholds, "confirmedDispatchStaleHours">): BusinessAlert {
+  const base = { id: "confirmed_not_dispatched", category: "operations" as const, label: "Confirmados sin despachar" };
+  if (staleCount > 0) {
+    return {
+      ...base,
+      status: "warning",
+      value: staleCount,
+      threshold: 1,
+      message: `${staleCount} pedido(s) confirmados llevan más de ${t.confirmedDispatchStaleHours} h sin salir hacia el proveedor — revisar en Pedidos`,
+    };
+  }
+  return { ...base, status: "healthy", value: 0, threshold: 1, message: "todos los confirmados están despachados o dentro de plazo" };
+}
+
+/** Coste real por pedido entregado (ventana corta) frente a su base 30d. */
+export function evalCostPerDeliveredDeviation(
+  current: number | null,
+  baseline: number | null,
+  t: Pick<Thresholds, "costDeviationPct">
+): BusinessAlert {
+  const base = { id: "cost_per_delivered_deviation", category: "business" as const, label: "Coste por pedido entregado" };
+  if (current === null || baseline === null || baseline <= 0) {
+    return { ...base, status: "unknown", value: current, threshold: t.costDeviationPct, message: "sin datos suficientes para comparar (costes o entregas incompletos)" };
+  }
+  const desviacion = ((current - baseline) / baseline) * 100;
+  if (desviacion > t.costDeviationPct) {
+    return {
+      ...base,
+      status: "warning",
+      value: Math.round(desviacion * 10) / 10,
+      threshold: t.costDeviationPct,
+      message: `el coste por entregado de 7 días (${current.toFixed(2)} €) está un ${desviacion.toFixed(0)}% por encima de la media de 30 días (${baseline.toFixed(2)} €)`,
+    };
+  }
+  return {
+    ...base,
+    status: "healthy",
+    value: Math.round(desviacion * 10) / 10,
+    threshold: t.costDeviationPct,
+    message: `coste por entregado estable (7d: ${current.toFixed(2)} € · 30d: ${baseline.toFixed(2)} €)`,
+  };
+}
+
+/** Coste total asumido / pedidos entregados de una ventana económica. */
+export function costPerDeliveredFromWindow(w: EconomicsWindow): number | null {
+  if (w.productCost == null || w.shippingCost == null || w.codFees == null || w.adSpend == null) return null;
+  if (w.deliveredOrders <= 0) return null;
+  return (w.productCost + w.shippingCost + w.handlingCost + w.codFees + w.adSpend) / w.deliveredOrders;
+}
+
 // --- Lectura de cifras ---
 
 export interface BusinessSnapshot {
@@ -177,6 +244,8 @@ export interface BusinessSnapshot {
   possibleDuplicatesPending: number;
   needsCallTotal: number;
   needsCallStale: number;
+  /** Confirmados hace más de N h y sin despachar a ningún proveedor. */
+  confirmedNotDispatchedStale: number;
   openIncidents: number;
   supplierFailures24h: number;
   trackingNotifyFailures24h: number;
@@ -254,11 +323,35 @@ export function readBusinessSnapshot(nowS = Math.floor(Date.now() / 1000), stale
     ).get() as { n: number }
   ).n;
 
+  // Confirmado hace >N h y sin despachar: ni proveedor sincronizado ni
+  // liberado a Beeping, y con el cierre aún vivo. Cada hora de retraso aquí
+  // es un pedido que no sale en el corte del día.
+  const dispatchLimite = nowS - businessThresholds().confirmedDispatchStaleHours * 3600;
+  let confirmedNotDispatchedStale = 0;
+  try {
+    confirmedNotDispatchedStale = (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM orders
+           WHERE status = 'confirmed'
+             AND COALESCE(confirmed_at, updated_at) < ?
+             AND closure_status IN ('unknown', 'in_progress')
+             AND supplier_external_order_id IS NULL
+             AND supplier_status_normalized IN ('unknown', 'created')
+             AND beeping_sync_status IN ('not_released', 'release_failed')`
+        )
+        .get(dispatchLimite) as { n: number }
+    ).n;
+  } catch {
+    /* DB anterior a v12: la columna beeping aún no existe */
+  }
+
   return {
     cancelRequestsPending,
     possibleDuplicatesPending,
     needsCallTotal: needsCall.total ?? 0,
     needsCallStale: needsCall.stale ?? 0,
+    confirmedNotDispatchedStale,
     openIncidents: incidencias.n,
     supplierFailures24h: supplierFailures,
     trackingNotifyFailures24h: notifyFailures,
@@ -277,12 +370,15 @@ const RANK: Record<HealthStatus, number> = { healthy: 0, disabled: 0, unknown: 0
 
 export function getBusinessAlerts(
   metrics: DeliveryMetrics = getDeliveryMetrics(),
-  snapshot: BusinessSnapshot = readBusinessSnapshot()
+  snapshot: BusinessSnapshot = readBusinessSnapshot(),
+  /** Coste/entregado 7d vs 30d; se inyecta en tests, se calcula en overview. */
+  costDeviation?: { current: number | null; baseline: number | null }
 ): BusinessAlertsResult {
   const t = businessThresholds();
   const w = metrics.last7d;
   const alerts: BusinessAlert[] = [
     evalDeliveryRate(w.deliveryRate, w.delivered + w.returned, t),
+    evalConfirmedNotDispatched(snapshot.confirmedNotDispatchedStale, t),
     // §11 del cierre: nada puede depender de que Pedro "se acuerde de
     // mirar". Una cancelación sin gestionar es un cliente esperando; un
     // duplicado sin revisar puede acabar en dos envíos (~9,37 € cada
@@ -295,6 +391,9 @@ export function getBusinessAlerts(
     evalTrackingStale(snapshot.trackingStale, trackingStaleHours()),
     evalTrackingNotifyFailures(snapshot.trackingNotifyFailures24h, t),
   ];
+  if (costDeviation) {
+    alerts.push(evalCostPerDeliveredDeviation(costDeviation.current, costDeviation.baseline, t));
+  }
   let status: HealthStatus = "healthy";
   for (const a of alerts) if (RANK[a.status] > RANK[status]) status = a.status;
   return { status, alerts, snapshot, thresholds: t };

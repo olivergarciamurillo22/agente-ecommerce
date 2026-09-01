@@ -50,6 +50,10 @@ export interface EconomicsWindow {
   productCost: number | null;
   shippingCost: number | null;
   codFees: number | null;
+  /** Manipulación del fulfillment (handling_cost). OPCIONAL: un SKU sin
+   *  dato cuenta 0 y no marca la ventana incompleta — se configura cuando
+   *  el fulfillment lo cobre (p.ej. Beeping). */
+  handlingCost: number;
   /** Manual (daily_ad_spend). null si ningún día de la ventana tiene dato. */
   adSpend: number | null;
   /** Derivados; null si falta cualquier componente. */
@@ -111,6 +115,7 @@ export function computeEconomics(
   let product = 0;
   let shipping = 0;
   let cod = 0;
+  let handling = 0;
   let productOk = true;
   let shippingOk = true;
   let codOk = true;
@@ -164,6 +169,8 @@ export function computeEconomics(
         shippingOk = false;
         missing.add(`coste de envío del SKU ${c.sku}`);
       } else shipping += c.shipping_cost * it.quantity;
+      // Manipulación: opcional (0 si no está configurada), asumida al enviar.
+      if (c.handling_cost != null) handling += c.handling_cost * it.quantity;
       if (entregado) {
         if (c.cod_fee == null) {
           codOk = false;
@@ -188,9 +195,10 @@ export function computeEconomics(
   const productCost = productOk ? r2(product) : null;
   const shippingCost = shippingOk ? r2(shipping) : null;
   const codFees = codOk ? r2(cod) : null;
+  const handlingCost = r2(handling);
   const margin =
     productCost != null && shippingCost != null && codFees != null && ads != null
-      ? r2(delivered - productCost - shippingCost - codFees - ads)
+      ? r2(delivered - productCost - shippingCost - codFees - handlingCost - ads)
       : null;
 
   return {
@@ -204,6 +212,7 @@ export function computeEconomics(
     productCost,
     shippingCost,
     codFees,
+    handlingCost,
     adSpend: ads != null ? r2(ads) : null,
     estimatedMargin: margin,
     estimatedMarginPct: margin != null && gross > 0 ? r2((margin / gross) * 100) : null,
@@ -238,6 +247,17 @@ function shippedRows(from: number, to: number): Row[] {
  */
 export function getUnitEconomicsMeasured(nowMs = Date.now()): Measured<UnitEconomics> {
   return measure("unit-economics", () => getUnitEconomics(nowMs));
+}
+
+/**
+ * Ventana económica ARBITRARIA [fromS, toS) — la base de Finanzas
+ * (Hoy / 7d / 30d / Mes / Personalizado). Misma regla contable.
+ */
+export function getEconomicsWindowRange(fromS: number, toS: number): EconomicsWindow {
+  const costs = listProductCosts();
+  const adRows = listDailyAdSpend(dayKey(fromS - 86400), dayKey(toS));
+  const adsByDay = new Map(adRows.map((r) => [r.day, r.amount]));
+  return computeEconomics(shippedRows(fromS, toS), costs, adsByDay, fromS, toS);
 }
 
 export function getUnitEconomics(nowMs = Date.now()): UnitEconomics {

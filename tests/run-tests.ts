@@ -4294,7 +4294,8 @@ async function main(): Promise<void> {
       const ov = sysOverview.getSystemOverview();
       assert.ok(ov.business.delivery.last7d);
       // 8 = las 6 originales + cancelaciones pendientes + duplicados pendientes (watchdog del cierre operativo)
-      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 8);
+      // 9 reglas base (la de desviación de coste solo aparece si se inyecta).
+      assert.ok(Array.isArray(ov.business.alerts.alerts) && ov.business.alerts.alerts.length === 9);
       assert.ok(ov.business.economics.last30d);
       const json = JSON.stringify(ov);
       for (const s of ["shpat_secreto_faseA", "dropea-key-faseA", "dropi-key-faseA", "34600119021", "Calle Ejemplo"]) {
