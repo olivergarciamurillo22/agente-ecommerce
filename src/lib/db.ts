@@ -160,9 +160,9 @@ export const CLOSURE_TERMINAL_STATUSES: ClosureStatus[] = ["delivered", "refused
  *  Precedencia: canTransitionClosure impide que CUALQUIER fuente (incluida
  *  llamada_ia) abandone un terminal ya fijado — Shopify/Dropea escriben
  *  primero y la llamada nunca los pisa. */
-export type ClosureSource = "shopify" | "dropea" | "manual" | "llamada_ia";
+export type ClosureSource = "shopify" | "dropea" | "beeping" | "manual" | "llamada_ia";
 
-export const CLOSURE_SOURCES: ClosureSource[] = ["shopify", "dropea", "manual", "llamada_ia"];
+export const CLOSURE_SOURCES: ClosureSource[] = ["shopify", "dropea", "beeping", "manual", "llamada_ia"];
 
 /**
  * ¿Se puede pasar de `from` a `to` en el eje de cierre?
@@ -572,6 +572,143 @@ export function migrateNotifyDelaySends(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración (SCHEMA_VERSION 12): eje Beeping en `orders` + nota de expedición.
+ *
+ * Beeping NO es otro Dropea: los pedidos los crea su app de Shopify (no
+ * nosotros) y quedan retenidos en "To be confirmed" hasta que Casamable los
+ * LIBERA con mark-to-send. Ese acto de liberar es un estado propio, distinto
+ * de la confirmación del cliente (orders.status='confirmed') y distinto del
+ * eje logístico (supplier_*). De ahí columnas propias:
+ *
+ *   beeping_sync_status  → not_released | releasing | released |
+ *                          release_failed | release_unknown
+ *                          (release_unknown = timeout ambiguo: NUNCA se
+ *                          reintenta a ciegas, primero se consulta Beeping)
+ *   beeping_order_status → el `status` crudo de Beeping (0-6), sin traducir.
+ *   beeping_external_id  → external_id con el que Beeping conoce el pedido.
+ *   beeping_released_at  → cuándo se llamó mark-to-send con éxito.
+ *   beeping_last_sync_at → última vez que la reconciliación vio este pedido.
+ *   beeping_last_error   → último error de release/sync, legible.
+ *   dispatch_note        → nota INTERNA de expedición de Pedro. La API
+ *                          pública de Beeping NO documenta campo de notas:
+ *                          hasta tener contrato, esto no viaja a ningún lado.
+ *
+ * Sin CHECK SQL (como el resto de columnas añadidas por ALTER): la
+ * validación vive en TypeScript (src/lib/beeping/).
+ */
+export function migrateBeepingAxis(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["beeping_sync_status", "TEXT NOT NULL DEFAULT 'not_released'"],
+    ["beeping_order_status", "INTEGER"],
+    ["beeping_external_id", "TEXT"],
+    ["beeping_released_at", "INTEGER"],
+    ["beeping_last_sync_at", "INTEGER"],
+    ["beeping_last_error", "TEXT"],
+    ["dispatch_note", "TEXT"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_beeping_sync ON orders(beeping_sync_status)");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
+/**
+ * Migración (SCHEMA_VERSION 13): snapshots diarios de Meta Ads (READ-ONLY).
+ *
+ * Insights de la Marketing API persistidos por (día, nivel, entidad) para
+ * que Finanzas y Anuncios no dependan de que Meta responda en cada carga
+ * del panel — y para conservar historia aunque Meta recorte la ventana.
+ * `actions_json` guarda el array `actions` crudo: las métricas de compra
+ * se derivarán cuando se verifique su fiabilidad con la cuenta real,
+ * sin necesidad de re-pedir datos.
+ */
+export function migrateMetaAdsDaily(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS meta_ads_daily (
+      day TEXT NOT NULL,
+      level TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      entity_name TEXT,
+      spend REAL,
+      impressions INTEGER,
+      reach INTEGER,
+      clicks INTEGER,
+      ctr REAL,
+      cpc REAL,
+      cpm REAL,
+      actions_json TEXT,
+      currency TEXT,
+      synced_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY (day, level, entity_id)
+    );
+  `);
+}
+
+/**
+ * Migración (SCHEMA_VERSION 14): histórico de costes por producto.
+ *
+ * `product_costs` es la foto VIGENTE (la consumen las pantallas y la
+ * economía de ventanas cortas). Para P&L por periodos hace falta saber qué
+ * coste regía CUANDO se envió cada pedido: cada cambio de coste cierra la
+ * fila vigente (effective_to) y abre una nueva. NUNCA se sobrescribe una
+ * fila histórica.
+ *
+ * Backfill neutro: la fila vigente de product_costs se copia UNA vez con
+ * effective_from = su updated_at real (dato de la fuente, no inventado).
+ * También se añade handling_cost a product_costs (coste de manipulación
+ * del fulfillment, p.ej. 1,70 € de Beeping), NULL para las filas viejas.
+ */
+export function migrateProductCostHistory(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(product_costs)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  if (!cols.has("handling_cost")) {
+    try {
+      db.exec("ALTER TABLE product_costs ADD COLUMN handling_cost REAL");
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS product_cost_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sku TEXT NOT NULL,
+      title TEXT,
+      product_cost REAL,
+      shipping_cost REAL,
+      cod_fee REAL,
+      handling_cost REAL,
+      effective_from INTEGER NOT NULL,
+      effective_to INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_pch_sku ON product_cost_history(sku, effective_from);
+  `);
+  // Copia inicial de lo vigente, solo para SKUs sin historia todavía.
+  db.exec(`
+    INSERT INTO product_cost_history (sku, title, product_cost, shipping_cost, cod_fee, handling_cost, effective_from, effective_to)
+    SELECT pc.sku, pc.title, pc.product_cost, pc.shipping_cost, pc.cod_fee, pc.handling_cost, pc.updated_at, NULL
+    FROM product_costs pc
+    WHERE NOT EXISTS (SELECT 1 FROM product_cost_history h WHERE h.sku = pc.sku)
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -673,6 +810,19 @@ export interface OrderRow {
   closure_status: ClosureStatus;
   closure_source: ClosureSource | null;
   closure_at: number | null;
+
+  // --- Eje Beeping (v12) — ver migrateBeepingAxis y src/lib/beeping/ ---
+  /** not_released | releasing | released | release_failed | release_unknown */
+  beeping_sync_status: string;
+  /** `status` crudo de Beeping (0-6). null = la sync nunca lo ha visto. */
+  beeping_order_status: number | null;
+  /** external_id con el que Beeping conoce el pedido (= id de Shopify). */
+  beeping_external_id: string | null;
+  beeping_released_at: number | null;
+  beeping_last_sync_at: number | null;
+  beeping_last_error: string | null;
+  /** Nota INTERNA de expedición. NO viaja a Beeping (sin contrato de notas). */
+  dispatch_note: string | null;
 }
 
 export interface NewOrderInput {
@@ -1168,6 +1318,9 @@ function build() {
   migrateActionResolutions(db);
   migrateOrderedAt(db);
   migrateNotifyDelaySends(db);
+  migrateBeepingAxis(db);
+  migrateMetaAdsDaily(db);
+  migrateProductCostHistory(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1337,7 +1490,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 11;
+export const SCHEMA_VERSION = 14;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1815,6 +1968,22 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
 
 export function getOrderById(id: number): OrderRow | null {
   return (ctx().db.prepare("SELECT * FROM orders WHERE id = ?").get(id) as OrderRow | undefined) ?? null;
+}
+
+/**
+ * Nota interna de expedición (Pedro). Editable hasta que el pedido se libera
+ * a Beeping; después queda congelada como registro de lo que se decidió.
+ * NUNCA viaja a Beeping: su API pública no documenta campo de notas.
+ */
+export function setOrderDispatchNote(id: number, note: string | null): boolean {
+  const limpia = (note ?? "").trim().slice(0, 500) || null;
+  const res = ctx()
+    .db.prepare(
+      `UPDATE orders SET dispatch_note = ?, updated_at = unixepoch()
+       WHERE id = ? AND beeping_sync_status IN ('not_released', 'release_failed')`
+    )
+    .run(limpia, id);
+  return res.changes > 0;
 }
 
 export function getOrderByShopifyId(shopifyOrderId: string): OrderRow | null {
@@ -2784,11 +2953,37 @@ export interface ProductCostRow {
   product_cost: number | null;
   shipping_cost: number | null;
   cod_fee: number | null;
+  /** Coste de manipulación del fulfillment (p.ej. Beeping). */
+  handling_cost: number | null;
   updated_at: number;
+}
+
+export interface ProductCostHistoryRow {
+  id: number;
+  sku: string;
+  title: string | null;
+  product_cost: number | null;
+  shipping_cost: number | null;
+  cod_fee: number | null;
+  handling_cost: number | null;
+  effective_from: number;
+  /** null = vigente hoy. */
+  effective_to: number | null;
+  created_at: number;
 }
 
 export function listProductCosts(): ProductCostRow[] {
   return ctx().db.prepare("SELECT * FROM product_costs ORDER BY sku").all() as ProductCostRow[];
+}
+
+export function listProductCostHistory(sku?: string): ProductCostHistoryRow[] {
+  const db = ctx().db;
+  if (sku) {
+    return db
+      .prepare("SELECT * FROM product_cost_history WHERE sku = ? ORDER BY effective_from")
+      .all(sku.trim()) as ProductCostHistoryRow[];
+  }
+  return db.prepare("SELECT * FROM product_cost_history ORDER BY sku, effective_from").all() as ProductCostHistoryRow[];
 }
 
 export function upsertProductCost(c: {
@@ -2797,21 +2992,50 @@ export function upsertProductCost(c: {
   product_cost?: number | null;
   shipping_cost?: number | null;
   cod_fee?: number | null;
+  handling_cost?: number | null;
 }): void {
   const sku = c.sku.trim();
   if (!sku) throw new Error("sku vacío");
-  ctx()
-    .db.prepare(
-      `INSERT INTO product_costs (sku, title, product_cost, shipping_cost, cod_fee, updated_at)
-       VALUES (?, ?, ?, ?, ?, unixepoch())
+  const db = ctx().db;
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO product_costs (sku, title, product_cost, shipping_cost, cod_fee, handling_cost, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, unixepoch())
        ON CONFLICT(sku) DO UPDATE SET
          title = COALESCE(excluded.title, product_costs.title),
          product_cost = COALESCE(excluded.product_cost, product_costs.product_cost),
          shipping_cost = COALESCE(excluded.shipping_cost, product_costs.shipping_cost),
          cod_fee = COALESCE(excluded.cod_fee, product_costs.cod_fee),
+         handling_cost = COALESCE(excluded.handling_cost, product_costs.handling_cost),
          updated_at = unixepoch()`
-    )
-    .run(sku, c.title ?? null, c.product_cost ?? null, c.shipping_cost ?? null, c.cod_fee ?? null);
+    ).run(sku, c.title ?? null, c.product_cost ?? null, c.shipping_cost ?? null, c.cod_fee ?? null, c.handling_cost ?? null);
+
+    // Historia versionada: si el resultado VIGENTE cambió, se cierra la fila
+    // abierta y se abre una nueva. Nunca se toca una fila histórica cerrada.
+    const vigente = db
+      .prepare("SELECT * FROM product_costs WHERE sku = ?")
+      .get(sku) as ProductCostRow;
+    const abierta = db
+      .prepare("SELECT * FROM product_cost_history WHERE sku = ? AND effective_to IS NULL ORDER BY effective_from DESC LIMIT 1")
+      .get(sku) as ProductCostHistoryRow | undefined;
+    const cambia =
+      !abierta ||
+      abierta.product_cost !== vigente.product_cost ||
+      abierta.shipping_cost !== vigente.shipping_cost ||
+      abierta.cod_fee !== vigente.cod_fee ||
+      abierta.handling_cost !== vigente.handling_cost;
+    if (cambia) {
+      const ahora = Math.floor(Date.now() / 1000);
+      if (abierta) {
+        db.prepare("UPDATE product_cost_history SET effective_to = ? WHERE id = ?").run(ahora, abierta.id);
+      }
+      db.prepare(
+        `INSERT INTO product_cost_history (sku, title, product_cost, shipping_cost, cod_fee, handling_cost, effective_from, effective_to)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`
+      ).run(sku, vigente.title, vigente.product_cost, vigente.shipping_cost, vigente.cod_fee, vigente.handling_cost, ahora);
+    }
+  });
+  tx();
 }
 
 export function deleteProductCost(sku: string): void {

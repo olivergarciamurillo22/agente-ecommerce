@@ -12,6 +12,8 @@ export type ServiceName =
   | "shopify"
   | "dropea"
   | "dropi"
+  | "beeping"
+  | "meta_ads"
   | "sqlite"
   | "backups"
   | "outbox"
@@ -20,7 +22,9 @@ export type ServiceName =
   | "scheduler:outbox"
   | "scheduler:watchdog"
   | "scheduler:reconcile"
-  | "scheduler:calls";
+  | "scheduler:calls"
+  | "scheduler:beeping"
+  | "scheduler:meta_ads";
 
 export type EventIntegration =
   | "system"
@@ -28,6 +32,8 @@ export type EventIntegration =
   | "whatsapp"
   | "dropea"
   | "dropi"
+  | "beeping"
+  | "meta_ads"
   | "tracking"
   | "sqlite"
   | "backup";
