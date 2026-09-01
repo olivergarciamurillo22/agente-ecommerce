@@ -16,6 +16,9 @@ import { beepingCutoff, type BeepingCutoffInfo } from "../beeping/cutoff";
 import { getMetaAdsHealth } from "../meta-ads/health";
 import { getEconomicsWindowRange } from "./unit-economics";
 import { getCallsHealth, getDropeaHealth, getShopifyHealth, getWhatsAppHealth } from "./health-integrations";
+import { codDefaults, cpaAuto, deliveryRateAuto, listCodProducts, shippingRateAuto, COD_MIN_SAMPLE } from "../cod-calculator/auto-inputs";
+import { computeBreakEven } from "../cod-calculator/break-even";
+import { evalDeliveryVsBreakEven, type BusinessAlert } from "./business-alerts";
 import type { HealthStatus } from "./types";
 
 export interface FlowNode {
@@ -47,6 +50,24 @@ export interface AttentionItem {
   target: "actions" | "orders" | "shipments" | "settings";
 }
 
+/** El bloque del modelo COD en la Home (§35): números accionables. */
+export interface ControlRoomCodModel {
+  /** Margen estimado de la ventana de 30 días (%, sobre facturación). */
+  marginPct: number | null;
+  /** Break-even de entrega calculado desde costes reales/configurados (%). */
+  breakEvenDeliveryPct: number | null;
+  /** Tasa de entrega real de 30 días (%). */
+  currentDeliveryPct: number | null;
+  /** Colchón en puntos (actual − break-even). */
+  cushionPts: number | null;
+  /** Tamaño de muestra de la tasa real. */
+  sample: number;
+  /** Qué falta si no se puede calcular. */
+  missingReason: string | null;
+  /** La alerta §36 ya evaluada (warning <be+5, critical <=be). */
+  alert: BusinessAlert;
+}
+
 export interface ControlRoom {
   generatedAt: number;
   today: ControlRoomToday;
@@ -54,6 +75,7 @@ export interface ControlRoom {
   attentionTotal: number;
   flow: FlowNode[];
   beepingCutoff: BeepingCutoffInfo;
+  codModel: ControlRoomCodModel;
 }
 
 const ATTENTION_META: Record<string, { label: string; urgency: AttentionItem["urgency"]; target: AttentionItem["target"] }> = {
@@ -124,6 +146,53 @@ export function getControlRoom(nowMs = Date.now()): ControlRoom {
     { id: "calls", label: "Llamadas", status: calls.status, message: calls.message },
   ];
 
+  // --- MODELO COD (§35): margen, break-even y colchón, con datos reales ---
+  const eco30 = getEconomicsWindowRange(ahora - 30 * 86400, ahora + 1);
+  const entregaReal = deliveryRateAuto(30);
+  const envioReal = shippingRateAuto(30);
+  const cpaReal = cpaAuto(7);
+  const productos = listCodProducts().filter((p) => p.salePrice !== null && p.productCost !== null);
+  const defaults = codDefaults();
+
+  let breakEvenPct: number | null = null;
+  let missingReason: string | null = null;
+  if (productos.length === 0) {
+    missingReason = "sin producto con precio y coste configurados (Finanzas → Costes)";
+  } else if (cpaReal.value === null) {
+    missingReason = "sin CPA (conecta Meta Ads o introdúcelo en la calculadora)";
+  } else {
+    const p = productos[0];
+    const be = computeBreakEven(
+      "real",
+      {
+        salePrice: p.salePrice!,
+        productCost: p.productCost!,
+        vatRate: defaults.vatRate,
+        rawCPA: cpaReal.value,
+        shippingRate: envioReal.value ?? 0.9,
+        deliveryRate: entregaReal.value ?? 0.7,
+        outboundShippingCost: defaults.outboundShippingCost,
+        codFee: defaults.codFee,
+        returnCost: defaults.returnCost,
+        otherCostPerOrder: defaults.otherCostPerOrder,
+      },
+      defaults.targetMargin
+    );
+    breakEvenPct = be.deliveryRateBreakEven !== null ? Math.round(be.deliveryRateBreakEven * 1000) / 10 : null;
+    if (breakEvenPct === null) missingReason = "el break-even no existe con estos números (revisa la calculadora)";
+  }
+  const currentDeliveryPct = entregaReal.value !== null ? Math.round(entregaReal.value * 1000) / 10 : null;
+  const codModel: ControlRoomCodModel = {
+    marginPct: eco30.estimatedMarginPct,
+    breakEvenDeliveryPct: breakEvenPct,
+    currentDeliveryPct,
+    cushionPts:
+      currentDeliveryPct !== null && breakEvenPct !== null ? Math.round((currentDeliveryPct - breakEvenPct) * 10) / 10 : null,
+    sample: entregaReal.sample ?? 0,
+    missingReason,
+    alert: evalDeliveryVsBreakEven(currentDeliveryPct, breakEvenPct, entregaReal.sample ?? 0, Math.min(10, COD_MIN_SAMPLE)),
+  };
+
   return {
     generatedAt: ahora,
     today: {
@@ -142,5 +211,6 @@ export function getControlRoom(nowMs = Date.now()): ControlRoom {
     attentionTotal: attention.reduce((a, b) => a + b.count, 0),
     flow,
     beepingCutoff: beepingCutoff(new Date(nowMs)),
+    codModel,
   };
 }

@@ -15,7 +15,7 @@ import AmbientBackground from "./AmbientBackground";
 import ChatsView from "./ChatsView";
 import Dock, { type DockView } from "./Dock";
 import DashboardHeader from "./DashboardHeader";
-import FinancePanel from "./FinancePanel";
+import FinanceView from "./FinanceView";
 import HomePanel from "./HomePanel";
 import OrdersPanel from "./OrdersPanel";
 import SafetyBanner from "./SafetyBanner";
@@ -154,7 +154,7 @@ export default function Dashboard({ phone }: DashboardProps) {
         ) : view === "ads" ? (
           <AdsPanel />
         ) : view === "finance" ? (
-          <FinancePanel />
+          <FinanceView />
         ) : (
           <SettingsView />
         )}

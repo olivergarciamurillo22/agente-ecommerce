@@ -22,6 +22,8 @@ import {
   LEASE_WATCHDOG,
 } from "../src/lib/system/leases";
 import { startCallOrchestrator } from "../src/lib/calls/scheduler";
+import { startBeepingScheduler } from "../src/lib/beeping/scheduler";
+import { startMetaAdsScheduler } from "../src/lib/meta-ads/scheduler";
 import { printSafetyStatus } from "../src/lib/safety";
 import { getPendingOutbox } from "../src/lib/db";
 
@@ -104,7 +106,10 @@ async function main(): Promise<void> {
     // no consulta nada: es la red de seguridad de los webhooks de proveedor.
     startTrackingScheduler();
     startReconcileScheduler();
-  startCallOrchestrator();
+    startCallOrchestrator();
+    // Beeping y Meta Ads: sin credenciales/flags, ambos quedan inactivos.
+    startBeepingScheduler();
+    startMetaAdsScheduler();
     if (whatsappProviderName() !== "cloud_api") {
       logger.info("[bot] esperando QR scan en el dashboard (localhost:3000)...");
     }

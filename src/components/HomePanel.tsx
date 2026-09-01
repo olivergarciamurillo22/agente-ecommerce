@@ -55,6 +55,15 @@ interface HomeData {
   attentionTotal: number;
   flow: FlowNode[];
   beepingCutoff: { shipsToday: boolean; minutesLeft: number | null; message: string };
+  codModel: {
+    marginPct: number | null;
+    breakEvenDeliveryPct: number | null;
+    currentDeliveryPct: number | null;
+    cushionPts: number | null;
+    sample: number;
+    missingReason: string | null;
+    alert: { status: string; message: string };
+  };
 }
 
 const URGENCY_STYLE: Record<AttentionItem["urgency"], { label: string; cls: string }> = {
@@ -168,6 +177,66 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
                   </button>
                 );
               })}
+            </Card>
+          )}
+        </section>
+
+        {/* ── MODELO COD (§35): margen, break-even y colchón ── */}
+        <section>
+          <SectionTitle
+            right={
+              <button
+                type="button"
+                onClick={() => onNavigate("finance")}
+                className="text-[11px] text-brand-gold hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 rounded"
+              >
+                Abrir calculadora →
+              </button>
+            }
+          >
+            Rentabilidad
+          </SectionTitle>
+          {!data ? (
+            <Skeleton className="h-20" />
+          ) : data.codModel.missingReason && data.codModel.currentDeliveryPct === null ? (
+            <Card className="px-5 py-4 text-sm text-brand-muted">
+              Modelo COD sin datos suficientes: {data.codModel.missingReason}.
+            </Card>
+          ) : (
+            <Card className="px-5 py-4">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Margen actual (30d)</div>
+                  <div className={`mt-1 text-xl font-semibold font-display ${data.codModel.marginPct === null ? "text-brand-text" : data.codModel.marginPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {data.codModel.marginPct === null ? "—" : `${data.codModel.marginPct.toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Break-even entrega</div>
+                  <div className="mt-1 text-xl font-semibold font-display text-brand-text">
+                    {data.codModel.breakEvenDeliveryPct === null ? "—" : `${data.codModel.breakEvenDeliveryPct.toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Entrega actual</div>
+                  <div className="mt-1 text-xl font-semibold font-display text-brand-text">
+                    {data.codModel.currentDeliveryPct === null ? "—" : `${data.codModel.currentDeliveryPct.toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`}
+                    {data.codModel.sample > 0 && <span className="ml-1.5 text-[10px] text-brand-muted font-sans font-normal">n={data.codModel.sample}</span>}
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Colchón</div>
+                  <div className={`mt-1 text-xl font-semibold font-display ${data.codModel.cushionPts === null ? "text-brand-text" : data.codModel.cushionPts > 5 ? "text-emerald-400" : data.codModel.cushionPts > 0 ? "text-amber-400" : "text-red-400"}`}>
+                    {data.codModel.cushionPts === null ? "—" : `${data.codModel.cushionPts > 0 ? "+" : ""}${data.codModel.cushionPts.toLocaleString("es-ES", { maximumFractionDigits: 1 })} pts`}
+                  </div>
+                </div>
+              </div>
+              {(data.codModel.alert.status === "warning" || data.codModel.alert.status === "critical") && (
+                <div className={`mt-3 flex items-center gap-2 text-xs ${data.codModel.alert.status === "critical" ? "text-red-300" : "text-amber-300"}`}>
+                  <StatusDot status={data.codModel.alert.status === "critical" ? "error" : "warn"} pulse={data.codModel.alert.status === "critical"} />
+                  {data.codModel.alert.message}
+                </div>
+              )}
             </Card>
           )}
         </section>

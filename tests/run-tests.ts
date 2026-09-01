@@ -10218,6 +10218,274 @@ async function main(): Promise<void> {
     assert.ok(sleeps > 0, "el ritmo entre envíos reales sí se respeta (sleep inyectado, sin esperar de verdad)");
   });
 
+  // ============ CALCULADORA COD — paridad con el Excel y modelo real ============
+  console.log("\n— Calculadora COD —");
+  {
+    const pedroModel = await import("../src/lib/cod-calculator/pedro-model");
+    const realModel = await import("../src/lib/cod-calculator/real-model");
+    const breakEven = await import("../src/lib/cod-calculator/break-even");
+    const codScenarios = await import("../src/lib/cod-calculator/scenarios");
+
+    /** El fixture EXACTO del Excel de Pedro (fila PELUCHE). */
+    const PELUCHE = {
+      salePrice: 39.99,
+      productCost: 6.5,
+      vatRate: 0,
+      rawCPA: 5,
+      shippingRate: 0.9,
+      deliveryRate: 0.7,
+      outboundShippingCost: 5.5,
+      codFee: 0.7,
+      returnCost: 4.5,
+    };
+    const cerca = (a: number | null, b: number, tol = 1e-6, msg = "") => {
+      assert.ok(a !== null, `${msg}: no debería ser null`);
+      assert.ok(Math.abs(a! - b) < tol, `${msg}: ${a} vs ${b} esperado`);
+    };
+
+    await test("cod-calculator-excel-parity: PELUCHE reproduce EXACTAMENTE los números del Excel de Pedro", () => {
+      const r = pedroModel.calculatePedroModel(PELUCHE);
+      cerca(r.vat, 0, 1e-9, "IVA");
+      cerca(r.realCPA, 7.936507937, 1e-6, "CPA REAL");
+      cerca(r.expectedShippingCost, 7.34, 1e-9, "GASTOS ENVÍO");
+      cerca(r.profit, 12.74944444, 1e-6, "PROFIT");
+      cerca(r.margin, 0.3188158151, 1e-8, "MARGEN");
+      cerca(r.roi, 1.961452991, 1e-7, "ROI");
+      cerca(r.afterIrpf, 10.19955556, 1e-6, "SIN IRPF");
+      // Y lo que ve Pedro en pantalla, redondeado como en el Excel.
+      assert.equal(r.realCPA!.toFixed(2), "7.94");
+      assert.equal(r.expectedShippingCost.toFixed(2), "7.34");
+      assert.equal(r.profit!.toFixed(2), "12.75");
+      assert.equal((r.margin! * 100).toFixed(2), "31.88");
+      assert.equal((r.roi! * 100).toFixed(2), "196.15");
+      assert.equal(r.afterIrpf!.toFixed(2), "10.20");
+    });
+
+    await test("COD Pedro: IVA se aplica AL COSTE (rareza del Excel, conservada a propósito)", () => {
+      const r = pedroModel.calculatePedroModel({ ...PELUCHE, vatRate: 0.21 });
+      cerca(r.vat, 6.5 * 0.21, 1e-9, "IVA sobre COSTE, no sobre precio");
+    });
+
+    await test("COD Pedro: divisiones por cero devuelven null (el Excel pinta #DIV/0!, la web '—')", () => {
+      const sinEntrega = pedroModel.calculatePedroModel({ ...PELUCHE, deliveryRate: 0 });
+      assert.equal(sinEntrega.realCPA, null, "entrega 0 → CPA real indefinido");
+      assert.equal(sinEntrega.profit, null);
+      assert.equal(sinEntrega.margin, null);
+      assert.equal(sinEntrega.afterIrpf, null);
+      const sinEnvio = pedroModel.calculatePedroModel({ ...PELUCHE, shippingRate: 0 });
+      assert.equal(sinEnvio.profit, null, "envío 0 → indefinido");
+      const sinCoste = pedroModel.calculatePedroModel({ ...PELUCHE, productCost: 0 });
+      assert.equal(sinCoste.roi, null, "coste 0 → ROI indefinido, NUNCA Infinity");
+      // Ni un solo NaN/Infinity puede salir hacia la UI.
+      for (const v of [sinEntrega.expectedShippingCost, sinCoste.profit ?? 0, sinCoste.vat]) {
+        assert.ok(Number.isFinite(v), "ningún valor puede ser NaN ni Infinity");
+      }
+    });
+
+    await test("COD Pedro: entrega 100% y CPA 0 dan los extremos correctos", () => {
+      const total = pedroModel.calculatePedroModel({ ...PELUCHE, deliveryRate: 1, shippingRate: 1 });
+      cerca(total.realCPA, 5, 1e-9, "sin pérdidas, CPA real = CPA");
+      cerca(total.expectedShippingCost, 5.5 + 0.7, 1e-9, "sin devoluciones");
+      cerca(total.profit, 39.99 - 6.5 - 5 - 6.2, 1e-9, "profit sin mermas");
+      const gratis = pedroModel.calculatePedroModel({ ...PELUCHE, rawCPA: 0 });
+      cerca(gratis.realCPA, 0, 1e-9, "CPA 0 no rompe");
+      assert.ok(gratis.profit! > pedroModel.calculatePedroModel(PELUCHE).profit!);
+    });
+
+    await test("COD Pedro: CPA alto produce PÉRDIDA (profit negativo, sin trampas)", () => {
+      const r = pedroModel.calculatePedroModel({ ...PELUCHE, rawCPA: 25 });
+      assert.ok(r.profit! < 0, "con CPA 25 € el pedido pierde dinero");
+      assert.ok(r.margin! < 0);
+    });
+
+    await test("COD Real: escenario de 100 pedidos — el embudo y cada coste en su evento", () => {
+      const r = realModel.calculateRealCODModel(PELUCHE, 100);
+      assert.equal(r.created, 100);
+      assert.equal(r.sent, 90, "100 × 90% de envío");
+      assert.equal(r.delivered, 63, "90 × 70% de entrega");
+      assert.equal(r.notDelivered, 27);
+      cerca(r.revenue, 63 * 39.99, 0.01, "ingreso solo de ENTREGADOS");
+      cerca(r.ads, 100 * 5, 0.01, "ads por pedido CREADO");
+      cerca(r.productCost, 90 * 6.5, 0.01, "producto por ENVIADO (recuperación 0 por defecto)");
+      cerca(r.outboundShipping, 90 * 5.5, 0.01, "envío de ida por ENVIADO");
+      cerca(r.codFees, 63 * 0.7, 0.01, "COD por ENTREGADO");
+      cerca(r.returnCosts, 27 * 4.5, 0.01, "devolución por NO entregado");
+      const esperado = 63 * 39.99 - 500 - 90 * 6.5 - 90 * 5.5 - 63 * 0.7 - 27 * 4.5;
+      cerca(r.profit100, Math.round(esperado * 100) / 100, 0.02, "beneficio por 100 pedidos");
+      cerca(r.profitPerOrder, esperado / 100, 0.01, "por pedido creado");
+      cerca(r.profitPerSent, esperado / 90, 0.01, "por enviado");
+      cerca(r.profitPerDelivered, esperado / 63, 0.01, "por entregado");
+      assert.match(r.fiscalNote, /fiscal/i, "el modelo real DECLARA que no aplica fiscalidad");
+    });
+
+    await test("COD Real: la recuperación de producto devuelto es EXPLÍCITA, nunca asumida", () => {
+      const sinRecuperar = realModel.calculateRealCODModel(PELUCHE, 100);
+      const recuperando = realModel.calculateRealCODModel({ ...PELUCHE, returnedProductRecoveryRate: 1 }, 100);
+      cerca(sinRecuperar.productRecovered, 0, 1e-9, "por defecto NO se recupera nada");
+      cerca(recuperando.productRecovered, 27 * 6.5, 0.01, "al 100% se recupera el coste de los devueltos");
+      assert.ok(recuperando.profit100 > sinRecuperar.profit100);
+    });
+
+    await test("COD Real: los dos modelos DIFIEREN — el Real no aplica dos veces la probabilidad", () => {
+      const p = pedroModel.calculatePedroModel(PELUCHE).profit!;
+      const r = realModel.calculateRealCODModel(PELUCHE, 100).profitPerOrder!;
+      assert.ok(Math.abs(p - r) > 0.5, `los modelos deben diferir de forma visible (Pedro ${p}, Real ${r})`);
+      // Ambos son POSITIVOS con el fixture: la diferencia es de semántica,
+      // no de "uno está roto". Documentado en docs/FINANCE-MODEL.md.
+      assert.ok(p > 0 && r > 0);
+    });
+
+    await test("COD break-even: entrega y CPA de equilibrio anulan el beneficio (verificado sustituyendo)", () => {
+      for (const modelo of ["pedro", "real"] as const) {
+        const be = breakEven.computeBreakEven(modelo, PELUCHE, 0.1);
+        assert.ok(be.deliveryRateBreakEven !== null, `${modelo}: debe existir entrega de equilibrio`);
+        assert.ok(be.cpaBreakEven !== null, `${modelo}: debe existir CPA de equilibrio`);
+        // Sustituir el break-even devuelve profit ~0: la prueba de que el
+        // solucionador resuelve el modelo REAL, no una fórmula paralela.
+        const enEquilibrio = breakEven.profitPerOrder(modelo, { ...PELUCHE, deliveryRate: be.deliveryRateBreakEven! });
+        cerca(enEquilibrio, 0, 1e-4, `${modelo}: profit en la entrega de equilibrio`);
+        const conCpaLimite = breakEven.profitPerOrder(modelo, { ...PELUCHE, rawCPA: be.cpaBreakEven! });
+        cerca(conCpaLimite, 0, 1e-4, `${modelo}: profit con el CPA máximo`);
+        // Un punto por debajo del break-even ya pierde dinero.
+        const peor = breakEven.profitPerOrder(modelo, { ...PELUCHE, deliveryRate: be.deliveryRateBreakEven! - 0.01 });
+        assert.ok(peor! < 0, `${modelo}: por debajo del break-even se pierde dinero`);
+      }
+    });
+
+    await test("COD break-even: precio mínimo y coste máximo también anulan el beneficio", () => {
+      const be = breakEven.computeBreakEven("real", PELUCHE, 0.1);
+      cerca(breakEven.profitPerOrder("real", { ...PELUCHE, salePrice: be.minSalePrice! }), 0, 1e-4, "precio mínimo");
+      cerca(breakEven.profitPerOrder("real", { ...PELUCHE, productCost: be.maxProductCost! }), 0, 1e-4, "coste máximo");
+    });
+
+    await test("COD objetivo de margen: los valores devueltos alcanzan EXACTAMENTE el margen pedido", () => {
+      const objetivo = 0.1;
+      const be = breakEven.computeBreakEven("real", PELUCHE, objetivo);
+      assert.ok(be.cpaForTargetMargin !== null && be.deliveryForTargetMargin !== null);
+      cerca(breakEven.marginOf("real", { ...PELUCHE, rawCPA: be.cpaForTargetMargin! }), objetivo, 1e-4, "CPA para el objetivo");
+      cerca(breakEven.marginOf("real", { ...PELUCHE, deliveryRate: be.deliveryForTargetMargin! }), objetivo, 1e-4, "entrega para el objetivo");
+      // Exigir MÁS margen obliga a pagar MENOS por pedido.
+      const exigente = breakEven.computeBreakEven("real", PELUCHE, 0.2);
+      assert.ok(exigente.cpaForTargetMargin! < be.cpaForTargetMargin!);
+    });
+
+    await test("COD break-even: cuando NO existe solución devuelve null, jamás una cifra inventada", () => {
+      // Producto que pierde dinero incluso entregando el 100%: ninguna tasa
+      // de entrega lo salva.
+      const imposible = { ...PELUCHE, salePrice: 8, productCost: 6.5, rawCPA: 12 };
+      const be = breakEven.computeBreakEven("real", imposible, 0.1);
+      assert.equal(be.deliveryRateBreakEven, null, "no hay entrega que lo haga rentable");
+      assert.ok(be.cpaForTargetMargin === null || be.cpaForTargetMargin >= 0);
+    });
+
+    await test("COD semáforo: verde / ámbar / rojo con TEXTO, no solo color", () => {
+      const verde = breakEven.trafficLight("real", PELUCHE, 0.05);
+      assert.equal(verde.light, "green");
+      assert.match(verde.headline, /RENTABLE/);
+      assert.match(verde.detail, /€ por pedido creado/);
+      const rojo = breakEven.trafficLight("real", { ...PELUCHE, rawCPA: 30 }, 0.1);
+      assert.equal(rojo.light, "red");
+      assert.match(rojo.headline, /PÉRDIDAS/);
+      const ambar = breakEven.trafficLight("real", PELUCHE, 0.9);
+      assert.equal(ambar.light, "amber", "objetivo altísimo: rentable pero por debajo del objetivo");
+      assert.match(ambar.detail, /margen/);
+      const sinDatos = breakEven.trafficLight("pedro", { ...PELUCHE, deliveryRate: 0 }, 0.1);
+      assert.equal(sinDatos.light, "unknown");
+    });
+
+    await test("COD sensibilidad: la matriz cubre CPA × entrega y ninguna celda es NaN", () => {
+      const cpas = [4, 5, 6, 7, 8];
+      const entregas = [0.6, 0.65, 0.7, 0.75, 0.8];
+      const m = breakEven.computeSensitivityMatrix("real", PELUCHE, cpas, entregas);
+      assert.equal(m.length, 5);
+      assert.equal(m[0].length, 5);
+      for (const fila of m) {
+        for (const celda of fila) {
+          assert.ok(celda.profitPerOrder === null || Number.isFinite(celda.profitPerOrder), "ni NaN ni Infinity");
+        }
+      }
+      // Monotonía: más CPA = menos beneficio; más entrega = más beneficio.
+      assert.ok(m[0][2].profitPerOrder! > m[4][2].profitPerOrder!, "CPA 4 € rinde más que CPA 8 €");
+      assert.ok(m[2][4].profitPerOrder! > m[2][0].profitPerOrder!, "80% de entrega rinde más que 60%");
+    });
+
+    await test("COD proyección: mantiene las tasas y SIEMPRE lo advierte", () => {
+      const p = breakEven.projectMonthly("real", PELUCHE, 20);
+      assert.equal(p.ordersPerMonth, 600);
+      assert.equal(p.sentPerMonth, 540);
+      assert.equal(p.deliveredPerMonth, 378);
+      cerca(p.ads, 600 * 5, 0.01, "gasto de ads del mes");
+      assert.match(p.note, /manteniendo constantes/, "la advertencia es obligatoria");
+      const doble = breakEven.projectMonthly("real", PELUCHE, 40);
+      cerca(doble.profitPerMonth, p.profitPerMonth! * 2, 0.05, "el doble de pedidos, el doble de beneficio a tasas constantes");
+    });
+
+    await test("COD escenarios: guardar, duplicar y borrar NUNCA tocan datos reales", () => {
+      const antesCostes = db.listProductCosts().length;
+      const antesAjustes = db.getSetting("cod_calc_shipping_cost");
+      const id = codScenarios.saveCodScenario({
+        name: "PELUCHE CPA 6€",
+        productSku: "PELUCHE",
+        modelType: "real",
+        assumptions: { ...PELUCHE, rawCPA: 6 },
+      });
+      assert.ok(id > 0);
+      const lista = codScenarios.listCodScenarios();
+      const guardado = lista.find((s) => s.id === id)!;
+      assert.equal(guardado.name, "PELUCHE CPA 6€");
+      assert.equal(JSON.parse(guardado.assumptions_json).rawCPA, 6);
+      const copia = codScenarios.duplicateCodScenario(id)!;
+      assert.match(codScenarios.listCodScenarios().find((s) => s.id === copia)!.name, /copia/);
+      codScenarios.deleteCodScenario(copia);
+      assert.ok(!codScenarios.listCodScenarios().some((s) => s.id === copia));
+      // La prueba que importa: simular no ha cambiado NADA del mundo real.
+      assert.equal(db.listProductCosts().length, antesCostes, "product_costs intacto");
+      assert.equal(db.getSetting("cod_calc_shipping_cost"), antesAjustes, "settings intactos");
+      codScenarios.deleteCodScenario(id);
+    });
+
+    await test("COD escenarios: la migración v15 es idempotente y el nombre vacío se rechaza", () => {
+      db.migrateCodScenarios(db.systemDbHandle());
+      db.migrateCodScenarios(db.systemDbHandle());
+      assert.throws(() => codScenarios.saveCodScenario({ name: "   ", modelType: "real", assumptions: PELUCHE }), /nombre/);
+    });
+
+    await test("COD auto-inputs: cada tasa llega con su DENOMINADOR y su muestra, o null si no hay datos", async () => {
+      const auto = await import("../src/lib/cod-calculator/auto-inputs");
+      const entrega = auto.deliveryRateAuto(30);
+      assert.ok(["real"].includes(entrega.source));
+      assert.ok(entrega.detail !== null, "siempre explica de dónde sale");
+      assert.ok(entrega.value === null || (entrega.value >= 0 && entrega.value <= 1), "fracción o null, nunca NaN");
+      const envio = auto.shippingRateAuto(30);
+      assert.ok(envio.value === null || (envio.value >= 0 && envio.value <= 1));
+      assert.ok((envio.detail ?? "").length > 0);
+      // Sin Meta Ads configurado en los tests, el CPA cae a manual y lo DICE.
+      const cpa = auto.cpaAuto(7);
+      assert.ok(cpa.value === null || Number.isFinite(cpa.value));
+      assert.ok((cpa.detail ?? "").length > 0);
+      const defaults = auto.codDefaults();
+      assert.equal(defaults.outboundShippingCost, 5.5, "default del Excel de Pedro");
+      assert.equal(defaults.codFee, 0.7);
+      assert.equal(defaults.returnCost, 4.5);
+    });
+
+    await test("COD alerta §36: el break-even NO está hardcodeado — sale del modelo y gradúa warning/critical", async () => {
+      const alerts = await import("../src/lib/system/business-alerts");
+      const holgado = alerts.evalDeliveryVsBreakEven(75, 62.9, 100);
+      assert.equal(holgado.status, "healthy");
+      assert.match(holgado.message, /colchón/);
+      const justo = alerts.evalDeliveryVsBreakEven(65, 62.9, 100);
+      assert.equal(justo.status, "warning");
+      assert.match(justo.message, /2\.1 puntos|2,1 puntos/);
+      const critico = alerts.evalDeliveryVsBreakEven(60, 62.9, 100);
+      assert.equal(critico.status, "critical");
+      const muestraCorta = alerts.evalDeliveryVsBreakEven(75, 62.9, 3);
+      assert.equal(muestraCorta.status, "unknown", "3 pedidos no deciden si escalar o parar");
+      const sinBreakEven = alerts.evalDeliveryVsBreakEven(75, null, 100);
+      assert.equal(sinBreakEven.status, "unknown");
+    });
+  }
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {

@@ -228,6 +228,58 @@ export function evalCostPerDeliveredDeviation(
   };
 }
 
+/**
+ * Entrega actual frente a su break-even CALCULADO (jamás 62,9% hardcodeado):
+ * el break-even sale del modelo COD con costes reales/configurados.
+ * WARNING < break-even + 5 puntos · CRITICAL <= break-even (§36).
+ */
+export function evalDeliveryVsBreakEven(
+  currentPct: number | null,
+  breakEvenPct: number | null,
+  sample: number,
+  minSample = 10
+): BusinessAlert {
+  const base = { id: "delivery_vs_break_even", category: "business" as const, label: "Entrega vs break-even" };
+  if (currentPct === null || breakEvenPct === null || sample < minSample) {
+    return {
+      ...base,
+      status: "unknown",
+      value: currentPct,
+      threshold: breakEvenPct,
+      message:
+        breakEvenPct === null
+          ? "sin break-even calculable (faltan costes o CPA)"
+          : `muestra insuficiente para evaluar (n=${sample})`,
+    };
+  }
+  const colchon = currentPct - breakEvenPct;
+  if (colchon <= 0) {
+    return {
+      ...base,
+      status: "critical",
+      value: currentPct,
+      threshold: breakEvenPct,
+      message: `la entrega (${currentPct.toFixed(1)}%) está EN o BAJO el break-even (${breakEvenPct.toFixed(1)}%): cada pedido pierde dinero — revisa CPA y anuncios YA`,
+    };
+  }
+  if (colchon < 5) {
+    return {
+      ...base,
+      status: "warning",
+      value: currentPct,
+      threshold: breakEvenPct,
+      message: `la entrega (${currentPct.toFixed(1)}%) está a solo ${colchon.toFixed(1)} puntos del break-even (${breakEvenPct.toFixed(1)}%)`,
+    };
+  }
+  return {
+    ...base,
+    status: "healthy",
+    value: currentPct,
+    threshold: breakEvenPct,
+    message: `colchón de ${colchon.toFixed(1)} puntos sobre el break-even (${breakEvenPct.toFixed(1)}%)`,
+  };
+}
+
 /** Coste total asumido / pedidos entregados de una ventana económica. */
 export function costPerDeliveredFromWindow(w: EconomicsWindow): number | null {
   if (w.productCost == null || w.shippingCost == null || w.codFees == null || w.adSpend == null) return null;
