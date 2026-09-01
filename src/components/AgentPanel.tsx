@@ -1,11 +1,12 @@
 "use client";
 
 // ============================================================
-// AGENTE (§24) — el copiloto operativo, NO un chatbot vacío.
+// AGENTE (§24 + §43) — el copiloto operativo, NO un chatbot vacío.
 //
-// Lee /api/agent (determinista: Action Center + cola de Beeping) y enseña,
-// pedido a pedido: QUÉ PASA / QUÉ FALTA / RECOMENDACIÓN. "Abrir" lleva a
-// la pestaña donde se resuelve (Acciones o Pedidos).
+// Arriba: la tarjeta de identidad de Lucía (estado, Retell, prompt,
+// versión, llamadas de hoy) en lenguaje de operador, sin internals.
+// Después: lo que necesita atención (QUÉ PASA / QUÉ FALTA / RECOMENDACIÓN,
+// de /api/agent) y las últimas llamadas completadas (/api/calls).
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
@@ -19,6 +20,7 @@ import {
   KpiTile,
   SectionTitle,
   Skeleton,
+  StatusDot,
   timeAgo,
 } from "./ui";
 
@@ -40,6 +42,61 @@ interface AgentData {
   items: AgentItem[];
 }
 
+interface CallsData {
+  config: {
+    aiCallsEnabled: boolean;
+    shadowMode: boolean;
+    dailyCap: number;
+    retellApiKey: "configured" | "missing";
+    retellFromNumber: "configured" | "missing";
+    retellAgentId: "configured" | "missing";
+  };
+  summary: { completedToday: number };
+  recentCompleted: Array<{
+    id: number;
+    order: string;
+    contact: string | null;
+    result: string | null;
+    endedAt: number | null;
+  }>;
+}
+
+interface AutomationCalls {
+  ready: boolean;
+  promptValidated: boolean;
+  agentVersionPinned: boolean;
+  configuredAgentVersion: string | null;
+  lastCallAgentVersion: string | null;
+  blockers: string[];
+}
+
+/** Resultados de llamada (enum de calls/results.ts) en palabras. */
+const RESULT_LABEL: Record<string, string> = {
+  confirmado: "Confirmado",
+  confirmado_con_correccion: "Confirmado con corrección",
+  cancelado: "Cancelado",
+  no_reconoce_pedido: "No reconoce el pedido",
+  numero_equivocado: "Número equivocado",
+  no_volver_a_llamar: "No volver a llamar",
+  incidencia_precio: "Incidencia de precio",
+  no_disponible: "No disponible",
+  rellamar: "Pidió rellamar",
+  no_contesta: "No contesta",
+  buzon_de_voz: "Buzón de voz",
+  fallo_tecnico: "Fallo técnico",
+};
+
+function resultLabel(result: string | null): string {
+  if (!result) return "Sin resultado";
+  return RESULT_LABEL[result] ?? result.replace(/_/g, " ");
+}
+
+/** Teléfono enmascarado en el cliente: solo los últimos 4 dígitos. */
+function maskPhone(phone: string | null): string {
+  const d = (phone ?? "").replace(/\D/g, "");
+  return d.length > 4 ? `···${d.slice(-4)}` : "···";
+}
+
 /** Acento de urgencia en el borde izquierdo de cada tarjeta. */
 function accentClass(urgency: number): string {
   if (urgency <= 2) return "border-l-2 border-l-red-500/70";
@@ -56,9 +113,20 @@ function MicroSection({ label, children }: { label: string; children: string }) 
   );
 }
 
+function IdentityFact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold">{label}</div>
+      <div className="mt-0.5 text-sm text-brand-text whitespace-nowrap">{children}</div>
+    </div>
+  );
+}
+
 export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) => void }) {
   const [data, setData] = useState<AgentData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [calls, setCalls] = useState<CallsData | null>(null);
+  const [automation, setAutomation] = useState<AutomationCalls | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -73,19 +141,111 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
     }
   }, []);
 
+  const refreshCalls = useCallback(async () => {
+    try {
+      const [callsRes, intRes] = await Promise.all([
+        fetch("/api/calls", { cache: "no-store" }),
+        fetch("/api/integrations", { cache: "no-store" }),
+      ]);
+      if (callsRes.ok) {
+        const j = (await callsRes.json()) as CallsData;
+        if (j.config && j.summary) setCalls(j);
+      }
+      if (intRes.ok) {
+        const ji = (await intRes.json()) as { ok?: boolean; automation?: { calls?: AutomationCalls } };
+        if (ji.ok && ji.automation?.calls) setAutomation(ji.automation.calls);
+      }
+    } catch {
+      // silenciar: la identidad se rellena en el siguiente ciclo
+    }
+  }, []);
+
   useEffect(() => {
     refresh();
+    refreshCalls();
     const t = setInterval(refresh, 20_000);
-    return () => clearInterval(t);
-  }, [refresh]);
+    const t2 = setInterval(refreshCalls, 30_000);
+    return () => {
+      clearInterval(t);
+      clearInterval(t2);
+    };
+  }, [refresh, refreshCalls]);
 
   if (error && !data) return <ErrorState message={error} onRetry={refresh} />;
+
+  const retellConfigured =
+    calls !== null &&
+    calls.config.retellApiKey === "configured" &&
+    calls.config.retellFromNumber === "configured" &&
+    calls.config.retellAgentId === "configured";
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
       <div className="max-w-5xl mx-auto space-y-6">
+        {/* ── Identidad de Lucía (§43) ── */}
         <section>
           <SectionTitle>Agente</SectionTitle>
+          {!calls ? (
+            <Skeleton className="h-[88px]" />
+          ) : (
+            <Card className="px-4 py-4">
+              <div className="flex flex-wrap items-center gap-x-7 gap-y-3">
+                <div className="flex items-center gap-3">
+                  <span
+                    className="shrink-0 h-11 w-11 rounded-full flex items-center justify-center font-semibold text-brand-gold border border-brand-gold/25 bg-brand-gold/10"
+                    aria-hidden
+                  >
+                    L
+                  </span>
+                  <div>
+                    <div className="text-sm font-semibold text-brand-text">Lucía</div>
+                    <div className="text-[11px] text-brand-muted">Agente de llamadas de confirmación</div>
+                  </div>
+                </div>
+                <IdentityFact label="Estado">
+                  <span className="inline-flex items-center gap-1.5">
+                    <StatusDot status={calls.config.aiCallsEnabled ? "ok" : "muted"} />
+                    {calls.config.aiCallsEnabled ? "MANUAL" : "APAGADO"}
+                    {calls.config.aiCallsEnabled && calls.config.shadowMode ? (
+                      <span className="text-[11px] text-brand-muted">(sombra)</span>
+                    ) : null}
+                  </span>
+                </IdentityFact>
+                <IdentityFact label="Retell">
+                  <span className="inline-flex items-center gap-1.5">
+                    <StatusDot status={retellConfigured ? "ok" : "muted"} />
+                    {retellConfigured ? "Conectado" : "Sin configurar"}
+                  </span>
+                </IdentityFact>
+                <IdentityFact label="Prompt">
+                  {automation ? (
+                    automation.promptValidated ? (
+                      <span className="text-emerald-400">Validado ✓</span>
+                    ) : (
+                      <span className="text-amber-300">No validado ✗</span>
+                    )
+                  ) : (
+                    "—"
+                  )}
+                </IdentityFact>
+                <IdentityFact label="Versión">
+                  {automation?.configuredAgentVersion ?? <span className="text-amber-300">SIN FIJAR</span>}
+                </IdentityFact>
+                <IdentityFact label="Llamadas hoy">
+                  {formatInt(calls.summary.completedToday)}/{formatInt(calls.config.dailyCap)}
+                </IdentityFact>
+              </div>
+            </Card>
+          )}
+        </section>
+
+        {/* ── Necesita atención ── */}
+        <section>
+          <SectionTitle
+            right={data && data.summary.total === 0 ? <span className="text-[11px] text-brand-muted">todo al día</span> : null}
+          >
+            Necesita atención{data ? `: ${formatInt(data.summary.total)}` : ""}
+          </SectionTitle>
           <p className="text-sm text-brand-muted -mt-1 mb-4">
             Tu copiloto operativo: qué está pasando, qué falta y qué haría yo.
           </p>
@@ -148,6 +308,32 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
                 </div>
               </Card>
             ))
+          )}
+        </section>
+
+        {/* ── Últimas llamadas ── */}
+        <section>
+          <SectionTitle>Últimas llamadas</SectionTitle>
+          {!calls ? (
+            <Skeleton className="h-24" />
+          ) : calls.recentCompleted.length === 0 ? (
+            <Card>
+              <EmptyState
+                title="Aún no hay llamadas completadas."
+                hint="Cuando Lucía termine una llamada, su resultado aparecerá aquí."
+              />
+            </Card>
+          ) : (
+            <Card className="divide-y divide-brand-border">
+              {calls.recentCompleted.map((c) => (
+                <div key={c.id} className="flex items-center gap-3 px-4 py-3">
+                  <span className="text-sm font-semibold text-brand-text shrink-0">#{c.order}</span>
+                  <span className="text-xs text-brand-muted shrink-0">{maskPhone(c.contact)}</span>
+                  <span className="flex-1 text-sm text-brand-text text-right truncate">{resultLabel(c.result)}</span>
+                  <span className="text-[11px] text-brand-muted whitespace-nowrap shrink-0">{timeAgo(c.endedAt)}</span>
+                </div>
+              ))}
+            </Card>
           )}
         </section>
       </div>

@@ -1,7 +1,7 @@
 "use client";
 
 // ============================================================
-// PEDIDOS v2 (§21-22) — la mesa de trabajo de Pedro.
+// PEDIDOS v3 (§21-22, §40-41) — la mesa de trabajo de Pedro.
 //
 // Un pedido tiene DOS decisiones distintas que aquí no se confunden:
 //   1. ¿El CLIENTE lo ha confirmado?  (status = confirmed)
@@ -10,12 +10,15 @@
 // después "Enviar a Beeping" (con el gate explicando qué falta si algo
 // bloquea). Nunca ocho botones del mismo nivel.
 //
+// v3: la ficha es un drawer lateral derecho en escritorio (bottom sheet en
+// móvil) con secciones planas separadas por hairlines y el CTA fijo abajo.
 // Conserva TODAS las acciones existentes (incluida "Avisar retraso" del
-// recovery del NAS, con su misma condición ultras/gafa), sustituyendo
-// window.confirm/alert por modales propios.
+// recovery del NAS, con su misma condición ultras/gafa), sin
+// window.confirm/alert.
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
+import type { ReactNode } from "react";
 import {
   Card,
   Chip,
@@ -25,6 +28,7 @@ import {
   ModalShell,
   OrderStateBadge,
   PrimaryButton,
+  SectionTitle,
   SkeletonRows,
   StatusDot,
   timeAgo,
@@ -165,6 +169,15 @@ function matchesFilter(o: OrderItem, f: Filter): boolean {
   }
 }
 
+/** Búsqueda en cliente (§40.1): número, cliente, teléfono o producto. */
+function matchesQuery(o: OrderItem, q: string): boolean {
+  if (!q) return true;
+  return [o.shopify_order_number, o.customer_name ?? "", o.phone, o.product_summary]
+    .join(" ")
+    .toLowerCase()
+    .includes(q);
+}
+
 function fmtTime(ts: number | null): string {
   if (!ts) return "—";
   const d = new Date(ts * 1000);
@@ -225,14 +238,40 @@ const ENVIO_META: Record<string, string> = {
   cancelled: "cancelado",
 };
 
-function KpiCard({ label, value, tone }: { label: string; value: number; tone?: "gold" | "green" | "red" | "sky" }) {
-  const valueCls =
-    tone === "red" && value > 0 ? "text-red-300" : tone === "green" ? "text-emerald-300" : tone === "sky" ? "text-sky-300" : "text-brand-text";
+/** Celda de KPI dentro de la franja agrupada (§40.2). */
+function KpiCell({ label, value, valueCls = "text-brand-text", span2Mobile = false }: { label: string; value: number; valueCls?: string; span2Mobile?: boolean }) {
   return (
-    <Card className={`px-4 py-3 ${tone === "red" && value > 0 ? "border-red-500/50 bg-red-500/10" : ""}`}>
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted">{label}</div>
-      <div className={`font-display text-3xl font-bold mt-1 ${valueCls}`}>{value}</div>
-    </Card>
+    <div className={`bg-brand-surface px-4 py-3 ${span2Mobile ? "col-span-2 md:col-span-1" : ""}`}>
+      <div className="text-[11px] uppercase tracking-wider text-brand-muted truncate">{label}</div>
+      <div className={`mt-1 font-display text-2xl font-semibold leading-tight tabular-nums ${valueCls}`}>{value}</div>
+    </div>
+  );
+}
+
+/** Sección plana del drawer (§41): etiqueta + contenido, separadas por hairlines. */
+function DrawerSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="px-5 py-4">
+      <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-2">{title}</div>
+      {children}
+    </section>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden>
+      <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function SearchIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" className="h-3.5 w-3.5" aria-hidden>
+      <circle cx="7" cy="7" r="4.25" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M10.5 10.5L14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
   );
 }
 
@@ -242,10 +281,13 @@ export default function OrdersPanel() {
   const [orders, setOrders] = useState<OrderItem[]>([]);
   const [counts, setCounts] = useState<Counts | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
+  const [query, setQuery] = useState("");
   const [detail, setDetail] = useState<OrderItem | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Entrada del drawer: se monta cerrado y desliza en el siguiente frame (150ms).
+  const [drawerIn, setDrawerIn] = useState(false);
   // Confirmación propia (sustituye a window.confirm).
   const [confirmBox, setConfirmBox] = useState<{ title: string; body: string; run: () => void } | null>(null);
   // Estado Beeping de la ficha abierta (gate + corte + nota).
@@ -273,6 +315,23 @@ export default function OrdersPanel() {
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  const drawerOpen = detail !== null;
+  useEffect(() => {
+    if (!drawerOpen) {
+      setDrawerIn(false);
+      return;
+    }
+    // Doble rAF: garantiza un frame pintado en posición cerrada antes de deslizar.
+    let r2 = 0;
+    const r1 = requestAnimationFrame(() => {
+      r2 = requestAnimationFrame(() => setDrawerIn(true));
+    });
+    return () => {
+      cancelAnimationFrame(r1);
+      cancelAnimationFrame(r2);
+    };
+  }, [drawerOpen]);
 
   // Al abrir la ficha: traer el gate de liberación y la nota de expedición.
   const loadBeepingInfo = useCallback(async (orderId: number) => {
@@ -438,7 +497,8 @@ export default function OrdersPanel() {
     }
   }
 
-  const visible = orders.filter((o) => matchesFilter(o, filter));
+  const q = query.trim().toLowerCase();
+  const visible = orders.filter((o) => matchesFilter(o, filter) && matchesQuery(o, q));
   const countBy = (f: Filter) => orders.filter((o) => matchesFilter(o, f)).length;
 
   // El CTA contextual de la ficha (§22): UNO grande, no ocho iguales.
@@ -447,7 +507,7 @@ export default function OrdersPanel() {
     if (ui === "cancelled" || ui === "delivered") return null;
     if (o.status !== "confirmed" && !["cancelled", "ignored_old"].includes(o.status)) {
       return (
-        <PrimaryButton busy={busy === o.id} onClick={() => doAction(o, "confirm")} className="w-full sm:w-auto">
+        <PrimaryButton busy={busy === o.id} onClick={() => doAction(o, "confirm")} className="w-full">
           Confirmar pedido
         </PrimaryButton>
       );
@@ -455,7 +515,7 @@ export default function OrdersPanel() {
     if (o.status === "confirmed" && ["not_released", "release_failed"].includes(o.beeping_sync_status)) {
       const gateOk = beepingInfo?.gate.ok ?? false;
       return (
-        <PrimaryButton busy={busy === o.id} disabled={!gateOk} onClick={() => releaseToBeeping(o)} className="w-full sm:w-auto">
+        <PrimaryButton busy={busy === o.id} disabled={!gateOk} onClick={() => releaseToBeeping(o)} className="w-full">
           Enviar a Beeping
         </PrimaryButton>
       );
@@ -463,16 +523,59 @@ export default function OrdersPanel() {
     return null;
   }
 
+  // ¿Hay algo que anclar abajo en el drawer? (mismo criterio que el bloque CTA v2)
+  const detailAwaitsBeeping = detail !== null && detail.status === "confirmed" && ["not_released", "release_failed"].includes(detail.beeping_sync_status);
+  const detailCta = detail ? primaryCta(detail) : null;
+  const showCtaFooter = detail !== null && (detailCta !== null || detailAwaitsBeeping);
+
+  const timeline: Array<[string, number | null]> = detail
+    ? [
+        ["WhatsApp enviado", detail.whatsapp_sent_at],
+        ["Recordatorio", detail.reminder_sent_at],
+        ["Respuesta del cliente", detail.customer_replied_at],
+        ["Confirmado", detail.confirmed_at],
+        ["Marcado para llamar", detail.needs_call_at],
+      ]
+    : [];
+
   return (
     <div className="h-full overflow-y-auto px-4 md:px-6 py-5 pb-24 md:pb-8">
-      {/* KPIs — lo que Pedro necesita ver en 5 segundos */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5">
-        <KpiCard label="Pedidos hoy" value={counts?.today ?? 0} tone="gold" />
-        <KpiCard label="Confirmados hoy" value={counts?.confirmedToday ?? 0} tone="green" />
-        <KpiCard label="Esperando respuesta" value={counts?.awaiting ?? 0} />
-        <KpiCard label="Corrección" value={counts?.correction ?? 0} tone="sky" />
-        <KpiCard label="Necesitan llamada" value={counts?.needsCall ?? 0} tone="red" />
-      </div>
+      {/* Cabecera: título + búsqueda en vivo (§40.1) */}
+      <SectionTitle
+        right={
+          <div className="relative">
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-brand-muted pointer-events-none">
+              <SearchIcon />
+            </span>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar pedido, cliente, teléfono…"
+              aria-label="Buscar pedidos"
+              className="w-48 sm:w-72 rounded-xl border border-brand-border bg-brand-surface-2 pl-8 pr-3 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 transition-colors duration-150 hover:border-brand-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+            />
+          </div>
+        }
+      >
+        Pedidos
+      </SectionTitle>
+
+      {/* KPIs — una sola superficie agrupada con divisiones finas (§40.2, §39) */}
+      <Card className="overflow-hidden mb-5">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-brand-border/50">
+          <KpiCell label="Pedidos hoy" value={counts?.today ?? 0} />
+          <KpiCell label="Confirmados hoy" value={counts?.confirmedToday ?? 0} valueCls="text-emerald-300" />
+          <KpiCell label="Esperando respuesta" value={counts?.awaiting ?? 0} />
+          <KpiCell label="Corrección" value={counts?.correction ?? 0} valueCls="text-sky-300" />
+          <KpiCell
+            label="Necesitan llamada"
+            value={counts?.needsCall ?? 0}
+            valueCls={(counts?.needsCall ?? 0) > 0 ? "text-red-300" : "text-brand-text"}
+            span2Mobile
+          />
+        </div>
+      </Card>
 
       {/* Filtros como chips (§21) */}
       <div className="flex flex-wrap gap-2 mb-4">
@@ -488,27 +591,39 @@ export default function OrdersPanel() {
       ) : visible.length === 0 ? (
         <Card>
           <EmptyState
-            title={orders.length === 0 ? "Sin pedidos todavía" : "Ningún pedido en este filtro"}
-            hint={orders.length === 0 ? "Cuando llegue un pedido contra reembolso de Shopify aparecerá aquí." : undefined}
+            title={
+              orders.length === 0
+                ? "Aún no hay pedidos"
+                : q
+                  ? "Nada coincide con la búsqueda"
+                  : "No hay pedidos en este estado"
+            }
+            hint={
+              orders.length === 0
+                ? "Cuando entre un pedido contra reembolso desde Shopify aparecerá aquí automáticamente."
+                : q
+                  ? "Prueba con el número de pedido, el nombre del cliente o el teléfono."
+                  : "Todo lo demás está en otros filtros. Cambia de pestaña para verlo."
+            }
           />
         </Card>
       ) : (
         <>
-          {/* Tabla (md+) */}
+          {/* Tabla (md+) — filas ~52px, hairlines suaves, hover discreto (§40.4) */}
           <Card className="hidden md:block overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
-                    <th className="px-3 py-3">Pedido</th>
-                    <th className="px-3 py-3">Cliente</th>
-                    <th className="px-3 py-3">Producto</th>
-                    <th className="px-3 py-3">Importe</th>
-                    <th className="px-3 py-3">Estado</th>
-                    <th className="px-3 py-3">WhatsApp</th>
-                    <th className="px-3 py-3">Beeping</th>
-                    <th className="px-3 py-3">Envío</th>
-                    <th className="px-3 py-3 text-right">Acción</th>
+                    <th className="px-3 py-3 font-semibold">Pedido</th>
+                    <th className="px-3 py-3 font-semibold">Cliente</th>
+                    <th className="px-3 py-3 font-semibold">Producto</th>
+                    <th className="px-3 py-3 font-semibold text-right">Importe</th>
+                    <th className="px-3 py-3 font-semibold">Estado</th>
+                    <th className="px-3 py-3 font-semibold">WhatsApp</th>
+                    <th className="px-3 py-3 font-semibold">Beeping</th>
+                    <th className="px-3 py-3 font-semibold">Envío</th>
+                    <th className="px-3 py-3 font-semibold text-right">Acción</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -518,11 +633,12 @@ export default function OrdersPanel() {
                     return (
                       <tr
                         key={o.id}
-                        className="border-b border-brand-border/50 last:border-0 hover:bg-brand-surface-2/60 cursor-pointer"
+                        className="h-[52px] border-b border-brand-border/40 last:border-0 hover:bg-brand-surface-2/50 transition-colors duration-150 cursor-pointer"
                         onClick={() => openDetail(o)}
                       >
-                        <td className="px-3 py-3 font-mono font-semibold text-brand-gold whitespace-nowrap">
-                          #{o.shopify_order_number}
+                        <td className="px-3 py-2.5 font-mono font-medium text-brand-text whitespace-nowrap tabular-nums">
+                          <span className="text-brand-muted">#</span>
+                          {o.shopify_order_number}
                           {o.possible_duplicate === 1 && (
                             <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 align-middle">
                               DUPLICADO?
@@ -534,53 +650,54 @@ export default function OrdersPanel() {
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-3 max-w-[150px]">
-                          <div className="truncate" title={o.customer_name ?? ""}>{o.customer_name ?? "—"}</div>
-                          <div className="text-[11px] text-brand-muted truncate">{o.city ?? ""}</div>
+                        <td className="px-3 py-2.5 max-w-[150px]">
+                          <div className="truncate leading-snug" title={o.customer_name ?? ""}>{o.customer_name ?? "—"}</div>
+                          <div className="text-[11px] text-brand-muted truncate leading-snug">{o.city ?? ""}</div>
                         </td>
-                        <td className="px-3 py-3 max-w-[180px] truncate text-brand-muted" title={o.product_summary.replace(/\n/g, " · ")}>
+                        <td className="px-3 py-2.5 max-w-[180px] truncate text-brand-muted" title={o.product_summary.replace(/\n/g, " · ")}>
                           {o.product_summary.replace(/\n/g, " · ")}
                         </td>
-                        <td className="px-3 py-3 whitespace-nowrap">{fmtMoney(o.total_price, o.currency)}</td>
-                        <td className="px-3 py-3">
+                        <td className="px-3 py-2.5 whitespace-nowrap text-right tabular-nums">{fmtMoney(o.total_price, o.currency)}</td>
+                        <td className="px-3 py-2.5">
                           <OrderStateBadge state={orderUiState(o)} />
+                          <div className="mt-0.5 text-[10px] text-brand-muted/80 whitespace-nowrap">{timeAgo(o.updated_at)}</div>
                         </td>
-                        <td className="px-3 py-3 whitespace-nowrap text-xs">
+                        <td className="px-3 py-2.5 whitespace-nowrap text-xs">
                           <span className="inline-flex items-center gap-1.5">
                             <StatusDot status={wa.status} />
                             <span className="text-brand-muted">{wa.text}</span>
                           </span>
                         </td>
-                        <td className="px-3 py-3 whitespace-nowrap text-xs">
+                        <td className="px-3 py-2.5 whitespace-nowrap text-xs">
                           <span className="inline-flex items-center gap-1.5">
                             <StatusDot status={bp.status} />
                             <span className="text-brand-muted">{bp.text}</span>
                           </span>
                         </td>
-                        <td className="px-3 py-3 whitespace-nowrap text-xs text-brand-muted">
+                        <td className="px-3 py-2.5 whitespace-nowrap text-xs text-brand-muted">
                           {ENVIO_META[o.supplier_status_normalized] ?? o.supplier_status_normalized}
                           {o.tracking_number && <span className="block font-mono text-[10px]">{o.tracking_number}</span>}
                         </td>
-                        <td className="px-3 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                        <td className="px-3 py-2.5 text-right" onClick={(e) => e.stopPropagation()}>
                           {o.status !== "confirmed" && !["cancelled", "ignored_old"].includes(o.status) ? (
                             <button
                               disabled={busy === o.id}
                               onClick={() => doAction(o, "confirm")}
-                              className="px-2.5 py-1.5 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 text-xs font-semibold disabled:opacity-50"
+                              className="px-2.5 py-1.5 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 transition-colors duration-150 text-xs font-semibold disabled:opacity-50"
                             >
                               Confirmar
                             </button>
                           ) : o.status === "confirmed" && ["not_released", "release_failed"].includes(o.beeping_sync_status) ? (
                             <button
                               onClick={() => openDetail(o)}
-                              className="px-2.5 py-1.5 rounded-lg border border-brand-gold/50 text-brand-gold hover:bg-brand-gold/10 text-xs font-semibold"
+                              className="px-2.5 py-1.5 rounded-lg border border-brand-gold/50 text-brand-gold hover:bg-brand-gold/10 transition-colors duration-150 text-xs font-semibold"
                             >
                               Enviar a Beeping
                             </button>
                           ) : (
                             <button
                               onClick={() => openDetail(o)}
-                              className="px-2.5 py-1.5 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text text-xs"
+                              className="px-2.5 py-1.5 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 text-xs"
                             >
                               Ver
                             </button>
@@ -594,21 +711,25 @@ export default function OrdersPanel() {
             </div>
           </Card>
 
-          {/* Cards (móvil) */}
+          {/* Cards (móvil) — objetivos táctiles amplios (§40.6) */}
           <div className="md:hidden space-y-2.5">
             {visible.map((o) => {
               const bp = beepingCell(o);
               return (
-                <Card key={o.id} className="px-4 py-3 active:bg-brand-surface-2" >
-                  <button type="button" className="w-full text-left" onClick={() => openDetail(o)}>
+                <Card key={o.id} className="active:bg-brand-surface-2 transition-colors duration-150">
+                  <button type="button" className="w-full text-left px-4 py-3.5" onClick={() => openDetail(o)}>
                     <div className="flex items-center justify-between gap-2">
-                      <span className="font-mono font-semibold text-brand-gold">#{o.shopify_order_number}</span>
+                      <span className="font-mono font-medium text-brand-text tabular-nums">
+                        <span className="text-brand-muted">#</span>
+                        {o.shopify_order_number}
+                      </span>
                       <OrderStateBadge state={orderUiState(o)} />
                     </div>
-                    <div className="mt-1 text-sm text-brand-text truncate">{o.customer_name ?? "—"} · {fmtMoney(o.total_price, o.currency)}</div>
-                    <div className="text-xs text-brand-muted truncate">{o.product_summary.replace(/\n/g, " · ")}</div>
-                    <div className="mt-1.5 flex items-center gap-3 text-[11px] text-brand-muted">
+                    <div className="mt-1.5 text-sm text-brand-text truncate">{o.customer_name ?? "—"} · {fmtMoney(o.total_price, o.currency)}</div>
+                    <div className="mt-0.5 text-xs text-brand-muted truncate">{o.product_summary.replace(/\n/g, " · ")}</div>
+                    <div className="mt-2 flex items-center gap-3 text-[11px] text-brand-muted">
                       <span className="inline-flex items-center gap-1"><StatusDot status={bp.status} /> Beeping: {bp.text}</span>
+                      <span className="text-brand-muted/80">{timeAgo(o.updated_at)}</span>
                       {o.cancellation_requested_at && <span className="text-rose-300 font-semibold">PIDE CANCELAR</span>}
                     </div>
                   </button>
@@ -619,20 +740,27 @@ export default function OrdersPanel() {
         </>
       )}
 
-      {/* ══ FICHA DE PEDIDO (§22): 4 bloques + CTA contextual ══ */}
+      {/* ══ FICHA DE PEDIDO (§41): drawer lateral en md+, bottom sheet en móvil ══ */}
       {detail && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center sm:p-6" onClick={() => setDetail(null)}>
+        <div className="fixed inset-0 z-50" role="dialog" aria-modal>
           <div
-            className="w-full sm:max-w-3xl max-h-[92vh] sm:max-h-[85vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl border border-brand-border bg-brand-surface p-5 sm:p-6 shadow-2xl"
+            className={`absolute inset-0 bg-black/50 transition-opacity duration-150 ${drawerIn ? "opacity-100" : "opacity-0"}`}
+            onClick={() => setDetail(null)}
+            aria-hidden
+          />
+          <div
+            className={`absolute inset-x-0 bottom-0 max-h-[92vh] rounded-t-2xl border-t md:inset-x-auto md:right-0 md:top-0 md:bottom-0 md:h-full md:max-h-full md:w-[480px] md:max-w-full md:rounded-none md:border-t-0 md:border-l border-brand-border bg-brand-surface shadow-2xl flex flex-col transition-transform duration-150 ease-out ${
+              drawerIn ? "translate-y-0 md:translate-x-0" : "translate-y-full md:translate-y-0 md:translate-x-full"
+            }`}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Cabecera */}
-            <div className="flex items-start justify-between mb-4">
-              <div>
-                <div className="font-display text-xl font-bold text-brand-text">
+            {/* Cabecera del drawer */}
+            <div className="shrink-0 px-5 pt-5 pb-4 border-b border-brand-border/60 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-display text-xl font-semibold text-brand-text">
                   Pedido <span className="text-brand-gold">#{detail.shopify_order_number}</span>
                 </div>
-                <div className="text-xs text-brand-muted mt-1">
+                <div className="text-xs text-brand-muted mt-1 truncate">
                   Shopify {detail.shopify_order_id} · creado {fmtTime(detail.created_at)}
                   {detail.shopify_tagged === 1 && <span className="ml-2 text-emerald-300">· WA_CONFIRMED ✓</span>}
                 </div>
@@ -649,26 +777,197 @@ export default function OrdersPanel() {
               <button
                 onClick={() => setDetail(null)}
                 aria-label="Cerrar"
-                className="px-2.5 py-1.5 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text text-sm"
+                className="shrink-0 p-2 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
               >
-                ✕
+                <CloseIcon />
               </button>
             </div>
 
-            {/* Cliente pide cancelar → decisión humana, nunca botón rojo directo */}
-            {detail.cancellation_requested_at && (
-              <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div className="text-sm text-rose-200">
-                  <strong>El cliente solicita cancelar</strong> ({fmtTime(detail.cancellation_requested_at)}). Tú decides.
+            {/* Cuerpo con scroll: avisos + secciones planas con hairlines */}
+            <div className="flex-1 min-h-0 overflow-y-auto">
+              {/* Cliente pide cancelar → decisión humana, nunca botón rojo directo */}
+              {detail.cancellation_requested_at && (
+                <div className="mx-5 mt-4 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3">
+                  <div className="text-sm text-rose-200">
+                    <strong>El cliente solicita cancelar</strong> ({fmtTime(detail.cancellation_requested_at)}). Tú decides.
+                  </div>
+                  <GhostButton onClick={() => setCancelBox(true)}>Gestionar cancelación</GhostButton>
                 </div>
-                <GhostButton onClick={() => setCancelBox(true)}>Gestionar cancelación</GhostButton>
-              </div>
-            )}
+              )}
 
-            {/* CTA CONTEXTUAL GRANDE */}
-            {(primaryCta(detail) !== null || (detail.status === "confirmed" && ["not_released", "release_failed"].includes(detail.beeping_sync_status))) && (
-              <div className="rounded-2xl border border-brand-gold/30 bg-brand-gold/5 p-4 mb-4">
-                {detail.status === "confirmed" && ["not_released", "release_failed"].includes(detail.beeping_sync_status) ? (
+              {detail.beeping_sync_status === "released" && (
+                <div className="mx-5 mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 text-sm text-emerald-200">
+                  Liberado a Beeping {detail.beeping_released_at ? timeAgo(detail.beeping_released_at) : ""} — el almacén ya lo está preparando.
+                </div>
+              )}
+              {detail.beeping_sync_status === "release_unknown" && (
+                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3.5 text-sm text-red-200">
+                  Liberación en estado <strong>AMBIGUO</strong>: Beeping no respondió. No se reintenta a ciegas — resuélvelo desde Envíos ("Resolver consultando").
+                </div>
+              )}
+
+              {actionError && (
+                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{actionError}</div>
+              )}
+
+              <div className="divide-y divide-brand-border/50">
+                {/* ── CLIENTE ── */}
+                <DrawerSection title="Cliente">
+                  <div className="text-sm text-brand-text">{detail.customer_name ?? "—"}</div>
+                  <div className="font-mono text-xs text-brand-muted mt-0.5">{detail.phone ? `+${detail.phone}` : "sin teléfono"}</div>
+                  {detail.email && <div className="text-xs text-brand-muted">{detail.email}</div>}
+                  <div className="text-xs text-brand-muted mt-2 whitespace-pre-line leading-relaxed">{addressBlock(detail) || "—"}</div>
+                  {detail.proposed_address && (
+                    <div className="mt-2.5 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-sky-300">Dirección propuesta por el cliente</div>
+                      <div className="text-xs whitespace-pre-line mt-1">{detail.proposed_address}</div>
+                      <div className="text-[10px] text-brand-muted mt-1">No se aplica sola: actualízala en Shopify y confirma.</div>
+                    </div>
+                  )}
+                </DrawerSection>
+
+                {/* ── PEDIDO ── */}
+                <DrawerSection title="Pedido">
+                  <div className="text-sm whitespace-pre-line text-brand-text leading-relaxed">{detail.product_summary}</div>
+                  <div className="font-semibold mt-1.5 text-brand-text tabular-nums">
+                    {fmtMoney(detail.total_price, detail.currency)} <span className="text-xs text-brand-muted font-normal">contra reembolso</span>
+                  </div>
+                  {detail.delivery_note && (
+                    <div className="mt-2.5 rounded-lg border border-violet-500/40 bg-violet-500/5 p-2.5">
+                      <div className="text-[10px] uppercase tracking-wider text-violet-300">Nota para el repartidor (cliente)</div>
+                      <div className="text-xs whitespace-pre-line mt-1">{detail.delivery_note}</div>
+                    </div>
+                  )}
+                  {detail.customer_note && (
+                    <div className="text-xs text-brand-muted mt-2 whitespace-pre-line">{detail.customer_note}</div>
+                  )}
+                </DrawerSection>
+
+                {/* ── COMUNICACIÓN: timeline compacto + acciones de canal ── */}
+                <DrawerSection title="Comunicación">
+                  <div className="space-y-1.5">
+                    {timeline.map(([label, ts]) => (
+                      <div key={label} className="flex items-center gap-2.5 text-xs">
+                        <StatusDot status={ts ? "ok" : "muted"} />
+                        <span className="flex-1 text-brand-muted">{label}</span>
+                        <span className={`tabular-nums ${ts ? "text-brand-text" : "text-brand-muted/60"}`}>{fmtTime(ts)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
+                    {!["confirmed", "cancelled", "ignored_old"].includes(detail.status) && detail.phone && (
+                      <>
+                        <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "resend")} className="!px-2.5 !py-1.5 text-xs">
+                          Reenviar WhatsApp
+                        </GhostButton>
+                        <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "call_now")} className="!px-2.5 !py-1.5 text-xs">
+                          Llamar ahora
+                        </GhostButton>
+                      </>
+                    )}
+                    {detail.status === "confirmed" &&
+                      detail.phone &&
+                      ((detail.product_summary ?? "").toLowerCase().includes("ultras") ||
+                        (detail.product_summary ?? "").toLowerCase().includes("gafa")) && (
+                        <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "notify_delay")} className="!px-2.5 !py-1.5 text-xs">
+                          Avisar retraso
+                        </GhostButton>
+                      )}
+                  </div>
+                </DrawerSection>
+
+                {/* ── FULFILLMENT ── */}
+                <DrawerSection title="Fulfillment">
+                  <div className="text-xs text-brand-muted space-y-1">
+                    <div>
+                      Beeping:{" "}
+                      <span className="text-brand-text">
+                        {beepingCell(detail).text}
+                        {detail.beeping_order_status !== null && ` (status ${detail.beeping_order_status})`}
+                      </span>
+                    </div>
+                    {detail.supplier_platform && detail.supplier_platform !== "unknown" && (
+                      <div>Proveedor: <span className="text-brand-text">{detail.supplier_platform}</span> · {detail.supplier_sync_status}</div>
+                    )}
+                    <div>
+                      Envío: <span className="text-brand-text">{ENVIO_META[detail.supplier_status_normalized] ?? detail.supplier_status_normalized}</span>
+                    </div>
+                    {detail.tracking_number && (
+                      <div>
+                        Tracking: {detail.carrier ? `${detail.carrier} · ` : ""}
+                        {detail.tracking_url ? (
+                          <a href={detail.tracking_url} target="_blank" rel="noreferrer" className="underline text-sky-300">
+                            {detail.tracking_number}
+                          </a>
+                        ) : (
+                          <span className="font-mono">{detail.tracking_number}</span>
+                        )}
+                      </div>
+                    )}
+                    {detail.supplier_last_error && <div className="text-amber-300">{detail.supplier_last_error}</div>}
+                  </div>
+
+                  {/* Nota de expedición (§12): INTERNA hasta tener contrato de Beeping */}
+                  <div className="mt-3">
+                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-brand-muted">
+                      Nota de expedición
+                      <span className="px-1.5 py-0.5 rounded bg-brand-surface-2 border border-brand-border text-[9px] normal-case tracking-normal">
+                        Nota interna — todavía no se envía a Beeping
+                      </span>
+                    </div>
+                    {["not_released", "release_failed"].includes(detail.beeping_sync_status) ? (
+                      <div className="mt-1.5 flex gap-2">
+                        <input
+                          value={noteDraft}
+                          onChange={(e) => setNoteDraft(e.target.value)}
+                          placeholder='p.ej. "Llamar antes de entregar"'
+                          maxLength={500}
+                          className="flex-1 rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                        />
+                        <GhostButton disabled={noteSaving || noteDraft === (detail.dispatch_note ?? "")} onClick={() => void saveDispatchNote(detail)} className="!px-2.5 !py-1.5 text-xs">
+                          {noteSaving ? "Guardando…" : "Guardar"}
+                        </GhostButton>
+                      </div>
+                    ) : (
+                      <div className="mt-1 text-xs text-brand-text">{detail.dispatch_note || "—"} <span className="text-brand-muted">(congelada al liberar)</span></div>
+                    )}
+                  </div>
+                </DrawerSection>
+              </div>
+
+              {detail.last_error && (
+                <div className="mx-5 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{detail.last_error}</div>
+              )}
+              {detail.deferred_until && detail.status === "pending_send" && (
+                <div className="mx-5 mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-200">
+                  En espera por horario: el mensaje saldrá hacia las {new Date(detail.deferred_until * 1000).toLocaleString("es-ES")}.
+                </div>
+              )}
+
+              {/* Acciones secundarias, deliberadamente pequeñas — encima del CTA fijo */}
+              <div className="flex flex-wrap gap-2 justify-end border-t border-brand-border/50 px-5 py-3">
+                {!["cancelled", "ignored_old"].includes(detail.status) &&
+                  (detail.pilot_authorized === 1 ? (
+                    <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "revoke_pilot")} className="!px-2.5 !py-1.5 text-xs">
+                      Retirar autorización piloto
+                    </GhostButton>
+                  ) : (
+                    <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "authorize_pilot")} className="!px-2.5 !py-1.5 text-xs">
+                      Autorizar piloto
+                    </GhostButton>
+                  ))}
+                {!["confirmed", "cancelled", "ignored_old"].includes(detail.status) && (
+                  <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "cancel")} className="!px-2.5 !py-1.5 text-xs">
+                    Descartar del flujo
+                  </GhostButton>
+                )}
+              </div>
+            </div>
+
+            {/* CTA CONTEXTUAL fijo al pie del drawer (§41) */}
+            {showCtaFooter && (
+              <div className="shrink-0 sticky bottom-0 bg-brand-surface border-t border-brand-border p-4">
+                {detailAwaitsBeeping && (
                   <>
                     <div className="flex items-center gap-2 text-sm text-brand-text mb-1">
                       <StatusDot status="ok" />
@@ -692,176 +991,10 @@ export default function OrdersPanel() {
                       <div className="text-xs text-red-300 mb-2">Último intento: {detail.beeping_last_error}</div>
                     )}
                   </>
-                ) : null}
-                <div className="flex flex-wrap gap-2">{primaryCta(detail)}</div>
-              </div>
-            )}
-
-            {detail.beeping_sync_status === "released" && (
-              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 mb-4 text-sm text-emerald-200">
-                Liberado a Beeping {detail.beeping_released_at ? timeAgo(detail.beeping_released_at) : ""} — el almacén ya lo está preparando.
-              </div>
-            )}
-            {detail.beeping_sync_status === "release_unknown" && (
-              <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3.5 mb-4 text-sm text-red-200">
-                Liberación en estado <strong>AMBIGUO</strong>: Beeping no respondió. No se reintenta a ciegas — resuélvelo desde Envíos ("Resolver consultando").
-              </div>
-            )}
-
-            {actionError && (
-              <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 mb-4 text-sm text-red-300">{actionError}</div>
-            )}
-
-            {/* ── Bloques CLIENTE / PEDIDO ── */}
-            <div className="grid sm:grid-cols-2 gap-3 mb-3">
-              <div className="rounded-xl border border-brand-border bg-brand-bg p-3.5">
-                <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">Cliente</div>
-                <div className="text-sm text-brand-text">{detail.customer_name ?? "—"}</div>
-                <div className="font-mono text-xs text-brand-muted mt-0.5">{detail.phone ? `+${detail.phone}` : "sin teléfono"}</div>
-                {detail.email && <div className="text-xs text-brand-muted">{detail.email}</div>}
-                <div className="text-xs text-brand-muted mt-2 whitespace-pre-line">{addressBlock(detail) || "—"}</div>
-                {detail.proposed_address && (
-                  <div className="mt-2 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2">
-                    <div className="text-[10px] uppercase tracking-wider text-sky-300">Dirección propuesta por el cliente</div>
-                    <div className="text-xs whitespace-pre-line mt-1">{detail.proposed_address}</div>
-                    <div className="text-[10px] text-brand-muted mt-1">No se aplica sola: actualízala en Shopify y confirma.</div>
-                  </div>
                 )}
-              </div>
-              <div className="rounded-xl border border-brand-border bg-brand-bg p-3.5">
-                <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">Pedido</div>
-                <div className="text-sm whitespace-pre-line text-brand-text">{detail.product_summary}</div>
-                <div className="font-semibold mt-1.5 text-brand-text">{fmtMoney(detail.total_price, detail.currency)} <span className="text-xs text-brand-muted font-normal">contra reembolso</span></div>
-                {detail.delivery_note && (
-                  <div className="mt-2 rounded-lg border border-violet-500/40 bg-violet-500/5 p-2">
-                    <div className="text-[10px] uppercase tracking-wider text-violet-300">Nota para el repartidor (cliente)</div>
-                    <div className="text-xs whitespace-pre-line mt-1">{detail.delivery_note}</div>
-                  </div>
-                )}
-                {detail.customer_note && (
-                  <div className="text-xs text-brand-muted mt-2 whitespace-pre-line">{detail.customer_note}</div>
-                )}
-              </div>
-            </div>
-
-            {/* ── Bloques COMUNICACIÓN / FULFILLMENT ── */}
-            <div className="grid sm:grid-cols-2 gap-3 mb-4">
-              <div className="rounded-xl border border-brand-border bg-brand-bg p-3.5">
-                <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">Comunicación</div>
-                <div className="text-xs text-brand-muted space-y-1">
-                  <div>WhatsApp enviado: {fmtTime(detail.whatsapp_sent_at)}</div>
-                  <div>Recordatorio: {fmtTime(detail.reminder_sent_at)}</div>
-                  <div>Respuesta del cliente: {fmtTime(detail.customer_replied_at)}</div>
-                  <div>Confirmado: {fmtTime(detail.confirmed_at)}</div>
-                  <div>Marcado para llamar: {fmtTime(detail.needs_call_at)}</div>
-                </div>
-                <div className="mt-2.5 flex flex-wrap gap-1.5" onClick={(e) => e.stopPropagation()}>
-                  {!["confirmed", "cancelled", "ignored_old"].includes(detail.status) && detail.phone && (
-                    <>
-                      <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "resend")} className="!px-2.5 !py-1.5 text-xs">
-                        Reenviar WhatsApp
-                      </GhostButton>
-                      <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "call_now")} className="!px-2.5 !py-1.5 text-xs">
-                        Llamar ahora
-                      </GhostButton>
-                    </>
-                  )}
-                  {detail.status === "confirmed" &&
-                    detail.phone &&
-                    ((detail.product_summary ?? "").toLowerCase().includes("ultras") ||
-                      (detail.product_summary ?? "").toLowerCase().includes("gafa")) && (
-                      <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "notify_delay")} className="!px-2.5 !py-1.5 text-xs">
-                        Avisar retraso
-                      </GhostButton>
-                    )}
-                </div>
-              </div>
-              <div className="rounded-xl border border-brand-border bg-brand-bg p-3.5">
-                <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">Fulfillment</div>
-                <div className="text-xs text-brand-muted space-y-1">
-                  <div>
-                    Beeping:{" "}
-                    <span className="text-brand-text">
-                      {beepingCell(detail).text}
-                      {detail.beeping_order_status !== null && ` (status ${detail.beeping_order_status})`}
-                    </span>
-                  </div>
-                  {detail.supplier_platform && detail.supplier_platform !== "unknown" && (
-                    <div>Proveedor: <span className="text-brand-text">{detail.supplier_platform}</span> · {detail.supplier_sync_status}</div>
-                  )}
-                  <div>
-                    Envío: <span className="text-brand-text">{ENVIO_META[detail.supplier_status_normalized] ?? detail.supplier_status_normalized}</span>
-                  </div>
-                  {detail.tracking_number && (
-                    <div>
-                      Tracking: {detail.carrier ? `${detail.carrier} · ` : ""}
-                      {detail.tracking_url ? (
-                        <a href={detail.tracking_url} target="_blank" rel="noreferrer" className="underline text-sky-300">
-                          {detail.tracking_number}
-                        </a>
-                      ) : (
-                        <span className="font-mono">{detail.tracking_number}</span>
-                      )}
-                    </div>
-                  )}
-                  {detail.supplier_last_error && <div className="text-amber-300">{detail.supplier_last_error}</div>}
-                </div>
-
-                {/* Nota de expedición (§12): INTERNA hasta tener contrato de Beeping */}
-                <div className="mt-2.5">
-                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-brand-muted">
-                    Nota de expedición
-                    <span className="px-1.5 py-0.5 rounded bg-brand-surface-2 border border-brand-border text-[9px] normal-case tracking-normal">
-                      Nota interna — todavía no se envía a Beeping
-                    </span>
-                  </div>
-                  {["not_released", "release_failed"].includes(detail.beeping_sync_status) ? (
-                    <div className="mt-1.5 flex gap-2">
-                      <input
-                        value={noteDraft}
-                        onChange={(e) => setNoteDraft(e.target.value)}
-                        placeholder='p.ej. "Llamar antes de entregar"'
-                        maxLength={500}
-                        className="flex-1 rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
-                      />
-                      <GhostButton disabled={noteSaving || noteDraft === (detail.dispatch_note ?? "")} onClick={() => void saveDispatchNote(detail)} className="!px-2.5 !py-1.5 text-xs">
-                        {noteSaving ? "Guardando…" : "Guardar"}
-                      </GhostButton>
-                    </div>
-                  ) : (
-                    <div className="mt-1 text-xs text-brand-text">{detail.dispatch_note || "—"} <span className="text-brand-muted">(congelada al liberar)</span></div>
-                  )}
-                </div>
-              </div>
-            </div>
-
-            {detail.last_error && (
-              <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 mb-4 text-sm text-red-300">{detail.last_error}</div>
-            )}
-            {detail.deferred_until && detail.status === "pending_send" && (
-              <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 mb-4 text-sm text-amber-200">
-                En espera por horario: el mensaje saldrá hacia las {new Date(detail.deferred_until * 1000).toLocaleString("es-ES")}.
+                {detailCta}
               </div>
             )}
-
-            {/* Acciones secundarias, deliberadamente pequeñas */}
-            <div className="flex flex-wrap gap-2 justify-end border-t border-brand-border pt-3">
-              {!["cancelled", "ignored_old"].includes(detail.status) &&
-                (detail.pilot_authorized === 1 ? (
-                  <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "revoke_pilot")} className="!px-2.5 !py-1.5 text-xs">
-                    Retirar autorización piloto
-                  </GhostButton>
-                ) : (
-                  <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "authorize_pilot")} className="!px-2.5 !py-1.5 text-xs">
-                    Autorizar piloto
-                  </GhostButton>
-                ))}
-              {!["confirmed", "cancelled", "ignored_old"].includes(detail.status) && (
-                <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "cancel")} className="!px-2.5 !py-1.5 text-xs">
-                  Descartar del flujo
-                </GhostButton>
-              )}
-            </div>
           </div>
         </div>
       )}
@@ -892,7 +1025,7 @@ export default function OrdersPanel() {
             type="button"
             disabled={busy !== null}
             onClick={() => detail && void cancelInBeeping(detail)}
-            className="w-full text-left rounded-xl border border-red-500/40 bg-red-500/5 hover:bg-red-500/10 p-3 text-sm disabled:opacity-50"
+            className="w-full text-left rounded-xl border border-red-500/40 bg-red-500/5 hover:bg-red-500/10 transition-colors duration-150 p-3 text-sm disabled:opacity-50"
           >
             <div className="font-semibold text-red-300">Cancelar en Beeping</div>
             <div className="text-xs text-brand-muted mt-0.5">
@@ -905,7 +1038,7 @@ export default function OrdersPanel() {
               setCancelBox(false);
               window.location.hash = "#acciones";
             }}
-            className="w-full text-left rounded-xl border border-brand-border hover:bg-brand-surface-2 p-3 text-sm"
+            className="w-full text-left rounded-xl border border-brand-border hover:bg-brand-surface-2 transition-colors duration-150 p-3 text-sm"
           >
             <div className="font-semibold text-brand-text">Resolver en Acciones</div>
             <div className="text-xs text-brand-muted mt-0.5">Hablar con el cliente primero, o marcar la solicitud como gestionada sin cancelar.</div>

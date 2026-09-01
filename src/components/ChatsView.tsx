@@ -1,22 +1,23 @@
 "use client";
 
 // ============================================================
-// CHATS (§23) — bandeja profesional de conversaciones.
+// CHATS (§23 + §42) — bandeja seria de conversaciones.
 //
 //   lg+:   [lista 300px | chat | contexto del pedido 320px]
 //   md:    [lista 280px | chat]                (contexto oculto)
 //   móvil: drill-down (lista → chat con barra de volver; el contexto
 //          del pedido se abre en un modal desde esa barra).
 //
-// La lista y el chat REUTILIZAN ConversationList y ConversationPanel tal
-// cual. Lo nuevo es la columna de contexto: los pedidos cuyo teléfono
-// coincide con el de la conversación, con su estado y acciones rápidas.
+// La columna del chat REUTILIZA ConversationPanel tal cual. La lista se
+// compone aquí: buscador cliente (nombre/teléfono), énfasis en lo
+// reciente (<1 h) y tiempos discretos. El contexto del pedido es una
+// única superficie agrupada con divisores.
 // ============================================================
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ConversationItem } from "./Dashboard";
-import ConversationList from "./ConversationList";
 import ConversationPanel from "./ConversationPanel";
+import Avatar from "./Avatar";
 import {
   Card,
   EmptyState,
@@ -72,7 +73,148 @@ function deriveState(o: OrderApiItem): OrderUiState {
 
 const smallBtn = "px-2.5 py-1.5 text-xs";
 
-/** Columna/modal de contexto: los pedidos del teléfono seleccionado. */
+/** "ahora", "hace 5 min"… — versión corta para la lista. */
+function shortAgo(timestamp: number | null): string {
+  if (!timestamp) return "";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000) - timestamp);
+  if (diff < 60) return "ahora";
+  if (diff < 3600) return `${Math.floor(diff / 60)} min`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} h`;
+  return `${Math.floor(diff / 86400)} d`;
+}
+
+// ============================================================
+// Lista de conversaciones (composición propia de esta vista)
+// ============================================================
+
+function ChatList({
+  conversations,
+  selectedId,
+  onSelect,
+}: {
+  conversations: ConversationItem[];
+  selectedId: number | null;
+  onSelect: (id: number) => void;
+}) {
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return conversations;
+    const qDigits = q.replace(/\D/g, "");
+    return conversations.filter((c) => {
+      const byName = (c.name ?? "").toLowerCase().includes(q);
+      const byPhone = qDigits.length > 0 && soloDigitos(c.phone).includes(qDigits);
+      return byName || byPhone;
+    });
+  }, [conversations, query]);
+
+  const nowS = Math.floor(Date.now() / 1000);
+
+  return (
+    <aside className="border-r border-brand-border bg-brand-bg/60 overflow-y-auto min-h-0">
+      <div className="sticky top-0 z-10 bg-brand-bg/95 backdrop-blur border-b border-brand-border">
+        <div className="px-4 pt-3 pb-2 flex items-center justify-between">
+          <h2 className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold">Conversaciones</h2>
+          <span className="text-[11px] font-semibold text-brand-gold bg-brand-gold/10 border border-brand-gold/20 rounded-full px-2 py-0.5">
+            {conversations.length}
+          </span>
+        </div>
+        <div className="px-3 pb-3">
+          <div className="relative">
+            <svg
+              width={14}
+              height={14}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.8}
+              strokeLinecap="round"
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-brand-muted pointer-events-none"
+              aria-hidden
+            >
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.8-3.8" />
+            </svg>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Buscar por nombre o teléfono…"
+              aria-label="Buscar conversaciones"
+              className="w-full rounded-xl border border-brand-border bg-brand-surface px-3 py-2 pl-9 text-xs text-brand-text placeholder:text-brand-muted focus:outline-none focus:border-brand-gold/60"
+            />
+          </div>
+        </div>
+      </div>
+
+      {conversations.length === 0 ? (
+        <div className="p-6 text-center text-sm text-brand-muted">
+          Aún no hay conversaciones. Escríbele al número conectado desde otro WhatsApp para verlas aquí.
+        </div>
+      ) : filtered.length === 0 ? (
+        <div className="p-6 text-center text-sm text-brand-muted">
+          Ninguna conversación coincide con la búsqueda.
+        </div>
+      ) : (
+        <ul>
+          {filtered.map((c) => {
+            const isSelected = c.id === selectedId;
+            const label = c.name ?? `+${c.phone}`;
+            const recent = c.last_message_at !== null && nowS - c.last_message_at < 3600;
+            return (
+              <li key={c.id}>
+                <button
+                  onClick={() => onSelect(c.id)}
+                  className={`w-full text-left px-4 py-3.5 border-b border-brand-border/40 transition-colors duration-150 flex gap-3 items-start relative focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+                    isSelected ? "bg-brand-surface-2" : "hover:bg-brand-surface"
+                  }`}
+                >
+                  {isSelected && <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-brand-gold rounded-r" />}
+                  <Avatar label={label} size={40} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2 mb-0.5">
+                      <div
+                        className={`text-sm truncate ${
+                          recent ? "font-bold text-brand-text" : "font-medium text-brand-text/90"
+                        }`}
+                      >
+                        {label}
+                      </div>
+                      <span className="flex items-center gap-1.5 shrink-0">
+                        {recent ? <span className="h-1.5 w-1.5 rounded-full bg-brand-gold" aria-hidden /> : null}
+                        <span className="text-[10px] text-brand-muted/80">{shortAgo(c.last_message_at)}</span>
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold shrink-0 ${
+                          c.mode === "AI" ? "bg-brand-gold/15 text-brand-gold" : "bg-emerald-500/15 text-emerald-400"
+                        }`}
+                      >
+                        {c.mode === "AI" ? "IA" : "TÚ"}
+                      </span>
+                      {c.last_message_preview ? (
+                        <div className={`text-xs truncate ${recent ? "text-brand-text/80" : "text-brand-muted"}`}>
+                          {c.last_message_preview}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </aside>
+  );
+}
+
+// ============================================================
+// Columna/modal de contexto: los pedidos del teléfono seleccionado
+// ============================================================
+
 function OrderContext({
   selected,
   orders,
@@ -143,8 +285,7 @@ function OrderContext({
   }, [noteModal, noteText, onChanged]);
 
   const telefono = soloDigitos(selected?.phone);
-  const vinculados =
-    telefono && orders ? orders.filter((o) => soloDigitos(o.phone) === telefono) : [];
+  const vinculados = telefono && orders ? orders.filter((o) => soloDigitos(o.phone) === telefono) : [];
 
   return (
     <div className="h-full overflow-y-auto px-3 py-3 space-y-3">
@@ -159,72 +300,72 @@ function OrderContext({
       ) : vinculados.length === 0 ? (
         <EmptyState title="Sin pedido vinculado a este teléfono" hint="Ningún pedido en el agente coincide con este número." />
       ) : (
-        vinculados.map((o) => {
-          const state = deriveState(o);
-          const err = errors[o.id];
-          return (
-            <Card key={o.id} className="px-3.5 py-3 space-y-2.5">
-              <div className="text-sm font-semibold text-brand-text leading-snug">
-                #{o.shopify_order_number}
-                <span className="font-normal text-brand-muted"> · {o.product_summary}</span>
-              </div>
-              <div className="flex items-center justify-between gap-2">
-                <OrderStateBadge state={state} />
-                <span className="text-sm font-semibold text-brand-text">
-                  {formatEuro(parseFloat(o.total_price))}
-                </span>
-              </div>
-              <div className="text-xs text-brand-muted space-y-0.5">
-                {o.city ? <div>{o.city}</div> : null}
-                <div>Último contacto: {timeAgo(o.customer_replied_at ?? o.whatsapp_sent_at)}</div>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {o.status !== "confirmed" ? (
+        <Card className="divide-y divide-brand-border">
+          {vinculados.map((o) => {
+            const state = deriveState(o);
+            const err = errors[o.id];
+            return (
+              <div key={o.id} className="px-3.5 py-3.5 space-y-2.5">
+                <div className="text-sm font-semibold text-brand-text leading-snug">
+                  #{o.shopify_order_number}
+                  <span className="font-normal text-brand-muted"> · {o.product_summary}</span>
+                </div>
+                <div className="flex items-center justify-between gap-2">
+                  <OrderStateBadge state={state} />
+                  <span className="text-sm font-semibold text-brand-text">{formatEuro(parseFloat(o.total_price))}</span>
+                </div>
+                <div className="text-xs text-brand-muted space-y-0.5">
+                  {o.city ? <div>{o.city}</div> : null}
+                  <div>Último contacto: {timeAgo(o.customer_replied_at ?? o.whatsapp_sent_at)}</div>
+                </div>
+                <div className="flex flex-wrap gap-1.5 pt-0.5">
+                  {o.status !== "confirmed" ? (
+                    <GhostButton
+                      className={smallBtn}
+                      disabled={busy === `${o.id}:confirm`}
+                      onClick={() => doAction(o.id, "confirm")}
+                    >
+                      Confirmar
+                    </GhostButton>
+                  ) : null}
                   <GhostButton
                     className={smallBtn}
-                    disabled={busy === `${o.id}:confirm`}
-                    onClick={() => doAction(o.id, "confirm")}
+                    disabled={busy === `${o.id}:resend`}
+                    onClick={() => doAction(o.id, "resend")}
                   >
-                    Confirmar
+                    Reenviar
                   </GhostButton>
-                ) : null}
-                <GhostButton
-                  className={smallBtn}
-                  disabled={busy === `${o.id}:resend`}
-                  onClick={() => doAction(o.id, "resend")}
-                >
-                  Reenviar
-                </GhostButton>
-                <GhostButton
-                  className={smallBtn}
-                  disabled={busy === `${o.id}:needs_call`}
-                  onClick={() => doAction(o.id, "needs_call")}
-                >
-                  A llamadas
-                </GhostButton>
-                <GhostButton
-                  className={smallBtn}
-                  onClick={() => {
-                    setNoteText(o.dispatch_note ?? "");
-                    setNoteError(null);
-                    setNoteModal({ orderId: o.id, orderNumber: o.shopify_order_number });
-                  }}
-                >
-                  Nota expedición
-                </GhostButton>
-                <GhostButton
-                  className={smallBtn}
-                  onClick={() => {
-                    window.location.hash = "#pedidos";
-                  }}
-                >
-                  Ver pedido →
-                </GhostButton>
+                  <GhostButton
+                    className={smallBtn}
+                    disabled={busy === `${o.id}:needs_call`}
+                    onClick={() => doAction(o.id, "needs_call")}
+                  >
+                    A llamadas
+                  </GhostButton>
+                  <GhostButton
+                    className={smallBtn}
+                    onClick={() => {
+                      setNoteText(o.dispatch_note ?? "");
+                      setNoteError(null);
+                      setNoteModal({ orderId: o.id, orderNumber: o.shopify_order_number });
+                    }}
+                  >
+                    Nota expedición
+                  </GhostButton>
+                  <GhostButton
+                    className={smallBtn}
+                    onClick={() => {
+                      window.location.hash = "#pedidos";
+                    }}
+                  >
+                    Ver pedido →
+                  </GhostButton>
+                </div>
+                {err ? <div className="text-xs text-red-400 leading-snug">{err}</div> : null}
               </div>
-              {err ? <div className="text-xs text-red-400 leading-snug">{err}</div> : null}
-            </Card>
-          );
-        })
+            );
+          })}
+        </Card>
       )}
 
       <ModalShell
@@ -298,12 +439,7 @@ export default function ChatsView({
     <div className="h-full overflow-hidden">
       {/* ── md+: lista | chat (| contexto en lg+) ── */}
       <div className="hidden md:grid h-full md:grid-cols-[280px_1fr] lg:grid-cols-[300px_1fr_320px]">
-        <ConversationList
-          conversations={conversations}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          onRefresh={onRefresh}
-        />
+        <ChatList conversations={conversations} selectedId={selectedId} onSelect={onSelect} />
         <ConversationPanel conversation={selected} onRefresh={onRefresh} />
         <div className="hidden lg:block min-h-0 border-l border-brand-border bg-brand-bg/60">
           {contexto}
@@ -314,12 +450,7 @@ export default function ChatsView({
       <div className="md:hidden h-full">
         {!mobileChatOpen || !selected ? (
           <div className="h-full grid grid-rows-1">
-            <ConversationList
-              conversations={conversations}
-              selectedId={selectedId}
-              onSelect={handleSelect}
-              onRefresh={onRefresh}
-            />
+            <ChatList conversations={conversations} selectedId={selectedId} onSelect={handleSelect} />
           </div>
         ) : (
           <div className="h-full flex flex-col">

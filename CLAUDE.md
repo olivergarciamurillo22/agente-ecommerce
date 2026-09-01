@@ -174,13 +174,27 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**⚠️ EL NAS AÚN CORRE `fix/hardening-casamable` (esquema 9/10); `main` YA
-ESTÁ RECONCILIADO Y POR DELANTE.** El 26-08-2026 se mergeó
-`feat/operational-closure` → `main` (merge `73884b1`, esquema **11**, 493
-tests) tras verificar el grafo: hardening ⊂ main ⊂ closure, cero commits de
-producción fuera. **Desplegar `main` en el NAS es la acción pendiente, de
-Pedro**: pasos exactos en `docs/PEDRO-DEPLOY-OPERACIONAL.md` y manifest con
-rollback en `docs/DEPLOY-MANIFEST-26-08.md` (backup → precheck →
+**⚠️ PRODUCCIÓN (NAS) CORRE `feat/casamable-control-center-v2` @ `67f05c7`
+(esquema 15, cloud_api, TEST_MODE=1).** La rama de trabajo actual es
+**`feat/control-center-v3-operational-polish`** (esquema 16): cierra los
+P0 del 02-09 — WhatsApp 132001 (mapping lógico→plantilla real de la WABA
+con verificación obligatoria vía `whatsapp:templates:doctor`), tracking
+gate-antes-del-claim + fail-closed de datos, cadena de exclusión de
+Shopify, Retell (preflight de variables `unsafe_dynamic_variable`,
+`RETELL_AGENT_VERSION` fijable, prompt versionado en
+`config/retell/casamable-agent-prompt.md` + validador ampliado,
+`retell:doctor`, `calls:simulate`) — y el rediseño v3 (nav rail con
+labels, marca Casamable, header provider-aware, ⌘K, rampa
+`whatsapp_rollout_percent` en settings). **Guía de despliegue:
+`docs/DEPLOY-HOTFIX-02-09.md`; informe: `docs/CONTROL-CENTER-V3.md`.**
+La confirmación inicial queda BLOQUEADA (con motivo visible) hasta correr
+el doctor de plantillas donde estén las credenciales de la WABA (el NAS).
+Llamadas siguen MANUAL-ONLY.
+
+**Estado anterior (26-08, ya contenido en la rama):** merge `73884b1`
+(esquema 11, 493 tests) — hardening ⊂ main ⊂ closure. Guías de aquel
+despliegue en `docs/PEDRO-DEPLOY-OPERACIONAL.md` y
+`docs/DEPLOY-MANIFEST-26-08.md` (backup → precheck →
 `73884b1` → observación 30 min). Ninguna variable de entorno nueva. Contexto
 de la sesión de Pedro en `docs/CONTEXTO-2026-08-25.md` (leer antes de tocar
 Meta, Dropi o llamadas).
