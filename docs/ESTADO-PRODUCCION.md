@@ -4,37 +4,52 @@ Documento vivo. Describe **lo que está corriendo de verdad en el NAS**, cómo e
 
 Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decisiones del momento), ver el `docs/CONTEXTO-YYYY-MM-DD.md` correspondiente — este documento es el snapshot actual, no el historial de cómo se llegó a él.
 
-**Última actualización: 26-08-2026 (cierre de sesión).**
+**Última actualización: 01-09-2026 (cierre de sesión).**
 
-> **Rama de código candidato al cierre:** `fix/hardening-casamable` = `main`
-> (reconciliados por merge explícito el 26-08; el NAS sigue en la rama y no
-> se ha tocado). Esquema del CÓDIGO: **10** (`ordered_at`); el NAS quedará en
-> 10 en su próximo despliegue — hoy corre 9. Novedades del cierre en
-> `docs/CONTEXTO-2026-08-26.md`: T1 (plantilla fuera de ventana — el bug que
-> bloqueaba la migración a Cloud API), HMAC contra ambos secretos con salud
-> visible, llamadas fail-closed en piloto, validador de prompt, diagnóstico
-> Dropi, y 7 PRs de la cola integrados.
+> ⚠️ **PRODUCCIÓN CORRE `feat/casamable-control-center-v2` (commit base
+> `67f05c7` + 2 commits locales sin subir aún, `36310e8` y `5971757`,
+> exportados en `FIX-CASAMABLE-01-09.patch`), esquema **15**.** Desplegada
+> el 01-09 desde cero (`repo-v2`, clon directo de GitHub vía contenedor
+> efímero — ver `docs/CONTEXTO-2026-09-01.md` §3). Reemplaza a
+> `fix/hardening-casamable`/`recover/nas-uncommitted-30-08` como base de
+> producción: ambas quedan absorbidas en `feat/casamable-control-center-v2`
+> (confirmado por `git merge-base`). El detalle completo — Control Center
+> v2, Meta Marketing API, el bug `132001` que bloqueaba el piloto COD, el
+> inventario de las 12 plantillas de la WABA y la recuperación del trabajo
+> sin commitear del NAS del 28–31-08 — está en `docs/CONTEXTO-2026-09-01.md`.
 
-> ⚠️ **PRODUCCIÓN CORRE `fix/hardening-casamable` (commit `fe53c9d`+, esquema
-> 9), NO `main`.** Desplegada por Pedro el 25-08 con backup y baseline
-> medidos (outbox 93/93/0 idéntico antes y después; WhatsApp reconectó sin
-> QR; las 4 migraciones nuevas corrieron). `main` está 27 commits por detrás
-> de producción: la reconciliación (merge) es la decisión pendiente de
-> Óliver. El detalle completo del despliegue y de los frentes de Meta, Dropi
-> y llamadas está en `docs/CONTEXTO-2026-08-25.md` — este snapshot lo resume.
-
-**Novedades del 25-08 en el NAS:**
-- **WhatsApp Cloud API instalada y APAGADA**: app de Meta creada y publicada,
-  webhook `https://agente.casamable.es/api/webhooks/whatsapp` verificado con
-  un evento real (el gate de coexistencia registró y no respondió — medido
-  en producción). Proveedor activo: **Baileys**, sin cambios de
-  comportamiento.
-- **Retell montado y APAGADO**: número +34 950 835 615 (voz, solo España),
-  trunk por Dublín, webhook del agente apuntando al NAS. Kill switch
-  cerrado, shadow ON, allowlist con el móvil de Pedro. Prompt v5 sin validar.
-- **Dropi desatascado**: la causa era el campo *vendor* del producto en
-  Shopify (`Casamable` → `Dropi PRO`). Verificado con el pedido `#35010994`
-  pasando a `IN_PROGRESS`.
+**Novedades del 01-09 en el NAS:**
+- **Control Center v2 desplegado**: Home/dock de 9 secciones, Pedidos v2,
+  calculadora de rentabilidad COD, Finanzas con P&L de entrega real,
+  integración de Meta Marketing API (solo lectura, `ads_read`+`read_insights`,
+  sin `ads_management`) e integración read-first de Beeping (apagada,
+  `BEEPING_ENABLED=0`, fail-closed). Esquema SQLite `user_version = 15`
+  (migraciones v11–v15, aditivas).
+- **742 líneas de trabajo sin commitear del NAS (28–31-08), recuperadas**:
+  MANUAL-ONLY de llamadas, aviso de retraso "Ultras" con botones
+  contextuales, plantillas Meta reales en tracking. Integradas en
+  `origin/recover/nas-uncommitted-30-08` y de ahí en la rama v2.
+- **Fuga de secretos en git, cerrada**: 17 backups `.env.bak*` no estaban en
+  `.gitignore`. Corregido antes de ningún `push`; ningún secreto llegó a
+  GitHub.
+- **Causa del bloqueante del piloto COD (`code 132001`) encontrada y
+  corregida**: el catálogo local de plantillas (`config/whatsapp-templates.json`)
+  declaraba 12 plantillas de las que solo 6 existían de verdad en Meta. Las
+  6 que pedía el flujo COD (`order_confirmation_request`, etc.) eran
+  borradores nunca dados de alta. Corregido apuntando el flujo a
+  `confirmacion_pedido_cod`/`recordatorio_confirmacion` (nuevas, creadas hoy)
+  — **pendientes de aprobación de Meta**, así que el piloto sigue bloqueado
+  hasta que aprueben.
+- **WhatsApp: sin coexistencia.** Solo corre Cloud API
+  (`WHATSAPP_PROVIDER=cloud_api`); Baileys sigue en el código como
+  implementación alternativa tras la misma interfaz, pero no arranca. El
+  número NO está en coexistencia con la app de WhatsApp Business — el
+  soporte humano se hace desde el panel, no desde el móvil.
+- **Autenticación del panel — trabajo en curso (Claude Code)**: hoy sigue
+  siendo HTTP Basic Auth sin sesión real. Recomendación registrada para
+  migrar a formulario + cookie firmada, con usuarios individuales (no
+  contraseña compartida), rate limiting en el login y logout que invalide
+  la sesión server-side. Ver `docs/CONTEXTO-2026-09-01.md` §7.
 
 ---
 
@@ -42,19 +57,24 @@ Para el diagnóstico detallado de una sesión concreta (hallazgos, cifras, decis
 
 | | |
 |---|---|
-| Commit desplegado | **`7fa41c8`** (rama `main`, al día) |
-| Esquema SQLite | `user_version = 5` |
-| Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
+| Commit desplegado | `67f05c7` (rama `feat/casamable-control-center-v2`) + `36310e8` + `5971757` (locales, pendientes de `push`) |
+| Esquema SQLite | `user_version = 15` |
+| Contenedor | `casamable-agent`, healthy, `restart: unless-stopped`, imagen `9131ffa0` |
 | NAS | UGREEN DXP2800, `192.168.2.109`, UGOS 1.18.1.0098 |
 | Acceso público | `https://agente.casamable.es` (VPS Hetzner → Caddy → WireGuard → NAS:3000) |
-| WhatsApp | Baileys, `+34 641 308 254`, reconecta sin QR |
-| Modo | `TEST_MODE=1` a propósito (decisión de Pedro, hasta que el sistema esté funcional) — solo escribe a la allowlist de 2 teléfonos; los pedidos de clientes reales se ignoran. **Mientras siga así, `needs_call` no mide nada real.** |
-| Llamadas (E7) | Desplegado y **APAGADO**: `ai_calls_enabled=0`, `calls_shadow_mode=1` por defecto. Ver `docs/RUNBOOK-LLAMADAS.md`. |
+| WhatsApp | **Cloud API** (`WHATSAPP_PROVIDER=cloud_api`), `+34 641 308 254`, sin coexistencia con la app de WhatsApp Business. Baileys queda dormido (sesión conservada en `auth/`, permite volver atrás sin QR) |
+| Modo | `TEST_MODE=1` a propósito — solo escribe a la allowlist de 2 teléfonos. `WHATSAPP_SEND_ENABLED=1`, `SHOPIFY_WRITE_ENABLED=1` |
+| Llamadas | MANUAL-ONLY desde el 28-08: el orquestador automático no encola ni marca llamadas por sí solo; solo el botón "Llamar ahora" del panel (`calls/manual.ts`) |
+| Meta Ads | `META_ADS_API_ENABLED=0` (integrado y verificado en vivo, aún no activado) |
+| Beeping | `BEEPING_ENABLED` sin poner → fail-closed |
+| Rollback disponible | `/repo` intacto en `38f3cc7`, imagen `cef8215dc818`, backup `messages-antes-v2-20260901-2017.db` |
 
-Desplegado en dos tandas:
-
-- **24-08 (noche)** — **E1** (eje de cierre) · **E2** (webhooks `orders/cancelled`/`fulfilled`/`updated`) · **E3** (backfill del histórico) · **E4** (enlace con Dropea por tag) · **E5** (reconciliación periódica) · **E7** (orquestador de llamadas Retell, apagado) · PR #5 (cadencia de reintentos anclada a días de calendario).
-- **25-08** — **E8** (reconciliador de Dropea por API) desplegado y `npm run dropea:reconcile -- --apply` corrido. Sin cambio de esquema: E8 no añade migración, solo dos consultas nuevas en `db.ts`.
+**Historial de despliegues anteriores** (24-08 a 26-08: E1–E8, hardening,
+ordered_at, HMAC de Shopify) — ver `docs/CONTEXTO-2026-08-24.md`,
+`docs/CONTEXTO-2026-08-25.md` y `docs/CONTEXTO-2026-08-26.md`. Las secciones
+2–8 de este documento describen ese estado intermedio (schema 5–10) y no se
+han vuelto a auditar contra la v2 todavía — tratarlas como historial, no
+como snapshot actual, hasta la próxima revisión completa.
 
 ---
 
