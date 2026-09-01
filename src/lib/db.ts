@@ -729,6 +729,32 @@ export function migrateCodScenarios(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración (SCHEMA_VERSION 16): qué agente y VERSIÓN de Retell atendió
+ * cada llamada. El incidente "[password 1]" (02-09) salió de una edición
+ * del dashboard que cambió las llamadas reales sin que nadie lo pidiera:
+ * desde ahora la versión se fija por env (RETELL_AGENT_VERSION) y cada
+ * intento persiste la que Retell usó de verdad — auditable en salud.
+ */
+export function migrateCallAgentVersion(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(call_attempts)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const [name, decl] of [
+    ["agent_id", "TEXT"],
+    ["agent_version", "TEXT"],
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE call_attempts ADD COLUMN ${name} ${decl}`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1342,6 +1368,7 @@ function build() {
   migrateMetaAdsDaily(db);
   migrateProductCostHistory(db);
   migrateCodScenarios(db);
+  migrateCallAgentVersion(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1511,7 +1538,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 15;
+export const SCHEMA_VERSION = 16;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -3548,6 +3575,9 @@ export interface CallAttemptRow {
   reason: string | null;
   created_at: number;
   updated_at: number;
+  /** Qué agente/versión de Retell atendió (v16, incidente 02-09). */
+  agent_id: string | null;
+  agent_version: string | null;
 }
 
 /** Crea un intento en cola. Devuelve null si el pedido YA tiene un intento
@@ -3634,6 +3664,8 @@ export function transitionCallAttempt(
     result: string;
     retry_consumed: number;
     reason: string;
+    agent_id: string | null;
+    agent_version: string | null;
   }> = {}
 ): boolean {
   const sets: string[] = ["state = ?", "updated_at = unixepoch()"];

@@ -8569,7 +8569,8 @@ async function main(): Promise<void> {
 
     const v6bueno =
       "Hola {{nombre_cliente}}, llamo de Casamable por tu pedido {{numero_pedido}}: " +
-      "{{unidades}} de {{producto}} por {{importe_total}}, a entregar en {{direccion}}, {{localidad}}.";
+      "{{unidades}} de {{producto}} por {{importe_total}}, a entregar en {{direccion}}, {{localidad}}, " +
+      "código postal {{codigo_postal}}.";
     assert.equal(promptVal.validatePromptPlaceholders(v6bueno).ok, true);
   });
 
@@ -8577,11 +8578,13 @@ async function main(): Promise<void> {
     // Si alguien añade una variable al payload sin tocar el validador (o al
     // revés), esto falla y el desfase se ve aquí, no en una llamada real.
     const payloadMod = fs.readFileSync(path.join(process.cwd(), "src/lib/calls/payload.ts"), "utf8");
-    const ini = payloadMod.indexOf("variables: {");
-    const fin = payloadMod.indexOf("},", ini);
+    // V3: el literal ahora es `const variables = {` (el preflight de
+    // seguridad lo inspecciona antes de devolverlo).
+    const ini = payloadMod.indexOf("const variables = {");
+    const fin = payloadMod.indexOf("};", ini);
     const cuerpo = payloadMod.slice(ini, fin);
     // Coge tanto `clave: valor` como el shorthand `clave,` (producto, direccion).
-    const delPayload = [...cuerpo.matchAll(/^\s{6}([a-z_]+)[,:]/gm)].map((m) => m[1]).sort();
+    const delPayload = [...cuerpo.matchAll(/^\s{4}([a-z_]+)[,:]/gm)].map((m) => m[1]).sort();
     const delValidador = [...promptVal.ALLOWED_PROMPT_VARIABLES].sort();
     assert.deepEqual(delValidador, delPayload, "payload.ts y prompt-validator.ts deben declarar LAS MISMAS variables");
   });
@@ -10777,6 +10780,130 @@ async function main(): Promise<void> {
     assert.equal(gate.ok, false);
     assert.ok(gate.reasons.some((r) => /cancelado en Shopify/.test(r)));
   });
+
+  // ============ V3 FASE D · Retell: el incidente "[password 1]" no puede repetirse ============
+  console.log("\n— V3 · Retell: variables seguras, versión fijada, prompt bajo contrato —");
+  {
+    const payloadMod = await import("../src/lib/calls/payload");
+    const promptVal = await import("../src/lib/calls/prompt-validator");
+    const { retellProvider } = await import("../src/lib/calls/retell");
+    const { CALL_RESULTS } = await import("../src/lib/calls/results");
+    const fsD = await import("node:fs");
+
+    const pedidoBase = (over: Partial<Record<string, unknown>> = {}) =>
+      ({
+        customer_name: "Marta García",
+        phone: "34600111333",
+        product_summary: "1x Limpiador Ultrasónico",
+        total_price: "29.99",
+        currency: "EUR",
+        address_line1: "Calle Almería 12",
+        city: "Almería",
+        postal_code: "04007",
+        shopify_order_number: "1137",
+        created_at: Math.floor(Date.now() / 1000) - 86400,
+        raw_payload: null,
+        ...over,
+      }) as unknown as import("../src/lib/db").OrderRow;
+
+    await test("retell-never-speaks-template-garbage: nombre '[password 1]' → CALL BLOCKED con unsafe_dynamic_variable", () => {
+      const r = payloadMod.buildCallPayload(pedidoBase({ customer_name: "[password 1]" }), new Date());
+      assert.equal(r.ok, false, "JAMÁS se llama con un placeholder como nombre");
+      assert.ok(r.missing.some((m) => m.startsWith("unsafe_dynamic_variable:nombre_cliente")), r.missing.join(","));
+      assert.equal(r.variables, null, "ni una variable sale del preflight");
+      // Y las demás formas del mismo veneno:
+      for (const veneno of ["{{nombre_cliente}}", "nombre_cliente", "undefined", "null", "No disponible", "password 1", "<cliente>"]) {
+        const rx = payloadMod.buildCallPayload(pedidoBase({ customer_name: veneno }), new Date());
+        assert.equal(rx.ok, false, `"${veneno}" debe bloquear la llamada`);
+      }
+    });
+
+    await test("retell preflight: el pedido NORMAL pasa — saludo con Marta, sin corchetes ni llaves en NINGUNA variable", () => {
+      const r = payloadMod.buildCallPayload(pedidoBase(), new Date());
+      assert.equal(r.ok, true);
+      assert.equal(r.variables!.nombre_cliente, "Marta García");
+      for (const [k, v] of Object.entries(r.variables!)) {
+        assert.ok(!/[\[\]{}]/.test(v), `${k} lleva símbolos de plantilla: "${v}"`);
+        assert.ok(!/password/i.test(v), `${k} lleva "password"`);
+      }
+    });
+
+    await test("retell versión fijada: override_agent_version viaja en el payload y la respuesta se captura", async () => {
+      const originalFetch = globalThis.fetch;
+      let bodyEnviado: Record<string, unknown> | null = null;
+      globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
+        bodyEnviado = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({ call_id: "call_test_v16", agent_id: "agent_abc", agent_version: 7 }), { status: 201 });
+      }) as typeof fetch;
+      try {
+        await withEnv({ RETELL_API_KEY: "key-test", RETELL_FROM_NUMBER: "+34950835615", RETELL_AGENT_ID: "agent_abc", RETELL_AGENT_VERSION: "7" }, async () => {
+          const accepted = await retellProvider.createOutboundCall({
+            toNumber: "+34600111333",
+            fromNumber: "+34950835615",
+            dynamicVariables: { nombre_cliente: "Marta" },
+            metadata: {},
+          });
+          assert.equal(bodyEnviado!.override_agent_version, 7, "la versión va como NÚMERO en el payload (contrato oficial)");
+          assert.equal(bodyEnviado!.override_agent_id, "agent_abc");
+          assert.equal(accepted.agentVersion, "7", "la versión usada se captura para auditoría");
+          assert.equal(accepted.agentId, "agent_abc");
+        });
+        // latest_published viaja como STRING (tag oficial), nunca draft.
+        await withEnv({ RETELL_API_KEY: "key-test", RETELL_FROM_NUMBER: "+34950835615", RETELL_AGENT_ID: "agent_abc", RETELL_AGENT_VERSION: "latest_published" }, async () => {
+          await retellProvider.createOutboundCall({ toNumber: "+34600111333", fromNumber: "+34950835615", dynamicVariables: {}, metadata: {} });
+          assert.equal(bodyEnviado!.override_agent_version, "latest_published");
+        });
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    await test("retell migración v16: agent_id/agent_version en call_attempts, idempotente", () => {
+      db.migrateCallAgentVersion(db.systemDbHandle());
+      db.migrateCallAgentVersion(db.systemDbHandle());
+      const cols = (db.systemDbHandle().prepare("PRAGMA table_info(call_attempts)").all() as Array<{ name: string }>).map((c) => c.name);
+      assert.ok(cols.includes("agent_id") && cols.includes("agent_version"));
+    });
+
+    await test("retell prompt versionado: válido, con las 11 variables, los 12 resultados del enum y la cancelación HONESTA", () => {
+      const prompt = fsD.readFileSync("config/retell/casamable-agent-prompt.md", "utf8");
+      const v = promptVal.validatePromptPlaceholders(prompt);
+      assert.equal(v.ok, true, v.issues.map((i) => i.detail).join(" · "));
+      assert.equal(v.used.length, 11, "usa las 11 variables del contrato");
+      for (const resultado of CALL_RESULTS) {
+        assert.ok(prompt.includes(resultado), `el prompt no menciona el resultado "${resultado}" del enum`);
+      }
+      assert.match(prompt, /dejo solicitada la cancelación/, "la cancelación se describe como SOLICITUD (lo que el backend hace de verdad)");
+      assert.ok(!/lo cancelo ahora mismo/.test(prompt), "jamás promete una mutación que no existe");
+      assert.match(prompt, /extraer_datos_llamada/, "referencia la tool real de extracción");
+      assert.match(prompt, /finalizarllamada/, "referencia la tool real de colgar");
+    });
+
+    await test("retell validador: caza el residuo 'password', el {{}} vacío y la variable obligatoria ausente", () => {
+      const conPassword = promptVal.validatePromptPlaceholders("Hola, ¿hablo con [password 1]? Dime {{nombre_cliente}} {{producto}} {{importe_total}} {{direccion}} {{localidad}} {{codigo_postal}}");
+      assert.ok(conPassword.issues.some((i) => i.kind === "password_residue"), "password_residue detectado");
+      const vacio = promptVal.validatePromptPlaceholders("Hola {{}} — {{nombre_cliente}} {{producto}} {{importe_total}} {{direccion}} {{localidad}} {{codigo_postal}}");
+      assert.ok(vacio.issues.some((i) => i.kind === "empty_placeholder"));
+      const sinNombre = promptVal.validatePromptPlaceholders("Confirmo {{producto}} {{importe_total}} {{direccion}} {{localidad}} {{codigo_postal}}");
+      assert.ok(sinNombre.issues.some((i) => i.kind === "missing_required_variable" && /nombre_cliente/.test(i.detail)));
+      const promesaFalsa = promptVal.validatePromptPlaceholders("Si quiere cancelar dile: lo cancelo ahora mismo. {{nombre_cliente}} {{producto}} {{importe_total}} {{direccion}} {{localidad}} {{codigo_postal}}");
+      assert.ok(promesaFalsa.issues.some((i) => i.kind === "false_promise"));
+    });
+
+    await test("retell salud: el preflight es visible — prompt validado y versión fijada o sin fijar, con la última versión usada", async () => {
+      const { getCallsHealth } = await import("../src/lib/system/health-integrations");
+      const h1 = getCallsHealth();
+      assert.equal(h1.promptValidated, true, "el prompt del repo valida");
+      await withEnv({ RETELL_AGENT_VERSION: "7" }, () => {
+        const h = getCallsHealth();
+        assert.equal(h.agentVersionPinned, true);
+        assert.equal(h.configuredAgentVersion, "7");
+      });
+      await withEnv({ RETELL_AGENT_VERSION: undefined }, () => {
+        assert.equal(getCallsHealth().agentVersionPinned, false, "sin fijar se DICE, no se esconde");
+      });
+    });
+  }
 
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);

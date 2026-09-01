@@ -9,13 +9,12 @@
 import fs from "node:fs";
 import { validatePromptPlaceholders, ALLOWED_PROMPT_VARIABLES } from "../src/lib/calls/prompt-validator";
 
-const ruta = process.argv[2];
-if (!ruta) {
-  console.log("\nUso: npm run calls:validate-prompt -- ruta/al/prompt.txt\n");
-  console.log("Variables permitidas (contrato de payload.ts):");
-  for (const v of ALLOWED_PROMPT_VARIABLES) console.log(`  {{${v}}}`);
-  process.exit(1);
-}
+// Sin argumento valida la FUENTE VERSIONADA del prompt de producción:
+// config/retell/casamable-agent-prompt.md (lo que debe estar pegado en
+// Retell). Con argumento, valida ese fichero (p.ej. un borrador).
+const ruta = process.argv[2] ?? "config/retell/casamable-agent-prompt.md";
+console.log("Variables permitidas (contrato de payload.ts):");
+for (const v of ALLOWED_PROMPT_VARIABLES) console.log(`  {{${v}}}`);
 
 const prompt = fs.readFileSync(ruta, "utf8");
 const r = validatePromptPlaceholders(prompt);

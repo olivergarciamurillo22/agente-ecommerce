@@ -37,9 +37,25 @@ export interface PromptIssue {
     | "unknown_placeholder" // {{algo}} que el payload no produce
     | "single_brace" // {variable} — Retell no lo sustituye, se lee en voz alta
     | "bracket_placeholder" // [variable] — ídem
-    | "template_filter"; // {{var | filtro}} — el modelo lo lee como texto
+    | "template_filter" // {{var | filtro}} — el modelo lo lee como texto
+    | "empty_placeholder" // {{}} — hueco sin variable
+    | "password_residue" // "password" en el texto (incidente [password 1])
+    | "missing_required_variable" // el prompt no usa una variable obligatoria
+    | "false_promise"; // promete una mutación que el backend no hace
   detail: string;
 }
+
+/** Variables que el prompt DEBE referenciar: sin ellas, la llamada no puede
+ *  cumplir su función (saludar, identificar el pedido, confirmar dirección
+ *  e importe). El resto son opcionales. */
+export const REQUIRED_PROMPT_VARIABLES = [
+  "nombre_cliente",
+  "producto",
+  "importe_total",
+  "direccion",
+  "localidad",
+  "codigo_postal",
+] as const;
 
 export interface PromptValidation {
   ok: boolean;
@@ -60,6 +76,10 @@ export function validatePromptPlaceholders(prompt: string): PromptValidation {
   // {{ ... }} — el formato correcto de Retell.
   for (const m of prompt.matchAll(/\{\{\s*([^}]*?)\s*\}\}/g)) {
     const dentro = m[1].trim();
+    if (!dentro) {
+      issues.push({ kind: "empty_placeholder", detail: '"{{}}" vacío: un hueco sin variable se lee tal cual' });
+      continue;
+    }
     if (dentro.includes("|")) {
       issues.push({
         kind: "template_filter",
@@ -95,6 +115,28 @@ export function validatePromptPlaceholders(prompt: string): PromptValidation {
         kind: "bracket_placeholder",
         detail: `"[${m[1]}]" entre corchetes: no es un marcador válido, se leería en voz alta`,
       });
+    }
+  }
+
+  // "password" en cualquier parte: el incidente real fue el agente diciendo
+  // "¿Hablo con [password 1]?" — residuo de autorrelleno en el dashboard.
+  for (const m of prompt.matchAll(/password[\s_-]*\d*/gi)) {
+    issues.push({ kind: "password_residue", detail: `contiene "${m[0]}": residuo de autorrelleno — EL incidente del 02-09` });
+  }
+
+  // Promesas falsas: el backend solo REGISTRA la solicitud de cancelación
+  // (cancel_request); el agente no puede decir que cancela él.
+  if (/lo cancelo ahora mismo|cancelo tu pedido ahora|queda cancelado ya/i.test(prompt)) {
+    issues.push({
+      kind: "false_promise",
+      detail: 'promete "lo cancelo ahora mismo": el backend solo registra la solicitud — usar "dejo solicitada la cancelación"',
+    });
+  }
+
+  // Variables obligatorias sin referenciar: el guion no puede funcionar.
+  for (const req of REQUIRED_PROMPT_VARIABLES) {
+    if (!used.has(req)) {
+      issues.push({ kind: "missing_required_variable", detail: `el prompt no usa {{${req}}}: la llamada no puede ${req === "nombre_cliente" ? "saludar" : "confirmar"} sin ella` });
     }
   }
 

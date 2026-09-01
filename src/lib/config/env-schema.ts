@@ -264,6 +264,14 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "RETELL_AGENT_ID", category: "RETELL_CALLS", secret: false, description: "Agent ID del agente de confirmación.", requiredFor: ["retell-pilot"] },
   { name: "RETELL_FROM_NUMBER", category: "RETELL_CALLS", secret: false, description: "Número desde el que se llama, E.164 (+34950835615).", requiredFor: ["retell-pilot"], validate: phoneE164 },
   {
+    name: "RETELL_AGENT_VERSION",
+    category: "RETELL_CALLS",
+    secret: false,
+    description: "Versión del agente que usan las llamadas (override_agent_version): número publicado, o 'latest_published'. SIN fijar, cada llamada usa la última versión GUARDADA — una edición del dashboard cambia producción (incidente [password 1], 02-09). Fijarla es requisito del preflight.",
+    requiredFor: ["retell-pilot"],
+    validate: (v) => (/^\d+$/.test(v) || v === "latest_published" ? null : `número de versión o "latest_published" (vale "${v}")`),
+  },
+  {
     name: "CALLS_PILOT_MODE",
     category: "RETELL_CALLS",
     secret: false,

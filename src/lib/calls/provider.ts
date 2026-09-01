@@ -17,6 +17,9 @@ export interface OutboundCallRequest {
 
 export interface OutboundCallAccepted {
   providerCallId: string;
+  /** Qué agente/versión usó el proveedor de verdad (si lo reporta). */
+  agentId?: string | null;
+  agentVersion?: string | null;
 }
 
 export type ParsedCallEventType = "call_started" | "call_ended" | "call_analyzed";

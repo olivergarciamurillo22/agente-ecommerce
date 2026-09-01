@@ -114,6 +114,8 @@ export async function manualDialOrder(
 
     transitionCallAttempt(attemptId, ["dialing"], "in_flight", {
       provider_call_id: accepted.providerCallId,
+      agent_id: accepted.agentId ?? null,
+      agent_version: accepted.agentVersion ?? null,
       started_at: nowS,
     });
 

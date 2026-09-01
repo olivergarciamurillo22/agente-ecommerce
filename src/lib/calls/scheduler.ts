@@ -280,6 +280,8 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
       transitionCallAttempt(attempt.id, ["dialing"], "in_flight", {
         provider_call_id: accepted.providerCallId,
         started_at: nowS,
+        agent_id: accepted.agentId ?? null,
+        agent_version: accepted.agentVersion ?? null,
       });
       out.dialed++;
       logger.info(

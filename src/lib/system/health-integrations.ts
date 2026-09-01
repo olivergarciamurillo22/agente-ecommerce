@@ -436,8 +436,39 @@ export interface CallsHealth {
   /** Retell no expone saldo por API que tengamos verificado: se dice la
    *  verdad ("hay que mirarlo a mano"), nunca un healthy falso. */
   paymentStatus: "unknown_manual_check_required";
+  /** V3 (incidente [password 1]): el preflight visible en salud. */
+  promptValidated: boolean;
+  agentVersionPinned: boolean;
+  configuredAgentVersion: string | null;
+  /** La versión que usó la ÚLTIMA llamada real (auditoría). */
+  lastCallAgentVersion: string | null;
   status: HealthStatus;
   message: string;
+}
+
+function callsPromptValidated(): boolean {
+  try {
+    // Import estático arriba sería un ciclo potencial; el validador es puro.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { validatePromptPlaceholders } = require("../calls/prompt-validator") as typeof import("../calls/prompt-validator");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    const prompt = fs.readFileSync("config/retell/casamable-agent-prompt.md", "utf8");
+    return validatePromptPlaceholders(prompt).ok;
+  } catch {
+    return false;
+  }
+}
+
+function lastCallAgentVersion(): string | null {
+  try {
+    const r = systemDbHandle()
+      .prepare("SELECT agent_version FROM call_attempts WHERE agent_version IS NOT NULL ORDER BY id DESC LIMIT 1")
+      .get() as { agent_version: string } | undefined;
+    return r?.agent_version ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function getCallsHealth(): CallsHealth {
@@ -450,6 +481,10 @@ export function getCallsHealth(): CallsHealth {
     lastFailureAt: null,
     consecutiveFailures: 0,
     paymentStatus: "unknown_manual_check_required",
+    promptValidated: callsPromptValidated(),
+    agentVersionPinned: Boolean((process.env.RETELL_AGENT_VERSION ?? "").trim()),
+    configuredAgentVersion: (process.env.RETELL_AGENT_VERSION ?? "").trim() || null,
+    lastCallAgentVersion: lastCallAgentVersion(),
     status: "unknown",
     message: "",
   };

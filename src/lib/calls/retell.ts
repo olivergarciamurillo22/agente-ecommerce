@@ -38,6 +38,18 @@ function agentId(): string {
   return (process.env.RETELL_AGENT_ID ?? "").trim();
 }
 
+/**
+ * Política de versión del agente (incidente "[password 1]", 02-09): las
+ * llamadas por API usan la ÚLTIMA versión GUARDADA del agente — una edición
+ * accidental del dashboard cambia las llamadas reales al instante. Con
+ * RETELL_AGENT_VERSION fijada, cada llamada lleva override_agent_version
+ * (contrato oficial: número de versión, o "latest_published" / tag de
+ * entorno — NUNCA el draft). Sin fijar, se avisa en salud y en el doctor.
+ */
+export function retellAgentVersion(): string {
+  return (process.env.RETELL_AGENT_VERSION ?? "").trim();
+}
+
 function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -63,6 +75,10 @@ export const retellProvider: CallProvider = {
       metadata: req.metadata,
     };
     if (agentId()) body.override_agent_id = agentId();
+    const version = retellAgentVersion();
+    if (version) {
+      body.override_agent_version = /^\d+$/.test(version) ? Number(version) : version;
+    }
 
     let res: Response;
     try {
@@ -85,9 +101,13 @@ export const retellProvider: CallProvider = {
       const detalle = await res.text().catch(() => "");
       throw new ProviderRequestError(`Retell HTTP ${res.status}: ${detalle.slice(0, 300)}`, res.status);
     }
-    const json = (await res.json()) as { call_id?: string };
+    const json = (await res.json()) as { call_id?: string; agent_id?: string; agent_version?: number | string };
     if (!json.call_id) throw new ProviderRequestError("Retell aceptó pero sin call_id en la respuesta");
-    return { providerCallId: json.call_id };
+    return {
+      providerCallId: json.call_id,
+      agentId: typeof json.agent_id === "string" ? json.agent_id : null,
+      agentVersion: json.agent_version !== undefined ? String(json.agent_version) : version || null,
+    };
   },
 
   verifyWebhook(rawBody: string, signatureHeader: string | null, nowMs = Date.now()): boolean {
