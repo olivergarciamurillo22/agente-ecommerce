@@ -5,18 +5,19 @@
    Dorado sobre negro cálido, tipografías Fraunces + Archivo.
    ============================================================ */
 @theme {
-  --color-brand-bg: #0a0a0a;
-  --color-brand-surface: #141310;
-  --color-brand-surface-2: #1c1a15;
-  --color-brand-border: #2a2a26;
-  --color-brand-text: #f4f1e9;
-  --color-brand-muted: #8f8b81;
+  /* V3 (§34): dark premium contenido — el oro es ACENTO, no ambiente. */
+  --color-brand-bg: #0b0a08;
+  --color-brand-surface: #14130f;
+  --color-brand-surface-2: #1b1a15;
+  --color-brand-border: #262420;
+  --color-brand-text: #f2efe8;
+  --color-brand-muted: #918d83;
   --color-brand-gold: #fac51c;
   --color-brand-gold-soft: #e0ac16;
   --color-wa-green: #25d366;
 
   --font-display: var(--font-fraunces), Georgia, serif;
-  --font-sans: var(--font-archivo), -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: var(--font-archivo), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 html, body {
@@ -25,11 +26,19 @@ html, body {
 
 body {
   font-family: var(--font-sans);
+  /* Halo dorado MUY sutil (§33: nada de neones ni gradientes excesivos). */
   background:
-    radial-gradient(1200px 600px at 15% -10%, rgba(250, 197, 28, 0.06), transparent 60%),
-    radial-gradient(900px 500px at 100% 0%, rgba(250, 197, 28, 0.04), transparent 55%),
-    #0a0a0a;
+    radial-gradient(1200px 600px at 15% -10%, rgba(250, 197, 28, 0.035), transparent 60%),
+    #0b0a08;
   background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Interacción (§49): transiciones cortas y consistentes en todo el panel. */
+button, a, input, select, textarea {
+  transition-property: color, background-color, border-color, opacity, box-shadow, transform;
+  transition-duration: 150ms;
+  transition-timing-function: ease-out;
 }
 
 .font-display { font-family: var(--font-display); }
@@ -40,15 +49,15 @@ body {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  opacity: 0.025;
+  opacity: 0.018;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-/* Scrollbar dorada discreta */
+/* Scrollbar neutra y discreta (el oro es acento, no cromo de la UI). */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(250, 197, 28, 0.14); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(250, 197, 28, 0.28); }
+::-webkit-scrollbar-thumb { background: rgba(145, 141, 131, 0.22); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(145, 141, 131, 0.4); }
 
 /* Latido del punto de estado */
 @keyframes brand-pulse {

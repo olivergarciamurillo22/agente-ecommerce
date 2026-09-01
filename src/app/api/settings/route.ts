@@ -12,6 +12,9 @@ const DEFAULTS: Record<string, string> = {
   buffer_seconds: process.env.BUFFER_SECONDS || "10",
   audio_enabled: "1",
   transcription_model: process.env.TRANSCRIPTION_MODEL || "google/gemini-2.5-flash",
+  // Rampa de WhatsApp automático (V3 §9): pilot | 25 | 50 | 100.
+  // pilot = SOLO la allowlist de pruebas (fail-closed, el default).
+  whatsapp_rollout_percent: "pilot",
 };
 
 const ALLOWED = new Set(Object.keys(DEFAULTS));

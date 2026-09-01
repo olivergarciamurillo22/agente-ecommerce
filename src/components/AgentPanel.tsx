@@ -9,7 +9,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
-import type { DockView } from "./Dock";
+import type { DockView } from "./NavRail";
 import {
   Card,
   EmptyState,

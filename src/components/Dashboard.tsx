@@ -1,10 +1,10 @@
 "use client";
 
 // ============================================================
-// Shell del Control Center v2: dock de 9 secciones (§18), Home como
-// control room (§19), y el resto de paneles. La sección activa se refleja
-// en el hash de la URL (#pedidos, #finanzas…) para que refrescar o volver
-// atrás no te saque de donde estabas.
+// Shell del Control Center v3: NAV RAIL con labels (§30-31), cabecera
+// provider-aware (§47), command palette (⌘K, §37) y las 9 secciones.
+// La sección activa vive en el hash (#pedidos, #finanzas…): refrescar o
+// volver atrás no te saca de donde estabas.
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
@@ -13,17 +13,20 @@ import AdsPanel from "./AdsPanel";
 import AgentPanel from "./AgentPanel";
 import AmbientBackground from "./AmbientBackground";
 import ChatsView from "./ChatsView";
-import Dock, { type DockView } from "./Dock";
+import CommandPalette from "./CommandPalette";
 import DashboardHeader from "./DashboardHeader";
 import FinanceView from "./FinanceView";
 import HomePanel from "./HomePanel";
+import NavRail, { NAV_ITEMS, type DockView } from "./NavRail";
 import OrdersPanel from "./OrdersPanel";
 import SafetyBanner from "./SafetyBanner";
 import SettingsView from "./SettingsView";
 import ShipmentsPanel from "./ShipmentsPanel";
+import { healthToUi, type UiStatus } from "./ui";
 
 interface DashboardProps {
   phone: string | null;
+  provider?: string;
 }
 
 export interface ConversationItem {
@@ -48,22 +51,29 @@ const HASH_TO_VIEW: Record<string, DockView> = {
 };
 const VIEW_TO_HASH = Object.fromEntries(Object.entries(HASH_TO_VIEW).map(([h, v]) => [v, h])) as Record<DockView, string>;
 
-export default function Dashboard({ phone }: DashboardProps) {
+const SECTION_LABEL: Record<DockView, string> = Object.fromEntries([
+  ...NAV_ITEMS.map((i) => [i.id, i.label]),
+  ["settings", "Ajustes"],
+]) as Record<DockView, string>;
+
+const RANK: Record<string, number> = { healthy: 0, disabled: 0, unknown: 0, warning: 1, critical: 2 };
+
+export default function Dashboard({ phone, provider }: DashboardProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  // Nada más entrar, Pedro ve el negocio: la Home es el control room.
   const [view, setView] = useState<DockView>(() => {
     if (typeof window !== "undefined" && HASH_TO_VIEW[window.location.hash]) return HASH_TO_VIEW[window.location.hash];
     return "home";
   });
   const [badges, setBadges] = useState<Partial<Record<DockView, number>>>({});
+  const [systemStatus, setSystemStatus] = useState<UiStatus>("muted");
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   const changeView = useCallback((v: DockView) => {
     setView(v);
     if (typeof window !== "undefined") window.history.replaceState(null, "", VIEW_TO_HASH[v]);
   }, []);
 
-  // Volver atrás / cambiar el hash a mano también navega.
   useEffect(() => {
     const onHash = () => {
       const v = HASH_TO_VIEW[window.location.hash];
@@ -71,6 +81,18 @@ export default function Dashboard({ phone }: DashboardProps) {
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  // ⌘K / Ctrl+K abre la paleta desde cualquier sección.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, []);
 
   const refreshConversations = useCallback(async () => {
@@ -84,15 +106,14 @@ export default function Dashboard({ phone }: DashboardProps) {
     }
   }, []);
 
-  // Los chats solo se refrescan cada 2 s CUANDO se están mirando; en el
-  // resto de vistas basta un pulso lento para el badge.
+  // Chats a 2 s SOLO cuando se miran; pulso lento para el badge en el resto.
   useEffect(() => {
     refreshConversations();
     const interval = setInterval(refreshConversations, view === "chats" ? 2000 : 30_000);
     return () => clearInterval(interval);
   }, [view, refreshConversations]);
 
-  // Badges del dock: un pulso ligero sobre /api/home.
+  // Badges del rail + salud global: un pulso ligero sobre /api/home.
   useEffect(() => {
     let vivo = true;
     const tick = async () => {
@@ -101,11 +122,18 @@ export default function Dashboard({ phone }: DashboardProps) {
         if (!res.ok) return;
         const j = (await res.json()) as {
           attention?: Array<{ target: DockView; count: number }>;
+          flow?: Array<{ status: string }>;
         };
-        if (!vivo || !j.attention) return;
-        const acc: Partial<Record<DockView, number>> = {};
-        for (const a of j.attention) acc[a.target] = (acc[a.target] ?? 0) + a.count;
-        setBadges(acc);
+        if (!vivo) return;
+        if (j.attention) {
+          const acc: Partial<Record<DockView, number>> = {};
+          for (const a of j.attention) acc[a.target] = (acc[a.target] ?? 0) + a.count;
+          setBadges(acc);
+        }
+        if (j.flow) {
+          const peor = j.flow.reduce((w, f) => (RANK[f.status] > RANK[w] ? f.status : w), "healthy");
+          setSystemStatus(healthToUi(peor));
+        }
       } catch {
         /* siguiente ciclo */
       }
@@ -127,39 +155,53 @@ export default function Dashboard({ phone }: DashboardProps) {
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
   return (
-    <main className="h-screen overflow-hidden flex flex-col">
+    <main className="h-screen overflow-hidden flex">
       <AmbientBackground />
-      <DashboardHeader phone={phone} />
-      <SafetyBanner />
-      {/* Contenido: hueco a la izquierda para el dock en desktop, y abajo en móvil. */}
-      <div className="flex-1 min-h-0 overflow-hidden md:pl-[72px]">
-        {view === "home" ? (
-          <HomePanel onNavigate={changeView} />
-        ) : view === "actions" ? (
-          <ActionCenter />
-        ) : view === "orders" ? (
-          <OrdersPanel />
-        ) : view === "chats" ? (
-          <ChatsView
-            conversations={conversations}
-            selected={selected}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onRefresh={refreshConversations}
-          />
-        ) : view === "agent" ? (
-          <AgentPanel onNavigate={changeView} />
-        ) : view === "shipments" ? (
-          <ShipmentsPanel />
-        ) : view === "ads" ? (
-          <AdsPanel />
-        ) : view === "finance" ? (
-          <FinanceView />
-        ) : (
-          <SettingsView />
-        )}
+      <NavRail
+        view={view}
+        onViewChange={changeView}
+        badges={badges}
+        systemStatus={systemStatus}
+        systemLabel={systemStatus === "ok" ? "Sistema operativo" : systemStatus === "warn" ? "Con avisos" : systemStatus === "error" ? "Atención requerida" : "Sistema"}
+      />
+      <div className="flex-1 min-w-0 flex flex-col">
+        <DashboardHeader
+          phone={phone}
+          provider={provider}
+          sectionLabel={SECTION_LABEL[view]}
+          onOpenSearch={() => setPaletteOpen(true)}
+          systemStatus={systemStatus}
+        />
+        <SafetyBanner />
+        <div className="flex-1 min-h-0 overflow-hidden">
+          {view === "home" ? (
+            <HomePanel onNavigate={changeView} />
+          ) : view === "actions" ? (
+            <ActionCenter />
+          ) : view === "orders" ? (
+            <OrdersPanel />
+          ) : view === "chats" ? (
+            <ChatsView
+              conversations={conversations}
+              selected={selected}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+              onRefresh={refreshConversations}
+            />
+          ) : view === "agent" ? (
+            <AgentPanel onNavigate={changeView} />
+          ) : view === "shipments" ? (
+            <ShipmentsPanel />
+          ) : view === "ads" ? (
+            <AdsPanel />
+          ) : view === "finance" ? (
+            <FinanceView />
+          ) : (
+            <SettingsView />
+          )}
+        </div>
       </div>
-      <Dock view={view} onViewChange={changeView} badges={badges} />
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={changeView} />
     </main>
   );
 }

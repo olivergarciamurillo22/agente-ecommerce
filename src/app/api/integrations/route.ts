@@ -12,6 +12,10 @@ import { getShopifyHealth, getWhatsAppHealth, getDropeaHealth, getDropiHealth, g
 import { getDatabaseHealth, getBackupHealth } from "@/lib/system/health-core";
 import { getBeepingHealth } from "@/lib/beeping/health";
 import { getMetaAdsHealth } from "@/lib/meta-ads/health";
+import { getTemplateReadiness } from "@/lib/whatsapp/templates";
+import { whatsappProviderName, type WhatsAppProviderName } from "@/lib/whatsapp/provider";
+import { testMode } from "@/lib/safety";
+import { getSetting } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +33,92 @@ export interface IntegrationCard {
   extra?: Record<string, unknown>;
   /** Una frase corta: qué hace esta integración en el flujo. */
   description: string;
+}
+
+// --- §57: semáforo de automatización — ¿puede el sistema actuar SOLO? ---
+
+export type WhatsAppRolloutMode = "pilot" | "25" | "50" | "100";
+
+export interface AutomationWhatsApp {
+  /** true = la plantilla de confirmación está APROBADA y verificada (el gate). */
+  ready: boolean;
+  /** La rampa configurada (informativa, no bloquea la automatización). */
+  mode: WhatsAppRolloutMode;
+  /** TEST_MODE activo: solo la lista de pruebas + la rampa reciben mensajes. */
+  testMode: boolean;
+  /** Frases completas en español; vacío cuando ready. */
+  blockers: string[];
+}
+
+export interface AutomationCalls {
+  /** true = prompt validado Y versión del agente fijada. */
+  ready: boolean;
+  promptValidated: boolean;
+  agentVersionPinned: boolean;
+  configuredAgentVersion: string | null;
+  lastCallAgentVersion: string | null;
+  /** Frases completas en español; vacío cuando ready. */
+  blockers: string[];
+}
+
+export interface AutomationSummary {
+  whatsapp: AutomationWhatsApp;
+  calls: AutomationCalls;
+}
+
+function buildWhatsAppAutomation(): AutomationWhatsApp {
+  let mode: WhatsAppRolloutMode = "pilot";
+  try {
+    const raw = (getSetting("whatsapp_rollout_percent") ?? "").trim();
+    if (raw === "25" || raw === "50" || raw === "100") mode = raw;
+  } catch {
+    /* sin DB → pilot (fail-closed) */
+  }
+  try {
+    const r = getTemplateReadiness("order_confirmation_request");
+    const blockers: string[] = [];
+    if (!r.ready) blockers.push(`Plantilla de confirmación no lista: ${r.detail}`);
+    return { ready: r.ready, mode, testMode: testMode(), blockers };
+  } catch (err) {
+    return {
+      ready: false,
+      mode,
+      testMode: testMode(),
+      blockers: [
+        `No se pudo comprobar la plantilla de confirmación: ${err instanceof Error ? err.message : "error desconocido"}`,
+      ],
+    };
+  }
+}
+
+function buildCallsAutomation(): AutomationCalls {
+  try {
+    const h = getCallsHealth();
+    const blockers: string[] = [];
+    if (!h.promptValidated) {
+      blockers.push("Prompt no validado: el guion de Lucía no pasa la validación de variables (config/retell/casamable-agent-prompt.md).");
+    }
+    if (!h.agentVersionPinned) {
+      blockers.push("Versión del agente sin fijar (RETELL_AGENT_VERSION): cada llamada usaría la última versión guardada en Retell.");
+    }
+    return {
+      ready: h.promptValidated && h.agentVersionPinned,
+      promptValidated: h.promptValidated,
+      agentVersionPinned: h.agentVersionPinned,
+      configuredAgentVersion: h.configuredAgentVersion,
+      lastCallAgentVersion: h.lastCallAgentVersion,
+      blockers,
+    };
+  } catch (err) {
+    return {
+      ready: false,
+      promptValidated: false,
+      agentVersionPinned: false,
+      configuredAgentVersion: null,
+      lastCallAgentVersion: null,
+      blockers: [`No se pudo leer el estado de las llamadas: ${err instanceof Error ? err.message : "error desconocido"}`],
+    };
+  }
 }
 
 /** Ejecuta un builder de tarjeta; si revienta, la tarjeta lo cuenta sin romper el resto. */
@@ -169,7 +259,14 @@ export async function GET() {
     }),
   ];
 
-  return NextResponse.json({ ok: true, cards });
+  const automation: AutomationSummary = {
+    whatsapp: buildWhatsAppAutomation(),
+    calls: buildCallsAutomation(),
+  };
+
+  const connection: { provider: WhatsAppProviderName } = { provider: whatsappProviderName() };
+
+  return NextResponse.json({ ok: true, cards, automation, connection });
 }
 
 export async function POST(req: NextRequest) {
