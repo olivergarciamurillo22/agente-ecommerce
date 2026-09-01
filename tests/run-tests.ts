@@ -9475,7 +9475,7 @@ async function main(): Promise<void> {
   await test(
     "T6 WhatsApp/Baileys no son alcanzables, ni transitivamente, desde ningún entrypoint de backfill/reconciliación",
     () => {
-      const entrypoints = ["scripts/shopify-backfill.ts", "scripts/dropea-reconcile.ts"];
+      const entrypoints = ["scripts/shopify-backfill.ts", "scripts/dropea-reconcile.ts", "scripts/beeping-sync.ts"];
 
       const baileysDir = path.join(PROJECT_ROOT, "src", "lib", "baileys");
       const forbiddenModules = [

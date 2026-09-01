@@ -29,7 +29,8 @@ import { logIntegrationEvent, recordSchedulerRun } from "../system/repo";
 import { processSupplierUpdate } from "../tracking/service";
 import { listOrders, listShops } from "./client";
 import { beepingEnabled, beepingNotificationsEnabled, cacheBeepingShop, cachedBeepingShopId } from "./config";
-import { beepingCourierName, beepingRawStatusLabel, mapBeepingOrder } from "./mapper";
+import { beepingCourierName, beepingRawStatusLabel, mapBeepingOrder, parseBeepingDate, toBeepingDate } from "./mapper";
+export { parseBeepingDate, toBeepingDate };
 import { updateBeepingSnapshot } from "./repo";
 import type { BeepingOrder, BeepingShop } from "./types";
 
@@ -49,32 +50,6 @@ export interface BeepingSyncDeps {
 }
 
 const defaultDeps: BeepingSyncDeps = { listOrders, listShops, now: () => new Date() };
-
-/** dd-mm-yyyy, el formato que documenta el filtro from_date de Beeping. */
-export function toBeepingDate(epochS: number): string {
-  const d = new Date(epochS * 1000);
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  return `${dd}-${mm}-${d.getUTCFullYear()}`;
-}
-
-/**
- * Fecha de Beeping → epoch. El formato real no está documentado: se acepta
- * ISO y dd-mm-yyyy[ hh:mm[:ss]]. Si no se entiende, null (JAMÁS inventar
- * un now() como fecha del hecho).
- */
-export function parseBeepingDate(value: string | null): number | null {
-  if (!value) return null;
-  const v = value.trim();
-  const iso = Date.parse(v);
-  if (Number.isFinite(iso)) return Math.floor(iso / 1000);
-  const m = /^(\d{2})-(\d{2})-(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(v);
-  if (m) {
-    const t = Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4] ?? 0), Number(m[5] ?? 0), Number(m[6] ?? 0));
-    return Number.isFinite(t) ? Math.floor(t / 1000) : null;
-  }
-  return null;
-}
 
 export interface ShopDiscovery {
   shopId: number | null;

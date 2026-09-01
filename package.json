@@ -45,7 +45,12 @@
     "readiness": "tsx scripts/readiness.ts",
     "deploy:precheck": "tsx scripts/deploy-precheck.ts",
     "calls:mode": "tsx scripts/calls-mode.ts",
-    "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts"
+    "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts",
+    "beeping:auth:init": "tsx scripts/beeping-auth-init.ts",
+    "beeping:doctor": "tsx scripts/beeping-doctor.ts",
+    "beeping:sync": "tsx scripts/beeping-sync.ts",
+    "meta-ads:doctor": "tsx scripts/meta-ads-doctor.ts",
+    "meta-ads:sync": "tsx scripts/meta-ads-sync.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
