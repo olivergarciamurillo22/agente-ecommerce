@@ -1,55 +1,38 @@
 "use client";
 
+// Cabecera del Control Center v2: identidad + estado de conexión.
+// La navegación vive en el Dock (izquierda en desktop, abajo en móvil).
+
 import { useState } from "react";
 import Logo from "./Logo";
+import { ModalShell, PrimaryButton, GhostButton } from "./ui";
 
-type View = "actions" | "orders" | "chats" | "system" | "settings";
 interface DashboardHeaderProps {
   phone: string | null;
-  view: View;
-  onViewChange: (v: View) => void;
 }
 
-export default function DashboardHeader({ phone, view, onViewChange }: DashboardHeaderProps) {
+export default function DashboardHeader({ phone }: DashboardHeaderProps) {
   const [disconnecting, setDisconnecting] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   async function handleDisconnect() {
-    const confirmed = confirm(
-      "¿Seguro que quieres desconectar? Tendrás que escanear el QR otra vez."
-    );
-    if (!confirmed) return;
-
     setDisconnecting(true);
+    setError(null);
     try {
       await fetch("/api/connection/disconnect", { method: "POST" });
       window.location.reload();
     } catch {
       setDisconnecting(false);
-      alert("Error al desconectar. Inténtalo de nuevo.");
+      setError("Error al desconectar. Inténtalo de nuevo.");
     }
   }
 
   return (
-    <header className="border-b border-brand-border bg-brand-surface/80 backdrop-blur px-6 py-3 flex items-center justify-between">
-      <div className="flex items-center gap-3.5">
-        <Logo size={20} />
-        <div className="h-9 w-px bg-brand-border" />
-        <nav className="inline-flex rounded-lg border border-brand-border p-0.5 bg-brand-bg">
-          {(["actions", "orders", "chats", "system", "settings"] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => onViewChange(v)}
-              className={`px-3.5 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-                view === v ? "bg-brand-gold text-black" : "text-brand-muted hover:text-brand-text"
-              }`}
-            >
-              {v === "actions" ? "Acciones" : v === "orders" ? "Pedidos" : v === "chats" ? "Chats" : v === "system" ? "Sistema" : "Ajustes"}
-            </button>
-          ))}
-        </nav>
-      </div>
+    <header className="border-b border-brand-border bg-brand-surface/80 backdrop-blur px-4 md:px-6 py-3 flex items-center justify-between">
+      <Logo size={20} />
 
-      <div className="flex items-center gap-5">
+      <div className="flex items-center gap-4">
         <div className="flex items-center gap-2.5">
           <span className="relative flex h-2.5 w-2.5">
             <span className="brand-pulse absolute inline-flex h-full w-full rounded-full bg-wa-green opacity-75" />
@@ -57,20 +40,31 @@ export default function DashboardHeader({ phone, view, onViewChange }: Dashboard
           </span>
           <div className="leading-tight">
             <div className="text-xs font-semibold text-brand-text">Conectado</div>
-            {phone && (
-              <div className="text-[11px] text-brand-muted font-mono">+{phone}</div>
-            )}
+            {phone && <div className="text-[11px] text-brand-muted font-mono">+{phone}</div>}
           </div>
         </div>
 
         <button
-          onClick={handleDisconnect}
+          onClick={() => setConfirming(true)}
           disabled={disconnecting}
           className="text-xs px-3.5 py-2 rounded-lg border border-brand-border bg-brand-surface-2 hover:border-brand-gold/40 hover:text-brand-gold text-brand-muted transition-colors disabled:opacity-50"
         >
-          {disconnecting ? "Desconectando..." : "Desconectar"}
+          {disconnecting ? "Desconectando…" : "Desconectar"}
         </button>
       </div>
+
+      <ModalShell open={confirming} onClose={() => setConfirming(false)} title="Desconectar WhatsApp">
+        <p className="text-sm text-brand-muted mb-4">
+          Se cerrará la sesión de WhatsApp y tendrás que escanear el QR otra vez para reconectar.
+        </p>
+        {error ? <p className="text-xs text-red-400 mb-3">{error}</p> : null}
+        <div className="flex justify-end gap-2">
+          <GhostButton onClick={() => setConfirming(false)}>Cancelar</GhostButton>
+          <PrimaryButton danger busy={disconnecting} onClick={handleDisconnect}>
+            Desconectar
+          </PrimaryButton>
+        </div>
+      </ModalShell>
     </header>
   );
 }

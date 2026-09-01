@@ -709,6 +709,26 @@ export function migrateProductCostHistory(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración (SCHEMA_VERSION 15): escenarios guardados de la Calculadora COD.
+ * Un escenario = un juego de supuestos con nombre ("PELUCHE CPA 6€",
+ * "Escala septiembre"). Guardar un escenario NUNCA toca datos reales
+ * (product_costs, settings, Shopify, Meta): es solo simulación.
+ */
+export function migrateCodScenarios(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS cod_scenarios (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      product_sku TEXT,
+      model_type TEXT NOT NULL DEFAULT 'real',
+      assumptions_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1321,6 +1341,7 @@ function build() {
   migrateBeepingAxis(db);
   migrateMetaAdsDaily(db);
   migrateProductCostHistory(db);
+  migrateCodScenarios(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1490,7 +1511,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 15;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),

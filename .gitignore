@@ -52,3 +52,4 @@ nas-data/
 
 # Config de producción del NAS
 .env.nas
+ENV-NAS-PENDIENTE.local.txt
