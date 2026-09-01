@@ -21,6 +21,7 @@
 import pino from "pino";
 import {
   claimTrackingNotification,
+  releaseTrackingNotification,
   setOrderSupplierReview,
   type OrderRow,
   type TrackingNotificationKind,
@@ -28,6 +29,7 @@ import {
 import { logIntegrationEvent } from "../system/repo";
 import { formatMoney } from "../orders/messages";
 import { sendWhatsAppInteractive, sendWhatsAppMessage } from "../whatsapp";
+import { canSendRealWhatsApp } from "../safety";
 import { buildTemplateMessage } from "../whatsapp/templates";
 import type { TrackingEvent } from "./types";
 
@@ -157,8 +159,27 @@ function trackingOrderNumber(order: OrderRow): string {
   return value.startsWith("#") ? value : `#${value}`;
 }
 
-function trackingCarrier(order: OrderRow): string {
-  return (order.carrier ?? "").trim() || "el transportista";
+/**
+ * FAIL-CLOSED de datos (P0-C, 02-09): al cliente JAMÁS le llega
+ * "No disponible", "el transportista", "—" ni un hueco. Si la plantilla
+ * real necesita un dato y no lo tenemos, el aviso NO sale y el pedido va
+ * a revisión con motivo tracking_payload_incomplete — visible en Acciones.
+ */
+export function trackingPayloadIssues(order: OrderRow, event: TrackingEvent): string[] {
+  const problemas: string[] = [];
+  if (event === "TRACKING_AVAILABLE") {
+    // La plantilla real (pedido_confirmado_casamable) lleva transportista,
+    // número de seguimiento Y enlace: los tres son huecos del cuerpo.
+    if (!(order.carrier ?? "").trim()) problemas.push("sin transportista");
+    if (!(order.tracking_number ?? "").trim()) problemas.push("sin número de seguimiento");
+    const url = (order.tracking_url ?? "").trim();
+    if (!/^https?:\/\/\S+$/i.test(url)) problemas.push("sin URL de seguimiento válida");
+  }
+  if (event === "OUT_FOR_DELIVERY") {
+    // reparto_hoy menciona al transportista: solo si existe de verdad.
+    if (!(order.carrier ?? "").trim()) problemas.push("sin transportista");
+  }
+  return problemas;
 }
 
 function buildTrackingAvailableOutbound(order: OrderRow) {
@@ -166,9 +187,9 @@ function buildTrackingAvailableOutbound(order: OrderRow) {
     message: buildTemplateMessage("pedido_confirmado_casamable", [
       firstName(order) || "cliente",
       trackingOrderNumber(order),
-      trackingCarrier(order),
-      (order.tracking_number ?? "").trim() || "No disponible",
-      (order.tracking_url ?? "").trim() || "No disponible",
+      (order.carrier ?? "").trim(),
+      (order.tracking_number ?? "").trim(),
+      (order.tracking_url ?? "").trim(),
     ]),
     fallbackText: buildTrackingAvailableMessage(order),
   };
@@ -179,7 +200,7 @@ function buildOutForDeliveryOutbound(order: OrderRow) {
     message: buildTemplateMessage("reparto_hoy", [
       firstName(order) || "cliente",
       trackingOrderNumber(order),
-      trackingCarrier(order),
+      (order.carrier ?? "").trim(),
       formatMoney(order.total_price, order.currency),
     ]),
     fallbackText: buildOutForDeliveryMessage(order),
@@ -272,7 +293,40 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
     return false;
   }
 
-  // Claim atómico: si ya se avisó, aquí se acaba.
+  // ── P0-B (02-09): GATE ANTES DEL CLAIM ──
+  // El orden viejo era claim → gate: un bloqueo deliberado (TEST_MODE,
+  // allowlist, safe mode) CONSUMÍA el sello, y al abrir el gate después el
+  // aviso ya no podía salir nunca. Ahora el gate se comprueba PRIMERO: un
+  // bloqueo no consume nada, y si el gate se abre más tarde el aviso sigue
+  // disponible.
+  const opts = {
+    name: order.customer_name ?? undefined,
+    orderAuthorized: order.pilot_authorized === 1,
+  };
+  if (!canSendRealWhatsApp(order.phone, { orderAuthorized: opts.orderAuthorized })) {
+    logger.info(`[TRACKING] #${order.shopify_order_number} ${event}: bloqueado por safety gates ANTES del claim (no se consume)`);
+    logIntegrationEvent(
+      "tracking",
+      "notification_skipped_by_gate",
+      "info",
+      `aviso ${event} bloqueado por safety gates (sello NO consumido: saldrá si el gate se abre)`,
+      order.shopify_order_number
+    );
+    return false;
+  }
+
+  // ── P0-C (02-09): COMPLETITUD ANTES DEL CLAIM ──
+  // Datos incompletos tampoco consumen el sello: cuando el proveedor traiga
+  // el tracking/transportista de verdad, el aviso podrá salir.
+  const incompleto = trackingPayloadIssues(order, event);
+  if (incompleto.length > 0) {
+    aRevision(order, `tracking_payload_incomplete: aviso ${event} sin datos suficientes (${incompleto.join(", ")}) — no se envía nada a medias`);
+    logIntegrationEvent("tracking", "tracking_payload_incomplete", "warning", `aviso ${event} retenido: ${incompleto.join(", ")}`, order.shopify_order_number);
+    return false;
+  }
+
+  // Claim atómico: de dos workers con la misma transición, EXACTAMENTE uno
+  // pasa de aquí. Si ya se avisó, aquí se acaba.
   if (!claimTrackingNotification(order.id, sello)) {
     logger.info(`[TRACKING] #${order.shopify_order_number} ${event}: ya se avisó, no se repite`);
     return false;
@@ -291,11 +345,7 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
 
   // Vía outbox (nunca Baileys directo): hereda reintentos y safety gates.
   let encolado: boolean;
-  try {      const opts = {
-        name: order.customer_name ?? undefined,
-        orderAuthorized: order.pilot_authorized === 1,
-      };
-
+  try {
       if (event === "TRACKING_AVAILABLE") {
         encolado = sendWhatsAppInteractive(
           order.phone,
@@ -313,22 +363,26 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
         encolado = sendWhatsAppMessage(order.phone, texto, opts);
       }
   } catch (err) {
-    // Fallo real (excepción al encolar, no un bloqueo deliberado): SÍ cuenta
-    // para la alerta "avisos de tracking fallidos" del Control Center.
+    // Fallo real (excepción al encolar, no un bloqueo deliberado): el sello
+    // se DEVUELVE — un aviso que no llegó a la cola no puede quedar como
+    // "enviado". Sí cuenta para la alerta de avisos fallidos.
+    releaseTrackingNotification(order.id, sello);
     const motivo = err instanceof Error ? err.message : String(err);
-    logger.error(`[WHATSAPP] #${order.shopify_order_number} ${event}: fallo al encolar — ${motivo}`);
-    logIntegrationEvent("tracking", "notification_failed", "warning", `aviso ${event} falló al encolar: ${motivo}`, order.shopify_order_number);
+    logger.error(`[WHATSAPP] #${order.shopify_order_number} ${event}: fallo al encolar — ${motivo} (sello devuelto)`);
+    logIntegrationEvent("tracking", "notification_failed", "warning", `aviso ${event} falló al encolar: ${motivo} (se reintentará)`, order.shopify_order_number);
     return false;
   }
 
-  logger.info(
-    `[WHATSAPP] #${order.shopify_order_number} queued ${event}${encolado ? "" : " (bloqueado por safety gates)"}`
-  );
   if (!encolado) {
-    // Bloqueo deliberado (TEST_MODE, fuera de allowlist, safe mode,
-    // EMERGENCY_STOP...): se registra para trazabilidad pero NO cuenta como
-    // fallo operativo — no debe disparar la alerta de "avisos fallidos".
-    logIntegrationEvent("tracking", "notification_skipped_by_gate", "info", `aviso ${event} bloqueado por safety gates`, order.shopify_order_number);
+    // El gate cambió entre nuestro pre-check y el encolado (carrera con un
+    // cambio de settings/env): el sello se devuelve igual que en el fallo —
+    // bloqueado deliberadamente NUNCA consume.
+    releaseTrackingNotification(order.id, sello);
+    logger.info(`[WHATSAPP] #${order.shopify_order_number} ${event}: bloqueado por safety gates en el encolado (sello devuelto)`);
+    logIntegrationEvent("tracking", "notification_skipped_by_gate", "info", `aviso ${event} bloqueado por safety gates (sello devuelto)`, order.shopify_order_number);
+    return false;
   }
-  return encolado;
+
+  logger.info(`[WHATSAPP] #${order.shopify_order_number} queued ${event}`);
+  return true;
 }

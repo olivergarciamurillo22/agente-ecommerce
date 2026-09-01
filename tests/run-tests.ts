@@ -3329,7 +3329,7 @@ async function main(): Promise<void> {
         event_id: "evento-unico-123",
         event_at: "2026-08-22T10:00:00.000Z",
         resource_id: 991030,
-        resource: { id: 991030, status: "SHIPPING", sub_status: "SHIPPED", tracking_number: "TRK-DUP" },
+        resource: { id: 991030, status: "SHIPPING", sub_status: "SHIPPED", tracking_number: "TRK-DUP", carrier: "GLS", tracking_url: "https://track.example/TRK-DUP" },
       });
       const firma =
         "sha256=" + crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
@@ -4114,7 +4114,7 @@ async function main(): Promise<void> {
     const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600119025").length;
     await withEnv({ TRACKING_MAX_NOTIFICATIONS_PER_ORDER: "1" }, () => {
       const antes = contar();
-      tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TS1", source: "webhook" }); // 1º aviso
+      tracking.processSupplierUpdate(o, { rawStatus: "shipped", trackingNumber: "TS1", carrier: "GLS", trackingUrl: "https://track.example/TS1", source: "webhook" }); // 1º aviso
       assert.equal(contar(), antes + 1);
       const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery", source: "webhook" });
       assert.deepEqual(r.events, ["OUT_FOR_DELIVERY"]);
@@ -10568,7 +10568,9 @@ async function main(): Promise<void> {
       limpiarVerificacion();
       const telefono = "34600994103";
       const o = mkOrder("v3wa-3", "94103", telefono);
-      const eventosAntes = sysRepo.listIntegrationEvents({ limit: 200 }).filter((e) => e.event_type === "template_not_ready").length;
+      const eventosDelPedido = () =>
+        sysRepo.listIntegrationEvents({ limit: 500 }).filter((e) => e.event_type === "template_not_ready" && e.order_ref === "94103").length;
+      const eventosAntes = eventosDelPedido();
       await withEnv(
         {
           WHATSAPP_PROVIDER: "cloud_api",
@@ -10590,9 +10592,9 @@ async function main(): Promise<void> {
       const despues = db.getOrderById(o.id)!;
       assert.equal(despues.status, "pending_send", "el pedido NO se consume: se enviará cuando la plantilla esté verificada");
       assert.equal(despues.whatsapp_sent_at, null, "no hay sello de envío");
-      const eventos = sysRepo.listIntegrationEvents({ limit: 200 }).filter((e) => e.event_type === "template_not_ready");
-      assert.ok(eventos.length > eventosAntes, "queda un evento template_not_ready (nada de 404 silenciosos en bucle)");
-      assert.match(eventos[0].message, /FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED/);
+      assert.ok(eventosDelPedido() > eventosAntes, "queda un evento template_not_ready (nada de 404 silenciosos en bucle)");
+      const evento = sysRepo.listIntegrationEvents({ limit: 500 }).find((e) => e.event_type === "template_not_ready" && e.order_ref === "94103")!;
+      assert.match(evento.message, /FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED/);
       // Y con la plantilla verificada, el MISMO pedido sale en el siguiente tick.
       verificar();
       await withEnv(
@@ -10656,6 +10658,89 @@ async function main(): Promise<void> {
     });
 
     limpiarVerificacion();
+  }
+
+  // ============ V3 FASE B · Tracking: gate ANTES del claim + fail-closed de datos ============
+  console.log("\n— V3 · Tracking: claim tras el gate, datos completos o nada —");
+  {
+    const trackingNotif = await import("../src/lib/tracking/notifications");
+    const trackingSvc = await import("../src/lib/tracking/service");
+    const sysRepo = await import("../src/lib/system/repo");
+
+    const mkTrack = (sid: string, num: string, phone: string, extra: Record<string, unknown> = {}) => {
+      const o = mkOrder(sid, num, phone);
+      const sets = Object.entries({ status: "confirmed", supplier_platform: "dropea", supplier_sync_status: "synced", supplier_external_order_id: sid, ...extra });
+      db.systemDbHandle()
+        .prepare(`UPDATE orders SET ${sets.map(([k]) => `${k} = ?`).join(", ")} WHERE id = ?`)
+        .run(...sets.map(([, v]) => v), o.id);
+      return db.getOrderById(o.id)!;
+    };
+
+    await test("P0-B: gate BLOQUEADO no consume el sello — y al abrir el gate el aviso SALE", async () => {
+      const tel = "34600994201";
+      const o = mkTrack("v3tr-1", "94201", tel, { carrier: "GLS", tracking_number: "TRK-B1", tracking_url: "https://t.example/B1" });
+      // Gate cerrado: fuera de allowlist con TEST_MODE=1.
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000000", APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        const enviado = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+        assert.equal(enviado, false);
+      });
+      const trasBloqueo = db.getOrderById(o.id)!;
+      assert.equal(trasBloqueo.tracking_notification_sent_at, null, "EL BUG: antes el claim se consumía con el gate cerrado");
+      // Gate abierto (el teléfono entra en la allowlist): el MISMO evento sale.
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        const enviado = trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "TRACKING_AVAILABLE");
+        assert.equal(enviado, true, "abrir el gate DESPUÉS permite enviar — la garantía nueva");
+      });
+      assert.ok(db.getOrderById(o.id)!.tracking_notification_sent_at !== null, "ahora sí: sello puesto tras encolar");
+      // Y repetir el evento NO reenvía (enviado una vez = nunca accidental).
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        assert.equal(trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "TRACKING_AVAILABLE"), false, "el claim manda: un solo envío");
+      });
+    });
+
+    await test("P0-C: datos incompletos NO consumen y NUNCA sale 'No disponible' — el pedido va a revisión visible", async () => {
+      const tel = "34600994202";
+      const o = mkTrack("v3tr-2", "94202", tel, { carrier: null, tracking_number: "TRK-B2", tracking_url: null });
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        const enviado = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+        assert.equal(enviado, false, "sin transportista ni URL: no se envía nada a medias");
+      });
+      const despues = db.getOrderById(o.id)!;
+      assert.equal(despues.tracking_notification_sent_at, null, "el sello NO se consume: cuando llegue el dato, saldrá");
+      assert.equal(despues.supplier_sync_status, "manual_review", "visible en Acciones");
+      assert.match(despues.supplier_last_error ?? "", /tracking_payload_incomplete/);
+      const ev = sysRepo.listIntegrationEvents({ limit: 300 }).find((e) => e.event_type === "tracking_payload_incomplete" && e.order_ref === "94202");
+      assert.ok(ev, "evento tracking_payload_incomplete registrado");
+      // Ningún mensaje encolado para este teléfono.
+      assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === tel).length, 0);
+      // El texto "No disponible" ya no puede construirse: los builders exigen datos.
+      const issues = trackingNotif.trackingPayloadIssues(despues, "TRACKING_AVAILABLE");
+      assert.ok(issues.length >= 2);
+    });
+
+    await test("P0-C: OUT_FOR_DELIVERY sin transportista se retiene; con transportista sale", async () => {
+      const tel = "34600994203";
+      const o = mkTrack("v3tr-3", "94203", tel, { carrier: null });
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        assert.equal(trackingNotif.notifyTrackingEvent(o, "OUT_FOR_DELIVERY"), false, "reparto_hoy menciona transportista: sin él, nada");
+        assert.equal(db.getOrderById(o.id)!.out_for_delivery_notification_sent_at, null);
+        db.systemDbHandle().prepare("UPDATE orders SET carrier = 'Correos Express' WHERE id = ?").run(o.id);
+        assert.equal(trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "OUT_FOR_DELIVERY"), true, "con el dato real, sale");
+      });
+    });
+
+    await test("P0-B: dos 'workers' con la misma transición → EXACTAMENTE un envío (el claim decide tras el gate)", async () => {
+      const tel = "34600994204";
+      const o = mkTrack("v3tr-4", "94204", tel, { carrier: "GLS", tracking_number: "TRK-B4", tracking_url: "https://t.example/B4" });
+      await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        const r1 = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+        // El "segundo worker" llega con la MISMA foto vieja del pedido (sello aún null en su copia).
+        const r2 = trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE");
+        assert.equal([r1, r2].filter(Boolean).length, 1, "uno gana el claim, el otro no duplica");
+      });
+      assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === tel).length, 1, "un solo mensaje en cola");
+      void trackingSvc;
+    });
   }
 
   // ============ Resumen ============
