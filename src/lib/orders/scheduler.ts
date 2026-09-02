@@ -36,8 +36,8 @@ import {
 } from "../db";
 import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
 import { whatsappProviderName } from "../whatsapp/provider";
-import { buildConfirmationOutbound } from "../whatsapp/interactive";
-import { TemplateNotReadyError } from "../whatsapp/templates";
+import { buildConfirmationOutbound, firstName } from "../whatsapp/interactive";
+import { buildApprovedTemplateMessage, TemplateNotReadyError } from "../whatsapp/templates";
 import { isWithinSessionWindow } from "../whatsapp/meta-cloud";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
@@ -79,6 +79,20 @@ const TAG_RETRY_BACKOFF_SEC = 10 * 60;
  * Un tick del scheduler. `nowSec` inyectable para tests.
  * Devuelve un resumen de lo hecho (útil en tests y logs).
  */
+/**
+ * Cuántas ACCIONES externas (envíos/escalados) hace un tick como máximo.
+ * Lo que se acota es el trabajo con efectos, NO cuántos pedidos se MIRAN.
+ *
+ * Bug real (03-09): las colas se leían con `LIMIT 20` ordenadas por fecha, y
+ * un pedido que el tick se salta sin cambiarle el estado (fuera de allowlist
+ * en TEST_MODE, no elegible, plantilla bloqueada) se quedaba en la cola. Con
+ * 20 de esos delante, el pedido nuevo del piloto NUNCA entraba en el LIMIT:
+ * inanición silenciosa (head-of-line blocking). Ahora se recorre la cola
+ * entera (acotada a QUEUE_SCAN_LIMIT) y solo se limita cuánto se ENVÍA.
+ */
+export const MAX_ACTIONS_PER_TICK = 20;
+export const QUEUE_SCAN_LIMIT = 500;
+
 export async function runSchedulerTick(nowSec?: number): Promise<{
   sent: number;
   reminders: number;
@@ -98,7 +112,8 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
   //    llamada, no tiene sentido un recordatorio que caduca en el mismo tick).
   //    Solo pedidos elegibles: fuera de allowlist = "no operativo" en TEST_MODE.
   const needsCallCutoff = now - Math.round(needsCallMin() * 60);
-  for (const order of getOrdersDueNeedsCall(needsCallCutoff)) {
+  for (const order of getOrdersDueNeedsCall(needsCallCutoff, QUEUE_SCAN_LIMIT)) {
+    if (summary.escalated >= MAX_ACTIONS_PER_TICK) break;
     // Elegibilidad ANTES que nada: un pedido ya cancelado en Shopify o con
     // fulfillment en marcha no debe escalar jamás a needs_call (el hallazgo
     // 4/5/1 del 23-08 era exactamente esto).
@@ -127,7 +142,8 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
 
   if (whatsappReady()) {
     // 2) Confirmaciones iniciales en cola.
-    for (const order of getOrdersDueInitialSend()) {
+    for (const order of getOrdersDueInitialSend(QUEUE_SCAN_LIMIT)) {
+      if (summary.sent >= MAX_ACTIONS_PER_TICK) break;
       const elig = isConfirmationEligible(order);
       if (!elig.eligible) {
         logOnce(
@@ -239,7 +255,8 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
     // 3) Recordatorios vencidos (solo a quien no ha contestado NADA).
     // También respetan la ventana horaria: nada de recordar a las 3 de la mañana.
     const reminderCutoff = now - Math.round(firstReminderMin() * 60);
-    for (const order of ventanaAbierta ? getOrdersDueReminder(reminderCutoff) : []) {
+    for (const order of ventanaAbierta ? getOrdersDueReminder(reminderCutoff, QUEUE_SCAN_LIMIT) : []) {
+      if (summary.reminders >= MAX_ACTIONS_PER_TICK) break;
       const elig = isConfirmationEligible(order);
       if (!elig.eligible) {
         logOnce(
@@ -257,15 +274,54 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
       const message = buildReminderMessage(order);
       const autorizado = order.pilot_authorized === 1;
+      // BUG REAL (03-09): en cloud_api el recordatorio salía como TEXTO libre.
+      // Un recordatorio va, por definición, a quien NO ha contestado — así que
+      // SIEMPRE está fuera de la ventana de 24 h de Meta, que rechaza todo lo
+      // que no sea plantilla. El claim ya se había consumido: el cliente nunca
+      // recibía el recordatorio y el pedido escalaba a llamada en silencio.
+      // La WABA tiene `recordatorio_confirmacion` (2 variables, 2 botones) para
+      // esto exactamente. Sin verificación de plantilla, se RETIENE (no se
+      // consume) y queda rastro visible, igual que la confirmación inicial.
+      let reminderSpec: ReturnType<typeof buildConfirmationOutbound> | null = null;
+      if (whatsappProviderName() === "cloud_api") {
+        try {
+          reminderSpec = {
+            message: buildApprovedTemplateMessage("order_reminder", {
+              nombre: firstName(order) || "cliente",
+              numero_pedido: `#${order.shopify_order_number}`,
+            }),
+            fallbackText: message,
+          };
+        } catch (err) {
+          const esBloqueo = err instanceof TemplateNotReadyError;
+          logIntegrationEvent(
+            "whatsapp",
+            esBloqueo ? "template_not_ready" : "template_build_failed",
+            "warning",
+            (esBloqueo
+              ? `recordatorio BLOQUEADO (${(err as TemplateNotReadyError).blocker}): ${err instanceof Error ? err.message : ""}`
+              : `no se pudo construir el recordatorio: ${err instanceof Error ? err.message : String(err)}`).slice(0, 300),
+            order.shopify_order_number
+          );
+          continue; // sin claim: cuando la plantilla esté verificada, saldrá
+        }
+      }
       if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         logBlockedSend(`sim-rem-${order.id}`, order.phone, message);
         continue;
       }
       if (!claimOrderReminder(order.id, now)) continue;
-      sendWhatsAppMessage(order.phone, message, {
-        name: order.customer_name ?? undefined,
-        orderAuthorized: autorizado,
-      });
+      if (reminderSpec) {
+        sendWhatsAppInteractive(order.phone, reminderSpec, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      } else {
+        sendWhatsAppMessage(order.phone, message, {
+          name: order.customer_name ?? undefined,
+          orderAuthorized: autorizado,
+        });
+      }
       summary.reminders++;
       logger.info(`[REMINDER] #${order.shopify_order_number} sent`);
     }

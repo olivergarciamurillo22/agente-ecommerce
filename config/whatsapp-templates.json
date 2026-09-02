@@ -222,15 +222,16 @@
         {
           "type": "QUICK_REPLY",
           "text": "No hay problema",
-          "payload": "delay_ok"
+          "payload": "delay_ok:{order_id}"
         },
         {
           "type": "QUICK_REPLY",
           "text": "Cancelar pedido",
-          "payload": "cancel_request"
+          "payload": "delay_cancel:{order_id}"
         }
       ],
-      "fallback": "Plantilla aprobada en Meta"
+      "fallback": "Plantilla aprobada en Meta",
+      "buttons_note": "Los payloads llevan el id interno del pedido: handleOrderButtonReply atiende delay_ok:<id> y delay_cancel:<id>. El builder sustituye {order_id}; notify-delay los adjunta explícitamente."
     },
     {
       "name": "pedido_cancelado",

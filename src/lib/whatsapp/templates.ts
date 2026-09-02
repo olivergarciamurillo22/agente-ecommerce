@@ -254,8 +254,25 @@ export function buildApprovedTemplateMessage(
     if (!v) throw new TemplateNotReadyError(logicalKey, "TEMPLATE_PARAM_EMPTY", `la variable "${k}" llegó vacía: no se envía una plantilla con huecos`);
     return v;
   });
-  const spec = getTemplateSpec(logicalKey);
-  const buttonPayloads = (spec?.buttons ?? []).map((b) => b.payload);
+  // MISMO resolver que el doctor y getTemplateReadiness: clave lógica y, si
+  // no hay spec con ese nombre, el nombre real de la WABA. Antes se buscaba
+  // solo por clave lógica: un mapping cuya spec vive bajo el nombre del
+  // proveedor (retraso_pedido) habría salido con los botones SIN payload.
+  const spec = resolveMappingSpec(r.mapping);
+  // Los payloads de botón pueden llevar {order_id} (retraso_pedido: los
+  // handlers exigen el id del pedido). Se rellena desde `values.order_id`;
+  // si queda un hueco sin resolver, NO se envía: un botón sin payload válido
+  // se vería igual pero al pulsarlo no haría nada.
+  const buttonPayloads = (spec?.buttons ?? []).map((b) => {
+    const p = b.payload.replace(/\{([a-z_]+)\}/g, (_m, name: string) => {
+      const v = (values[name] ?? "").trim();
+      if (!v) {
+        throw new TemplateNotReadyError(logicalKey, "TEMPLATE_BUTTON_PAYLOAD_UNRESOLVED", `el botón "${b.text}" tiene un payload sin resolver (${b.payload}): la variable "${name}" llegó vacía`);
+      }
+      return v;
+    });
+    return p;
+  });
   return {
     kind: "template",
     templateName: r.mapping.providerTemplate,
