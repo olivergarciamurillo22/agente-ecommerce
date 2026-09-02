@@ -11422,6 +11422,83 @@ async function main(): Promise<void> {
       }
     });
 
+    await test("PREFLIGHT · whatsapp:templates:doctor --check-only NO toca la DB (ni migra ni cachea)", () => {
+      // Contrato de despliegue (02-09): el doctor con --check-only es el
+      // ÚNICO preflight autorizado contra el volumen de producción, porque
+      // el camino CON escritura llama a setSetting → ctx() → build() y eso
+      // MIGRARÍA el esquema 15→17 con el contenedor viejo todavía en pie.
+      // Si alguien añade un getSetting/setSetting antes del gate de
+      // --check-only, este test cae y el runbook deja de ser válido.
+      const os = require("node:os") as typeof import("node:os");
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-preflight-"));
+      const dataDir = path.join(dir, "data");
+      fs.mkdirSync(dataDir);
+      const dbFile = path.join(dataDir, "messages.db");
+
+      // Fixture: una DB "de producción" en esquema 15 con un centinela.
+      const fixture = new Database(dbFile);
+      fixture.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+      fixture.prepare("INSERT INTO settings (key,value) VALUES ('centinela','intacto')").run();
+      fixture.pragma("user_version = 15");
+      fixture.close();
+
+      // Stub de red: ninguna llamada real a Meta; cualquier otro host revienta.
+      const stub = path.join(dir, "meta-stub.mjs");
+      fs.writeFileSync(
+        stub,
+        [
+          'const T = { data: [{ name: "confirmacion_pedido_cod", status: "APPROVED", language: "es",',
+          '  components: [ { type: "BODY", text: "Hola {{1}} {{2}} {{3}} {{4}}" },',
+          '    { type: "BUTTONS", buttons: [{type:"QUICK_REPLY"},{type:"QUICK_REPLY"},{type:"QUICK_REPLY"}] } ] }] };',
+          'globalThis.fetch = async (u) => {',
+          '  if (!String(u).includes("graph.facebook.com")) throw new Error("red no permitida en el test");',
+          '  return new Response(JSON.stringify(T), { status: 200, headers: { "content-type": "application/json" } });',
+          '};',
+        ].join("\n")
+      );
+
+      try {
+        execSync(`npx tsx ${path.join(process.cwd(), "scripts/whatsapp-templates-doctor.ts")} -- --check-only`, {
+          cwd: process.cwd(),
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            DATA_DIR: dataDir,
+            META_WHATSAPP_BUSINESS_ACCOUNT_ID: "WABA_FALSA_DE_TEST",
+            META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+            NODE_OPTIONS: `--import ${stub}`,
+          },
+        });
+      } catch {
+        // Sale con código 1 si algún mapping no cuadra contra el stub: da igual.
+        // Lo que se prueba aquí es el efecto sobre la DB, no el veredicto.
+      }
+
+      const after = new Database(dbFile, { readonly: true });
+      try {
+        assert.equal(after.pragma("user_version", { simple: true }), 15, "--check-only NO migra el esquema");
+        assert.equal(
+          (after.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table'").get() as { c: number }).c,
+          1,
+          "--check-only NO ejecuta build(): la DB sigue con su única tabla"
+        );
+        assert.equal(
+          (after.prepare("SELECT COUNT(*) c FROM settings WHERE key LIKE 'wa_tpl_verified:%'").get() as { c: number }).c,
+          0,
+          "--check-only NO cachea verificaciones"
+        );
+        assert.equal(
+          (after.prepare("SELECT value FROM settings WHERE key='centinela'").get() as { value: string }).value,
+          "intacto"
+        );
+      } finally {
+        after.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
     await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {
       const g = src("src/components/GrowthView.tsx");
       const primary = /const TABS: Array<\{ id: GrowthTab; label: string \}> = \[([\s\S]*?)\n\];/.exec(g)![1];
