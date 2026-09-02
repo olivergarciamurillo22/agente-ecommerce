@@ -68,3 +68,24 @@ El botón solo descarga un archivo. No llama a Shopify, no crea temas y no
 publica. El preview sobre un tema no publicado queda preparado como siguiente
 integración manual; necesita que Pedro elija el tema y autorice credenciales de
 solo escritura de temas en una sesión separada.
+
+## Persistencia
+
+Landing Studio v1 utiliza `localStorage` **deliberadamente**. La UI lo declara
+(badge "Beta" + "Guardado localmente en este navegador") para que nadie
+suponga que hay sincronización.
+
+La persistencia server-side/SQLite queda **DEFERRED** hasta que exista una
+necesidad real demostrada, como:
+
+- compartir proyectos entre Pedro y Óliver
+- trabajar desde varios dispositivos
+- auditoría server-side necesaria
+- que otro flujo real dependa de ello
+
+**No subir el schema solo para sustituir `localStorage`.** Un experimento de
+persistencia (schema v18 + `landing_projects/versions/exports` + rutas
+`/api/landing-studio`) se escribió el 02-09-2026 y se descartó sin integrar:
+no satisfacía ninguno de los criterios de arriba, no tenía tests y ninguna
+pantalla lo consumía. La copia local vive fuera de git en
+`artifacts/landing-studio-server-persistence-experimental.patch`.
