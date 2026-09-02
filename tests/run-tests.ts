@@ -292,6 +292,16 @@ function containsCallTo(src: string, fnName: string): boolean {
   return src.split("\n").some((line) => callPattern.test(line) && !declPattern.test(line));
 }
 
+/** grep acotado para tests de "esto no debe existir en el código". */
+function execSyncSafe(cmd: string): string {
+  const { execSync } = require("node:child_process") as typeof import("node:child_process");
+  try {
+    return execSync(cmd, { encoding: "utf8", cwd: process.cwd() }).trim();
+  } catch {
+    return "";
+  }
+}
+
 async function main(): Promise<void> {
   console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
 
@@ -5828,6 +5838,143 @@ async function main(): Promise<void> {
     const s2 = db.getActiveCallAttemptForOrder(o2.id)!;
     assert.ok(s2.scheduled_at >= Math.floor(enFranja.getTime() / 1000), "jamás en el pasado");
     assert.ok(sched.insideCallWindow(new Date(s2.scheduled_at * 1000), noHoliday));
+    resetCallCfg();
+  });
+
+  // ── CONTRATO LIVE DE RETELL (03-09) ──
+  // El agente PUBLICADO derivó del contrato versionado: entrega
+  // `resultado_llamada`, `datos_corregidos` y `pidio_no_llamar`. El repo sigue
+  // declarando `resultado` + campos planos como canónico. Se aceptan ambos en
+  // normalizeRetellAnalysis; estos tests fijan que ninguno de los dos se rompe.
+
+  await test("RETELL live · normalizador puro: alias de resultado, contenedor anidado, booleano inequívoco y basura ignorada", async () => {
+    const { normalizeRetellAnalysis } = await import("../src/lib/calls/analysis");
+
+    // A · contrato canónico del repo
+    assert.equal(normalizeRetellAnalysis({ resultado: "confirmado" }).resultado, "confirmado");
+    // B · contrato live
+    assert.equal(normalizeRetellAnalysis({ resultado_llamada: "confirmado" }).resultado, "confirmado");
+    // Histórico
+    assert.equal(normalizeRetellAnalysis({ result: "confirmado" }).resultado, "confirmado");
+    // Precedencia: live > canónico > histórico
+    assert.equal(
+      normalizeRetellAnalysis({ resultado_llamada: "cancelado", resultado: "confirmado", result: "no_contesta" }).resultado,
+      "cancelado"
+    );
+
+    // C · correcciones dentro del contenedor live, con nombres CANÓNICOS
+    const anidado = normalizeRetellAnalysis({
+      resultado_llamada: "confirmado_con_correccion",
+      datos_corregidos: { direccion_corregida: "Calle Nueva 3", localidad_corregida: "Almería", codigo_postal_corregido: "04001", telefono_alternativo: "600 111 222" },
+    });
+    assert.equal(anidado.direccionCorregida, "Calle Nueva 3");
+    assert.equal(anidado.localidadCorregida, "Almería");
+    assert.equal(anidado.codigoPostalCorregido, "04001");
+    assert.equal(anidado.telefonoAlternativo, "600 111 222");
+
+    // El contenedor gana, pero SOLO con valor real: null/"" no pisan el plano.
+    const mezcla = normalizeRetellAnalysis({
+      direccion_corregida: "Calle Plana 1",
+      datos_corregidos: { direccion_corregida: "", localidad_corregida: null },
+      localidad_corregida: "Roquetas",
+    });
+    assert.equal(mezcla.direccionCorregida, "Calle Plana 1", "un vacío anidado NO borra un valor plano válido");
+    assert.equal(mezcla.localidadCorregida, "Roquetas");
+
+    // G · basura: no revienta y no aplica nada
+    for (const basura of [null, undefined, "texto", 42, [1, 2]] as unknown[]) {
+      const n = normalizeRetellAnalysis({ resultado: "confirmado", datos_corregidos: basura } as Record<string, unknown>);
+      assert.equal(n.direccionCorregida, null);
+      assert.equal(n.pidioNoLlamar, false);
+    }
+    assert.equal(normalizeRetellAnalysis(null).resultado, undefined);
+
+    // Booleano INEQUÍVOCO: Boolean("false") sería true en JS.
+    assert.equal(normalizeRetellAnalysis({ pidio_no_llamar: "false" }).pidioNoLlamar, false, '"false" NO es true');
+    assert.equal(normalizeRetellAnalysis({ pidio_no_llamar: "quizá" }).pidioNoLlamar, false);
+    assert.equal(normalizeRetellAnalysis({ pidio_no_llamar: 0 }).pidioNoLlamar, false);
+    assert.equal(normalizeRetellAnalysis({ pidio_no_llamar: true }).pidioNoLlamar, true);
+    assert.equal(normalizeRetellAnalysis({ pidio_no_llamar: "sí" }).pidioNoLlamar, true);
+    assert.equal(normalizeRetellAnalysis({ datos_corregidos: { pidio_no_llamar: true } }).pidioNoLlamar, true);
+  });
+
+  await test("RETELL live · resultado_llamada se comporta EXACTAMENTE igual que resultado (canónico)", async () => {
+    const a = await dialOne("997450", "4450", "34600117450");
+    calls.applyCallAnalysis(a.attempt, analyzedEvent(a.attempt.provider_call_id!, { resultado: "confirmado" }), enFranja, noHoliday);
+    const canonico = db.getOrderById(a.order.id)!;
+
+    const b = await dialOne("997451", "4451", "34600117451");
+    calls.applyCallAnalysis(b.attempt, analyzedEvent(b.attempt.provider_call_id!, { resultado_llamada: "confirmado" }), enFranja, noHoliday);
+    const live = db.getOrderById(b.order.id)!;
+
+    assert.equal(live.status, canonico.status, "mismo estado de pedido con el alias live");
+    assert.ok(live.confirmed_at !== null, "confirmado por llamada");
+  });
+
+  await test("RETELL live · confirmado_con_correccion + datos_corregidos aplica las correcciones válidas", async () => {
+    const { order, attempt } = await dialOne("997452", "4452", "34600117452");
+    calls.applyCallAnalysis(
+      attempt,
+      analyzedEvent(attempt.provider_call_id!, {
+        resultado_llamada: "confirmado_con_correccion",
+        datos_corregidos: {
+          direccion_corregida: "Avenida Corregida 12",
+          localidad_corregida: "El Ejido",
+          codigo_postal_corregido: "04700",
+          telefono_alternativo: "+34 611-222-333",
+        },
+      }),
+      enFranja,
+      noHoliday
+    );
+    const o = db.getOrderById(order.id)!;
+    assert.equal(o.address_line1, "Avenida Corregida 12");
+    assert.equal(o.city, "El Ejido");
+    assert.equal(o.postal_code, "04700");
+    assert.equal(o.phone, "34611222333", "el teléfono conserva la sanitización a solo dígitos");
+  });
+
+  await test("RETELL live · pidio_no_llamar entra en DNC AUNQUE el resultado sea confirmado", async () => {
+    const tel = "34600117453";
+    const { order, attempt } = await dialOne("997453", "4453", tel);
+    assert.equal(db.isDncPhone(tel), false, "antes no está en la lista");
+    calls.applyCallAnalysis(
+      attempt,
+      analyzedEvent(attempt.provider_call_id!, { resultado_llamada: "confirmado", pidio_no_llamar: true }),
+      enFranja,
+      noHoliday
+    );
+    const o = db.getOrderById(order.id)!;
+    assert.ok(o.confirmed_at !== null, "el pedido SÍ queda confirmado");
+    assert.equal(db.isDncPhone(tel), true, "y el teléfono entra en no-llamar: la preferencia del cliente manda");
+  });
+
+  await test("RETELL live · no_volver_a_llamar sigue provocando DNC como antes", async () => {
+    const tel = "34600117454";
+    const { attempt } = await dialOne("997454", "4454", tel);
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado_llamada: "no_volver_a_llamar" }), enFranja, noHoliday);
+    assert.equal(db.isDncPhone(tel), true);
+  });
+
+  await test("RETELL live · resultado desconocido sigue yendo a revisión manual (los 12 válidos no se amplían)", async () => {
+    const { attempt } = await dialOne("997455", "4455", "34600117455");
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, { resultado_llamada: "inventado_por_el_agente" }), enFranja, noHoliday);
+    const a = db.getCallAttempt(attempt.id)!;
+    assert.equal(a.state, "manual_review", "nada de fuzzy matching: lo que no está en la lista es revisión humana");
+  });
+
+  await test("RETELL live · momento_rellamada mantiene el comportamiento actual (también dentro del contenedor)", async () => {
+    const objetivo = Math.floor(md(2026, 9, 1, 18, 0).getTime() / 1000);
+    const { order, attempt } = await dialOne("997456", "4456", "34600117456");
+    calls.applyCallAnalysis(
+      attempt,
+      analyzedEvent(attempt.provider_call_id!, { resultado_llamada: "rellamar", datos_corregidos: { momento_rellamada: objetivo } }),
+      enFranja,
+      noHoliday
+    );
+    const siguiente = db.getActiveCallAttemptForOrder(order.id)!;
+    assert.equal(siguiente.scheduled_at, objetivo, "respeta el momento pedido");
+    assert.equal(db.countConsumedContacts(order.id), 0, "rellamar sigue sin consumir contacto");
     resetCallCfg();
   });
 
@@ -11565,6 +11712,89 @@ async function main(): Promise<void> {
       const escritura = doc.indexOf("storeVerifiedTemplate(");
       const gate = doc.indexOf('if (!hasFlag("check-only"))');
       assert.ok(gate > 0 && escritura > gate, "la única escritura vive detrás del gate de --check-only");
+    });
+
+    await test("WHATSAPP DOCTOR · order_delay_restock resuelve el contrato de botones de retraso_pedido", async () => {
+      // Falso negativo real (doctor contra la WABA, 03-09): el catálogo guarda
+      // specs con DOS nombres —clave lógica y nombre real de la WABA—. No
+      // existe spec "order_delay_restock", pero sí "retraso_pedido" con sus 2
+      // botones. Buscando solo por la clave lógica el doctor decía "la WABA
+      // tiene 2 y el flujo local espera 0" y tumbaba el preflight, cuando el
+      // flujo de retraso SÍ atiende esos botones.
+      const tpl = await import("../src/lib/whatsapp/templates");
+      const mapping = tpl.loadProviderMappings().find((m) => m.logicalKey === "order_delay_restock")!;
+      assert.ok(mapping, "el mapping existe");
+      assert.equal(mapping.providerTemplate, "retraso_pedido");
+      assert.equal(tpl.getTemplateSpec("order_delay_restock"), null, "no hay spec con la clave lógica: ese era el origen del falso negativo");
+      const spec = tpl.resolveMappingSpec(mapping);
+      assert.ok(spec, "la spec se resuelve por el nombre real de la WABA");
+      assert.equal(spec!.name, "retraso_pedido");
+      assert.equal(spec!.buttons.length, 2, "el contrato local son 2 botones, los mismos que la WABA");
+    });
+
+    await test("WHATSAPP · el aviso de retraso genera delay_ok/delay_cancel y AMBOS tienen handler seguro", async () => {
+      // Los 2 botones de retraso_pedido no son decorativos: existen payloads y
+      // existe handler. Por eso el doctor no debe bloquear por ellos.
+      const notify = src("src/lib/orders/notify-delay.ts");
+      assert.match(notify, /buildTemplateMessage\("retraso_pedido"/);
+      assert.match(notify, /delay_ok:\$\{order\.id\}/);
+      assert.match(notify, /delay_cancel:\$\{order\.id\}/);
+
+      const conf = await import("../src/lib/orders/confirmation");
+      const tel = "34600118801";
+      const o = mkOrder("wa-delay-1", "88801", tel);
+      db.systemDbHandle().prepare("UPDATE orders SET status='confirmed', confirmed_at=unixepoch() WHERE id=?").run(o.id);
+
+      const ok = await conf.handleOrderButtonReply(tel, `delay_ok:${o.id}`);
+      assert.equal(ok.handled, true, "delay_ok está atendido");
+      const trasOk = db.getOrderById(o.id)!;
+      assert.ok(!/cancel/.test(trasOk.status), "aceptar esperar NO cancela nada");
+
+      const o2 = mkOrder("wa-delay-2", "88802", "34600118802");
+      db.systemDbHandle().prepare("UPDATE orders SET status='confirmed', confirmed_at=unixepoch() WHERE id=?").run(o2.id);
+      const cancel = await conf.handleOrderButtonReply("34600118802", `delay_cancel:${o2.id}`);
+      assert.equal(cancel.handled, true, "delay_cancel está atendido");
+      const trasCancel = db.getOrderById(o2.id)!;
+      assert.equal(trasCancel.closure_status, "unknown", "NO cancela el pedido: solo REGISTRA la solicitud para gestión humana");
+      assert.ok(
+        sysRepo.listIntegrationEvents({ limit: 2000 }).some((e) => e.event_type === "delay_cancellation_requested"),
+        "queda constancia de la solicitud"
+      );
+    });
+
+    await test("WHATSAPP · mapping DESHABILITADO es fail-closed: ni con caché previa se considera listo", async () => {
+      // order_cancelled_ack → pedido_cancelado: la WABA tiene un botón
+      // "Necesito ayuda" sin handler, y NO existe sender productivo (búsqueda
+      // 03-09: cero usos en src/ y scripts/). Apagado a propósito.
+      const tpl = await import("../src/lib/whatsapp/templates");
+      const mapping = tpl.loadProviderMappings().find((m) => m.logicalKey === "order_cancelled_ack")!;
+      assert.equal(mapping.enabled, false, "declarado explícitamente en el catálogo");
+
+      // Se le planta una caché de verificación PERFECTA a propósito.
+      tpl.storeVerifiedTemplate("order_cancelled_ack", {
+        provider: "pedido_cancelado",
+        language: "en",
+        status: "APPROVED",
+        paramCount: 2,
+        buttonCount: 1,
+        buttonTypes: ["QUICK_REPLY"],
+        category: "UTILITY",
+        verifiedAt: Math.floor(Date.now() / 1000),
+      });
+      const r = tpl.getTemplateReadiness("order_cancelled_ack");
+      assert.equal(r.ready, false, "sigue sin estar listo pese a la caché APPROVED");
+      assert.equal(r.blocker, "TEMPLATE_MAPPING_DISABLED");
+      // Y el envío no se puede construir.
+      assert.throws(
+        () => tpl.buildApprovedTemplateMessage("order_cancelled_ack", { nombre: "x", numero_pedido: "#1" }),
+        /no lista|DESHABILITADO/i,
+        "no hay forma de enviarlo por accidente"
+      );
+      // Cero senders en el código: si algún día aparece uno, este test lo caza.
+      const usos = ["src", "scripts"].flatMap((d) =>
+        execSyncSafe(`grep -rl "order_cancelled_ack" ${d} 2>/dev/null || true`).split("\n").filter(Boolean)
+      );
+      assert.deepEqual(usos, [], "ningún fichero de src/ o scripts/ referencia este mapping");
     });
 
     await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {

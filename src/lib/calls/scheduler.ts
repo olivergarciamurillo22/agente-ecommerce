@@ -61,6 +61,7 @@ import { buildCallPayload } from "./payload";
 import { ProviderRequestError, type CallProvider, type ParsedCallEvent } from "./provider";
 import { retellProvider } from "./retell";
 import { insideCallWindow, madridDate, madridParts, nextCallableDayAfter, nextCallSlot, windowStart } from "./schedule";
+import { normalizeRetellAnalysis } from "./analysis";
 import { parseCallResult, RESULT_OUTCOMES, type CallResult } from "./results";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -445,11 +446,14 @@ export function applyCallAnalysis(
     toManualReview(attempt, "pedido inexistente");
     return;
   }
-  const analysis = event.analysis ?? {};
-  const result = parseCallResult(analysis["resultado"] ?? analysis["result"]);
+  // Un único punto traduce el contrato del proveedor (el agente publicado
+  // entrega `resultado_llamada`/`datos_corregidos`; el repo declara
+  // `resultado` + campos planos). A partir de aquí solo se usa lo normalizado.
+  const norm = normalizeRetellAnalysis(event.analysis);
+  const result = parseCallResult(norm.resultado);
   if (!result) {
     transitionCallAttempt(attempt.id, ["in_flight", "dialing"], "manual_review", {
-      reason: `unknown_retell_result: "${str(analysis["resultado"] ?? analysis["result"]).slice(0, 60)}"`,
+      reason: `unknown_retell_result: "${str(norm.resultado).slice(0, 60)}"`,
       ended_at: event.eventAt ?? toS(now),
     });
     logIntegrationEvent("system", "call_unknown_result", "warning", "resultado de llamada no reconocido: revisión manual", order.shopify_order_number);
@@ -467,11 +471,11 @@ export function applyCallAnalysis(
 
   // Correcciones de datos (solo no-vacías y distintas; con auditoría).
   if (outcome.corrections) {
-    const canon = (v: unknown) => str(v).trim();
-    const dir = canon(analysis["direccion_corregida"]);
-    const loc = canon(analysis["localidad_corregida"]);
-    const cp = canon(analysis["codigo_postal_corregido"]);
-    const tel = canon(analysis["telefono_alternativo"]).replace(/[^\d]/g, "");
+    const dir = norm.direccionCorregida;
+    const loc = norm.localidadCorregida;
+    const cp = norm.codigoPostalCorregido;
+    // Misma sanitización de teléfono de siempre: solo dígitos.
+    const tel = (norm.telefonoAlternativo ?? "").replace(/[^\d]/g, "");
     if (dir) applyOrderCorrection(order.id, "address_line1", dir, attempt.provider_call_id);
     if (loc) applyOrderCorrection(order.id, "city", loc, attempt.provider_call_id);
     if (cp) applyOrderCorrection(order.id, "postal_code", cp, attempt.provider_call_id);
@@ -502,7 +506,10 @@ export function applyCallAnalysis(
     }
   }
 
-  if (outcome.dnc) {
+  // DNC por el RESULTADO (no_volver_a_llamar) o por la marca explícita del
+  // cliente. Son independientes: se puede confirmar el pedido Y pedir que no
+  // se vuelva a llamar. La preferencia del cliente manda sobre el resultado.
+  if (outcome.dnc || norm.pidioNoLlamar) {
     addDncPhone(order.phone, "llamada_ia", {
       reason: "pidio_no_llamar",
       orderId: order.id,
@@ -523,7 +530,7 @@ export function applyCallAnalysis(
 
   // Flujo legacy/automático conservado para compatibilidad histórica/tests,
   // pero el orquestador ya no crea ni marca estos intentos por sí solo.
-  const rellamada = analysis["momento_rellamada"];
+  const rellamada = norm.momentoRellamada;
   const rellamadaS =
     typeof rellamada === "number"
       ? Math.floor(rellamada)

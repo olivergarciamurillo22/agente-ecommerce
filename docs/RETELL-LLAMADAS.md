@@ -223,3 +223,53 @@ Cada una viene de un fallo real observado en llamadas de prueba:
 3. Revertir los valores por defecto de las variables dinámicas de Retell a los centinelas antes de la primera llamada real.
 4. Huecos de la base de conocimiento: envíos fuera de la península, quién paga la devolución, reembolso de un pago en efectivo, y las características físicas de los dos productos.
 5. Rollout operativo (kill switch OFF → shadow → allowlist con móvil propio → real): ver `docs/RUNBOOK-LLAMADAS.md`.
+
+---
+
+## Contrato del `analysis` — canónico vs. compatibilidad live (03-09-2026)
+
+**CANONICAL CONTRACT = el repo.** `config/retell/casamable-agent-prompt.md`
+declara `resultado` y las correcciones como campos **planos**:
+`direccion_corregida`, `localidad_corregida`, `codigo_postal_corregido`,
+`telefono_alternativo`, `momento_rellamada`, `pidio_no_llamar`.
+**Ese fichero no se reescribe** porque el agente publicado haya derivado: es
+la fuente de verdad y lo valida `npm run calls:validate-prompt`.
+
+**LIVE COMPATIBILITY = alias aceptados.** El agente publicado en Retell
+entrega hoy `resultado_llamada`, un contenedor `datos_corregidos` y
+`pidio_no_llamar`. Para no romper ninguno de los dos, todo se traduce en un
+único punto —`normalizeRetellAnalysis()` en `src/lib/calls/analysis.ts`,
+función pura, sin DB ni red— y `applyCallAnalysis()` consume **solo** lo
+normalizado:
+
+| Campo canónico | Alias aceptados (en orden de precedencia) |
+|---|---|
+| `resultado` | `resultado_llamada` → `resultado` → `result` |
+| correcciones | `datos_corregidos.<canónico>` → campo plano `<canónico>` |
+| `momento_rellamada` | dentro de `datos_corregidos` o plano |
+| `pidio_no_llamar` | dentro de `datos_corregidos` o plano |
+
+Reglas que **no** cambian: el resultado sigue pasando por `parseCallResult`
+(los 12 valores válidos no se amplían, sin coincidencias aproximadas); un
+valor vacío del contenedor nunca pisa un campo plano válido; el teléfono
+conserva su sanitización a dígitos; `pidio_no_llamar` añade a DNC **aunque el
+resultado sea otro** (un cliente puede confirmar el pedido y aun así pedir que
+no se le llame más), y solo cuentan booleanos inequívocos — `"false"` es
+`false`.
+
+### ⚠️ PENDIENTE de confirmación de Pedro
+
+Las **subclaves exactas** dentro de `datos_corregidos` no están documentadas
+en el repo. Se aceptan los nombres **canónicos** dentro del contenedor
+(`direccion_corregida`, …). Si el agente publicado escribiera formas cortas
+(`direccion`, `localidad`, `codigo_postal`, `telefono`), **no se están
+leyendo**: no se han añadido porque no hay evidencia — inventarlas sería
+adivinar. Pedro debe pegar un `analysis` real de una llamada con corrección
+para confirmarlo.
+
+**RETELL LIVE CONTRACT VALIDATION PENDING**: `scripts/retell-doctor.ts` no
+inspecciona hoy el contrato de `analysis` (solo agente, versión y tools), así
+que esta comprobación no está automatizada. No se ha ampliado el doctor para
+no inventar una validación sobre un contrato sin evidencia.
+
+**Las llamadas siguen MANUAL-ONLY.** Nada de esto activa automatismo.
