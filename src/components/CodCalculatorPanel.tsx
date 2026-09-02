@@ -141,14 +141,14 @@ export default function CodCalculatorPanel() {
 
   function SourceLine({ field, src }: { field: string; src?: CODInputWithSource }) {
     if (touched.has(field)) {
-      return <span className="mt-1 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">SIMULACIÓN</span>;
+      return <span className="mt-1 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold bg-amber-500/15 text-amber-600 border border-amber-500/30">SIMULACIÓN</span>;
     }
     if (!src) return <span className="mt-1 block text-[10px] text-brand-muted">MANUAL</span>;
     const corta = src.sample !== null && src.sample !== undefined && src.sample > 0 && src.sample < auto!.minSample;
     return (
       <span className="mt-1 block text-[10px] text-brand-muted">
         {SOURCE_LABEL[src.source] ?? src.source} · {src.detail ?? "—"}
-        {corta && <span className="text-amber-300"> · muestra pequeña (n={src.sample})</span>}
+        {corta && <span className="text-amber-600"> · muestra pequeña (n={src.sample})</span>}
       </span>
     );
   }
@@ -197,7 +197,7 @@ export default function CodCalculatorPanel() {
         <line x1={pad} y1={py(0)} x2={W - pad} y2={py(0)} stroke="currentColor" className="text-brand-border" strokeWidth="1" />
         <path d={d} fill="none" stroke="currentColor" className="text-brand-gold" strokeWidth="1.6" />
         {breakEvenX !== null && breakEvenX >= x0 && breakEvenX <= x1 && (
-          <line x1={px(breakEvenX)} y1={pad} x2={px(breakEvenX)} y2={H - pad} stroke="currentColor" className="text-red-400" strokeWidth="1" strokeDasharray="3 3">
+          <line x1={px(breakEvenX)} y1={pad} x2={px(breakEvenX)} y2={H - pad} stroke="currentColor" className="text-red-600" strokeWidth="1" strokeDasharray="3 3">
             <title>break-even</title>
           </line>
         )}
@@ -242,7 +242,7 @@ export default function CodCalculatorPanel() {
   }
 
   const lightCls =
-    light.light === "green" ? "text-emerald-400" : light.light === "amber" ? "text-amber-400" : light.light === "red" ? "text-red-400" : "text-brand-muted";
+    light.light === "green" ? "text-emerald-600" : light.light === "amber" ? "text-amber-600" : light.light === "red" ? "text-red-600" : "text-brand-muted";
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
@@ -297,7 +297,7 @@ export default function CodCalculatorPanel() {
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
             <div>
               <div className="text-[10px] uppercase tracking-wider text-brand-muted">Profit / pedido</div>
-              <div className={`text-xl font-semibold font-display ${(profitPerOrder(model, inputs) ?? 0) < 0 ? "text-red-400" : "text-brand-text"}`}>{eur(profitPerOrder(model, inputs))}</div>
+              <div className={`text-xl font-semibold font-display ${(profitPerOrder(model, inputs) ?? 0) < 0 ? "text-red-600" : "text-brand-text"}`}>{eur(profitPerOrder(model, inputs))}</div>
             </div>
             <div>
               <div className="text-[10px] uppercase tracking-wider text-brand-muted">Margen</div>
@@ -383,12 +383,12 @@ export default function CodCalculatorPanel() {
             ].map(([label, val, neg]) => (
               <div key={label as string} className="flex justify-between">
                 <span className="text-brand-muted">{label as string}</span>
-                <span className={neg ? "text-red-300" : "text-brand-text"}>{neg ? `(${eur(val as number)})` : eur(val as number)}</span>
+                <span className={neg ? "text-red-600" : "text-brand-text"}>{neg ? `(${eur(val as number)})` : eur(val as number)}</span>
               </div>
             ))}
             <div className="flex justify-between border-t border-brand-border pt-1.5 font-semibold">
               <span className="text-brand-text">BENEFICIO</span>
-              <span className={real.profit100 >= 0 ? "text-emerald-400" : "text-red-400"}>{eur(real.profit100)}</span>
+              <span className={real.profit100 >= 0 ? "text-emerald-600" : "text-red-600"}>{eur(real.profit100)}</span>
             </div>
           </div>
           {model === "pedro" && <div className="mt-2 text-[11px] text-brand-muted">Calculado por evento (Modelo Real): el Modelo Pedro no descompone el embudo.</div>}
@@ -472,7 +472,7 @@ export default function CodCalculatorPanel() {
               <div><span className="text-brand-muted text-xs block">Ads</span>{eur(proj.ads)}</div>
               <div>
                 <span className="text-brand-muted text-xs block">Beneficio/mes</span>
-                <span className={(proj.profitPerMonth ?? 0) >= 0 ? "text-emerald-400" : "text-red-400"}>{eur(proj.profitPerMonth)}</span>
+                <span className={(proj.profitPerMonth ?? 0) >= 0 ? "text-emerald-600" : "text-red-600"}>{eur(proj.profitPerMonth)}</span>
               </div>
             </div>
           )}
@@ -586,7 +586,7 @@ export default function CodCalculatorPanel() {
                         <td className="px-2 py-1 text-brand-text">{p.title}</td>
                         <td className="px-2 py-1">{eur(p.salePrice)}</td>
                         <td className="px-2 py-1">{eur(p.productCost)}</td>
-                        <td className={`px-2 py-1 ${(profitPerOrder(model, ins) ?? 0) < 0 ? "text-red-400" : "text-emerald-400"}`}>{eur(profitPerOrder(model, ins))}</td>
+                        <td className={`px-2 py-1 ${(profitPerOrder(model, ins) ?? 0) < 0 ? "text-red-600" : "text-emerald-600"}`}>{eur(profitPerOrder(model, ins))}</td>
                         <td className="px-2 py-1">{pct(marginOf(model, ins), 1)}</td>
                         <td className="px-2 py-1">{eur(b.cpaBreakEven)}</td>
                         <td className="px-2 py-1">{pct(b.deliveryRateBreakEven)}</td>

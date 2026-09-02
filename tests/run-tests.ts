@@ -295,6 +295,7 @@ function containsCallTo(src: string, fnName: string): boolean {
 async function main(): Promise<void> {
   console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
 
+
   const db = await import("../src/lib/db");
   const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage, normalizeOrder } = await import(
     "../src/lib/orders/normalize"
@@ -316,6 +317,36 @@ async function main(): Promise<void> {
   const { sendWhatsAppMessage } = await import("../src/lib/whatsapp");
   const safety = await import("../src/lib/safety");
   const { handleIncomingMessages } = await import("../src/lib/baileys/handler");
+
+  // V4 (02-09): TODAS las plantillas de la WABA se resuelven por clave lógica
+  // con verificación obligatoria (mapping → nombre real, aridad, botones,
+  // APPROVED). La suite siembra la verificación "como la dejaría el doctor"
+  // a partir del propio catálogo, para que los flujos de tracking/confirmación
+  // corran; los tests del incidente 132001 la borran/alteran a propósito.
+  {
+    const catalogo = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config", "whatsapp-templates.json"), "utf8")) as {
+      templates: Array<{ name: string; buttons: Array<{ type: string }> }>;
+      provider_mappings: Array<{ logicalKey: string; providerTemplate: string; language: string; params: string[] }>;
+    };
+    for (const m of catalogo.provider_mappings) {
+      const spec = catalogo.templates.find((t) => t.name === m.logicalKey);
+      const botones = spec?.buttons ?? [];
+      db.setSetting(
+        `wa_tpl_verified:${m.logicalKey}`,
+        JSON.stringify({
+          provider: m.providerTemplate,
+          language: m.language,
+          status: "APPROVED",
+          paramCount: m.params.length,
+          buttonCount: botones.length,
+          buttonTypes: botones.map((b) => b.type),
+          category: "UTILITY",
+          verifiedAt: 1756700000,
+        })
+      );
+    }
+  }
+
 
   const mkOrder = (shopifyId: string, num: string, phone: string) =>
     db.insertOrderIfNew({
@@ -10599,7 +10630,7 @@ async function main(): Promise<void> {
       const telefono = "34600994103";
       const o = mkOrder("v3wa-3", "94103", telefono);
       const eventosDelPedido = () =>
-        sysRepo.listIntegrationEvents({ limit: 500 }).filter((e) => e.event_type === "template_not_ready" && e.order_ref === "94103").length;
+        sysRepo.listIntegrationEvents({ limit: 2000 }).filter((e) => e.event_type === "template_not_ready" && e.order_ref === "94103").length;
       const eventosAntes = eventosDelPedido();
       await withEnv(
         {
@@ -10628,7 +10659,7 @@ async function main(): Promise<void> {
       assert.equal(despues.status, "pending_send", "el pedido NO se consume: se enviará cuando la plantilla esté verificada");
       assert.equal(despues.whatsapp_sent_at, null, "no hay sello de envío");
       assert.ok(eventosDelPedido() > eventosAntes, "queda un evento template_not_ready (nada de 404 silenciosos en bucle)");
-      const evento = sysRepo.listIntegrationEvents({ limit: 500 }).find((e) => e.event_type === "template_not_ready" && e.order_ref === "94103")!;
+      const evento = sysRepo.listIntegrationEvents({ limit: 2000 }).find((e) => e.event_type === "template_not_ready" && e.order_ref === "94103")!;
       assert.match(evento.message, /FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED/);
       // Y con la plantilla verificada, el MISMO pedido sale en el siguiente tick.
       verificar();
@@ -10762,6 +10793,49 @@ async function main(): Promise<void> {
         db.systemDbHandle().prepare("UPDATE orders SET carrier = 'Correos Express' WHERE id = ?").run(o.id);
         assert.equal(trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "OUT_FOR_DELIVERY"), true, "con el dato real, sale");
       });
+    });
+
+    await test("incidente 02-09: reparto_hoy en PENDING (editada en Meta) → el aviso se RETIENE con motivo, sin consumir el sello; APPROVED → sale", async () => {
+      const tpl = await import("../src/lib/whatsapp/templates");
+      const tel = "34600994205";
+      const o = mkTrack("v3tr-5", "94205", tel, { carrier: "GLS", tracking_number: "TRK-B5", tracking_url: "https://t.example/B5" });
+      const antes = db.getSetting("wa_tpl_verified:out_for_delivery_cod")!;
+      // Lo que vio el doctor la noche del 01-09: editada → PENDING.
+      tpl.storeVerifiedTemplate("out_for_delivery_cod", { ...JSON.parse(antes), status: "PENDING" });
+      try {
+        await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+          assert.equal(trackingNotif.notifyTrackingEvent(o, "OUT_FOR_DELIVERY"), false, "plantilla en revisión: NADA sale (antes: 132001 y el cliente sin saber el importe)");
+        });
+        const tras = db.getOrderById(o.id)!;
+        assert.equal(tras.out_for_delivery_notification_sent_at, null, "el sello NO se consume");
+        const ev = sysRepo.listIntegrationEvents({ limit: 300 }).find((e) => e.event_type === "template_not_ready" && e.order_ref === "94205");
+        assert.ok(ev, "queda rastro visible template_not_ready");
+        assert.match(ev!.message, /NOT_APPROVED|PENDING/);
+        assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === tel).length, 0, "ni un mensaje en cola");
+      } finally {
+        db.setSetting("wa_tpl_verified:out_for_delivery_cod", antes); // el doctor la ve APPROVED de nuevo
+      }
+      await withEnv({ WHATSAPP_PROVIDER: "cloud_api", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        assert.equal(trackingNotif.notifyTrackingEvent(db.getOrderById(o.id)!, "OUT_FOR_DELIVERY"), true, "reaprobada: el MISMO aviso sale");
+      });
+      const item = db.getPendingOutbox(999).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.template_name, "reparto_hoy", "el nombre REAL de la WABA");
+      const payload = JSON.parse(item.payload_json!) as { bodyParams: string[] };
+      assert.equal(payload.bodyParams.length, 4, "4 variables: nombre, nº pedido, transportista, importe");
+      assert.equal(payload.bodyParams[1], "#94205", "el nº de pedido va en 2.ª posición, con #");
+      assert.equal(payload.bodyParams[2], "GLS");
+    });
+
+    await test("inventario WABA 01-09: tracking_available → pedido_confirmado_casamable con 5 variables en el orden real", async () => {
+      const tel = "34600994206";
+      const o = mkTrack("v3tr-6", "94206", tel, { carrier: "Correos Express", tracking_number: "PQ123", tracking_url: "https://t.example/PQ123" });
+      await withEnv({ WHATSAPP_PROVIDER: "cloud_api", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, () => {
+        assert.equal(trackingNotif.notifyTrackingEvent(o, "TRACKING_AVAILABLE"), true);
+      });
+      const item = db.getPendingOutbox(999).filter((x) => x.phone === tel).pop()!;
+      assert.equal(item.template_name, "pedido_confirmado_casamable", "pese al nombre, es la de ENVÍO con tracking");
+      const payload = JSON.parse(item.payload_json!) as { bodyParams: string[] };
+      assert.deepEqual(payload.bodyParams, ["Cliente", "#94206", "Correos Express", "PQ123", "https://t.example/PQ123"]);
     });
 
     await test("P0-B: dos 'workers' con la misma transición → EXACTAMENTE un envío (el claim decide tras el gate)", async () => {

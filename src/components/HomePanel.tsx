@@ -71,8 +71,8 @@ interface HomeData {
 }
 
 const URGENCY_STYLE: Record<AttentionItem["urgency"], { label: string; cls: string }> = {
-  urgent: { label: "URGENTE", cls: "text-red-400 border-red-500/40 bg-red-500/10" },
-  today: { label: "HOY", cls: "text-amber-400 border-amber-500/40 bg-amber-500/10" },
+  urgent: { label: "URGENTE", cls: "text-red-600 border-red-500/40 bg-red-500/10" },
+  today: { label: "HOY", cls: "text-amber-600 border-amber-500/40 bg-amber-500/10" },
   later: { label: "DESPUÉS", cls: "text-brand-muted border-brand-border bg-brand-surface-2" },
 };
 
@@ -280,7 +280,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-brand-border/50">
                 <div className="bg-brand-surface px-4 py-3.5">
                   <div className="text-[11px] uppercase tracking-wider text-brand-muted truncate">Margen actual (30d)</div>
-                  <div className={`mt-1 font-display text-xl font-semibold leading-tight tabular-nums ${data.codModel.marginPct === null ? "text-brand-text" : data.codModel.marginPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  <div className={`mt-1 font-display text-xl font-semibold leading-tight tabular-nums ${data.codModel.marginPct === null ? "text-brand-text" : data.codModel.marginPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                     {data.codModel.marginPct === null ? "—" : `${data.codModel.marginPct.toLocaleString("es-ES", { maximumFractionDigits: 1 })}%`}
                   </div>
                 </div>
@@ -299,13 +299,13 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
                 </div>
                 <div className="bg-brand-surface px-4 py-3.5">
                   <div className="text-[11px] uppercase tracking-wider text-brand-muted truncate">Colchón</div>
-                  <div className={`mt-1 font-display text-xl font-semibold leading-tight tabular-nums ${data.codModel.cushionPts === null ? "text-brand-text" : data.codModel.cushionPts > 5 ? "text-emerald-400" : data.codModel.cushionPts > 0 ? "text-amber-400" : "text-red-400"}`}>
+                  <div className={`mt-1 font-display text-xl font-semibold leading-tight tabular-nums ${data.codModel.cushionPts === null ? "text-brand-text" : data.codModel.cushionPts > 5 ? "text-emerald-600" : data.codModel.cushionPts > 0 ? "text-amber-600" : "text-red-600"}`}>
                     {data.codModel.cushionPts === null ? "—" : `${data.codModel.cushionPts > 0 ? "+" : ""}${data.codModel.cushionPts.toLocaleString("es-ES", { maximumFractionDigits: 1 })} pts`}
                   </div>
                 </div>
               </div>
               {(data.codModel.alert.status === "warning" || data.codModel.alert.status === "critical") && (
-                <div className={`border-t border-brand-border/50 px-5 py-2.5 flex items-center gap-2 text-xs ${data.codModel.alert.status === "critical" ? "text-red-300" : "text-amber-300"}`}>
+                <div className={`border-t border-brand-border/50 px-5 py-2.5 flex items-center gap-2 text-xs ${data.codModel.alert.status === "critical" ? "text-red-600" : "text-amber-600"}`}>
                   <StatusDot status={data.codModel.alert.status === "critical" ? "error" : "warn"} pulse={data.codModel.alert.status === "critical"} />
                   {data.codModel.alert.message}
                 </div>

@@ -266,7 +266,7 @@ export default function ShipmentsPanel() {
           >
             Envíos
           </SectionTitle>
-          {syncError ? <div className="mb-2 text-xs text-red-400">{syncError}</div> : null}
+          {syncError ? <div className="mb-2 text-xs text-red-600">{syncError}</div> : null}
 
           {/* ── Liberaciones ambiguas: siempre lo primero ── */}
           {ambiguous.length > 0 ? (

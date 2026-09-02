@@ -259,27 +259,27 @@ interface CostRow {
 const STATUS_META: Record<Status, { label: string; pill: string; dot: string }> = {
   healthy: {
     label: "OK",
-    pill: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
-    dot: "bg-emerald-400",
+    pill: "bg-emerald-500/15 text-emerald-600 border-emerald-500/40",
+    dot: "bg-emerald-500",
   },
   warning: {
     label: "AVISO",
-    pill: "bg-amber-500/15 text-amber-300 border-amber-500/40",
-    dot: "bg-amber-400",
+    pill: "bg-amber-500/15 text-amber-600 border-amber-500/40",
+    dot: "bg-amber-500",
   },
   critical: {
     label: "CRÍTICO",
-    pill: "bg-red-500/15 text-red-300 border-red-500/40",
-    dot: "bg-red-400",
+    pill: "bg-red-500/15 text-red-600 border-red-500/40",
+    dot: "bg-red-500",
   },
   disabled: {
     label: "APAGADO",
-    pill: "bg-zinc-500/15 text-zinc-400 border-zinc-500/40",
+    pill: "bg-zinc-500/15 text-zinc-600 border-zinc-500/40",
     dot: "bg-zinc-500",
   },
   unknown: {
     label: "SIN DATOS",
-    pill: "bg-sky-500/10 text-sky-300/80 border-sky-500/30",
+    pill: "bg-sky-500/10 text-sky-600/80 border-sky-500/30",
     dot: "bg-sky-500/70",
   },
 };
@@ -350,9 +350,9 @@ function money(v: number | null | undefined, cur = "EUR"): string {
 }
 function rateColor(v: number | null, warn = 70, crit = 65): string {
   if (v == null) return "text-brand-muted";
-  if (v < crit) return "text-red-300";
-  if (v < warn) return "text-amber-300";
-  return "text-emerald-300";
+  if (v < crit) return "text-red-600";
+  if (v < warn) return "text-amber-600";
+  return "text-emerald-600";
 }
 
 function BucketTable({ title, rows }: { title: string; rows: DeliveryBucket[] }) {
@@ -409,7 +409,7 @@ function EconomicsCard({ title, w }: { title: string; w: EconomicsWindow }) {
       <Row k="Margen estimado" v={w.estimatedMargin == null ? "—" : `${money(w.estimatedMargin, w.currency)} (${pct(w.estimatedMarginPct)})`} />
       <Row k="ROAS bruto / neto" v={`${w.grossRoas ?? "—"} / ${w.netRoas ?? "—"}`} />
       {w.missing.length > 0 && (
-        <div className="mt-2 text-[11px] text-amber-300/90">
+        <div className="mt-2 text-[11px] text-amber-600/90">
           Falta: {w.missing.slice(0, 5).join(" · ")}
           {w.missing.length > 5 ? ` · y ${w.missing.length - 5} más` : ""}
         </div>
@@ -472,7 +472,7 @@ function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: A
         Coste por unidad y SKU. Sin estos datos la economía sale “incompleta”; nunca se estima.
       </div>
       {suggested.length > 0 && (
-        <div className="text-[11px] text-amber-300/90 mb-2">
+        <div className="text-[11px] text-amber-600/90 mb-2">
           SKUs vistos sin coste:{" "}
           {suggested.map((s) => (
             <button
@@ -492,7 +492,7 @@ function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: A
         <input className={input} placeholder="Envío €" value={form.shipping_cost} onChange={(e) => setForm({ ...form, shipping_cost: e.target.value })} />
         <input className={input} placeholder="COD €" value={form.cod_fee} onChange={(e) => setForm({ ...form, cod_fee: e.target.value })} />
       </div>
-      <button onClick={saveCost} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-black">
+      <button onClick={saveCost} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-white">
         Guardar coste
       </button>
       <div className="mt-3 space-y-1">
@@ -508,7 +508,7 @@ function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: A
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         <input className={input} type="date" value={adDay} onChange={(e) => setAdDay(e.target.value)} />
         <input className={input} placeholder="Importe €" value={adAmount} onChange={(e) => setAdAmount(e.target.value)} />
-        <button onClick={saveAd} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-black">
+        <button onClick={saveAd} className="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-brand-gold text-white">
           Guardar gasto
         </button>
       </div>
@@ -589,7 +589,7 @@ function CallsPanel() {
   if (!data) return <div className="text-sm text-brand-muted">Cargando llamadas…</div>;
   const c = data.config;
   const btn = (active: boolean) =>
-    `px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${active ? "bg-brand-gold text-black border-brand-gold" : "border-brand-border text-brand-muted hover:text-brand-text"}`;
+    `px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${active ? "bg-brand-gold text-white border-brand-gold" : "border-brand-border text-brand-muted hover:text-brand-text"}`;
   const input = "bg-brand-bg border border-brand-border rounded-lg px-2 py-1 text-xs w-full";
 
   return (
@@ -629,8 +629,8 @@ function CallsPanel() {
           {msg && <div className="mt-2 text-[11px] text-brand-muted">{msg}</div>}
         </Section>
         <Section title="Credenciales (solo estado)">
-          <Row k="RETELL_API_KEY" v={c.retellApiKey === "configured" ? "configurada" : <span className="text-amber-300">falta</span>} />
-          <Row k="RETELL_FROM_NUMBER" v={c.retellFromNumber === "configured" ? "configurado" : <span className="text-amber-300">falta</span>} />
+          <Row k="RETELL_API_KEY" v={c.retellApiKey === "configured" ? "configurada" : <span className="text-amber-600">falta</span>} />
+          <Row k="RETELL_FROM_NUMBER" v={c.retellFromNumber === "configured" ? "configurado" : <span className="text-amber-600">falta</span>} />
           <Row k="RETELL_AGENT_ID" v={c.retellAgentId === "configured" ? "configurado" : <span className="text-brand-muted">opcional</span>} />
           <Row k="Disparo tras WhatsApp sin respuesta" v={`${c.triggerMinutes} min`} />
           <Row k="Contactos máximos" v={c.maxContacts} />
@@ -641,7 +641,7 @@ function CallsPanel() {
           <Row k="En cola" v={data.summary.planned} />
           <Row k="En curso" v={data.summary.inFlight} />
           <Row k="Completadas hoy" v={data.summary.completedToday} />
-          <Row k="Revisión manual" v={data.summary.manualReview > 0 ? <span className="text-amber-300">{data.summary.manualReview}</span> : 0} />
+          <Row k="Revisión manual" v={data.summary.manualReview > 0 ? <span className="text-amber-600">{data.summary.manualReview}</span> : 0} />
           <Row k="Candidatas shadow registradas" v={data.summary.shadowPending} />
         </Section>
       </div>
@@ -665,7 +665,7 @@ function CallsPanel() {
             <div className="text-sm text-brand-muted">Sin casos pendientes.</div>
           ) : (
             data.manualReview.map((a) => (
-              <Row key={a.id} k={`#${a.order} · contacto ${a.contact}`} v={<span className="text-amber-300 text-xs">{a.reason ?? "revisar"}</span>} />
+              <Row key={a.id} k={`#${a.order} · contacto ${a.contact}`} v={<span className="text-amber-600 text-xs">{a.reason ?? "revisar"}</span>} />
             ))
           )}
         </Section>
@@ -702,8 +702,8 @@ function MetricWarning({ m, que }: { m: MeasuredStatus; que: string }) {
         : `${que.charAt(0).toUpperCase() + que.slice(1)} está incompleto.`;
   const color =
     m.status === "error"
-      ? "bg-rose-500/10 border-rose-500/40 text-rose-200"
-      : "bg-amber-500/10 border-amber-500/40 text-amber-200";
+      ? "bg-rose-500/10 border-rose-500/40 text-rose-600"
+      : "bg-amber-500/10 border-amber-500/40 text-amber-600";
   return (
     <div className={`rounded-lg border px-3 py-2 text-xs mb-3 ${color}`}>
       <div className="font-semibold">{texto}</div>
@@ -722,7 +722,7 @@ function MetricWarning({ m, que }: { m: MeasuredStatus; que: string }) {
 /** Contador de un eje, con su etiqueta en cristiano. */
 function AxisCount({ k, v, tone }: { k: string; v: number; tone?: "good" | "bad" | "muted" }) {
   const color =
-    tone === "good" ? "text-emerald-300" : tone === "bad" ? "text-rose-300" : tone === "muted" ? "text-brand-muted" : "";
+    tone === "good" ? "text-emerald-600" : tone === "bad" ? "text-rose-600" : tone === "muted" ? "text-brand-muted" : "";
   return <Row k={k} v={<span className={`font-semibold ${color}`}>{v}</span>} />;
 }
 
@@ -791,7 +791,7 @@ function MappingsPanel() {
   if (error) {
     return (
       <Section title="Productos emparejados con el proveedor">
-        <div className="text-sm text-rose-300">No se ha podido leer la lista: {error}</div>
+        <div className="text-sm text-rose-600">No se ha podido leer la lista: {error}</div>
       </Section>
     );
   }
@@ -811,7 +811,7 @@ function MappingsPanel() {
       </div>
 
       {rows.length === 0 ? (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-xs text-amber-200">
+        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-xs text-amber-600">
           <div className="font-semibold">No hay ningún producto emparejado.</div>
           <div className="mt-1 opacity-90">
             Mientras esté así, <strong>todos</strong> los pedidos van a revisión manual. Es el comportamiento seguro,
@@ -976,17 +976,17 @@ export default function SystemPanel() {
             <span
               className={
                 data.overall === "healthy"
-                  ? "text-emerald-300"
+                  ? "text-emerald-600"
                   : data.overall === "critical"
-                    ? "text-red-300"
-                    : "text-amber-300"
+                    ? "text-red-600"
+                    : "text-amber-600"
               }
             >
               {overallMeta.label}
             </span>
           </h2>
           {data.emergencyStop && (
-            <span className="px-2 py-0.5 rounded-md border border-red-500/50 bg-red-500/20 text-red-200 text-[10px] font-bold tracking-wide">
+            <span className="px-2 py-0.5 rounded-md border border-red-500/50 bg-red-500/20 text-red-600 text-[10px] font-bold tracking-wide">
               EMERGENCY STOP ACTIVO
             </span>
           )}
@@ -1004,7 +1004,7 @@ export default function SystemPanel() {
             onClick={() => setTab(id)}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors ${
               tab === id
-                ? "bg-brand-gold text-black border-brand-gold"
+                ? "bg-brand-gold text-white border-brand-gold"
                 : "border-brand-border text-brand-muted hover:text-brand-text"
             }`}
           >
@@ -1158,7 +1158,7 @@ export default function SystemPanel() {
             <Row k="Versión de esquema" v={`${data.database.schemaVersion} (esperada ${data.database.expectedSchemaVersion})`} />
             <Row k="Última escritura" v={hace(data.database.lastWriteAt)} />
             {data.database.walWarning && (
-              <div className="mt-2 text-xs text-amber-300/90 border border-amber-500/30 bg-amber-500/10 rounded-lg px-3 py-2">
+              <div className="mt-2 text-xs text-amber-600/90 border border-amber-500/30 bg-amber-500/10 rounded-lg px-3 py-2">
                 {data.database.walWarning}
               </div>
             )}
@@ -1246,7 +1246,7 @@ export default function SystemPanel() {
             k="Retenidos (no saldrán solos)"
             v={
               data.outbox.retained > 0 ? (
-                <span className="text-amber-300">{data.outbox.retained} — revisar con outbox:inspect</span>
+                <span className="text-amber-600">{data.outbox.retained} — revisar con outbox:inspect</span>
               ) : (
                 0
               )
@@ -1275,7 +1275,7 @@ export default function SystemPanel() {
               k="Bloqueados por dirección (city “-”)"
               v={
                 data.tracking.blockedAddress > 0 ? (
-                  <span className="text-amber-300">{data.tracking.blockedAddress}</span>
+                  <span className="text-amber-600">{data.tracking.blockedAddress}</span>
                 ) : (
                   0
                 )
@@ -1325,7 +1325,7 @@ export default function SystemPanel() {
               <Row k="Pendientes de llamada" v={data.business.alerts.snapshot.needsCallTotal} />
               <Row
                 k="· atrasados"
-                v={<span className={data.business.alerts.snapshot.needsCallStale ? "text-amber-300" : ""}>{data.business.alerts.snapshot.needsCallStale}</span>}
+                v={<span className={data.business.alerts.snapshot.needsCallStale ? "text-amber-600" : ""}>{data.business.alerts.snapshot.needsCallStale}</span>}
               />
               <Row k="Incidencias abiertas" v={data.business.alerts.snapshot.openIncidents} />
               <Row k="Entregados hoy" v={data.business.delivery.today.closure.delivered} />
@@ -1403,7 +1403,7 @@ export default function SystemPanel() {
                 onClick={() => setSeverityFilter(s)}
                 className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border ${
                   severityFilter === s
-                    ? "bg-brand-gold text-black border-brand-gold"
+                    ? "bg-brand-gold text-white border-brand-gold"
                     : "border-brand-border text-brand-muted hover:text-brand-text"
                 }`}
               >

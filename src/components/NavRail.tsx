@@ -274,7 +274,7 @@ export default function NavRail({
       {/* Sheet de "Más" (móvil) */}
       {moreOpen && (
         <div className="md:hidden fixed inset-0 z-50" role="dialog" aria-modal aria-label="Más secciones">
-          <div className="absolute inset-0 bg-black/60" onClick={() => setMoreOpen(false)} aria-hidden />
+          <div className="absolute inset-0 bg-black/30" onClick={() => setMoreOpen(false)} aria-hidden />
           <div className="absolute bottom-0 inset-x-0 rounded-t-2xl border-t border-brand-border bg-brand-surface p-4 pb-[max(env(safe-area-inset-bottom),16px)]">
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-brand-border" aria-hidden />
             <div className="grid grid-cols-3 gap-2">

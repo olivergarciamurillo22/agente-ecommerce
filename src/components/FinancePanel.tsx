@@ -110,12 +110,12 @@ function Waterfall({ data }: { data: FinanceOverview }) {
           r.kind === "in"
             ? "bg-brand-gold/85"
             : r.kind === "cost"
-              ? "bg-red-400/40"
+              ? "bg-red-500/40"
               : r.value >= 0
-                ? "bg-emerald-400/85"
-                : "bg-red-400/85";
+                ? "bg-emerald-500/85"
+                : "bg-red-500/85";
         const valueCls =
-          r.kind === "result" ? (r.value >= 0 ? "text-emerald-400" : "text-red-400") : "text-brand-text";
+          r.kind === "result" ? (r.value >= 0 ? "text-emerald-600" : "text-red-600") : "text-brand-text";
         return (
           <div key={r.label} className="flex items-center gap-3">
             <div className="w-36 md:w-44 shrink-0 text-xs text-brand-muted truncate" title={r.label}>
@@ -240,10 +240,10 @@ function DailyChart({ series }: { series: FinanceDayPoint[] }) {
       </svg>
       <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-brand-muted">
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-2 w-2 rounded-[3px] bg-emerald-400/80" aria-hidden /> beneficio del día
+          <span className="h-2 w-2 rounded-[3px] bg-emerald-500/80" aria-hidden /> beneficio del día
         </span>
         <span className="inline-flex items-center gap-1.5">
-          <span className="h-2 w-2 rounded-[3px] bg-red-400/80" aria-hidden /> pérdida
+          <span className="h-2 w-2 rounded-[3px] bg-red-500/80" aria-hidden /> pérdida
         </span>
         <span className="inline-flex items-center gap-1.5">
           <span className="h-0.5 w-4 rounded bg-brand-gold" aria-hidden /> gasto en ads
@@ -362,7 +362,7 @@ function CourierTable({ rows }: { rows: CourierPerformanceRow[] }) {
                 <td className="px-4 py-3 text-brand-text">{c.carrier}</td>
                 <td className={TD_NUM}>{formatInt(c.shipped)}</td>
                 <td className={TD_NUM}>{formatInt(c.delivered)}</td>
-                <td className={`px-4 py-3 text-right tabular-nums ${c.refused > 0 ? "text-amber-400" : "text-brand-text"}`}>
+                <td className={`px-4 py-3 text-right tabular-nums ${c.refused > 0 ? "text-amber-600" : "text-brand-text"}`}>
                   {formatInt(c.refused)}
                 </td>
                 <td className={`px-4 py-3 text-right tabular-nums ${STATUS_TEXT[rateStatus(c.deliveryRate)]}`}>
@@ -383,7 +383,7 @@ function CourierTable({ rows }: { rows: CourierPerformanceRow[] }) {
               <span className="text-brand-muted">Entregados</span>
               <span className="text-right tabular-nums text-brand-text">{formatInt(c.delivered)}</span>
               <span className="text-brand-muted">Rehusados</span>
-              <span className={`text-right tabular-nums ${c.refused > 0 ? "text-amber-400" : "text-brand-text"}`}>{formatInt(c.refused)}</span>
+              <span className={`text-right tabular-nums ${c.refused > 0 ? "text-amber-600" : "text-brand-text"}`}>{formatInt(c.refused)}</span>
               <span className="text-brand-muted">Tasa</span>
               <span className={`text-right tabular-nums ${STATUS_TEXT[rateStatus(c.deliveryRate)]}`}>{formatPct(c.deliveryRate)}</span>
             </div>
@@ -582,7 +582,7 @@ export default function FinancePanel() {
         {data && w && w.missing.length > 0 ? (
           <section>
             <Card className="border-amber-500/40 px-5 py-4">
-              <div className="text-sm font-semibold text-amber-400">Para completar el beneficio falta:</div>
+              <div className="text-sm font-semibold text-amber-600">Para completar el beneficio falta:</div>
               <ul className="mt-2 space-y-1">
                 {w.missing.map((m) => (
                   <li key={m} className="text-xs text-brand-muted">

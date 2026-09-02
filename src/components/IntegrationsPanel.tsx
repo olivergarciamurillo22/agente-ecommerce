@@ -443,7 +443,7 @@ export default function IntegrationsPanel() {
                         {card.lastErrorAt !== null || card.lastError ? (
                           <div className="flex justify-between gap-3">
                             <span className="text-brand-muted shrink-0">Último error</span>
-                            <span className="text-red-400/90 text-right break-words min-w-0" title={card.lastError ?? undefined}>
+                            <span className="text-red-600/90 text-right break-words min-w-0" title={card.lastError ?? undefined}>
                               {card.lastError ?? "—"}
                               {card.lastErrorAt !== null ? ` (${timeAgo(card.lastErrorAt)})` : ""}
                             </span>
@@ -499,7 +499,7 @@ export default function IntegrationsPanel() {
                         </div>
                       ) : null}
                       {isBeeping && discoveryNote ? (
-                        <div className={`text-[11px] leading-snug ${discoveryNote.ok ? "text-emerald-400" : "text-red-400"}`}>
+                        <div className={`text-[11px] leading-snug ${discoveryNote.ok ? "text-emerald-600" : "text-red-600"}`}>
                           {discoveryNote.detail}
                         </div>
                       ) : null}
@@ -515,7 +515,7 @@ export default function IntegrationsPanel() {
                             {testing[card.id] ? "Probando…" : "Probar conexión"}
                           </GhostButton>
                           {result ? (
-                            <div className={`text-[11px] leading-snug ${result.ok ? "text-emerald-400" : "text-red-400"}`} title={result.detail}>
+                            <div className={`text-[11px] leading-snug ${result.ok ? "text-emerald-600" : "text-red-600"}`} title={result.detail}>
                               {result.ok ? `Conexión OK — ${result.detail}` : `Error: ${result.detail}`}
                             </div>
                           ) : null}

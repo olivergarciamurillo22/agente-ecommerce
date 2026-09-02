@@ -255,7 +255,7 @@ export default function AdsPanel() {
               </Chip>
             ))}
           </div>
-          {syncError ? <div className="mt-2 text-xs text-red-400">Sincronización: {syncError}</div> : null}
+          {syncError ? <div className="mt-2 text-xs text-red-600">Sincronización: {syncError}</div> : null}
         </section>
 
         {notConfigured ? (
@@ -411,7 +411,7 @@ export default function AdsPanel() {
                   Rendimiento por campaña
                 </SectionTitle>
                 {data.campaignEconomics.campaignCoveragePct < 100 && data.campaignEconomics.totalOrders > 0 && (
-                  <p className="text-[11px] text-amber-300/90 mb-2.5">
+                  <p className="text-[11px] text-amber-600/90 mb-2.5">
                     Cifras PARCIALES: solo cuentan los pedidos cuya campaña se pudo resolver (UTM de Shopify contra las campañas
                     de Meta). Lo no resuelto está en «Sin atribución» — nunca se reparte proporcionalmente.
                   </p>
@@ -458,7 +458,7 @@ export default function AdsPanel() {
                             <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.deliveredRevenue)}</td>
                             <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.cpaOrder)}</td>
                             <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.cpaDelivered)}</td>
-                            <td className={`px-4 py-2.5 text-right tabular-nums ${c.netRoas !== null && c.netRoas < 1 ? "text-red-300" : "text-brand-text"}`}>
+                            <td className={`px-4 py-2.5 text-right tabular-nums ${c.netRoas !== null && c.netRoas < 1 ? "text-red-600" : "text-brand-text"}`}>
                               {c.netRoas === null ? "—" : `${c.netRoas.toLocaleString("es-ES", { maximumFractionDigits: 2 })}x`}
                             </td>
                           </tr>

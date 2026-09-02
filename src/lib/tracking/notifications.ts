@@ -30,7 +30,7 @@ import { logIntegrationEvent } from "../system/repo";
 import { formatMoney } from "../orders/messages";
 import { sendWhatsAppInteractive, sendWhatsAppMessage } from "../whatsapp";
 import { canSendRealWhatsApp } from "../safety";
-import { buildTemplateMessage } from "../whatsapp/templates";
+import { buildApprovedTemplateMessage, getTemplateReadiness } from "../whatsapp/templates";
 import type { TrackingEvent } from "./types";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -182,27 +182,40 @@ export function trackingPayloadIssues(order: OrderRow, event: TrackingEvent): st
   return problemas;
 }
 
+/**
+ * Los avisos de tracking resuelven su plantilla por clave LÓGICA (mapping
+ * verificado por whatsapp:templates:doctor), igual que la confirmación
+ * inicial. Incidente 02-09: reparto_hoy se editó en Meta (título + TTL) y
+ * volvió a PENDING; dos avisos de reparto fallaron con 132001 y esos
+ * clientes recibieron el paquete sin saber el importe. Con la verificación
+ * cacheada, una plantilla en revisión BLOQUEA el aviso con motivo visible.
+ */
+const EVENT_TEMPLATE_KEY: Partial<Record<TrackingEvent, string>> = {
+  TRACKING_AVAILABLE: "tracking_available",
+  OUT_FOR_DELIVERY: "out_for_delivery_cod",
+};
+
 function buildTrackingAvailableOutbound(order: OrderRow) {
   return {
-    message: buildTemplateMessage("pedido_confirmado_casamable", [
-      firstName(order) || "cliente",
-      trackingOrderNumber(order),
-      (order.carrier ?? "").trim(),
-      (order.tracking_number ?? "").trim(),
-      (order.tracking_url ?? "").trim(),
-    ]),
+    message: buildApprovedTemplateMessage("tracking_available", {
+      nombre: firstName(order) || "cliente",
+      numero_pedido: trackingOrderNumber(order),
+      transportista: (order.carrier ?? "").trim(),
+      numero_seguimiento: (order.tracking_number ?? "").trim(),
+      tracking_url: (order.tracking_url ?? "").trim(),
+    }),
     fallbackText: buildTrackingAvailableMessage(order),
   };
 }
 
 function buildOutForDeliveryOutbound(order: OrderRow) {
   return {
-    message: buildTemplateMessage("reparto_hoy", [
-      firstName(order) || "cliente",
-      trackingOrderNumber(order),
-      (order.carrier ?? "").trim(),
-      formatMoney(order.total_price, order.currency),
-    ]),
+    message: buildApprovedTemplateMessage("out_for_delivery_cod", {
+      nombre: firstName(order) || "cliente",
+      numero_pedido: trackingOrderNumber(order),
+      transportista: (order.carrier ?? "").trim(),
+      importe: formatMoney(order.total_price, order.currency),
+    }),
     fallbackText: buildOutForDeliveryMessage(order),
   };
 }
@@ -323,6 +336,19 @@ export function notifyTrackingEvent(order: OrderRow, event: TrackingEvent): bool
     aRevision(order, `tracking_payload_incomplete: aviso ${event} sin datos suficientes (${incompleto.join(", ")}) — no se envía nada a medias`);
     logIntegrationEvent("tracking", "tracking_payload_incomplete", "warning", `aviso ${event} retenido: ${incompleto.join(", ")}`, order.shopify_order_number);
     return false;
+  }
+
+  // ── Plantilla REAL verificada (02-09): PENDING/no verificada = bloqueo
+  // visible SIN consumir el sello. Cuando el doctor la vea APPROVED, el
+  // aviso podrá salir.
+  const tplKey = EVENT_TEMPLATE_KEY[event];
+  if (tplKey) {
+    const r = getTemplateReadiness(tplKey);
+    if (!r.ready) {
+      logger.warn(`[TRACKING] #${order.shopify_order_number} ${event}: plantilla no lista (${r.blocker}) — aviso retenido, sello NO consumido`);
+      logIntegrationEvent("whatsapp", "template_not_ready", "warning", `aviso ${event} retenido (${r.blocker}): ${r.detail}`.slice(0, 300), order.shopify_order_number);
+      return false;
+    }
   }
 
   // Claim atómico: de dos workers con la misma transición, EXACTAMENTE uno

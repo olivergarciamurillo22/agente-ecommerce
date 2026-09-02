@@ -49,7 +49,7 @@
       "use": "Recordatorio si no contestó al primer mensaje y la ventana de 24 h ya venció.",
       "variables": [
         "nombre",
-        "producto"
+        "numero_pedido"
       ],
       "draft_body": "Hola {{1}}, seguimos esperando tu confirmación del pedido {{2}} para poder enviarlo. Responde cuando puedas.",
       "buttons": [
@@ -64,7 +64,8 @@
           "payload": "change_address"
         }
       ],
-      "fallback": "buildReminderMessage (orders/messages.ts)"
+      "fallback": "buildReminderMessage (orders/messages.ts)",
+      "note_v4": "Aridad alineada con la plantilla REAL de la WABA (inventario 01-09). El texto real vive en Meta; esto es el contrato local."
     },
     {
       "name": "tracking_available",
@@ -72,12 +73,16 @@
       "category": "UTILITY",
       "use": "El pedido ya tiene número de seguimiento (suele ser días después de confirmar: fuera de ventana casi siempre).",
       "variables": [
-        "producto",
+        "nombre",
+        "numero_pedido",
+        "transportista",
+        "numero_seguimiento",
         "tracking_url"
       ],
       "draft_body": "Tu pedido {{1}} ya está en camino 🚚 Puedes seguirlo aquí: {{2}}",
       "buttons": [],
-      "fallback": "buildTrackingAvailableMessage (tracking/notifications.ts)"
+      "fallback": "buildTrackingAvailableMessage (tracking/notifications.ts)",
+      "note_v4": "Aridad alineada con la plantilla REAL de la WABA (inventario 01-09). El texto real vive en Meta; esto es el contrato local."
     },
     {
       "name": "out_for_delivery_cod",
@@ -85,12 +90,15 @@
       "category": "UTILITY",
       "use": "Sale a reparto HOY: recordar el importe en efectivo (clave en COD).",
       "variables": [
-        "producto",
+        "nombre",
+        "numero_pedido",
+        "transportista",
         "importe"
       ],
       "draft_body": "Tu pedido {{1}} sale a reparto hoy. Recuerda tener {{2}} en efectivo para pagar al repartidor.",
       "buttons": [],
-      "fallback": "buildOutForDeliveryMessage (tracking/notifications.ts)"
+      "fallback": "buildOutForDeliveryMessage (tracking/notifications.ts)",
+      "note_v4": "Aridad alineada con la plantilla REAL de la WABA (inventario 01-09). El texto real vive en Meta; esto es el contrato local."
     },
     {
       "name": "delivery_attempt_failed",
@@ -98,17 +106,24 @@
       "category": "UTILITY",
       "use": "El repartidor no encontró al cliente. Es el aviso que más pedidos recupera.",
       "variables": [
-        "nombre"
+        "nombre",
+        "numero_pedido"
       ],
       "draft_body": "Hola {{1}}, el repartidor ha intentado entregar tu pedido de Casamable y no ha podido. Volverá a pasar; si no vas a estar o prefieres otra dirección, respóndenos a este mensaje.",
       "buttons": [
         {
           "type": "QUICK_REPLY",
           "text": "Cambiar dirección",
-          "payload": "change_address"
+          "payload": "retry_delivery"
+        },
+        {
+          "type": "QUICK_REPLY",
+          "text": "need_help",
+          "payload": "need_help"
         }
       ],
-      "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)"
+      "fallback": "buildDeliveryAttemptMessage (tracking/notifications.ts)",
+      "note_v4": "Aridad alineada con la plantilla REAL de la WABA (inventario 01-09). El texto real vive en Meta; esto es el contrato local."
     },
     {
       "name": "manual_attention_required",
@@ -253,6 +268,87 @@
         "importe"
       ],
       "note": "Confirmada contra el inventario real de la WABA (sesión 01-09, docs/CONTEXTO-2026-09-01.md §5): 4 variables — {{1}} nombre, {{2}} nº pedido (ej. '#1042'), {{3}} producto, {{4}} importe — y 3 botones en este orden: Confirmar pedido→confirm_order, Cambiar dirección→change_address, Dejar una nota→delivery_note. 'pedido' (el mapping anterior) era la plantilla de ejemplo de Meta sin adaptar, nunca la real — origen del incidente 132001. Sigue exigiendo whatsapp:templates:doctor antes de activarse: esto declara intención, no aprobación."
+    },
+    {
+      "logicalKey": "order_reminder",
+      "providerTemplate": "recordatorio_confirmacion",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido"
+      ],
+      "note": "Recordatorio fuera de ventana de 24h. 2 botones a propósito (confirm_order, change_address). PENDING la noche del 01-09: exige doctor."
+    },
+    {
+      "logicalKey": "tracking_available",
+      "providerTemplate": "pedido_confirmado_casamable",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido",
+        "transportista",
+        "numero_seguimiento",
+        "tracking_url"
+      ],
+      "note": "Pese al nombre es la de ENVÍO CON TRACKING (el nombre no se puede cambiar en Meta). Fail-closed: sin transportista/número/URL no se envía. Editada el 01-09 → PENDING hasta reaprobación."
+    },
+    {
+      "logicalKey": "out_for_delivery_cod",
+      "providerTemplate": "reparto_hoy",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido",
+        "transportista",
+        "importe"
+      ],
+      "note": "La que más dinero salva (recuerda el efectivo). Editada el 01-09 (título + TTL 12h) → PENDING: el 02-09 fallaron dos avisos con 132001 por esto, no por el mapping."
+    },
+    {
+      "logicalKey": "delivery_attempt_failed",
+      "providerTemplate": "entrega_fallida",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido"
+      ],
+      "note": "Los payloads retry_delivery/need_help no tienen flujo posterior completo: NO activar envío automático (DELIVERY_ATTEMPT_WHATSAPP_ENABLED sigue a 0)."
+    },
+    {
+      "logicalKey": "order_delay_restock",
+      "providerTemplate": "retraso_pedido",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido",
+        "producto",
+        "fecha_reposicion"
+      ],
+      "note": "APPROVED. ⛔ NO EDITAR en Meta hasta terminar la campaña Ultras. El código la envía por nombre directo (notify-delay); este mapping es documental."
+    },
+    {
+      "logicalKey": "order_cancelled_ack",
+      "providerTemplate": "pedido_cancelado",
+      "language": "en",
+      "params": [
+        "nombre",
+        "numero_pedido"
+      ],
+      "note": "BLOQUEADA: tiene un botón 'Necesito ayuda' sin payload ni handler. No enviar hasta resolverlo. El idioma 'en' es literal en Meta: NO cambiar a 'es'."
+    },
+    {
+      "logicalKey": "order_confirmed_ack_out_of_window",
+      "providerTemplate": "pedido_confirmado",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido",
+        "importe"
+      ],
+      "note": "Solo fuera de ventana de 24h (confirmación por llamada o manual). NUNCA como primer mensaje (decisión de Pedro 01-09). Sin uso en código todavía."
     }
-  ]
+  ],
+  "_unavailable_in_waba": {
+    "manual_attention_required": "Sin plantilla real en la WABA: o se crea, o este mensaje queda solo para dentro de ventana."
+  }
 }

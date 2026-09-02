@@ -171,7 +171,7 @@ export default function ConversationPanel({
           <ModeToggle mode={conversation.mode} onChange={handleModeChange} />
           <button
             onClick={handleDelete}
-            className="text-xs px-3 py-2 rounded-lg border border-brand-border text-brand-muted hover:border-red-800/60 hover:text-red-300 transition-colors"
+            className="text-xs px-3 py-2 rounded-lg border border-brand-border text-brand-muted hover:border-red-800/60 hover:text-red-600 transition-colors"
           >
             Borrar
           </button>

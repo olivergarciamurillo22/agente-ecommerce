@@ -83,7 +83,7 @@ export default function SettingsPanel() {
             </button>
             <button
               onClick={() => save("paused", "1")}
-              className={`px-4 py-2 text-sm font-semibold rounded-md transition-colors ${paused ? "bg-brand-gold text-black" : "text-brand-muted hover:text-brand-text"}`}
+              className={`px-4 py-2 text-sm font-semibold rounded-md transition-colors ${paused ? "bg-brand-gold text-white" : "text-brand-muted hover:text-brand-text"}`}
             >
               ⏸ En pausa
             </button>
@@ -115,7 +115,7 @@ export default function SettingsPanel() {
             />
             <button
               onClick={() => customModel.trim() && save("model", customModel.trim())}
-              className="px-3 py-2 rounded-lg bg-brand-gold text-black text-sm font-semibold disabled:opacity-40"
+              className="px-3 py-2 rounded-lg bg-brand-gold text-white text-sm font-semibold disabled:opacity-40"
               disabled={!customModel.trim()}
             >
               Usar
@@ -164,7 +164,7 @@ export default function SettingsPanel() {
             </button>
             <button
               onClick={() => save("audio_enabled", "0")}
-              className={`px-4 py-2 text-sm font-semibold rounded-md transition-colors ${!audioOn ? "bg-brand-gold text-black" : "text-brand-muted hover:text-brand-text"}`}
+              className={`px-4 py-2 text-sm font-semibold rounded-md transition-colors ${!audioOn ? "bg-brand-gold text-white" : "text-brand-muted hover:text-brand-text"}`}
             >
               Desactivados
             </button>

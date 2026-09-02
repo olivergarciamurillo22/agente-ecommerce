@@ -26,9 +26,9 @@ function Chip({ label, on, danger }: { label: string; on: boolean; danger?: bool
       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-bold tracking-wide ${
         on
           ? danger
-            ? "bg-red-500/20 border-red-500/50 text-red-200"
-            : "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-          : "bg-zinc-500/10 border-zinc-500/30 text-zinc-400"
+            ? "bg-red-500/20 border-red-500/50 text-red-600"
+            : "bg-emerald-500/15 border-emerald-500/40 text-emerald-600"
+          : "bg-zinc-500/10 border-zinc-500/30 text-zinc-600"
       }`}
     >
       {label}: {on ? "ON" : "OFF"}
@@ -65,10 +65,10 @@ export default function SafetyBanner() {
   const fullProduction = !isSafe && !s.testMode && s.realSendPossible;
 
   const bannerCls = isSafe
-    ? "bg-sky-500/10 border-sky-500/40 text-sky-200"
+    ? "bg-sky-500/10 border-sky-500/40 text-sky-600"
     : fullProduction
-      ? "bg-red-500/15 border-red-500/50 text-red-200"
-      : "bg-violet-500/10 border-violet-500/40 text-violet-200";
+      ? "bg-red-500/15 border-red-500/50 text-red-600"
+      : "bg-violet-500/10 border-violet-500/40 text-violet-600";
 
   const title = isSafe ? "SAFE MODE" : s.testMode ? "TEST MODE" : "PRODUCTION";
   const subtitle = isSafe
@@ -88,8 +88,8 @@ export default function SafetyBanner() {
           title={`Ventana de envío: ${s.windowLabel}`}
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-bold tracking-wide ${
             s.insideWindow
-              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
-              : "bg-amber-500/15 border-amber-500/40 text-amber-300"
+              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-600"
+              : "bg-amber-500/15 border-amber-500/40 text-amber-600"
           }`}
         >
           🕘 {s.insideWindow ? "EN HORARIO" : "FUERA DE HORARIO"} · {s.windowLabel}

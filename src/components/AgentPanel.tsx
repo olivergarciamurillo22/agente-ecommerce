@@ -220,16 +220,16 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
                 <IdentityFact label="Prompt">
                   {automation ? (
                     automation.promptValidated ? (
-                      <span className="text-emerald-400">Validado ✓</span>
+                      <span className="text-emerald-600">Validado ✓</span>
                     ) : (
-                      <span className="text-amber-300">No validado ✗</span>
+                      <span className="text-amber-600">No validado ✗</span>
                     )
                   ) : (
                     "—"
                   )}
                 </IdentityFact>
                 <IdentityFact label="Versión">
-                  {automation?.configuredAgentVersion ?? <span className="text-amber-300">SIN FIJAR</span>}
+                  {automation?.configuredAgentVersion ?? <span className="text-amber-600">SIN FIJAR</span>}
                 </IdentityFact>
                 <IdentityFact label="Llamadas hoy">
                   {formatInt(calls.summary.completedToday)}/{formatInt(calls.config.dailyCap)}

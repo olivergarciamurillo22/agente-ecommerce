@@ -162,7 +162,7 @@ export default function CostsPanel() {
           Cada cambio se versiona: el histórico de costes nunca se sobrescribe, para que el P&amp;L de un mes pasado use los costes que regían entonces.
         </p>
 
-        {saveError && <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{saveError}</div>}
+        {saveError && <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-600">{saveError}</div>}
 
         {adding && (
           <Card className="p-4 space-y-3">

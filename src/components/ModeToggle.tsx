@@ -12,7 +12,7 @@ export default function ModeToggle({ mode, onChange }: ModeToggleProps) {
         onClick={() => onChange("AI")}
         className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
           mode === "AI"
-            ? "bg-brand-gold text-black"
+            ? "bg-brand-gold text-white"
             : "text-brand-muted hover:text-brand-text"
         }`}
       >

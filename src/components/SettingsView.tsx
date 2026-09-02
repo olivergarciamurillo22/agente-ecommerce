@@ -77,15 +77,15 @@ function AutomationBanner({ title, ready, blockers }: { title: string; ready: bo
     >
       <div className="flex items-center gap-2">
         <StatusDot status={ready ? "ok" : "warn"} />
-        <span className={`text-[11px] font-bold tracking-[0.14em] ${ready ? "text-emerald-400" : "text-amber-300"}`}>
+        <span className={`text-[11px] font-bold tracking-[0.14em] ${ready ? "text-emerald-600" : "text-amber-600"}`}>
           {title}: {ready ? "READY" : "BLOCKED"}
         </span>
       </div>
       {!ready && blockers.length > 0 ? (
         <ul className="mt-2 space-y-1">
           {blockers.map((b, i) => (
-            <li key={i} className="flex items-start gap-2 text-xs text-amber-200/90 leading-snug">
-              <span className="mt-1.5 h-1 w-1 rounded-full bg-amber-400 shrink-0" aria-hidden />
+            <li key={i} className="flex items-start gap-2 text-xs text-amber-600/90 leading-snug">
+              <span className="mt-1.5 h-1 w-1 rounded-full bg-amber-500 shrink-0" aria-hidden />
               <span>{b}</span>
             </li>
           ))}
@@ -266,7 +266,7 @@ function WhatsAppSection() {
         ) : null}
         {automation.testMode ? (
           <InfoRow label="Modo de pruebas">
-            <span className="text-amber-300">TEST_MODE activo: solo la lista de pruebas y la rampa reciben mensajes.</span>
+            <span className="text-amber-600">TEST_MODE activo: solo la lista de pruebas y la rampa reciben mensajes.</span>
           </InfoRow>
         ) : null}
       </Card>
@@ -327,7 +327,7 @@ function WhatsAppSection() {
               <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold mb-1">Quién recibirá mensajes ahora mismo</div>
               <p className="text-sm text-brand-text leading-snug">{rolloutAudience(rolloutTarget)}</p>
             </div>
-            {rolloutError ? <div className="text-xs text-red-400 leading-snug">{rolloutError}</div> : null}
+            {rolloutError ? <div className="text-xs text-red-600 leading-snug">{rolloutError}</div> : null}
             <div className="flex justify-end gap-2 pt-1">
               <GhostButton onClick={() => setRolloutTarget(null)} disabled={rolloutSaving}>
                 Cancelar
@@ -346,7 +346,7 @@ function WhatsAppSection() {
           <p className="text-sm text-brand-text leading-snug">
             Se cerrará la sesión de WhatsApp Web y el agente dejará de enviar y recibir mensajes hasta que vuelvas a escanear el código QR.
           </p>
-          {disconnectError ? <div className="text-xs text-red-400 leading-snug">{disconnectError}</div> : null}
+          {disconnectError ? <div className="text-xs text-red-600 leading-snug">{disconnectError}</div> : null}
           <div className="flex justify-end gap-2 pt-1">
             <GhostButton onClick={() => setDisconnectOpen(false)} disabled={disconnecting}>
               Cancelar
@@ -493,7 +493,7 @@ function CallsSection() {
       <div className="min-w-0">
         <div className="text-sm text-brand-text">
           {label}
-          {savedKey === key ? <span className="ml-2 text-[11px] text-emerald-400">guardado ✓</span> : null}
+          {savedKey === key ? <span className="ml-2 text-[11px] text-emerald-600">guardado ✓</span> : null}
         </div>
         <div className="text-[11px] text-brand-muted leading-snug">{hint}</div>
       </div>
@@ -529,7 +529,7 @@ function CallsSection() {
       <div className="min-w-0">
         <div className="text-sm text-brand-text">
           {label}
-          {savedKey === key ? <span className="ml-2 text-[11px] text-emerald-400">guardado ✓</span> : null}
+          {savedKey === key ? <span className="ml-2 text-[11px] text-emerald-600">guardado ✓</span> : null}
         </div>
         <div className="text-[11px] text-brand-muted leading-snug">{hint}</div>
       </div>
@@ -542,7 +542,7 @@ function CallsSection() {
             else void saveConfig(key, "1");
           }}
           className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
-            on ? "bg-brand-gold text-black" : "text-brand-muted hover:text-brand-text"
+            on ? "bg-brand-gold text-white" : "text-brand-muted hover:text-brand-text"
           }`}
         >
           {onLabel}
@@ -595,9 +595,9 @@ function CallsSection() {
         <InfoRow label="Prompt">
           {automation ? (
             automation.promptValidated ? (
-              <span className="text-emerald-400">Validado ✓</span>
+              <span className="text-emerald-600">Validado ✓</span>
             ) : (
-              <span className="text-amber-300">No validado</span>
+              <span className="text-amber-600">No validado</span>
             )
           ) : (
             "—"
@@ -605,7 +605,7 @@ function CallsSection() {
         </InfoRow>
         <InfoRow label="Versión del agente">
           <span>
-            {automation?.configuredAgentVersion ?? <span className="text-amber-300 font-semibold">SIN FIJAR</span>}
+            {automation?.configuredAgentVersion ?? <span className="text-amber-600 font-semibold">SIN FIJAR</span>}
             {automation?.lastCallAgentVersion ? (
               <span className="text-brand-muted"> · última llamada: {automation.lastCallAgentVersion}</span>
             ) : null}
@@ -660,7 +660,7 @@ function CallsSection() {
           <div className="px-4 py-3 space-y-1.5">
             <div className="text-sm text-brand-text">
               Lista de teléfonos autorizados
-              {savedKey === "calls_allowlist" ? <span className="ml-2 text-[11px] text-emerald-400">guardado ✓</span> : null}
+              {savedKey === "calls_allowlist" ? <span className="ml-2 text-[11px] text-emerald-600">guardado ✓</span> : null}
             </div>
             <div className="text-[11px] text-brand-muted leading-snug">
               Separados por comas, formato internacional sin «+» (ej. 34600111222). En modo piloto, la lista vacía bloquea a todos.
@@ -682,7 +682,7 @@ function CallsSection() {
             />
           </div>
         </Card>
-        {saveError ? <div className="mt-2 text-xs text-red-400 leading-snug">{saveError}</div> : null}
+        {saveError ? <div className="mt-2 text-xs text-red-600 leading-snug">{saveError}</div> : null}
       </section>
 
       {/* Cómo probar (sin marcador libre, a propósito) */}

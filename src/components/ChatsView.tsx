@@ -189,7 +189,7 @@ function ChatList({
                     <div className="flex items-center gap-2">
                       <span
                         className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                          c.mode === "AI" ? "bg-brand-gold/15 text-brand-gold" : "bg-emerald-500/15 text-emerald-400"
+                          c.mode === "AI" ? "bg-brand-gold/15 text-brand-gold" : "bg-emerald-500/15 text-emerald-600"
                         }`}
                       >
                         {c.mode === "AI" ? "IA" : "TÚ"}
@@ -361,7 +361,7 @@ function OrderContext({
                     Ver pedido →
                   </GhostButton>
                 </div>
-                {err ? <div className="text-xs text-red-400 leading-snug">{err}</div> : null}
+                {err ? <div className="text-xs text-red-600 leading-snug">{err}</div> : null}
               </div>
             );
           })}
@@ -380,7 +380,7 @@ function OrderContext({
           placeholder="Nota interna para la expedición (no viaja a Beeping)…"
           className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-brand-gold/60 text-brand-text placeholder:text-brand-muted"
         />
-        {noteError ? <div className="mt-2 text-xs text-red-400 leading-snug">{noteError}</div> : null}
+        {noteError ? <div className="mt-2 text-xs text-red-600 leading-snug">{noteError}</div> : null}
         <div className="mt-3 flex justify-end gap-2">
           <GhostButton onClick={() => setNoteModal(null)}>Cancelar</GhostButton>
           <PrimaryButton busy={noteSaving} onClick={saveNote}>

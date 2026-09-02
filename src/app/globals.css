@@ -1,83 +1,71 @@
 @import "tailwindcss";
 
 /* ============================================================
-   Identidad de marca (personalízala a tu gusto — ver docs/09-personalizar-dashboard.md)
-   Dorado sobre negro cálido, tipografías Fraunces + Archivo.
+   Sistema de diseño v4 — dirección visual propia, inspirada en la
+   claridad de producto Apple: fondo blanco cálido, superficies blancas,
+   texto casi negro, grises neutros, UN azul profundo como acción
+   principal y verde/ámbar/rojo SOLO para estados semánticos.
+
+   Los nombres de token se conservan (brand-*) para que los ~30
+   componentes cambien de piel sin reescribirse. `brand-gold` es ahora el
+   ACENTO PRIMARIO (azul), no un dorado.
    ============================================================ */
 @theme {
-  /* V3 (§34): dark premium contenido — el oro es ACENTO, no ambiente. */
-  --color-brand-bg: #0b0a08;
-  --color-brand-surface: #14130f;
-  --color-brand-surface-2: #1b1a15;
-  --color-brand-border: #262420;
-  --color-brand-text: #f2efe8;
-  --color-brand-muted: #918d83;
-  --color-brand-gold: #fac51c;
-  --color-brand-gold-soft: #e0ac16;
-  --color-wa-green: #25d366;
+  --color-brand-bg: #f5f5f7;        /* fondo de app, gris muy claro cálido */
+  --color-brand-surface: #ffffff;   /* superficies */
+  --color-brand-surface-2: #f2f2f5; /* superficie secundaria / hover */
+  --color-brand-border: #e3e3e8;    /* hairlines */
+  --color-brand-text: #1d1d1f;      /* texto principal */
+  --color-brand-muted: #6e6e73;     /* secundario (contraste AA sobre blanco) */
+  --color-brand-gold: #1f4fd8;      /* acción principal: azul profundo */
+  --color-brand-gold-soft: #173fb0; /* hover de la acción principal */
+  --color-wa-green: #1f9d55;
 
-  --font-display: var(--font-fraunces), Georgia, serif;
-  --font-sans: var(--font-archivo), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+
+  --radius-card: 16px;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.04);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  --duration-fast: 160ms;
+  --duration-base: 220ms;
 }
 
-html, body {
-  height: 100%;
-}
+html, body { height: 100%; }
 
 body {
   font-family: var(--font-sans);
-  /* Halo dorado MUY sutil (§33: nada de neones ni gradientes excesivos). */
-  background:
-    radial-gradient(1200px 600px at 15% -10%, rgba(250, 197, 28, 0.035), transparent 60%),
-    #0b0a08;
-  background-attachment: fixed;
+  background: #f5f5f7;
+  color: #1d1d1f;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-/* Interacción (§49): transiciones cortas y consistentes en todo el panel. */
-button, a, input, select, textarea {
-  transition-property: color, background-color, border-color, opacity, box-shadow, transform;
-  transition-duration: 150ms;
-  transition-timing-function: ease-out;
-}
+.font-display { font-family: var(--font-display); letter-spacing: -0.01em; }
 
-.font-display { font-family: var(--font-display); }
-
-/* Textura sutil de grano para el fondo de marca */
-.brand-grain::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.018;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-
-/* Scrollbar neutra y discreta (el oro es acento, no cromo de la UI). */
+/* Scrollbar discreta */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(145, 141, 131, 0.22); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(145, 141, 131, 0.4); }
+::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.12); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.22); }
 
-/* Latido del punto de estado */
+/* Latido del punto de estado crítico */
 @keyframes brand-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(0.85); }
+  50% { opacity: 0.45; transform: scale(0.85); }
 }
 .brand-pulse { animation: brand-pulse 2s ease-in-out infinite; }
 
-/* Mecer de las palmeras (naturaleza viva). Balanceo suave desde su base
-   con la propiedad `rotate`, independiente del `transform` que las orienta. */
-.brand-sway { animation: sway-a 8s ease-in-out infinite; }
-.brand-sway-slow { animation: sway-b 11s ease-in-out infinite; }
-.brand-sway-alt { animation: sway-c 9.5s ease-in-out infinite; }
-/* Cada una oscila un poco distinto para que no vayan sincronizadas. El rotate
-   base lo pone el inline style; aquí solo añadimos el balanceo relativo. */
-@keyframes sway-a { 0%,100% { rotate: -2.5deg; } 50% { rotate: 2.5deg; } }
-@keyframes sway-b { 0%,100% { rotate: 2deg; } 50% { rotate: -2deg; } }
-@keyframes sway-c { 0%,100% { rotate: -3deg; } 50% { rotate: 1.5deg; } }
+/* Entrada suave de drawers/sheets (funcional, 200 ms) */
+@keyframes slide-in-right { from { transform: translateX(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+@keyframes slide-in-up { from { transform: translateY(16px); opacity: 0; } to { transform: none; opacity: 1; } }
+.anim-slide-right { animation: slide-in-right var(--duration-base) ease-out; }
+.anim-slide-up { animation: slide-in-up var(--duration-base) ease-out; }
 
+/* Sin grano: `brand-grain` se mantiene como clase inerte por compatibilidad */
+.brand-grain::before { content: none; }
 
 @media (prefers-reduced-motion: reduce) {
-  .brand-pulse { animation: none; }
+  .brand-pulse, .anim-slide-right, .anim-slide-up { animation: none; }
+  * { transition-duration: 0.01ms !important; }
 }

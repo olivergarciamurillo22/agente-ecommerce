@@ -565,13 +565,13 @@ export default function OrdersPanel() {
       <Card className="overflow-hidden mb-5">
         <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-brand-border/50">
           <KpiCell label="Pedidos hoy" value={counts?.today ?? 0} />
-          <KpiCell label="Confirmados hoy" value={counts?.confirmedToday ?? 0} valueCls="text-emerald-300" />
+          <KpiCell label="Confirmados hoy" value={counts?.confirmedToday ?? 0} valueCls="text-emerald-600" />
           <KpiCell label="Esperando respuesta" value={counts?.awaiting ?? 0} />
-          <KpiCell label="Corrección" value={counts?.correction ?? 0} valueCls="text-sky-300" />
+          <KpiCell label="Corrección" value={counts?.correction ?? 0} valueCls="text-sky-600" />
           <KpiCell
             label="Necesitan llamada"
             value={counts?.needsCall ?? 0}
-            valueCls={(counts?.needsCall ?? 0) > 0 ? "text-red-300" : "text-brand-text"}
+            valueCls={(counts?.needsCall ?? 0) > 0 ? "text-red-600" : "text-brand-text"}
             span2Mobile
           />
         </div>
@@ -640,12 +640,12 @@ export default function OrdersPanel() {
                           <span className="text-brand-muted">#</span>
                           {o.shopify_order_number}
                           {o.possible_duplicate === 1 && (
-                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 align-middle">
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/15 text-amber-600 border border-amber-500/30 align-middle">
                               DUPLICADO?
                             </span>
                           )}
                           {o.cancellation_requested_at && (
-                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-300 border border-rose-500/30 align-middle">
+                            <span className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-500/15 text-rose-600 border border-rose-500/30 align-middle">
                               PIDE CANCELAR
                             </span>
                           )}
@@ -683,7 +683,7 @@ export default function OrdersPanel() {
                             <button
                               disabled={busy === o.id}
                               onClick={() => doAction(o, "confirm")}
-                              className="px-2.5 py-1.5 rounded-lg border border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10 transition-colors duration-150 text-xs font-semibold disabled:opacity-50"
+                              className="px-2.5 py-1.5 rounded-lg border border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 transition-colors duration-150 text-xs font-semibold disabled:opacity-50"
                             >
                               Confirmar
                             </button>
@@ -730,7 +730,7 @@ export default function OrdersPanel() {
                     <div className="mt-2 flex items-center gap-3 text-[11px] text-brand-muted">
                       <span className="inline-flex items-center gap-1"><StatusDot status={bp.status} /> Beeping: {bp.text}</span>
                       <span className="text-brand-muted/80">{timeAgo(o.updated_at)}</span>
-                      {o.cancellation_requested_at && <span className="text-rose-300 font-semibold">PIDE CANCELAR</span>}
+                      {o.cancellation_requested_at && <span className="text-rose-600 font-semibold">PIDE CANCELAR</span>}
                     </div>
                   </button>
                 </Card>
@@ -762,15 +762,15 @@ export default function OrdersPanel() {
                 </div>
                 <div className="text-xs text-brand-muted mt-1 truncate">
                   Shopify {detail.shopify_order_id} · creado {fmtTime(detail.created_at)}
-                  {detail.shopify_tagged === 1 && <span className="ml-2 text-emerald-300">· WA_CONFIRMED ✓</span>}
+                  {detail.shopify_tagged === 1 && <span className="ml-2 text-emerald-600">· WA_CONFIRMED ✓</span>}
                 </div>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   <OrderStateBadge state={orderUiState(detail)} />
                   {detail.possible_duplicate === 1 && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">POSIBLE DUPLICADO</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-600 border border-amber-500/30">POSIBLE DUPLICADO</span>
                   )}
                   {detail.pilot_authorized === 1 && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-violet-500/15 text-violet-300 border border-violet-500/30">PILOTO AUTORIZADO</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-violet-500/15 text-violet-600 border border-violet-500/30">PILOTO AUTORIZADO</span>
                   )}
                 </div>
               </div>
@@ -788,7 +788,7 @@ export default function OrdersPanel() {
               {/* Cliente pide cancelar → decisión humana, nunca botón rojo directo */}
               {detail.cancellation_requested_at && (
                 <div className="mx-5 mt-4 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 flex flex-wrap items-center justify-between gap-3">
-                  <div className="text-sm text-rose-200">
+                  <div className="text-sm text-rose-600">
                     <strong>El cliente solicita cancelar</strong> ({fmtTime(detail.cancellation_requested_at)}). Tú decides.
                   </div>
                   <GhostButton onClick={() => setCancelBox(true)}>Gestionar cancelación</GhostButton>
@@ -796,18 +796,18 @@ export default function OrdersPanel() {
               )}
 
               {detail.beeping_sync_status === "released" && (
-                <div className="mx-5 mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 text-sm text-emerald-200">
+                <div className="mx-5 mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3.5 text-sm text-emerald-600">
                   Liberado a Beeping {detail.beeping_released_at ? timeAgo(detail.beeping_released_at) : ""} — el almacén ya lo está preparando.
                 </div>
               )}
               {detail.beeping_sync_status === "release_unknown" && (
-                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3.5 text-sm text-red-200">
+                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3.5 text-sm text-red-600">
                   Liberación en estado <strong>AMBIGUO</strong>: Beeping no respondió. No se reintenta a ciegas — resuélvelo desde Envíos ("Resolver consultando").
                 </div>
               )}
 
               {actionError && (
-                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{actionError}</div>
+                <div className="mx-5 mt-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-600">{actionError}</div>
               )}
 
               <div className="divide-y divide-brand-border/50">
@@ -819,7 +819,7 @@ export default function OrdersPanel() {
                   <div className="text-xs text-brand-muted mt-2 whitespace-pre-line leading-relaxed">{addressBlock(detail) || "—"}</div>
                   {detail.proposed_address && (
                     <div className="mt-2.5 rounded-lg border border-sky-500/40 bg-sky-500/5 p-2.5">
-                      <div className="text-[10px] uppercase tracking-wider text-sky-300">Dirección propuesta por el cliente</div>
+                      <div className="text-[10px] uppercase tracking-wider text-sky-600">Dirección propuesta por el cliente</div>
                       <div className="text-xs whitespace-pre-line mt-1">{detail.proposed_address}</div>
                       <div className="text-[10px] text-brand-muted mt-1">No se aplica sola: actualízala en Shopify y confirma.</div>
                     </div>
@@ -834,7 +834,7 @@ export default function OrdersPanel() {
                   </div>
                   {detail.delivery_note && (
                     <div className="mt-2.5 rounded-lg border border-violet-500/40 bg-violet-500/5 p-2.5">
-                      <div className="text-[10px] uppercase tracking-wider text-violet-300">Nota para el repartidor (cliente)</div>
+                      <div className="text-[10px] uppercase tracking-wider text-violet-600">Nota para el repartidor (cliente)</div>
                       <div className="text-xs whitespace-pre-line mt-1">{detail.delivery_note}</div>
                     </div>
                   )}
@@ -896,7 +896,7 @@ export default function OrdersPanel() {
                       <div>
                         Tracking: {detail.carrier ? `${detail.carrier} · ` : ""}
                         {detail.tracking_url ? (
-                          <a href={detail.tracking_url} target="_blank" rel="noreferrer" className="underline text-sky-300">
+                          <a href={detail.tracking_url} target="_blank" rel="noreferrer" className="underline text-sky-600">
                             {detail.tracking_number}
                           </a>
                         ) : (
@@ -904,7 +904,7 @@ export default function OrdersPanel() {
                         )}
                       </div>
                     )}
-                    {detail.supplier_last_error && <div className="text-amber-300">{detail.supplier_last_error}</div>}
+                    {detail.supplier_last_error && <div className="text-amber-600">{detail.supplier_last_error}</div>}
                   </div>
 
                   {/* Nota de expedición (§12): INTERNA hasta tener contrato de Beeping */}
@@ -936,10 +936,10 @@ export default function OrdersPanel() {
               </div>
 
               {detail.last_error && (
-                <div className="mx-5 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">{detail.last_error}</div>
+                <div className="mx-5 mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-600">{detail.last_error}</div>
               )}
               {detail.deferred_until && detail.status === "pending_send" && (
-                <div className="mx-5 mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-200">
+                <div className="mx-5 mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-600">
                   En espera por horario: el mensaje saldrá hacia las {new Date(detail.deferred_until * 1000).toLocaleString("es-ES")}.
                 </div>
               )}
@@ -981,14 +981,14 @@ export default function OrdersPanel() {
                     {beepingInfo && !beepingInfo.gate.ok && (
                       <ul className="mb-3 space-y-1">
                         {beepingInfo.gate.reasons.map((r) => (
-                          <li key={r} className="text-xs text-amber-300 flex gap-1.5">
+                          <li key={r} className="text-xs text-amber-600 flex gap-1.5">
                             <span aria-hidden>·</span> {r}
                           </li>
                         ))}
                       </ul>
                     )}
                     {detail.beeping_last_error && detail.beeping_sync_status === "release_failed" && (
-                      <div className="text-xs text-red-300 mb-2">Último intento: {detail.beeping_last_error}</div>
+                      <div className="text-xs text-red-600 mb-2">Último intento: {detail.beeping_last_error}</div>
                     )}
                   </>
                 )}
@@ -1027,7 +1027,7 @@ export default function OrdersPanel() {
             onClick={() => detail && void cancelInBeeping(detail)}
             className="w-full text-left rounded-xl border border-red-500/40 bg-red-500/5 hover:bg-red-500/10 transition-colors duration-150 p-3 text-sm disabled:opacity-50"
           >
-            <div className="font-semibold text-red-300">Cancelar en Beeping</div>
+            <div className="font-semibold text-red-600">Cancelar en Beeping</div>
             <div className="text-xs text-brand-muted mt-0.5">
               Solo posible si aún no está preparado (Pending / Pending Stock / To be confirmed). Se consulta el estado antes de escribir. La cancelación en Shopify se hace aparte, en Shopify.
             </div>
