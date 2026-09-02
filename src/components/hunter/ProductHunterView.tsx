@@ -8,7 +8,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, EmptyState, ErrorState, Skeleton, TabBar } from "../ui";
+import { Card, EmptyState, ErrorState, GhostButton, ReadinessBadge, Skeleton, TabBar } from "../ui";
 import type { AdLibraryResult, ProductHunterAvailability, ProductResearchStatus, WinningProductCandidate } from "@/lib/product-hunter/types";
 import CandidateDetail, { type DetailTarget } from "./CandidateDetail";
 import CompareTable from "./CompareTable";
@@ -24,10 +24,13 @@ interface Notice {
   text: string;
 }
 
-export default function ProductHunterView() {
+export default function ProductHunterView({ initialTab }: { initialTab?: "search" | "studio" } = {}) {
   const [availability, setAvailability] = useState<ProductHunterAvailability | null>(null);
   const [availError, setAvailError] = useState<string | null>(null);
-  const [tab, setTab] = useState<HunterTab>(() => typeof window !== "undefined" && window.location.hash === "#landing-studio" ? "studio" : "search");
+  const [tab, setTab] = useState<HunterTab>(() => {
+    if (initialTab) return initialTab;
+    return typeof window !== "undefined" && window.location.hash === "#landing-studio" ? "studio" : "search";
+  });
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [savedMap, setSavedMap] = useState<Record<string, ProductResearchStatus>>({});
   const [detail, setDetail] = useState<DetailTarget | null>(null);
@@ -98,13 +101,19 @@ export default function ProductHunterView() {
           <div>
             <h1 className="font-display text-[26px] md:text-[30px] font-semibold text-brand-text leading-[1.15] tracking-[-0.02em]">Cazador de productos</h1>
             <p className="mt-1.5 text-[14px] text-brand-muted max-w-2xl leading-snug">
-              Anuncios que llevan tiempo activos en la Biblioteca de anuncios de Meta, puntuados por el backend, para que decidas qué probar en COD.
+              {availability && !availability.available
+                ? "Puedes explorar la interfaz, pero todavía no hay una fuente real de productos conectada."
+                : "Anuncios que llevan tiempo activos en la Biblioteca de anuncios de Meta, puntuados por el backend, para que decidas qué probar en COD."}
             </p>
           </div>
-          {availability?.available ? (
-            <Pill tone={availability.source === "mock" ? "warn" : "ok"} title={availability.reason}>
-              {availability.source === "mock" ? "Datos de ejemplo" : "Conectado"}
-            </Pill>
+          {availability ? (
+            availability.available ? (
+              <Pill tone={availability.source === "mock" ? "warn" : "ok"} title={availability.reason}>
+                {availability.source === "mock" ? "Datos de ejemplo" : "Conectado"}
+              </Pill>
+            ) : (
+              <ReadinessBadge readiness="not_configured" title={availability.reason} />
+            )
           ) : null}
         </header>
 
@@ -130,12 +139,22 @@ export default function ProductHunterView() {
           <>
             {/* ── Vistas ── */}
             <TabBar
-              tabs={[
-                { id: "search", label: "Buscar" },
-                { id: "saved", label: "Guardados" },
-                { id: "compare", label: "Comparar" },
-                { id: "studio", label: "Landing Studio" },
-              ]}
+              tabs={
+                availability.available
+                  ? [
+                      { id: "search", label: "Buscar" },
+                      { id: "saved", label: "Guardados" },
+                      { id: "compare", label: "Comparar" },
+                      { id: "studio", label: "Landing Studio" },
+                    ]
+                  : [
+                      // Sin fuente conectada no hay nada que buscar, guardar ni
+                      // comparar: enseñar esas pestañas sería prometer un
+                      // descubrimiento que no puede ocurrir.
+                      { id: "search", label: "Estado" },
+                      { id: "studio", label: "Landing Studio" },
+                    ]
+              }
               value={tab}
               onChange={(next) => {
                 setTab(next);
@@ -161,9 +180,12 @@ export default function ProductHunterView() {
                       <path d="M16 16l4.5 4.5M8 11h6M11 8v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
                     </svg>
                   }
-                  title="El Cazador de productos aún no está conectado"
-                  hint={availability.reason}
+                  title="No hay una fuente de descubrimiento conectada"
+                  hint={`Esto NO significa que no haya productos: significa que todavía no se ha buscado en ningún sitio. ${availability.reason}`}
                 />
+                <div className="flex justify-center pb-8 -mt-4">
+                  <GhostButton onClick={() => void loadAvailability()}>Pendiente de conexión · reintentar</GhostButton>
+                </div>
               </Card>
             ) : tab === "search" ? (
               <SearchView

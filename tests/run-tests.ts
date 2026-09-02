@@ -11028,7 +11028,7 @@ async function main(): Promise<void> {
     });
     await test("UI · móvil: CUATRO áreas + 'Más' con icono + label, y sheet — no 9 iconos minúsculos", () => {
       const nav = fs.readFileSync(path.join(process.cwd(), "src/components/NavRail.tsx"), "utf8");
-      const m = /MOBILE_PRIMARY: NavArea\[\] = \[([^\]]+)\]/.exec(nav);
+      const m = /MOBILE_PRIMARY: NavKey\[\] = \[([^\]]+)\]/.exec(nav);
       assert.ok(m, "MOBILE_PRIMARY definido");
       assert.equal(m![1].split(",").length, 4, "cuatro áreas principales en móvil");
       assert.ok(nav.includes("grid-cols-5"), "4 + Más = 5 huecos");
@@ -11265,10 +11265,11 @@ async function main(): Promise<void> {
   {
     const src = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
 
-    await test("V4 navegación: 6 áreas con nombre visible en escritorio; móvil = 4 áreas + 'Más' con icono y label", () => {
+    await test("V4 navegación: todas las áreas con nombre visible en escritorio; móvil = 4 áreas de operación + 'Más'", () => {
       const nav = src("src/components/NavRail.tsx");
-      for (const label of ["Inicio", "Pedidos", "Seguimiento", "Cazador", "Growth", "Ajustes"]) assert.ok(nav.includes(`"${label}"`), label);
-      assert.match(nav, /MOBILE_PRIMARY: NavArea\[\] = \["home", "orders", "followup", "hunter"\]/, "4 áreas principales en móvil");
+      for (const label of ["Inicio", "Pedidos", "Seguimiento", "Cazador", "Growth", "Ajustes", "Landing Studio"]) assert.ok(nav.includes(`"${label}"`), label);
+      // v4.2: el móvil prioriza operación real; Cazador y Landing Studio viven en "Más".
+      assert.match(nav, /MOBILE_PRIMARY: NavKey\[\] = \["home", "orders", "followup", "growth"\]/, "4 áreas de operación en móvil");
       assert.ok(nav.includes("<span>Más</span>"), "entrada Más");
       assert.ok(nav.includes("safe-area-inset-bottom"), "respeta el safe area");
       assert.ok(!nav.includes("Tu Agente"), "sin branding provisional");
@@ -11332,6 +11333,111 @@ async function main(): Promise<void> {
       const page = src("src/app/design-system/page.tsx");
       assert.match(page, /NODE_ENV === "production"\) notFound\(\)/, "404 en producción");
       assert.match(src("src/components/DesignSystemGallery.tsx"), /Solo desarrollo/);
+    });
+
+    // ── V4.2 · REGLA DE SUPERFICIE ──
+    // Una función no gana espacio principal porque exista en el código.
+    // Estos tests fijan la jerarquía acordada el 02-09: la operación diaria
+    // manda; Cazador (sin fuente) y Landing Studio (beta) son herramientas.
+
+    await test("V4.2 nav móvil: exactamente 5 entradas — 4 áreas de operación + Más, todas con label", () => {
+      const nav = src("src/components/NavRail.tsx");
+      const m = /MOBILE_PRIMARY: NavKey\[\] = \[([^\]]+)\]/.exec(nav);
+      assert.ok(m, "MOBILE_PRIMARY definido");
+      const primary = m![1].split(",").map((x) => x.trim().replace(/"/g, "")).filter(Boolean);
+      assert.deepEqual(primary, ["home", "orders", "followup", "growth"], "las 4 principales son operación + growth");
+      assert.ok(nav.includes("grid-cols-5"), "4 + Más = 5 huecos");
+      assert.ok(nav.includes("<span>Más</span>"), "la quinta entrada es Más");
+      // Ningún icono sin nombre: cada entrada primaria pinta su label.
+      assert.match(nav, /\{NAV_ICONS\[id\]\}\s*<span>\{it\.label\}<\/span>/, "icono + label visible");
+    });
+
+    await test("V4.2 Cazador y Landing Studio NO son navegación principal en móvil", () => {
+      const nav = src("src/components/NavRail.tsx");
+      const m = /MOBILE_PRIMARY: NavKey\[\] = \[([^\]]+)\]/.exec(nav)![1];
+      assert.ok(!m.includes("hunter"), "Cazador fuera de la barra principal mientras no tenga fuente real");
+      assert.ok(!m.includes("landing"), "Landing Studio fuera de la barra principal (beta)");
+    });
+
+    await test("V4.2 'Más' agrupa Herramientas (Cazador + Landing Studio) y Sistema (Ajustes)", () => {
+      const nav = src("src/components/NavRail.tsx");
+      const m = /MORE_GROUPS[^=]*=\s*\[([\s\S]*?)\n\];/.exec(nav);
+      assert.ok(m, "MORE_GROUPS definido");
+      const body = m![1];
+      assert.match(body, /label: "Herramientas"[\s\S]*?"hunter"[\s\S]*?"landing"/, "Herramientas: Cazador + Landing Studio");
+      assert.match(body, /label: "Sistema"[\s\S]*?"settings"/, "Sistema: Ajustes");
+    });
+
+    await test("V4.2 sidebar de escritorio agrupada: Operación · Crecimiento · Herramientas · Sistema", () => {
+      const nav = src("src/components/NavRail.tsx");
+      for (const g of ["Operación", "Crecimiento", "Herramientas", "Sistema"]) assert.ok(nav.includes(`label: "${g}"`), `grupo ${g}`);
+      const items = /NAV_ITEMS[\s\S]*?\n\];/.exec(nav)![0];
+      assert.match(items, /id: "home"[^\n]*group: "operation"/);
+      assert.match(items, /id: "orders"[^\n]*group: "operation"/);
+      assert.match(items, /id: "followup"[^\n]*group: "operation"/);
+      assert.match(items, /id: "growth"[^\n]*group: "growth"/);
+      assert.match(items, /id: "hunter"[^\n]*group: "tools"/, "Cazador es herramienta, no operación");
+      assert.match(items, /id: "landing"[^\n]*group: "tools"/, "Landing Studio es herramienta");
+      assert.match(items, /id: "settings"[^\n]*group: "system"/);
+    });
+
+    await test("V4.2 Product Hunter con source=off: NOT_CONFIGURED, sin prometer búsqueda ni '0 resultados'", async () => {
+      const previo = process.env.PRODUCT_HUNTER_SOURCE;
+      process.env.PRODUCT_HUNTER_SOURCE = "off";
+      const mod = await import("../src/lib/product-hunter/adapter");
+      const av = mod.productHunterAvailability();
+      assert.equal(av.available, false, "sin fuente no está disponible");
+      assert.equal(av.source, "off");
+      process.env.PRODUCT_HUNTER_SOURCE = previo;
+
+      const view = src("src/components/hunter/ProductHunterView.tsx");
+      assert.match(view, /No hay una fuente de descubrimiento conectada/, "dice NO CONFIGURADO, no 'sin resultados'");
+      assert.ok(!/0 productos encontrados|0 resultados/.test(view), "nunca implica que se buscó y no hubo nada");
+      assert.match(view, /todavía no hay una fuente real de productos conectada/, "subtexto honesto");
+      assert.match(view, /readiness="not_configured"/, "badge de madurez");
+      // Sin fuente NO se ofrecen Buscar/Guardados/Comparar: serían CTA engañosas.
+      assert.match(view, /availability\.available\s*\?\s*\[[\s\S]*?id: "search", label: "Buscar"[\s\S]*?\]\s*:\s*\[/, "las pestañas de búsqueda solo existen con fuente conectada");
+    });
+
+    await test("V4.2 Landing Studio: Beta + aviso de que se guarda en este navegador", () => {
+      const ls = src("src/components/landing-studio/LandingStudio.tsx");
+      assert.match(ls, /readiness="beta"/, "declara que es beta");
+      assert.match(ls, /Guardado localmente en este navegador/, "transparencia sobre localStorage");
+      assert.ok(!/window\.alert|role="alertdialog"/.test(ls), "sin modal ni warning agresivo: solo transparencia");
+      const nav = src("src/components/NavRail.tsx");
+      assert.match(nav, /"Beta"/, "la navegación también lo marca");
+    });
+
+    await test("V4.2 la persistencia server-side de Landing Studio NO está integrada (schema sigue en 17)", () => {
+      const db = src("src/lib/db.ts");
+      assert.match(db, /export const SCHEMA_VERSION = 17;/, "el esquema no sube sin un bug funcional real");
+      for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
+        assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
+      }
+      assert.ok(!fs.existsSync(path.join(process.cwd(), "src/app/api/landing-studio")), "sin rutas server de Landing Studio");
+      assert.ok(!fs.existsSync(path.join(process.cwd(), "src/lib/landing-studio/repository.ts")), "sin repository SQLite");
+      // Lo que SÍ debe seguir existiendo: Landing Studio v1 intacto.
+      for (const f of ["types.ts", "viability.ts", "validation.ts", "shopify-export.ts"]) {
+        assert.ok(fs.existsSync(path.join(process.cwd(), "src/lib/landing-studio", f)), `v1 intacto: ${f}`);
+      }
+    });
+
+    await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {
+      const g = src("src/components/GrowthView.tsx");
+      const primary = /const TABS: Array<\{ id: GrowthTab; label: string \}> = \[([\s\S]*?)\n\];/.exec(g)![1];
+      assert.equal((primary.match(/id: "/g) ?? []).length, 4, "cuatro pestañas principales");
+      const secondary = /const SECONDARY_TABS[\s\S]*?\n\];/.exec(g)![0];
+      for (const t of ["calculator", "audit", "repurchase", "competition"]) {
+        assert.ok(secondary.includes(`id: "${t}"`), `${t} sigue accesible en Más análisis`);
+      }
+      assert.match(g, /aria-label="Más análisis"/, "navegación secundaria real");
+    });
+
+    await test("V4.2 Home sigue centrada en operación: ni Cazador ni Landing Studio como tarea prioritaria", () => {
+      const home = src("src/components/HomePanel.tsx");
+      assert.ok(!/hunter|landing|Cazador|Landing Studio/i.test(home), "Home no promociona herramientas secundarias");
+      const room = src("src/lib/system/control-room.ts");
+      assert.ok(!/hunter|landing/i.test(room), "el backend de la Home tampoco genera atención de herramientas");
     });
 
     await test("V4 seguimiento: buckets por lo que toca hacer, teléfono ENMASCARADO y antigüedad desde el último contacto", async () => {

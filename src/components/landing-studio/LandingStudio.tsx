@@ -15,7 +15,7 @@ import {
 import { calculateLandingViability } from "@/lib/landing-studio/viability";
 import { canExportLanding, validateLandingBlueprint } from "@/lib/landing-studio/validation";
 import { buildShopifyThemeBundle, bundleToZip, validateShopifyThemeBundle } from "@/lib/landing-studio/shopify-export";
-import { Badge, Card, EmptyState, ErrorState, GhostButton, INPUT_CLASS, MetricCell, MetricGroup, PrimaryButton, SectionTitle, SelectInput, SkeletonRows, TabBar, formatEuro } from "../ui";
+import { Badge, Card, EmptyState, ErrorState, GhostButton, INPUT_CLASS, MetricCell, MetricGroup, PrimaryButton, ReadinessBadge, SectionTitle, SelectInput, SkeletonRows, TabBar, formatEuro } from "../ui";
 import { hunterGet } from "../hunter/hunter-shared";
 
 type StudioTab = "candidate" | "viability" | "brief" | "editor" | "preview" | "validation" | "versions" | "export";
@@ -138,7 +138,16 @@ export default function LandingStudio() {
   return (
     <div className="space-y-5" data-testid="landing-studio">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 className="font-display text-[24px] font-semibold text-brand-text">Landing Studio</h2><p className="mt-1 text-sm text-brand-muted">Del candidato a un bundle Shopify revisable, sin publicar.</p></div>
+        <div>
+          <div className="flex items-center gap-2">
+            <h2 className="font-display text-[24px] font-semibold text-brand-text">Landing Studio</h2>
+            <ReadinessBadge readiness="beta" title="Los proyectos se guardan en este navegador" />
+          </div>
+          <p className="mt-1 text-sm text-brand-muted">Del candidato a un bundle Shopify revisable, sin publicar.</p>
+          {/* Transparencia, no alarma: Pedro debe saber que esto NO está
+              sincronizado antes de invertir tiempo en un proyecto. */}
+          <p className="mt-1 text-[12px] text-brand-tertiary">Guardado localmente en este navegador · no se sincroniza entre dispositivos</p>
+        </div>
         {project ? <SelectInput label="Proyecto de landing" value={projectId} onChange={setProjectId} options={projects.map((p) => ({ value: p.blueprint.id, label: p.blueprint.product.name }))} /> : null}
       </div>
       <TabBar tabs={TABS} value={tab} onChange={setTab} label="Flujo de Landing Studio" counts={{ validation: blockers.length || undefined, versions: project?.versions.length || undefined }} />

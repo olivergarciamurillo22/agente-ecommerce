@@ -14,7 +14,7 @@ import DashboardHeader from "./DashboardHeader";
 import FollowUpView from "./FollowUpView";
 import GrowthView from "./GrowthView";
 import HomePanel from "./HomePanel";
-import NavRail, { NAV_ITEMS, type DockView, type NavArea } from "./NavRail";
+import NavRail, { NAV_ITEMS, type DockView, type NavArea, type NavKey } from "./NavRail";
 import OrdersPanel from "./OrdersPanel";
 import ProductHunterEntry from "./hunter/ProductHunterEntry";
 import SafetyBanner from "./SafetyBanner";
@@ -37,13 +37,14 @@ export interface ConversationItem {
 
 type FollowTab = "followup" | "actions" | "chats" | "shipments" | "agent";
 type GrowthTab = "summary" | "funnel" | "products" | "ads" | "calculator" | "audit" | "repurchase" | "competition";
+type HunterTab = "search" | "studio";
 
 const HASH_TO_TARGET: Record<string, DockView> = {
   "#inicio": "home",
   "#pedidos": "orders",
   "#seguimiento": "followup",
   "#cazador": "hunter",
-  "#landing-studio": "hunter",
+  "#landing-studio": "landing",
   "#growth": "growth",
   "#ajustes": "settings",
   // alias heredados (enlaces antiguos siguen funcionando)
@@ -56,9 +57,13 @@ const HASH_TO_TARGET: Record<string, DockView> = {
 };
 const AREA_TO_HASH: Record<NavArea, string> = { home: "#inicio", orders: "#pedidos", followup: "#seguimiento", hunter: "#cazador", growth: "#growth", settings: "#ajustes" };
 
-/** Traduce cualquier destino a área + pestaña. */
-function resolveTarget(t: DockView): { area: NavArea; followTab?: FollowTab; growthTab?: GrowthTab } {
+/** Traduce cualquier destino a área + pestaña. `landing` no es un área
+ *  propia: es el Cazador abierto en su pestaña de Landing Studio, y por eso
+ *  lleva su propio hash (deep-link que el módulo ya sabe leer). */
+function resolveTarget(t: DockView): { area: NavArea; followTab?: FollowTab; growthTab?: GrowthTab; hunterTab?: HunterTab; hash?: string } {
   switch (t) {
+    case "landing":
+      return { area: "hunter", hunterTab: "studio", hash: "#landing-studio" };
     case "actions":
       return { area: "followup", followTab: "actions" };
     case "chats":
@@ -102,6 +107,13 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
       if (t) return resolveTarget(t).growthTab ?? "summary";
     }
     return "summary";
+  });
+  const [hunterTab, setHunterTab] = useState<HunterTab>(() => {
+    if (typeof window !== "undefined") {
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) return resolveTarget(t).hunterTab ?? "search";
+    }
+    return "search";
   });
   const [badges, setBadges] = useState<Partial<Record<NavArea, number>>>({});
   const [systemStatus, setSystemStatus] = useState<UiStatus>("muted");
@@ -199,11 +211,14 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
   }, [conversations, selectedId]);
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
+  // Resaltado de la navegación: Landing Studio es su propia entrada aunque
+  // por dentro sea el Cazador en otra pestaña.
+  const navKeyActive: NavKey = area === "hunter" && hunterTab === "studio" ? "landing" : area;
 
   return (
     <main className="h-screen overflow-hidden flex">
       <NavRail
-        view={area}
+        view={navKeyActive}
         onViewChange={changeView}
         badges={badges}
         systemStatus={systemStatus}
@@ -213,7 +228,7 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
         <DashboardHeader
           phone={phone}
           provider={provider}
-          sectionLabel={SECTION_LABEL[area]}
+          sectionLabel={navKeyActive === "landing" ? "Landing Studio" : SECTION_LABEL[area]}
           onOpenSearch={() => setPaletteOpen(true)}
           systemStatus={systemStatus}
         />
@@ -236,7 +251,7 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
               onNavigate={changeView}
             />
           ) : area === "hunter" ? (
-            <ProductHunterEntry />
+            <ProductHunterEntry key={`h${navKey}`} initialTab={hunterTab} />
           ) : area === "growth" ? (
             <GrowthView key={`g${navKey}`} initialTab={growthTab} onNavigate={changeView} />
           ) : (

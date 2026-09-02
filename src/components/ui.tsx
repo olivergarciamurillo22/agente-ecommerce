@@ -97,6 +97,28 @@ export function Badge({ status = "muted", children, dot = true }: { status?: UiS
   );
 }
 
+/** Madurez de un módulo (§15). No es un framework: es vocabulario visual
+ *  para que Pedro sepa QUÉ puede esperar antes de entrar.
+ *   · live            → conectado a datos reales, se puede operar
+ *   · beta            → funciona, pero con límites que hay que declarar
+ *   · not_configured  → la interfaz existe, la fuente de datos no */
+export type FeatureReadiness = "live" | "beta" | "not_configured";
+
+const READINESS: Record<FeatureReadiness, { label: string; status: UiStatus }> = {
+  live: { label: "Conectado", status: "ok" },
+  beta: { label: "Beta", status: "info" },
+  not_configured: { label: "Sin conectar", status: "muted" },
+};
+
+export function ReadinessBadge({ readiness, title }: { readiness: FeatureReadiness; title?: string }) {
+  const { label, status } = READINESS[readiness];
+  return (
+    <span title={title}>
+      <Badge status={status}>{label}</Badge>
+    </span>
+  );
+}
+
 // --- Contenedores ---
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {

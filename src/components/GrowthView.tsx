@@ -18,16 +18,24 @@ import { Card, Chip, EmptyState, ErrorState, SectionTitle, SkeletonRows, TabBar,
 
 export type GrowthTab = "summary" | "funnel" | "products" | "ads" | "calculator" | "audit" | "repurchase" | "competition";
 
+/** Jerarquía (regla de superficie): lo que se mira a diario va en pestañas;
+ *  el análisis ocasional vive en "Más análisis". Misma funcionalidad, menos
+ *  ruido — ninguna sub-área desaparece. */
 const TABS: Array<{ id: GrowthTab; label: string }> = [
   { id: "summary", label: "Resumen" },
   { id: "funnel", label: "Embudo" },
   { id: "products", label: "Productos" },
   { id: "ads", label: "Anuncios" },
+];
+
+const SECONDARY_TABS: Array<{ id: GrowthTab; label: string }> = [
   { id: "calculator", label: "Calculadora COD" },
   { id: "audit", label: "Auditoría" },
   { id: "repurchase", label: "Recompra" },
   { id: "competition", label: "Competencia" },
 ];
+
+export const ALL_GROWTH_TABS = [...TABS, ...SECONDARY_TABS];
 
 /** Etiqueta de naturaleza del dato (§10): hecho, hipótesis, escenario, IA. */
 export function DataKind({ kind }: { kind: "real" | "hypothesis" | "scenario" | "ai" }) {
@@ -144,11 +152,30 @@ function CompetitionPanel({ onNavigate }: { onNavigate: (v: DockView) => void })
 
 export default function GrowthView({ initialTab, onNavigate }: { initialTab?: GrowthTab; onNavigate: (v: DockView) => void }) {
   const [tab, setTab] = useState<GrowthTab>(initialTab ?? "summary");
+  // La sub-área secundaria activa se muestra como pestaña extra mientras se
+  // está en ella: si no, el operador no vería dónde está.
+  const secondary = SECONDARY_TABS.find((t) => t.id === tab) ?? null;
   return (
     <div className="h-full flex flex-col">
       <div className="shrink-0 px-4 md:px-8 bg-brand-surface border-b border-brand-border">
-        <div className="-mb-px">
-          <TabBar tabs={TABS} value={tab} onChange={setTab} label="Secciones de Growth" />
+        <div className="-mb-px flex items-center gap-4">
+          <TabBar
+            tabs={secondary ? [...TABS, secondary] : TABS}
+            value={tab}
+            onChange={setTab}
+            label="Secciones de Growth"
+          />
+          <select
+            value=""
+            onChange={(e) => e.target.value && setTab(e.target.value as GrowthTab)}
+            aria-label="Más análisis"
+            className={`ml-auto h-8 shrink-0 rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${secondary ? "text-brand-text" : "text-brand-muted"}`}
+          >
+            <option value="">Más análisis</option>
+            {SECONDARY_TABS.map((t) => (
+              <option key={t.id} value={t.id}>{t.label}</option>
+            ))}
+          </select>
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-hidden">
