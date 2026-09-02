@@ -5406,7 +5406,9 @@ async function main(): Promise<void> {
       name: "mock",
       isConfigured: () => true,
       async createOutboundCall(req) {
-        if (opts.fail) throw new providerMod.ProviderRequestError("mock: rechazado", 500);
+        // 429 = petición RECHAZADA (reintentable). Un 5xx sería AMBIGUO
+        // (pudo crear la llamada) y va a revisión manual: ver matriz RETELL.
+        if (opts.fail) throw new providerMod.ProviderRequestError("mock: rechazado", 429);
         created.push({ toNumber: req.toNumber, variables: req.dynamicVariables, metadata: req.metadata });
         return { providerCallId: `mock-call-${++mockCallSeq}` };
       },
@@ -6149,14 +6151,452 @@ async function main(): Promise<void> {
       const viejo = String(Date.now() - 10 * 60_000);
       const dViejo = crypto.createHmac("sha256", "retell-key-test").update(body + viejo).digest("hex");
       assert.equal(retellProvider.verifyWebhook(body, `v=${viejo},d=${dViejo}`), false, "timestamp caducado (anti-replay)");
-      // Fallback: firma simple del cuerpo.
+      // Hardening 03-09: el antiguo fallback "HMAC del cuerpo sin timestamp" se
+      // RECHAZA. Retell no lo envía (docs: solo v=,d=) y sin timestamp una firma
+      // capturada valdría para siempre (replay).
       const simple = crypto.createHmac("sha256", "retell-key-test").update(body).digest("hex");
-      assert.equal(retellProvider.verifyWebhook(body, simple), true);
+      assert.equal(retellProvider.verifyWebhook(body, simple), false, "sin timestamp no hay anti-replay: rechazada");
+      // Un solo byte cambiado en el cuerpo → firma inválida.
+      const body2 = body.replace("call-x", "call-y");
+      assert.equal(retellProvider.verifyWebhook(body2, `v=${ts},d=${d}`), false, "1 byte distinto → inválida");
+      // Cabeceras malformadas.
+      for (const h of ["", "v=,d=", `v=${ts}`, `d=${d}`, `v=${ts},d=zz`, `v=abc,d=${d}`, ` v=${ts},d=${d},x=1`]) {
+        assert.equal(retellProvider.verifyWebhook(body, h), false, `cabecera malformada rechazada: "${h}"`);
+      }
+      // Sin API key configurada, NADA se acepta.
+      const keyBak = process.env.RETELL_API_KEY; process.env.RETELL_API_KEY = "";
+      assert.equal(retellProvider.verifyWebhook(body, `v=${ts},d=${d}`), false, "sin key no hay verificación posible");
+      process.env.RETELL_API_KEY = keyBak;
       // Parser estricto de eventos.
       assert.equal(retellProvider.parseEvent("{no json"), null);
       assert.equal(retellProvider.parseEvent(JSON.stringify({ event: "otra_cosa", call: { call_id: "x" } })), null);
       assert.equal(retellProvider.parseEvent(JSON.stringify({ event: "call_ended", call: {} })), null, "sin call_id → null");
     });
+  });
+
+  // ════════════════════════════════════════════════════════════════
+  // RETELL · PRODUCTION HARDENING (03-09-2026). Contratos + evidencia.
+  // Todo sin red: proveedor mock, fetch stubbeado, fixtures sin PII.
+  // ════════════════════════════════════════════════════════════════
+  console.log("\n— RETELL · hardening de producción —");
+  const payloadMod = await import("../src/lib/calls/payload");
+  const cfgMod = await import("../src/lib/calls/config");
+  const manualMod = await import("../src/lib/calls/manual");
+  const resultsMod = await import("../src/lib/calls/results");
+  const retellMod = await import("../src/lib/calls/retell");
+  const RETELL_ENV = { RETELL_API_KEY: "retell-key-test", RETELL_FROM_NUMBER: "+34950835615", RETELL_AGENT_ID: "agent_TEST_ONLY", RETELL_AGENT_VERSION: "7" };
+  const fixture = (name: string) => fs.readFileSync(path.join(process.cwd(), "tests/fixtures/retell", name), "utf8");
+  const firmar = (body: string, key = "retell-key-test", ts = Date.now()) => `v=${ts},d=${crypto.createHmac("sha256", key).update(body + String(ts)).digest("hex")}`;
+  /** fetch stub: NUNCA sale a la red. */
+  const conFetch = async (impl: (url: string, init: RequestInit) => Promise<Response> | Response, fn: () => Promise<void>) => {
+    const real = globalThis.fetch;
+    const vistas: Array<{ url: string; body: unknown }> = [];
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const u = String(url);
+      if (!u.includes("api.retellai.com")) throw new Error(`red no permitida en test: ${u}`);
+      vistas.push({ url: u, body: init?.body ? JSON.parse(String(init.body)) : null });
+      return impl(u, init ?? {});
+    }) as typeof fetch;
+    try { await fn(); } finally { globalThis.fetch = real; }
+    return vistas;
+  };
+  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  const llamableParaManual = (id: string, num: string, tel: string) => {
+    const o = mkCallable(id, num, tel, 30);
+    db.setSetting("calls_allowlist", tel); db.setSetting("calls_daily_cap", "500"); db.setSetting("calls_shadow_mode", "0"); db.setSetting("ai_calls_enabled", "1");
+    return o;
+  };
+
+  await test("RETELL · contrato de variables: exactamente las 11 claves, y el validador del prompt las importa de ahí", () => {
+    assert.deepEqual([...payloadMod.RETELL_CALL_VARIABLE_KEYS], ["nombre_cliente","producto","unidades","importe_total","direccion","localidad","codigo_postal","telefono","fecha_pedido","numero_pedido","current_datetime"]);
+    const pv = fs.readFileSync(path.join(process.cwd(), "src/lib/calls/prompt-validator.ts"), "utf8");
+    assert.match(pv, /ALLOWED_PROMPT_VARIABLES = RETELL_CALL_VARIABLE_KEYS/, "una sola fuente de verdad");
+    const prompt = fs.readFileSync(path.join(process.cwd(), "config/retell/casamable-agent-prompt.md"), "utf8");
+    const usadas = new Set([...prompt.matchAll(/\{\{\s*([a-z_]+)\s*\}\}/g)].map((m) => m[1]));
+    for (const k of usadas) assert.ok((payloadMod.RETELL_CALL_VARIABLE_KEYS as readonly string[]).includes(k), `el prompt usa {{${k}}} y el contrato no la produce`);
+  });
+
+  await test("RETELL · preflight de placeholders: cualquier residuo de plantilla bloquea; nombres y productos raros pasan", () => {
+    const bloquea = ["[password 1]", "[password 999]", "{{ customer_name }}", "{nombre}", "${name}", "undefined", "null", "NaN", "[object Object]", "<customer_name>", "N/A", "n/a", "TBD", "   ", "", "test", "-", "??", "nombre_cliente", "No disponible", "%{x}", "Variable 3"];
+    for (const v of bloquea) assert.ok(payloadMod.unsafeVariableReason("nombre_cliente", v) !== null, `debería bloquear: "${v}"`);
+    const pasa = ["José María", "O'Connor", "Ana-Luz", "Cortaúñas Eléctrico 3 en 1™ — \"pro\" & más / 2x", "😀 Peluche", "veintinueve euros con noventa y cinco céntimos", "04001", "C/ Real 12, 3ºB", "ayer por la tarde"];
+    for (const v of pasa) assert.equal(payloadMod.unsafeVariableReason("producto", v), null, `NO debería bloquear: "${v}"`);
+    // Validación completa: claves de más o de menos también bloquean.
+    const ok = payloadMod.validateRetellCallVariables({ nombre_cliente: "Ana", producto: "P", unidades: "una unidad", importe_total: "diez euros", direccion: "Calle 1", localidad: "X", codigo_postal: "04001", telefono: "+34999000001", fecha_pedido: "ayer", numero_pedido: "T1", current_datetime: "hoy" });
+    assert.deepEqual(ok, []);
+    assert.ok(payloadMod.validateRetellCallVariables({ nombre_cliente: "Ana" }).some((i) => i.startsWith("missing_variable:")));
+    assert.ok(payloadMod.validateRetellCallVariables({ nombre_cliente: "Ana", extra: "x" }).some((i) => i === "unexpected_variable:extra"));
+  });
+
+  await test("RETELL · buildCallPayload: placeholder → NO CALL; dirección/CP vacíos → NO CALL; CP conserva el cero; importe 0 → NO CALL", () => {
+    const base = mkCallable("rt-pl-1", "7001", "34600117001");
+    const okp = payloadMod.buildCallPayload(base, enFranja);
+    assert.equal(okp.ok, true); assert.equal(okp.variables!.codigo_postal, "04001", "cero inicial intacto");
+    assert.equal(okp.variables!.telefono, "+34600117001");
+    const h = db.systemDbHandle();
+    const casos: Array<[string, string, string]> = [
+      ["customer_name", "[password 1]", "unsafe_dynamic_variable:nombre_cliente"],
+      ["address_line1", "", "direccion"],
+      ["postal_code", "", "codigo_postal"],
+      ["postal_code", "4001", "codigo_postal (formato"],
+      ["total_price", "0", "importe_total (0"],
+      ["product_summary", "{{producto}}", "unsafe_dynamic_variable:producto"],
+    ];
+    let n = 2;
+    for (const [col, val, esperado] of casos) {
+      const o = mkCallable(`rt-pl-${n}`, `70${String(n).padStart(2, "0")}`, `346001170${String(n).padStart(2, "0")}`);
+      h.prepare(`UPDATE orders SET ${col} = ? WHERE id = ?`).run(val, o.id);
+      const r = payloadMod.buildCallPayload(db.getOrderById(o.id)!, enFranja);
+      assert.equal(r.ok, false, `${col}="${val}" debe bloquear`);
+      assert.ok(r.missing.some((m) => m.startsWith(esperado)), `${col}="${val}": motivo esperado "${esperado}", obtenido ${JSON.stringify(r.missing)}`);
+      assert.equal(r.variables, null, "no se devuelve NINGUNA variable si algo está mal");
+      n++;
+    }
+  });
+
+  await test("RETELL · pin de versión: sin RETELL_AGENT_VERSION o con 'latest_published' NO sale ninguna llamada; con número sale y va en override_agent_version", async () => {
+    assert.ok(retellMod.agentVersionPinIssue(""));
+    assert.ok(retellMod.agentVersionPinIssue("latest_published"));
+    assert.ok(retellMod.agentVersionPinIssue("prod"));
+    assert.equal(retellMod.agentVersionPinIssue("12"), null);
+    const req = { toNumber: "+34999000001", fromNumber: "+34950835615", dynamicVariables: JSON.parse(fixture("create-phone-call.expected.json")).retell_llm_dynamic_variables, metadata: { attempt_id: "42", order_number: "TEST_1501" } };
+    for (const v of ["", "latest_published", "staging"]) {
+      await withEnv({ ...RETELL_ENV, RETELL_AGENT_VERSION: v }, async () => {
+        const vistas = await conFetch(() => json(201, { call_id: "nunca" }), async () => {
+          await assert.rejects(retellMod.retellProvider.createOutboundCall(req), (e: Error & { kind?: string }) => e.kind === "config" && /agent_version_not_pinned/.test(e.message));
+        });
+        assert.equal(vistas.length, 0, `con RETELL_AGENT_VERSION="${v}" no se toca la red`);
+      });
+    }
+    await withEnv(RETELL_ENV, async () => {
+      const vistas = await conFetch(() => json(201, { call_id: "call_ok", agent_id: "agent_TEST_ONLY", agent_version: 7 }), async () => {
+        const acc = await retellMod.retellProvider.createOutboundCall(req);
+        assert.equal(acc.providerCallId, "call_ok"); assert.equal(acc.agentVersion, "7"); assert.equal(acc.requestedAgentVersion, "7");
+      });
+      assert.equal(vistas.length, 1);
+      assert.equal((vistas[0].body as Record<string, unknown>).override_agent_version, 7, "número, no string");
+      // GOLDEN: el cuerpo exacto es el del fixture (sin PII, agente sintético).
+      assert.deepEqual(vistas[0].body, JSON.parse(fixture("create-phone-call.expected.json")));
+    });
+  });
+
+  await test("RETELL · última puerta: variables inseguras bloquean en el propio proveedor aunque alguien se salte el builder", async () => {
+    await withEnv(RETELL_ENV, async () => {
+      const vistas = await conFetch(() => json(201, { call_id: "nunca" }), async () => {
+        await assert.rejects(
+          retellMod.retellProvider.createOutboundCall({ toNumber: "+34999000001", fromNumber: "+34950835615", dynamicVariables: { nombre_cliente: "[password 1]" }, metadata: {} }),
+          (e: Error & { kind?: string }) => e.kind === "config" && /unsafe_dynamic_variables/.test(e.message)
+        );
+      });
+      assert.equal(vistas.length, 0);
+    });
+  });
+
+  await test("RETELL · deriva de versión: Retell resuelve otra versión → la llamada ya salió, pero las SIGUIENTES quedan bloqueadas hasta revisar", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    cfgMod.clearCallsBlocked();
+    const tel = "34600117050";
+    const o = llamableParaManual("rt-drift-1", "7050", tel);
+    await withEnv({ ...RETELL_ENV, EMERGENCY_STOP: "0", APP_MODE: "production" }, async () => {
+      await conFetch(() => json(201, { call_id: "call_drift", agent_id: "agent_TEST_ONLY", agent_version: 9 }), async () => {
+        const r = await manualMod.manualDialOrder(o.id, enFranja, retellMod.retellProvider);
+        assert.equal(r.ok, true, "la primera llamada sale (no se puede deshacer)");
+      });
+      const a = db.getActiveCallAttemptForOrder(o.id)!;
+      assert.equal(a.agent_version, "9", "se persiste la versión que Retell USÓ de verdad, no la del .env");
+      assert.match(cfgMod.callsBlockedReason() ?? "", /agent_version_drift: pedida 7, Retell usó 9/);
+      assert.ok(sysRepo.listIntegrationEvents({ limit: 50 }).some((e) => e.event_type === "call_agent_version_drift" && e.severity === "critical"));
+      // Siguiente llamada: bloqueada sin tocar la red.
+      const o2 = llamableParaManual("rt-drift-2", "7051", "34600117051");
+      const vistas = await conFetch(() => json(201, { call_id: "nunca" }), async () => {
+        const r2 = await manualMod.manualDialOrder(o2.id, enFranja, retellMod.retellProvider);
+        assert.equal(r2.ok, false); assert.match(r2.error ?? "", /bloqueadas/);
+      });
+      assert.equal(vistas.length, 0);
+      // Y el orquestador tampoco marca.
+      db.setSetting("calls_allowlist", "34600117051");
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      const { provider, created } = mkProvider();
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+      assert.equal(created.length, 0, "orquestador bloqueado");
+      cfgMod.clearCallsBlocked();
+    });
+    resetCallCfg();
+  });
+
+  await test("RETELL · matriz de errores del proveedor: 429 reintenta; 400/422 revisión; 401/402 bloquean; 500/timeout AMBIGUO → revisión, NUNCA segunda llamada", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    cfgMod.clearCallsBlocked();
+    const casos: Array<{ status: number | null; kind: string; espera: "retry" | "review" | "block" }> = [
+      { status: 429, kind: "rate_limit", espera: "retry" },
+      { status: 400, kind: "invalid_payload", espera: "review" },
+      { status: 422, kind: "invalid_payload", espera: "review" },
+      { status: 401, kind: "auth", espera: "block" },
+      { status: 402, kind: "billing", espera: "block" },
+      { status: 500, kind: "ambiguous", espera: "review" },
+      { status: 503, kind: "ambiguous", espera: "review" },
+      { status: null, kind: "ambiguous", espera: "review" }, // timeout / red
+      { status: 418, kind: "unknown", espera: "review" },
+    ];
+    let n = 0;
+    for (const c of casos) {
+      cfgMod.clearCallsBlocked();
+      const tel = `346001171${String(n).padStart(2, "0")}`;
+      const o = llamableParaManual(`rt-err-${n}`, `71${String(n).padStart(2, "0")}`, tel);
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      const provider: import("../src/lib/calls/provider").CallProvider = {
+        name: "retell", isConfigured: () => true,
+        async createOutboundCall() { throw new providerMod.ProviderRequestError(`simulado ${c.status ?? "timeout"}`, c.status, c.status === null ? "ambiguous" : undefined); },
+        verifyWebhook: () => true, parseEvent: () => null,
+      };
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+      const intentos = db.listCallAttemptsForOrder(o.id);
+      const ultimo = intentos[intentos.length - 1];
+      assert.equal(new providerMod.ProviderRequestError("x", c.status).kind, c.status === null ? "ambiguous" : c.kind, `clasificación de ${c.status}`);
+      if (c.espera === "retry") {
+        assert.equal(intentos.some((a) => a.state === "completed" && a.result === "fallo_tecnico"), true, `${c.status}: fallo técnico`);
+        assert.ok(db.getActiveCallAttemptForOrder(o.id), `${c.status}: hay reintento planificado (la petición fue RECHAZADA, es seguro)`);
+      } else {
+        assert.equal(ultimo.state, "manual_review", `${c.status}: revisión manual`);
+        assert.ok(!db.getActiveCallAttemptForOrder(o.id), `${c.status}: NINGÚN reintento automático`);
+        assert.equal(intentos.length, 1, `${c.status}: exactamente un intento (cero duplicados)`);
+        if (c.kind === "ambiguous") assert.match(ultimo.reason ?? "", /provider_ambiguous.*COMPROBAR en Retell/);
+      }
+      if (c.espera === "block") assert.match(cfgMod.callsBlockedReason() ?? "", new RegExp(`^${c.kind}:`), `${c.status}: bloqueo global`);
+      else assert.equal(cfgMod.callsBlockedReason(), null, `${c.status}: sin bloqueo global`);
+      n++;
+    }
+    cfgMod.clearCallsBlocked(); resetCallCfg();
+  });
+
+  await test("CALLS · cola SIN inanición: 60 pedidos aparcados en revisión manual (más caros y más viejos) NO tapan a un pedido nuevo", () => {
+    // Bug real (03-09): findCallCandidates hacía LIMIT 50 ANTES de descartar
+    // los pedidos con intento en revisión → con 50 aparcados, ningún pedido
+    // nuevo entraba jamás en la cola de llamadas. Silencioso: la suite lo
+    // destapó al acumular exactamente ese patrón.
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const h = db.systemDbHandle();
+    const aparcados: number[] = [];
+    for (let i = 0; i < 60; i++) {
+      const tel = `3460011800${String(i).padStart(2, "0")}`;
+      const o = mkCallable(`rt-starve-${i}`, `8${String(i).padStart(3, "0")}`, tel, 300);
+      h.prepare("UPDATE orders SET total_price='999.00', created_at = created_at - 86400 WHERE id=?").run(o.id);
+      const id = db.insertCallAttempt(o.id, 1, Math.floor(enFranja.getTime() / 1000))!;
+      db.transitionCallAttempt(id, ["planned"], "manual_review", { reason: "aparcado en test" });
+      aparcados.push(o.id);
+    }
+    const nuevo = mkCallable("rt-starve-new", "8999", "34600118999", 30);
+    db.setSetting("calls_allowlist", "");
+    db.setSetting("calls_pilot_mode", "0");
+    try {
+      const n = calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      assert.ok(n >= 1, "el pedido nuevo entra en la cola aunque haya 60 aparcados delante");
+      assert.ok(db.getActiveCallAttemptForOrder(nuevo.id), "tiene su intento planificado");
+      for (const id of aparcados) assert.ok(!db.getActiveCallAttemptForOrder(id), "un aparcado en revisión NO se re-encola solo");
+      const candidatos = calls.findCallCandidates(Math.floor(enFranja.getTime() / 1000)).map((o) => o.id);
+      assert.ok(!candidatos.some((id) => aparcados.includes(id)), "los aparcados ni siquiera ocupan hueco en el barrido");
+    } finally {
+      db.setSetting("calls_pilot_mode", "");
+      resetCallCfg();
+    }
+  });
+
+  await test("RETELL · llamada NO conectada: análisis vacío + disconnection_reason → clasificación determinista, sin confirmar ni corregir nada", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const casos: Array<[string, string, boolean]> = [
+      ["dial_no_answer", "no_contesta", true], ["dial_busy", "no_contesta", true], ["user_declined", "no_contesta", true],
+      ["voicemail_reached", "buzon_de_voz", true], ["dial_failed", "fallo_tecnico", true], ["error_llm_websocket_open", "fallo_tecnico", true],
+      ["telephony_provider_unavailable", "fallo_tecnico", true],
+    ];
+    let n = 0;
+    for (const [reason, esperado] of casos) {
+      const { order, attempt } = await dialOne(`rt-nc-${n}`, `72${String(n).padStart(2, "0")}`, `346001172${String(n).padStart(2, "0")}`);
+      calls.applyCallAnalysis(attempt, { ...analyzedEvent(attempt.provider_call_id!, {}), providerStatus: "not_connected", disconnectionReason: reason }, enFranja, noHoliday);
+      const a = db.getCallAttempt(attempt.id)!;
+      assert.equal(a.state, "completed", `${reason}: completado, no revisión manual`);
+      assert.equal(a.result, esperado, `${reason} → ${esperado}`);
+      const o = db.getOrderById(order.id)!;
+      assert.equal(o.confirmed_at, null, `${reason}: jamás confirma`);
+      assert.equal(o.address_line1, "Calle Mayor 5", `${reason}: jamás corrige`);
+      n++;
+    }
+    // Lo que NO se puede mapear sigue yendo a revisión humana.
+    const { attempt: aSpam } = await dialOne("rt-nc-spam", "7299", "34600117299");
+    calls.applyCallAnalysis(aSpam, { ...analyzedEvent(aSpam.provider_call_id!, {}), disconnectionReason: "marked_as_spam" }, enFranja, noHoliday);
+    assert.equal(db.getCallAttempt(aSpam.id)!.state, "manual_review");
+    assert.equal(resultsMod.technicalResultFromDisconnection("inactivity"), null);
+    resetCallCfg();
+  });
+
+  await test("RETELL · webhook end-to-end con fixtures: firma sobre RAW body, 10 reintentos del mismo webhook = 1 efecto, orden alterado sin regresión", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const { POST } = await import("../src/app/api/webhooks/retell/call-events/route");
+    const { order, attempt } = await dialOne("rt-wh-1", "7301", "34600117301");
+    const bodyOk = fixture("call_analyzed-confirmed.json").replace("call_fx_001", attempt.provider_call_id!);
+    const post = async (body: string, sig: string | null) => {
+      const req = new Request("http://localhost/api/webhooks/retell/call-events", { method: "POST", body, headers: sig ? { "x-retell-signature": sig } : {} });
+      return POST(req as unknown as import("next/server").NextRequest);
+    };
+    await withEnv(RETELL_ENV, async () => {
+      assert.equal((await post(bodyOk, null)).status, 401, "sin firma → 401");
+      assert.equal((await post(bodyOk, firmar(bodyOk, "otra-key"))).status, 401, "firma con otra key → 401");
+      assert.equal((await post(bodyOk, firmar(bodyOk, "retell-key-test", Date.now() - 6 * 60_000))).status, 401, "timestamp caducado → 401");
+      // Re-serializar cambia bytes → la firma del RAW original ya no vale.
+      const reserializado = JSON.stringify(JSON.parse(bodyOk), null, 2);
+      assert.equal((await post(reserializado, firmar(bodyOk))).status, 401, "firma calculada sobre otro body → 401");
+      // Malformado con firma válida: 200 e ignorado (Retell no debe reintentar).
+      const mal = fixture("malformed.json");
+      const rMal = await post(mal, firmar(mal)); assert.equal(rMal.status, 200); assert.equal((await rMal.json()).ignored, "forma desconocida");
+      // 10 entregas del MISMO webhook → 1 fila, 1 efecto.
+      let nuevos = 0;
+      for (let i = 0; i < 10; i++) { const r = await post(bodyOk, firmar(bodyOk)); assert.equal(r.status, 200); if (!(await r.json()).duplicate) nuevos++; }
+      assert.equal(nuevos, 1, "solo la primera entrega es nueva");
+      calls.processCallEvents(enFranja, noHoliday);
+      calls.processCallEvents(enFranja, noHoliday);
+      const o = db.getOrderById(order.id)!;
+      assert.ok(o.confirmed_at !== null, "pedido confirmado UNA vez");
+      assert.equal(db.getCallAttempt(attempt.id)!.state, "completed");
+      // call_ended que llega DESPUÉS del analyzed: no revierte nada.
+      const ended = fixture("call_ended.json").replace("call_fx_001", attempt.provider_call_id!);
+      assert.equal((await post(ended, firmar(ended))).status, 200);
+      calls.processCallEvents(enFranja, noHoliday);
+      assert.equal(db.getCallAttempt(attempt.id)!.state, "completed", "sigue completado");
+      assert.equal(db.getCallAttempt(attempt.id)!.result, "confirmado");
+      // call_started de una llamada desconocida: seguro.
+      const started = fixture("call_started.json").replace("call_fx_001", "call_desconocida_zz");
+      assert.equal((await post(started, firmar(started))).status, 200);
+      calls.processCallEvents(enFranja, noHoliday);
+    });
+    resetCallCfg();
+  });
+
+  await test("RETELL · fixtures: corrección, DNC y rellamada aplican su semántica; no-conectada no confirma", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const aplica = async (fx: string, id: string, num: string, tel: string) => {
+      const d = await dialOne(id, num, tel);
+      const ev = retellMod.retellProvider.parseEvent(fixture(fx).replace(/call_fx_00\d/, d.attempt.provider_call_id!))!;
+      calls.applyCallAnalysis(d.attempt, ev, enFranja, noHoliday);
+      return { ...d, after: db.getOrderById(d.order.id)!, att: db.getCallAttempt(d.attempt.id)! };
+    };
+    const c = await aplica("call_analyzed-correction.json", "rt-fx-c", "7401", "34600117911");
+    assert.equal(c.att.result, "confirmado_con_correccion"); assert.equal(c.after.address_line1, "Calle Ensayo Nueva 12"); assert.equal(c.after.postal_code, "04002"); assert.equal(c.after.phone, "34600117911", "telefono_alternativo vacío NO pisa el teléfono");
+    const dn = await aplica("call_analyzed-dnc.json", "rt-fx-d", "7402", "34600117912");
+    assert.equal(dn.att.result, "no_volver_a_llamar"); assert.equal(db.isDncPhone("34600117912"), true);
+    const rc = await aplica("call_analyzed-recall.json", "rt-fx-r", "7403", "34600117913");
+    assert.equal(rc.att.result, "rellamar"); assert.ok(db.getActiveCallAttemptForOrder(rc.order.id), "rellamada planificada"); assert.equal(db.countConsumedContacts(rc.order.id), 0);
+    const nc = await aplica("not-connected.json", "rt-fx-n", "7404", "34600117914");
+    assert.equal(nc.att.result, "no_contesta"); assert.equal(nc.after.confirmed_at, null);
+    // Deriva detectada también por el propio webhook (call.agent_version ≠ persistida).
+    cfgMod.clearCallsBlocked();
+    const dr = await dialOne("rt-fx-v", "7405", "34600117915");
+    db.systemDbHandle().prepare("UPDATE call_attempts SET agent_version='7' WHERE id=?").run(dr.attempt.id);
+    const evD = retellMod.retellProvider.parseEvent(fixture("drift-version.json").replace("call_fx_006", dr.attempt.provider_call_id!))!;
+    assert.equal(evD.agentVersion, "9");
+    calls.applyCallAnalysis(db.getCallAttempt(dr.attempt.id)!, evD, enFranja, noHoliday);
+    assert.match(cfgMod.callsBlockedReason() ?? "", /agent_version_drift/);
+    cfgMod.clearCallsBlocked(); resetCallCfg();
+  });
+
+  await test("RETELL · KILL SWITCH (P0): con EMERGENCY_STOP=1 ni el orquestador ni el botón manual crean llamadas", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const tel = "34600117500";
+    const o = llamableParaManual("rt-ks-1", "7500", tel);
+    calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+    await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+      const { provider, created } = mkProvider();
+      await calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday });
+      assert.equal(created.length, 0, "orquestador: cero llamadas con EMERGENCY_STOP=1");
+      const r = await manualMod.manualDialOrder(o.id, enFranja, provider);
+      assert.equal(r.ok, false); assert.match(r.error ?? "", /EMERGENCY_STOP/);
+      assert.equal(created.length, 0, "manual: cero llamadas con EMERGENCY_STOP=1");
+    });
+    resetCallCfg();
+  });
+
+  await test("RETELL · DNC y allowlist en forma canónica: +34 / 34 / 9 dígitos / espacios son el MISMO teléfono", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    db.addDncPhone("+34 600 11 76 00", "manual", { reason: "test" });
+    for (const f of ["34600117600", "+34600117600", "600117600", "600 11 76 00", "+34 600-117-600"]) assert.equal(db.isDncPhone(f), true, `DNC debe reconocer "${f}"`);
+    assert.equal(db.isDncPhone("34600117601"), false);
+    db.setSetting("calls_allowlist", "+34 600 11 76 10, 600117611");
+    assert.equal(cfgMod.callAllowedByAllowlist("34600117610"), true);
+    assert.equal(cfgMod.callAllowedByAllowlist("34600117611"), true, "apuntado sin el 34 también cuenta");
+    assert.equal(cfgMod.callAllowedByAllowlist("34600117612"), false);
+    // Y el botón manual respeta el DNC aunque el pedido tenga el número en otro formato.
+    const o = llamableParaManual("rt-dnc-m", "7600", "34600117600");
+    const { provider, created } = mkProvider();
+    const r = await manualMod.manualDialOrder(o.id, enFranja, provider);
+    assert.equal(r.ok, false); assert.match(r.error ?? "", /NO LLAMAR/); assert.equal(created.length, 0);
+    resetCallCfg();
+  });
+
+  await test("RETELL · precedencia: un análisis que llega cuando el pedido ya está CANCELADO por Shopify no lo confirma; ya CONFIRMADO por WhatsApp no lo retrocede", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const a = await dialOne("rt-pre-1", "7700", "34600117700");
+    db.setOrderClosure(a.order.id, "cancelled", "shopify", Math.floor(enFranja.getTime() / 1000));
+    db.systemDbHandle().prepare("UPDATE orders SET status='cancelled' WHERE id=?").run(a.order.id);
+    calls.applyCallAnalysis(a.attempt, analyzedEvent(a.attempt.provider_call_id!, { resultado_llamada: "confirmado" }), enFranja, noHoliday);
+    const oa = db.getOrderById(a.order.id)!;
+    assert.equal(oa.status, "cancelled", "un cierre terminal de Shopify no se pisa por una llamada");
+    assert.equal(oa.closure_status, "cancelled");
+    const b = await dialOne("rt-pre-2", "7701", "34600117701");
+    db.markOrderConfirmed(b.order.id, true); // WhatsApp confirmó mientras la llamada estaba en curso
+    calls.applyCallAnalysis(b.attempt, analyzedEvent(b.attempt.provider_call_id!, { resultado_llamada: "cancelado" }), enFranja, noHoliday);
+    const ob = db.getOrderById(b.order.id)!;
+    assert.ok(ob.confirmed_at !== null, "la confirmación por WhatsApp no se borra");
+    assert.equal(db.getCallAttempt(b.attempt.id)!.state === "completed" || db.getCallAttempt(b.attempt.id)!.state === "manual_review", true);
+    resetCallCfg();
+  });
+
+  await test("RETELL · fuzz: 1.000 payloads malformados al normalizador y al parser de eventos — cero excepciones, cero basura aplicada", () => {
+    const { normalizeRetellAnalysis } = require("../src/lib/calls/analysis") as typeof import("../src/lib/calls/analysis");
+    let seed = 12345;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed / 0x7fffffff; };
+    const basura = (): unknown => {
+      const r = rnd();
+      if (r < 0.1) return null; if (r < 0.2) return undefined; if (r < 0.3) return rnd() * 1e6; if (r < 0.4) return rnd() > 0.5;
+      if (r < 0.5) return [1, "a", {}]; if (r < 0.6) return "x".repeat(Math.floor(rnd() * 5000)); if (r < 0.7) return "false";
+      if (r < 0.8) return { anidado: { mas: { y: "z" } } }; if (r < 0.9) return "confirmado"; return "{{resultado}}";
+    };
+    const keys = ["resultado", "resultado_llamada", "result", "datos_corregidos", "direccion_corregida", "localidad_corregida", "codigo_postal_corregido", "telefono_alternativo", "momento_rellamada", "pidio_no_llamar", "zzz"];
+    let dnc = 0, largos = 0;
+    for (let i = 0; i < 1000; i++) {
+      const obj: Record<string, unknown> = {};
+      for (const k of keys) if (rnd() > 0.4) obj[k] = basura();
+      if (rnd() > 0.7) obj.datos_corregidos = { direccion_corregida: basura(), pidio_no_llamar: basura() };
+      const n = normalizeRetellAnalysis(obj);
+      assert.equal(typeof n.pidioNoLlamar, "boolean");
+      for (const v of [n.direccionCorregida, n.localidadCorregida, n.codigoPostalCorregido, n.telefonoAlternativo]) assert.ok(v === null || (typeof v === "string" && v.length > 0));
+      if (n.pidioNoLlamar) dnc++;
+      if (typeof n.direccionCorregida === "string" && n.direccionCorregida.length > 500) largos++;
+      // parser de eventos con el mismo caos
+      assert.doesNotThrow(() => retellMod.retellProvider.parseEvent(JSON.stringify({ event: rnd() > 0.5 ? "call_analyzed" : basura(), call: rnd() > 0.5 ? { call_id: rnd() > 0.5 ? "c" : basura(), call_analysis: basura() } : basura() })));
+    }
+    assert.ok(dnc < 1000, "DNC solo con booleanos inequívocos");
+  });
+
+  await test("RETELL · stress 100×: normalización, idempotencia del inbox, placeholder y prevención de doble llamada — 0 flakes", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const { normalizeRetellAnalysis } = require("../src/lib/calls/analysis") as typeof import("../src/lib/calls/analysis");
+    for (let i = 0; i < 100; i++) {
+      assert.equal(normalizeRetellAnalysis({ resultado_llamada: "confirmado", pidio_no_llamar: "false" }).pidioNoLlamar, false);
+      assert.ok(payloadMod.unsafeVariableReason("nombre_cliente", `[password ${i}]`));
+      const key = `stress:${i}:call_analyzed:1`;
+      let nuevos = 0;
+      for (let k = 0; k < 5; k++) if (db.insertCallEvent({ dedupeKey: key, providerCallId: `stress-${i}`, eventType: "call_analyzed", eventAt: 1, payloadJson: null })) nuevos++;
+      assert.equal(nuevos, 1);
+    }
+    // Doble llamada: dos "workers" compiten por el mismo intento → exactamente una llamada.
+    for (let i = 0; i < 20; i++) {
+      const tel = `346001178${String(i).padStart(2, "0")}`;
+      llamableParaManual(`rt-race-${i}`, `78${String(i).padStart(2, "0")}`, tel);
+      calls.enqueueDueOrders({ now: enFranja, isHoliday: noHoliday });
+      const { provider, created } = mkProvider();
+      await Promise.all([calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday }), calls.dialDueAttempts({ now: enFranja, provider, isHoliday: noHoliday })]);
+      assert.equal(created.filter((c) => c.toNumber === `+${tel}`).length, 1, `carrera ${i}: una sola llamada`);
+    }
+    db.systemDbHandle().prepare("DELETE FROM call_events WHERE dedupe_key LIKE 'stress:%'").run();
+    resetCallCfg();
   });
 
   await test("E7 inbox: evento duplicado UN solo efecto; call_analyzed repetido no revierte; call_id desconocido seguro", async () => {
@@ -8765,17 +9205,13 @@ async function main(): Promise<void> {
     assert.equal(promptVal.validatePromptPlaceholders(v6bueno).ok, true);
   });
 
-  await test("PROMPT · contrato sincronizado: las variables del validador SON las de payload.ts", () => {
+  await test("PROMPT · contrato sincronizado: las variables del validador SON las de payload.ts", async () => {
     // Si alguien añade una variable al payload sin tocar el validador (o al
     // revés), esto falla y el desfase se ve aquí, no en una llamada real.
-    const payloadMod = fs.readFileSync(path.join(process.cwd(), "src/lib/calls/payload.ts"), "utf8");
-    // V3: el literal ahora es `const variables = {` (el preflight de
-    // seguridad lo inspecciona antes de devolverlo).
-    const ini = payloadMod.indexOf("const variables = {");
-    const fin = payloadMod.indexOf("};", ini);
-    const cuerpo = payloadMod.slice(ini, fin);
-    // Coge tanto `clave: valor` como el shorthand `clave,` (producto, direccion).
-    const delPayload = [...cuerpo.matchAll(/^\s{4}([a-z_]+)[,:]/gm)].map((m) => m[1]).sort();
+    // Hardening 03-09: la fuente de verdad es el export tipado
+    // RETELL_CALL_VARIABLE_KEYS de payload.ts; el validador lo importa.
+    const { RETELL_CALL_VARIABLE_KEYS } = await import("../src/lib/calls/payload");
+    const delPayload = [...RETELL_CALL_VARIABLE_KEYS].sort();
     const delValidador = [...promptVal.ALLOWED_PROMPT_VARIABLES].sort();
     assert.deepEqual(delValidador, delPayload, "payload.ts y prompt-validator.ts deben declarar LAS MISMAS variables");
   });
@@ -10772,6 +11208,143 @@ async function main(): Promise<void> {
       assert.equal(tpl.getTemplateReadiness("order_confirmation_request").ready, true);
     });
 
+    await test("SCHEDULER · inanición de cola (P1 real): 25 pedidos atascados delante NO impiden procesar el nuevo del piloto", async () => {
+      // Causa raíz del flake "132001" y de un bug REAL de producción: las colas
+      // se leían con LIMIT 20 por fecha y los pedidos que el tick se salta sin
+      // cambiar estado (fuera de allowlist en TEST_MODE) se quedaban delante
+      // para siempre. Con 20 de esos, el pedido allowlisted más nuevo jamás
+      // entraba en el LIMIT: en producción (TEST_MODE=1 desde semanas) el
+      // pedido del piloto nunca habría recibido su WhatsApp.
+      limpiarVerificacion();
+      const telefono = "34600994150";
+      const h = db.systemDbHandle();
+      for (let i = 0; i < 25; i++) {
+        const atascado = mkOrder(`starve-${i}`, `95${String(i).padStart(3, "0")}`, `3460071${String(i).padStart(4, "0")}`);
+        // más antiguos que el objetivo, con created_at DISTINTO (como en producción)
+        h.prepare("UPDATE orders SET created_at = created_at - ? WHERE id = ?").run(2000 - i, atascado.id);
+      }
+      const objetivo = mkOrder("starve-target", "95999", telefono);
+      const eventos = () =>
+        (h.prepare("SELECT COUNT(*) c FROM integration_events WHERE event_type='template_not_ready' AND order_ref='95999'").get() as { c: number }).c;
+      const antes = eventos();
+      await withEnv(
+        {
+          WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+          META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real", APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1",
+          TEST_MODE: "1", TEST_PHONE_ALLOWLIST: telefono, WHATSAPP_WINDOW_ENABLED: "0", EMERGENCY_STOP: "0",
+        },
+        async () => {
+          const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
+          await runSchedulerTick();
+          assert.ok(eventos() > antes, "el pedido nuevo se PROCESA aunque haya 25 atascados delante (bloqueado con motivo, no invisible)");
+          assert.equal(db.getOrderById(objetivo.id)!.status, "pending_send", "bloqueado por plantilla: no se consume");
+          verificar();
+          await runSchedulerTick();
+          const tras = db.getOrderById(objetivo.id)!;
+          assert.ok(tras.whatsapp_sent_at !== null, "verificada la plantilla, SALE — sin que nadie tenga que vaciar la cola a mano");
+          assert.equal(tras.status, "awaiting_reply");
+        }
+      );
+      // Los 25 atascados siguen exactamente igual: no se les hizo nada.
+      const atascados = (h.prepare("SELECT COUNT(*) c FROM orders WHERE shopify_order_id LIKE 'starve-%' AND status='pending_send' AND whatsapp_sent_at IS NULL").get() as { c: number }).c;
+      assert.equal(atascados, 25, "ni un envío fuera de la allowlist");
+    });
+
+    await test("WHATSAPP · recordatorio en cloud_api sale como PLANTILLA (recordatorio_confirmacion); sin verificación se RETIENE sin consumir el claim", async () => {
+      // Bug real (03-09): el recordatorio salía como texto libre. Va a quien NO
+      // ha contestado → siempre fuera de la ventana de 24 h → Meta lo rechaza
+      // y el claim ya estaba consumido: el cliente nunca lo recibía.
+      const tel = "34600994160";
+      const o = mkOrder("v3wa-rem", "94160", tel);
+      const h = db.systemDbHandle();
+      h.prepare("UPDATE orders SET status='awaiting_reply', whatsapp_sent_at = unixepoch() - 120, customer_replied_at = NULL WHERE id=?").run(o.id); // la suite corre con FIRST_REMINDER_MINUTES=1 y NEEDS_CALL_MINUTES=3
+      h.prepare("DELETE FROM settings WHERE key='wa_tpl_verified:order_reminder'").run();
+      const eventos = () => (h.prepare("SELECT COUNT(*) c FROM integration_events WHERE event_type='template_not_ready' AND order_ref='94160'").get() as { c: number }).c;
+      const env = { WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", META_WHATSAPP_PHONE_NUMBER_ID: "111222333", META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real", APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tel, WHATSAPP_WINDOW_ENABLED: "0", EMERGENCY_STOP: "0" };
+      await withEnv(env, async () => {
+        const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
+        const antes = eventos();
+        await runSchedulerTick();
+        const r1 = db.getOrderById(o.id)!;
+        assert.equal(r1.status, "awaiting_reply", "sin plantilla verificada NO se consume el claim del recordatorio");
+        assert.equal(r1.reminder_sent_at, null);
+        assert.ok(eventos() > antes, "queda rastro visible: recordatorio BLOQUEADO con motivo");
+        tpl.storeVerifiedTemplate("order_reminder", { provider: "recordatorio_confirmacion", language: "es", status: "APPROVED", paramCount: 2, buttonCount: 2, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: Math.floor(Date.now() / 1000) });
+        await runSchedulerTick();
+        const r2 = db.getOrderById(o.id)!;
+        assert.equal(r2.status, "reminder_sent", "verificada la plantilla, el recordatorio SALE");
+        const fila = h.prepare("SELECT message_type, template_name, payload_json FROM outbox WHERE phone=? ORDER BY id DESC LIMIT 1").get(tel) as { message_type: string; template_name: string | null; payload_json: string | null };
+        assert.equal(fila.message_type, "template", "en cloud_api el recordatorio es una PLANTILLA, no texto");
+        assert.equal(fila.template_name, "recordatorio_confirmacion");
+        assert.match(fila.payload_json ?? "", /confirm_order/, "con sus botones (confirmar / cambiar dirección)");
+        await runSchedulerTick();
+        assert.equal(db.getOrderById(o.id)!.status, "reminder_sent", "un solo recordatorio, jamás dos");
+      });
+      h.prepare("DELETE FROM settings WHERE key='wa_tpl_verified:order_reminder'").run();
+    });
+
+    await test("SCHEDULER · un tick envía como máximo MAX_ACTIONS_PER_TICK y el siguiente continúa por donde iba", async () => {
+      verificar();
+      const sched = await import("../src/lib/orders/scheduler");
+      const tels: string[] = [];
+      for (let i = 0; i < 25; i++) {
+        const t = `3460072${String(i).padStart(4, "0")}`;
+        tels.push(t);
+        mkOrder(`cap-${i}`, `96${String(i).padStart(3, "0")}`, t);
+      }
+      await withEnv(
+        {
+          WHATSAPP_PROVIDER: "cloud_api", META_WHATSAPP_API_ENABLED: "1", META_WHATSAPP_PHONE_NUMBER_ID: "111222333",
+          META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real", APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1",
+          TEST_MODE: "1", TEST_PHONE_ALLOWLIST: tels.join(","), WHATSAPP_WINDOW_ENABLED: "0", EMERGENCY_STOP: "0",
+        },
+        async () => {
+          const r1 = await sched.runSchedulerTick();
+          assert.equal(r1.sent, sched.MAX_ACTIONS_PER_TICK, "tope de envíos por tick");
+          const r2 = await sched.runSchedulerTick();
+          assert.equal(r2.sent, 25 - sched.MAX_ACTIONS_PER_TICK, "el resto sale en el tick siguiente: nadie se queda atrás");
+          const r3 = await sched.runSchedulerTick();
+          assert.equal(r3.sent, 0, "y no se reenvía nada");
+        }
+      );
+      const enviados = (db.systemDbHandle().prepare("SELECT COUNT(*) c FROM orders WHERE shopify_order_id LIKE 'cap-%' AND status='awaiting_reply'").get() as { c: number }).c;
+      assert.equal(enviados, 25, "cada pedido exactamente una vez");
+    });
+
+    await test("TEMPLATES · una sola fuente de verdad para resolver la spec: doctor, readiness y builder coinciden", () => {
+      verificar();
+      // A · spec por clave lógica
+      const conf = tpl.loadProviderMappings().find((m) => m.logicalKey === "order_confirmation_request")!;
+      assert.equal(tpl.resolveMappingSpec(conf)!.name, "order_confirmation_request");
+      // B · sin spec por clave lógica, con spec por nombre real
+      const delay = tpl.loadProviderMappings().find((m) => m.logicalKey === "order_delay_restock")!;
+      assert.equal(tpl.getTemplateSpec("order_delay_restock"), null);
+      assert.equal(tpl.resolveMappingSpec(delay)!.name, "retraso_pedido");
+      // C · el builder usa el MISMO resolver y conserva payloads
+      tpl.storeVerifiedTemplate("order_delay_restock", { provider: "retraso_pedido", language: "es", status: "APPROVED", paramCount: 4, buttonCount: 2, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: Math.floor(Date.now() / 1000) });
+      // Sin order_id el payload de los botones quedaría sin resolver → NO se construye (fail-closed).
+      assert.throws(
+        () => tpl.buildApprovedTemplateMessage("order_delay_restock", { nombre: "Ana", numero_pedido: "#1", producto: "X", fecha_reposicion: "hoy" }),
+        /TEMPLATE_BUTTON_PAYLOAD_UNRESOLVED|sin resolver/,
+        "un botón sin payload válido se vería igual pero no haría nada: mejor no enviar"
+      );
+      const m = tpl.buildApprovedTemplateMessage("order_delay_restock", { nombre: "Ana", numero_pedido: "#1", producto: "X", fecha_reposicion: "hoy", order_id: "4242" });
+      assert.equal(m.templateName, "retraso_pedido");
+      assert.deepEqual(m.buttonPayloads, ["delay_ok:4242", "delay_cancel:4242"], "los 2 botones llevan EXACTAMENTE el payload que atienden los handlers delay_ok:<id>/delay_cancel:<id>");
+      // Y coinciden con lo que el sender real adjunta a mano (notify-delay.ts).
+      const notify = fs.readFileSync(path.join(process.cwd(), "src/lib/orders/notify-delay.ts"), "utf8");
+      assert.match(notify, /`delay_ok:\$\{order\.id\}`, `delay_cancel:\$\{order\.id\}`/);
+      const c = tpl.buildApprovedTemplateMessage("order_confirmation_request", { nombre: "Ana", numero_pedido: "#1", producto: "X", importe: "1 €" });
+      assert.deepEqual(c.buttonPayloads, ["confirm_order", "change_address", "delivery_note"]);
+      assert.equal(tpl.getTemplateReadiness("order_delay_restock").ready, true, "readiness cuadra con la WABA real (2 botones)");
+      // D · disabled → no construye nada enviable
+      assert.throws(() => tpl.buildApprovedTemplateMessage("order_cancelled_ack", { nombre: "x", numero_pedido: "#1" }), /DESHABILITADO|no lista/i);
+      // E · inexistente → fail-closed
+      assert.throws(() => tpl.buildApprovedTemplateMessage("no_existe_este_mapping", {}), /no lista|mapping/i);
+      assert.equal(tpl.getTemplateReadiness("no_existe_este_mapping").blocker, "TEMPLATE_MAPPING_MISSING");
+      db.systemDbHandle().prepare("DELETE FROM settings WHERE key = 'wa_tpl_verified:order_delay_restock'").run();
+    });
+
     await test("132001: el scheduler en cloud_api con plantilla bloqueada NO consume el pedido y deja rastro visible", async () => {
       limpiarVerificacion();
       const telefono = "34600994103";
@@ -11093,7 +11666,7 @@ async function main(): Promise<void> {
           const accepted = await retellProvider.createOutboundCall({
             toNumber: "+34600111333",
             fromNumber: "+34950835615",
-            dynamicVariables: { nombre_cliente: "Marta" },
+            dynamicVariables: JSON.parse(fs.readFileSync(path.join(process.cwd(), "tests/fixtures/retell/create-phone-call.expected.json"), "utf8")).retell_llm_dynamic_variables,
             metadata: {},
           });
           assert.equal(bodyEnviado!.override_agent_version, 7, "la versión va como NÚMERO en el payload (contrato oficial)");
@@ -11101,10 +11674,15 @@ async function main(): Promise<void> {
           assert.equal(accepted.agentVersion, "7", "la versión usada se captura para auditoría");
           assert.equal(accepted.agentId, "agent_abc");
         });
-        // latest_published viaja como STRING (tag oficial), nunca draft.
+        // Hardening 03-09: "latest_published" ya NO vale como pin (se mueve
+        // cuando alguien publica). Solo número: si no, no hay llamada.
         await withEnv({ RETELL_API_KEY: "key-test", RETELL_FROM_NUMBER: "+34950835615", RETELL_AGENT_ID: "agent_abc", RETELL_AGENT_VERSION: "latest_published" }, async () => {
-          await retellProvider.createOutboundCall({ toNumber: "+34600111333", fromNumber: "+34950835615", dynamicVariables: {}, metadata: {} });
-          assert.equal(bodyEnviado!.override_agent_version, "latest_published");
+          bodyEnviado = null;
+          await assert.rejects(
+            retellProvider.createOutboundCall({ toNumber: "+34600111333", fromNumber: "+34950835615", dynamicVariables: JSON.parse(fs.readFileSync(path.join(process.cwd(), "tests/fixtures/retell/create-phone-call.expected.json"), "utf8")).retell_llm_dynamic_variables, metadata: {} }),
+            /agent_version_not_pinned/
+          );
+          assert.equal(bodyEnviado, null, "sin pin numérico no se toca la red");
         });
       } finally {
         globalThis.fetch = originalFetch;
