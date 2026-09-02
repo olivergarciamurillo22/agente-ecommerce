@@ -77,15 +77,7 @@ button, a, input, select, textarea {
 @keyframes sway-b { 0%,100% { rotate: 2deg; } 50% { rotate: -2deg; } }
 @keyframes sway-c { 0%,100% { rotate: -3deg; } 50% { rotate: 1.5deg; } }
 
-/* Brasas doradas que ascienden con leve deriva y se desvanecen. */
-@keyframes brand-ember {
-  0% { transform: translateY(0) translateX(0); opacity: 0; }
-  10% { opacity: 0.9; }
-  85% { opacity: 0.7; }
-  100% { transform: translateY(-102vh) translateX(var(--drift, 0px)); opacity: 0; }
-}
-.brand-ember { bottom: -10px; animation-name: brand-ember; animation-timing-function: linear; animation-iteration-count: infinite; }
 
 @media (prefers-reduced-motion: reduce) {
-  .brand-sway, .brand-sway-slow, .brand-sway-alt, .brand-ember, .brand-pulse { animation: none; }
+  .brand-pulse { animation: none; }
 }
