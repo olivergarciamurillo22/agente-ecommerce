@@ -78,12 +78,12 @@ export default function SafetyBanner() {
       : "⚠️ Envíos reales activos para CUALQUIER cliente";
 
   return (
-    <div className={`border-b px-6 py-2 flex flex-wrap items-center gap-x-4 gap-y-1 ${bannerCls}`}>
+    <div className={`border-b px-4 md:px-6 py-1.5 md:py-2 flex flex-wrap items-center gap-x-4 gap-y-1 ${bannerCls}`}>
       <div className="flex items-baseline gap-2">
         <span className="font-display font-bold text-sm tracking-wide">{title}</span>
         <span className="text-xs opacity-90">{subtitle}</span>
       </div>
-      <div className="flex flex-wrap items-center gap-1.5 ml-auto">
+      <div className="hidden sm:flex flex-wrap items-center gap-1.5 ml-auto">
         <span
           title={`Ventana de envío: ${s.windowLabel}`}
           className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-bold tracking-wide ${

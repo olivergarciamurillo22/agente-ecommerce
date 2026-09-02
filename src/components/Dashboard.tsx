@@ -1,27 +1,24 @@
 "use client";
 
 // ============================================================
-// Shell del Control Center v3: NAV RAIL con labels (§30-31), cabecera
-// provider-aware (§47), command palette (⌘K, §37) y las 9 secciones.
-// La sección activa vive en el hash (#pedidos, #finanzas…): refrescar o
-// volver atrás no te saca de donde estabas.
+// Shell v4: seis áreas (Inicio · Pedidos · Seguimiento · Cazador · Growth ·
+// Ajustes). Los destinos heredados (acciones/chats/envíos/agente →
+// Seguimiento; anuncios/finanzas → Growth) se traducen aquí a área +
+// pestaña, así ninguna pantalla antigua se queda sin sitio. El área activa
+// vive en el hash de la URL.
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
-import ActionCenter from "./ActionCenter";
-import AdsPanel from "./AdsPanel";
-import AgentPanel from "./AgentPanel";
-import AmbientBackground from "./AmbientBackground";
-import ChatsView from "./ChatsView";
 import CommandPalette from "./CommandPalette";
 import DashboardHeader from "./DashboardHeader";
-import FinanceView from "./FinanceView";
+import FollowUpView from "./FollowUpView";
+import GrowthView from "./GrowthView";
 import HomePanel from "./HomePanel";
-import NavRail, { NAV_ITEMS, type DockView } from "./NavRail";
+import NavRail, { NAV_ITEMS, type DockView, type NavArea } from "./NavRail";
 import OrdersPanel from "./OrdersPanel";
+import ProductHunterEntry from "./hunter/ProductHunterEntry";
 import SafetyBanner from "./SafetyBanner";
 import SettingsView from "./SettingsView";
-import ShipmentsPanel from "./ShipmentsPanel";
 import { healthToUi, type UiStatus } from "./ui";
 
 interface DashboardProps {
@@ -38,52 +35,97 @@ export interface ConversationItem {
   last_message_preview: string | null;
 }
 
-const HASH_TO_VIEW: Record<string, DockView> = {
+type FollowTab = "followup" | "actions" | "chats" | "shipments" | "agent";
+type GrowthTab = "summary" | "funnel" | "products" | "ads" | "calculator" | "audit" | "repurchase" | "competition";
+
+const HASH_TO_TARGET: Record<string, DockView> = {
   "#inicio": "home",
-  "#acciones": "actions",
   "#pedidos": "orders",
+  "#seguimiento": "followup",
+  "#cazador": "hunter",
+  "#growth": "growth",
+  "#ajustes": "settings",
+  // alias heredados (enlaces antiguos siguen funcionando)
+  "#acciones": "actions",
   "#chats": "chats",
   "#agente": "agent",
   "#envios": "shipments",
   "#anuncios": "ads",
   "#finanzas": "finance",
-  "#ajustes": "settings",
 };
-const VIEW_TO_HASH = Object.fromEntries(Object.entries(HASH_TO_VIEW).map(([h, v]) => [v, h])) as Record<DockView, string>;
+const AREA_TO_HASH: Record<NavArea, string> = { home: "#inicio", orders: "#pedidos", followup: "#seguimiento", hunter: "#cazador", growth: "#growth", settings: "#ajustes" };
 
-const SECTION_LABEL: Record<DockView, string> = Object.fromEntries([
-  ...NAV_ITEMS.map((i) => [i.id, i.label]),
-  ["settings", "Ajustes"],
-]) as Record<DockView, string>;
+/** Traduce cualquier destino a área + pestaña. */
+function resolveTarget(t: DockView): { area: NavArea; followTab?: FollowTab; growthTab?: GrowthTab } {
+  switch (t) {
+    case "actions":
+      return { area: "followup", followTab: "actions" };
+    case "chats":
+      return { area: "followup", followTab: "chats" };
+    case "shipments":
+      return { area: "followup", followTab: "shipments" };
+    case "agent":
+      return { area: "followup", followTab: "agent" };
+    case "ads":
+      return { area: "growth", growthTab: "ads" };
+    case "finance":
+      return { area: "growth", growthTab: "summary" };
+    default:
+      return { area: t };
+  }
+}
 
+const SECTION_LABEL: Record<NavArea, string> = Object.fromEntries([...NAV_ITEMS.map((i) => [i.id, i.label]), ["settings", "Ajustes"]]) as Record<NavArea, string>;
 const RANK: Record<string, number> = { healthy: 0, disabled: 0, unknown: 0, warning: 1, critical: 2 };
 
 export default function Dashboard({ phone, provider }: DashboardProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-  const [view, setView] = useState<DockView>(() => {
-    if (typeof window !== "undefined" && HASH_TO_VIEW[window.location.hash]) return HASH_TO_VIEW[window.location.hash];
+  const [area, setArea] = useState<NavArea>(() => {
+    if (typeof window !== "undefined") {
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) return resolveTarget(t).area;
+    }
     return "home";
   });
-  const [badges, setBadges] = useState<Partial<Record<DockView, number>>>({});
+  const [followTab, setFollowTab] = useState<FollowTab>(() => {
+    if (typeof window !== "undefined") {
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) return resolveTarget(t).followTab ?? "followup";
+    }
+    return "followup";
+  });
+  const [growthTab, setGrowthTab] = useState<GrowthTab>(() => {
+    if (typeof window !== "undefined") {
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) return resolveTarget(t).growthTab ?? "summary";
+    }
+    return "summary";
+  });
+  const [badges, setBadges] = useState<Partial<Record<NavArea, number>>>({});
   const [systemStatus, setSystemStatus] = useState<UiStatus>("muted");
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Cambia de clave para forzar el remount de Seguimiento/Growth con la pestaña pedida.
+  const [navKey, setNavKey] = useState(0);
 
-  const changeView = useCallback((v: DockView) => {
-    setView(v);
-    if (typeof window !== "undefined") window.history.replaceState(null, "", VIEW_TO_HASH[v]);
+  const changeView = useCallback((t: DockView) => {
+    const r = resolveTarget(t);
+    setArea(r.area);
+    if (r.followTab) setFollowTab(r.followTab);
+    if (r.growthTab) setGrowthTab(r.growthTab);
+    if (r.followTab || r.growthTab) setNavKey((k) => k + 1);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", AREA_TO_HASH[r.area]);
   }, []);
 
   useEffect(() => {
     const onHash = () => {
-      const v = HASH_TO_VIEW[window.location.hash];
-      if (v) setView(v);
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) changeView(t);
     };
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
-  }, []);
+  }, [changeView]);
 
-  // ⌘K / Ctrl+K abre la paleta desde cualquier sección.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -102,32 +144,31 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
       const data = (await res.json()) as { conversations: ConversationItem[] };
       setConversations(data.conversations);
     } catch {
-      // silenciar: reintenta en el siguiente ciclo
+      /* siguiente ciclo */
     }
   }, []);
 
-  // Chats a 2 s SOLO cuando se miran; pulso lento para el badge en el resto.
   useEffect(() => {
     refreshConversations();
-    const interval = setInterval(refreshConversations, view === "chats" ? 2000 : 30_000);
+    const viendoChats = area === "followup" && followTab === "chats";
+    const interval = setInterval(refreshConversations, viendoChats ? 2000 : 30_000);
     return () => clearInterval(interval);
-  }, [view, refreshConversations]);
+  }, [area, followTab, refreshConversations]);
 
-  // Badges del rail + salud global: un pulso ligero sobre /api/home.
   useEffect(() => {
     let vivo = true;
     const tick = async () => {
       try {
         const res = await fetch("/api/home", { cache: "no-store" });
         if (!res.ok) return;
-        const j = (await res.json()) as {
-          attention?: Array<{ target: DockView; count: number }>;
-          flow?: Array<{ status: string }>;
-        };
+        const j = (await res.json()) as { attention?: Array<{ target: DockView; count: number }>; flow?: Array<{ status: string }> };
         if (!vivo) return;
         if (j.attention) {
-          const acc: Partial<Record<DockView, number>> = {};
-          for (const a of j.attention) acc[a.target] = (acc[a.target] ?? 0) + a.count;
+          const acc: Partial<Record<NavArea, number>> = {};
+          for (const a of j.attention) {
+            const ar = resolveTarget(a.target).area;
+            acc[ar] = (acc[ar] ?? 0) + a.count;
+          }
           setBadges(acc);
         }
         if (j.flow) {
@@ -156,9 +197,8 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
 
   return (
     <main className="h-screen overflow-hidden flex">
-      <AmbientBackground />
       <NavRail
-        view={view}
+        view={area}
         onViewChange={changeView}
         badges={badges}
         systemStatus={systemStatus}
@@ -168,34 +208,32 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
         <DashboardHeader
           phone={phone}
           provider={provider}
-          sectionLabel={SECTION_LABEL[view]}
+          sectionLabel={SECTION_LABEL[area]}
           onOpenSearch={() => setPaletteOpen(true)}
           systemStatus={systemStatus}
         />
         <SafetyBanner />
         <div className="flex-1 min-h-0 overflow-hidden">
-          {view === "home" ? (
+          {area === "home" ? (
             <HomePanel onNavigate={changeView} />
-          ) : view === "actions" ? (
-            <ActionCenter />
-          ) : view === "orders" ? (
+          ) : area === "orders" ? (
             <OrdersPanel />
-          ) : view === "chats" ? (
-            <ChatsView
+          ) : area === "followup" ? (
+            <FollowUpView
+              key={`f${navKey}`}
+              initialTab={followTab}
+              badges={{ actions: badges.followup }}
               conversations={conversations}
               selected={selected}
               selectedId={selectedId}
               onSelect={setSelectedId}
               onRefresh={refreshConversations}
+              onNavigate={changeView}
             />
-          ) : view === "agent" ? (
-            <AgentPanel onNavigate={changeView} />
-          ) : view === "shipments" ? (
-            <ShipmentsPanel />
-          ) : view === "ads" ? (
-            <AdsPanel />
-          ) : view === "finance" ? (
-            <FinanceView />
+          ) : area === "hunter" ? (
+            <ProductHunterEntry />
+          ) : area === "growth" ? (
+            <GrowthView key={`g${navKey}`} initialTab={growthTab} onNavigate={changeView} />
           ) : (
             <SettingsView />
           )}

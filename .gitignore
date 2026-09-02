@@ -46,3 +46,6 @@ desktop.ini
 
 # ── Artefactos del kit original ──
 02-kit-agente-whatsapp.zip
+
+# ── QA visual (capturas Playwright, temporales) ──
+.playwright-mcp/

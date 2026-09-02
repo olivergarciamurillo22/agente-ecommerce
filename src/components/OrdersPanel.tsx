@@ -83,6 +83,7 @@ export interface OrderItem {
   needs_call_at: number | null;
   created_at: number;
   updated_at: number;
+  ordered_at?: number | null;
   closure_status: string;
   beeping_sync_status: string;
   beeping_order_status: number | null;
@@ -132,10 +133,11 @@ export function orderUiState(o: OrderItem): OrderUiState {
   return "other";
 }
 
-type Filter = "all" | "waiting" | "needs_call" | "correction" | "confirmed" | "ready_beeping" | "in_fulfillment" | "incident" | "closed";
+type Filter = "all" | "attention" | "waiting" | "needs_call" | "correction" | "confirmed" | "ready_beeping" | "in_fulfillment" | "incident" | "closed";
 
 const FILTERS: Array<{ key: Filter; label: string; critical?: boolean }> = [
   { key: "all", label: "Todos" },
+  { key: "attention", label: "Necesita atención", critical: true },
   { key: "waiting", label: "Esperando cliente" },
   { key: "needs_call", label: "Necesitan llamada", critical: true },
   { key: "correction", label: "Corrección" },
@@ -150,6 +152,17 @@ function matchesFilter(o: OrderItem, f: Filter): boolean {
   switch (f) {
     case "all":
       return o.status !== "ignored_old";
+    case "attention":
+      // Lo que pide una decisión: cancelación, duplicado, corrección,
+      // llamada, error, incidencia o confirmado sin liberar.
+      return (
+        o.status !== "ignored_old" &&
+        (o.cancellation_requested_at !== null ||
+          o.possible_duplicate === 1 ||
+          ["needs_correction", "needs_call", "error"].includes(o.status) ||
+          ui === "incident" ||
+          ui === "ready_beeping")
+      );
     case "waiting":
       return ui === "waiting_customer";
     case "needs_call":
@@ -242,7 +255,7 @@ const ENVIO_META: Record<string, string> = {
 function KpiCell({ label, value, valueCls = "text-brand-text", span2Mobile = false }: { label: string; value: number; valueCls?: string; span2Mobile?: boolean }) {
   return (
     <div className={`bg-brand-surface px-4 py-3 ${span2Mobile ? "col-span-2 md:col-span-1" : ""}`}>
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted truncate">{label}</div>
+      <div className="text-[11px] uppercase tracking-wider text-brand-muted leading-tight">{label}</div>
       <div className={`mt-1 font-display text-2xl font-semibold leading-tight tabular-nums ${valueCls}`}>{value}</div>
     </div>
   );
@@ -282,6 +295,8 @@ export default function OrdersPanel() {
   const [counts, setCounts] = useState<Counts | null>(null);
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
+  const [range, setRange] = useState<"all" | "today" | "7d" | "30d">("all");
+  const [sort, setSort] = useState<"recent" | "oldest" | "amount">("recent");
   const [detail, setDetail] = useState<OrderItem | null>(null);
   const [busy, setBusy] = useState<number | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -498,7 +513,18 @@ export default function OrdersPanel() {
   }
 
   const q = query.trim().toLowerCase();
-  const visible = orders.filter((o) => matchesFilter(o, filter) && matchesQuery(o, q));
+  const nowS = Math.floor(Date.now() / 1000);
+  const desde = range === "today" ? nowS - 86400 : range === "7d" ? nowS - 7 * 86400 : range === "30d" ? nowS - 30 * 86400 : 0;
+  const fecha = (o: OrderItem) => o.ordered_at ?? o.created_at;
+  const visible = orders
+    .filter((o) => matchesFilter(o, filter) && matchesQuery(o, q) && fecha(o) >= desde)
+    .sort((a, b) =>
+      sort === "amount"
+        ? (parseFloat(b.total_price) || 0) - (parseFloat(a.total_price) || 0)
+        : sort === "oldest"
+          ? fecha(a) - fecha(b)
+          : fecha(b) - fecha(a)
+    );
   const countBy = (f: Filter) => orders.filter((o) => matchesFilter(o, f)).length;
 
   // El CTA contextual de la ficha (§22): UNO grande, no ocho iguales.
@@ -578,12 +604,30 @@ export default function OrdersPanel() {
       </Card>
 
       {/* Filtros como chips (§21) */}
-      <div className="flex flex-wrap gap-2 mb-4">
+      <div className="flex gap-2 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 md:flex-wrap mb-3 pb-1 [scrollbar-width:none]">
         {FILTERS.map((f) => (
           <Chip key={f.key} active={filter === f.key} onClick={() => setFilter(f.key)} count={f.key === "all" ? undefined : countBy(f.key)}>
             {f.label}
           </Chip>
         ))}
+      </div>
+      <div className="flex items-center gap-2 mb-4 text-xs overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 md:flex-wrap pb-1 [scrollbar-width:none]">
+        <span className="text-brand-muted shrink-0">Fecha</span>
+        {([["all", "Todo"], ["today", "24 h"], ["7d", "7 días"], ["30d", "30 días"]] as const).map(([k, l]) => (
+          <Chip key={k} active={range === k} onClick={() => setRange(k)}>{l}</Chip>
+        ))}
+        <span className="ml-2 text-brand-muted">Orden</span>
+        <select
+          value={sort}
+          onChange={(e) => setSort(e.target.value as typeof sort)}
+          aria-label="Ordenar pedidos"
+          className="h-9 rounded-full border border-brand-border bg-brand-surface px-3 text-xs text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+        >
+          <option value="recent">Más recientes</option>
+          <option value="oldest">Más antiguos</option>
+          <option value="amount">Mayor importe</option>
+        </select>
+        <span className="ml-auto text-brand-muted tabular-nums">{visible.length} pedidos</span>
       </div>
 
       {!loaded ? (

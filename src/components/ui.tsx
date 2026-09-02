@@ -88,7 +88,7 @@ export function Card({ children, className = "" }: { children: ReactNode; classN
 
 export function SectionTitle({ children, right }: { children: ReactNode; right?: ReactNode }) {
   return (
-    <div className="flex items-center justify-between gap-3 mb-3">
+    <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
       <h2 className="text-[11px] font-semibold tracking-[0.18em] uppercase text-brand-muted">{children}</h2>
       {right}
     </div>
@@ -109,7 +109,7 @@ export function KpiTile({
 }) {
   return (
     <Card className="px-4 py-3">
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted truncate">{label}</div>
+      <div className="text-[11px] uppercase tracking-wider text-brand-muted leading-snug">{label}</div>
       <div className={`mt-1 text-xl font-semibold font-display leading-tight ${status ? STATUS_TEXT[status] : "text-brand-text"}`}>
         {value}
       </div>
@@ -135,7 +135,7 @@ export function Chip({
     <button
       type="button"
       onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs whitespace-nowrap transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3.5 min-h-11 md:min-h-0 md:py-1.5 text-[13px] md:text-xs whitespace-nowrap transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
         active
           ? "border-brand-gold/60 bg-brand-gold/15 text-brand-gold"
           : "border-brand-border bg-brand-surface text-brand-muted hover:text-brand-text hover:border-brand-muted/60"

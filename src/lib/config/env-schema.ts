@@ -43,6 +43,7 @@ export type EnvCategory =
   | "DROPI"
   | "BEEPING"
   | "META_ADS"
+  | "PRODUCT_HUNTER"
   | "TRACKING"
   | "SYSTEM"
   | "LEGACY";
@@ -357,6 +358,19 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     defaultValue: "v26.0",
     validate: graphVersion,
   },
+
+  // ── CAZADOR DE PRODUCTOS (Meta Ad Library, backend de Pedro) ──
+  {
+    name: "PRODUCT_HUNTER_SOURCE",
+    category: "PRODUCT_HUNTER",
+    secret: false,
+    description: "off (default) | api (backend real de Pedro) | mock (SOLO desarrollo: en producción se rechaza). Sin definir, el módulo se muestra como no conectado.",
+    requiredFor: [],
+    defaultValue: "off",
+    validate: enumOf("off", "api", "mock"),
+  },
+  { name: "PRODUCT_HUNTER_API_URL", category: "PRODUCT_HUNTER", secret: false, description: "URL base del backend del Cazador (contrato en src/lib/product-hunter/adapter.ts).", requiredFor: [] },
+  { name: "PRODUCT_HUNTER_API_TOKEN", category: "PRODUCT_HUNTER", secret: true, description: "Bearer opcional para el backend del Cazador. Solo servidor; jamás llega al navegador.", requiredFor: [] },
 
   { name: "DROPEA_API_KEY", category: "DROPEA", secret: true, description: "API key de solo lectura (sin orders:create, a propósito).", requiredFor: [] },
   { name: "DROPEA_MARKET", category: "DROPEA", secret: false, description: "Mercado (es).", requiredFor: [], defaultValue: "es" },

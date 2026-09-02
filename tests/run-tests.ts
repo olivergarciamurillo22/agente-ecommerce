@@ -11019,26 +11019,21 @@ async function main(): Promise<void> {
      *  puede hacer fallar la aceptación de que no se hace. */
     const codigo = (rel: string) => leer(rel).replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-    await test("UI · el nav desktop lleva LABELS visibles (rail, no dock de iconos) y las 9 secciones", () => {
-      const rail = leer("src/components/NavRail.tsx");
-      for (const label of ["Inicio", "Acciones", "Pedidos", "Chats", "Agente", "Envíos", "Anuncios", "Finanzas", "Ajustes"]) {
-        assert.ok(rail.includes(`"${label}"`) || rail.includes(`'${label}'`) || rail.includes(`>${label}<`) || rail.includes(`label: "${label}"`), `falta la sección ${label}`);
-      }
-      assert.match(rail, /collapsed/, "colapsable");
-      assert.match(rail, /localStorage/, "recuerda la preferencia");
-      assert.match(rail, /Casamable/, "la marca vive en el rail");
-      assert.ok(!/from "\.\/Dock"/.test(rail), "el dock viejo está muerto");
+    await test("UI · el nav desktop lleva LABELS visibles (rail, no dock de iconos) y las 6 áreas v4", () => {
+      const nav = fs.readFileSync(path.join(process.cwd(), "src/components/NavRail.tsx"), "utf8");
+      for (const label of ["Inicio", "Pedidos", "Seguimiento", "Cazador", "Growth", "Ajustes"]) assert.ok(nav.includes(`"${label}"`), `falta la sección ${label}`);
+      assert.ok(/collapsed/.test(nav) && /localStorage/.test(nav), "colapsable con preferencia recordada");
+      assert.ok(/w-\[232px\]/.test(nav), "rail con presencia real, no un dock diminuto");
     });
-
-    await test("UI · móvil: CINCO entradas con icono + label y sheet de 'Más' — no 9 iconos minúsculos", () => {
-      const rail = leer("src/components/NavRail.tsx");
-      assert.match(rail, /MOBILE_PRIMARY/);
-      const m = /const MOBILE_PRIMARY: DockView\[\] = \[([^\]]+)\]/.exec(rail)!;
-      assert.equal(m[1].split(",").filter((x) => x.trim()).length, 4, "4 principales + 'Más' = 5 entradas");
-      assert.match(rail, /grid-cols-5/, "cinco columnas abajo");
-      assert.match(rail, /Más/, "la quinta es 'Más'");
+    await test("UI · móvil: CUATRO áreas + 'Más' con icono + label, y sheet — no 9 iconos minúsculos", () => {
+      const nav = fs.readFileSync(path.join(process.cwd(), "src/components/NavRail.tsx"), "utf8");
+      const m = /MOBILE_PRIMARY: NavArea\[\] = \[([^\]]+)\]/.exec(nav);
+      assert.ok(m, "MOBILE_PRIMARY definido");
+      assert.equal(m![1].split(",").length, 4, "cuatro áreas principales en móvil");
+      assert.ok(nav.includes("grid-cols-5"), "4 + Más = 5 huecos");
+      assert.ok(nav.includes("<span>Más</span>") && nav.includes("anim-slide-up"), "sheet de Más");
+      assert.ok(/h-14/.test(nav), "targets táctiles ≥44px");
     });
-
     await test("UI · marca: 'Tu Agente' ha muerto — Casamable + Control Center, con slot para el logo real", () => {
       const logo = leer("src/components/Logo.tsx");
       assert.ok(!logo.includes("Tu Agente"), "ni rastro del kit genérico");
@@ -11262,6 +11257,123 @@ async function main(): Promise<void> {
       assert.ok(!/ya está cancelado|cancelado ✅|queda cancelado/i.test(respuesta), "JAMÁS afirmar una cancelación que no ocurrió");
       assert.match(respuesta, /marcado para cancelar|te contactamos/i, "dice la verdad: anotado y pendiente de confirmar");
     });
+  }
+
+  // ============ V4 · Rediseño: navegación, seguimiento, home, PII, sin cifras inventadas ============
+  console.log("\n— V4 · Control Center rediseñado —");
+  {
+    const src = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+
+    await test("V4 navegación: 6 áreas con nombre visible en escritorio; móvil = 4 áreas + 'Más' con icono y label", () => {
+      const nav = src("src/components/NavRail.tsx");
+      for (const label of ["Inicio", "Pedidos", "Seguimiento", "Cazador", "Growth", "Ajustes"]) assert.ok(nav.includes(`"${label}"`), label);
+      assert.match(nav, /MOBILE_PRIMARY: NavArea\[\] = \["home", "orders", "followup", "hunter"\]/, "4 áreas principales en móvil");
+      assert.ok(nav.includes("<span>Más</span>"), "entrada Más");
+      assert.ok(nav.includes("safe-area-inset-bottom"), "respeta el safe area");
+      assert.ok(!nav.includes("Tu Agente"), "sin branding provisional");
+      // Los alias heredados siguen resolviéndose en el shell (enlaces antiguos no se rompen).
+      const dash = src("src/components/Dashboard.tsx");
+      for (const h of ["#acciones", "#chats", "#envios", "#agente", "#anuncios", "#finanzas"]) assert.ok(dash.includes(`"${h}"`), h);
+    });
+
+    await test("V4 tokens: tema claro con stack de sistema, sin Google Fonts ni degradados llamativos", () => {
+      const css = src("src/app/globals.css");
+      assert.match(css, /--color-brand-bg: #f5f5f7/);
+      assert.match(css, /--color-brand-surface: #ffffff/);
+      assert.match(css, /-apple-system, BlinkMacSystemFont, "Inter"/);
+      assert.ok(!/next\/font\/google/.test(src("src/app/layout.tsx")), "sin fuentes remotas");
+      assert.ok(!/linear-gradient/.test(css), "sin degradados en el sistema de diseño");
+      assert.match(css, /prefers-reduced-motion/);
+    });
+
+    await test("V4 seguimiento: buckets por lo que toca hacer, teléfono ENMASCARADO y antigüedad desde el último contacto", async () => {
+      const fu = await import("../src/lib/system/followup");
+      const tel = "34600997101";
+      const o = mkOrder("v4fu-1", "97101", tel);
+      db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', whatsapp_sent_at = unixepoch() - 7200 WHERE id = ?").run(o.id);
+      const ov = fu.getFollowUpOverview();
+      const item = ov.items.find((i) => i.id === o.id)!;
+      assert.ok(item, "aparece en seguimiento");
+      assert.equal(item.bucket, "awaiting_reply");
+      assert.equal(item.phoneMasked, "···7101", "solo los 4 últimos dígitos en el listado");
+      assert.ok(!JSON.stringify(ov).includes(tel), "el teléfono completo NO viaja en la vista");
+      assert.ok(item.ageSeconds !== null && item.ageSeconds >= 7100, "antigüedad desde el último contacto (nuestro envío)");
+      db.systemDbHandle().prepare("UPDATE orders SET status='needs_call', needs_call_at = unixepoch() WHERE id = ?").run(o.id);
+      assert.equal(fu.getFollowUpOverview().items.find((i) => i.id === o.id)!.bucket, "needs_call");
+    });
+
+    await test("V4 seguimiento: la línea temporal solo contiene hechos con fecha, en orden cronológico", async () => {
+      const fu = await import("../src/lib/system/followup");
+      const o = mkOrder("v4fu-2", "97102", "34600997102");
+      db.systemDbHandle()
+        .prepare("UPDATE orders SET created_at = unixepoch() - 7200, ordered_at = unixepoch() - 7200, whatsapp_sent_at = unixepoch() - 3600, customer_replied_at = unixepoch() - 1800, confirmed_at = unixepoch() - 1700, status='confirmed' WHERE id = ?")
+        .run(o.id);
+      const t = fu.getOrderTimeline(o.id);
+      const kinds = t.events.map((e) => e.kind);
+      assert.deepEqual(kinds.slice(0, 4), ["order_received", "message_sent", "reply_received", "confirmed"]);
+      for (let i = 1; i < t.events.length; i++) assert.ok(t.events[i].at >= t.events[i - 1].at, "orden cronológico");
+      assert.ok(!kinds.includes("reminder_sent"), "sin recordatorio no hay evento de recordatorio: nada inventado");
+      assert.equal(fu.getOrderTimeline(999999).order, null);
+    });
+
+    await test("V4 home: dinero en riesgo = pedidos vivos sin confirmar o con problema; ayer solo si hubo datos", async () => {
+      const extras = await import("../src/lib/system/control-room-extras");
+      const o = mkOrder("v4hm-1", "97201", "34600997201");
+      db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', total_price='40.00' WHERE id = ?").run(o.id);
+      const antes = extras.getHomeExtras();
+      db.systemDbHandle().prepare("UPDATE orders SET status='confirmed', confirmed_at = unixepoch() WHERE id = ?").run(o.id);
+      const despues = extras.getHomeExtras();
+      assert.ok(antes.today.revenueAtRisk >= despues.today.revenueAtRisk + 40 - 0.01, "confirmar saca 40 € del riesgo");
+      assert.ok(antes.today.revenueAtRiskOrders === despues.today.revenueAtRiskOrders + 1);
+      assert.ok(despues.yesterday === null || despues.yesterday.orders > 0, "comparación con ayer solo con datos reales");
+      assert.ok(Array.isArray(despues.recentActivity) && despues.recentActivity.length <= 8, "actividad compacta");
+      for (const e of despues.recentActivity) assert.ok(!/\+?34\d{9}/.test(e.message), "sin teléfonos completos en la actividad");
+    });
+
+    await test("V4 seguridad: los flags de producción no cambian por el rediseño (fail-closed intacto)", async () => {
+      const safety2 = await import("../src/lib/safety");
+      await withEnv({ WHATSAPP_SEND_ENABLED: "0", APP_MODE: "production", EMERGENCY_STOP: "0", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000001" }, () => {
+        assert.equal(safety2.canSendRealWhatsApp("34600000001"), false, "WHATSAPP_SEND_ENABLED=0 → jamás un envío real");
+      });
+      const dropea = await import("../src/lib/suppliers/dropea/create-gate");
+      await withEnv({ DROPEA_CREATE_MODE: "external_app" }, () => {
+        assert.equal(dropea.dropeaCreateMode(), "external_app", "la app oficial crea los pedidos; our_api sigue apagado");
+      });
+      const env = src(".env.example");
+      assert.match(env, /^WHATSAPP_SEND_ENABLED=0/m);
+      assert.match(env, /^DROPEA_CREATE_MODE=external_app/m);
+    });
+
+    await test("V4 growth: el embudo declara qué pasos NO tienen integración (sin porcentajes inventados)", () => {
+      const g = src("src/components/GrowthView.tsx");
+      assert.match(g, /Shopify Web Pixels/);
+      assert.match(g, /available: false/);
+      assert.ok(!/\d+%/.test(g.split("FUNNEL_STEPS")[1]?.split("function ScrollRoot")[0] ?? ""), "ningún porcentaje hardcodeado en el embudo");
+      assert.match(g, /Dato real|Hipótesis|Escenario|Recomendación IA/);
+    });
+
+    await test("V4 responsive: sin anchos fijos en píxeles fuera de contenedores con scroll propio", () => {
+      const comps = fs.readdirSync(path.join(process.cwd(), "src/components")).filter((f) => f.endsWith(".tsx"));
+      for (const f of comps) {
+        const code = src(`src/components/${f}`);
+        // min-w-[NNNpx] solo dentro de tablas/áreas con overflow-x-auto: se comprueba
+        // que cada fichero que lo usa también declara overflow-x-auto.
+        if (/min-w-\[[4-9]\d{2,}px\]/.test(code)) assert.ok(/overflow-x-auto/.test(code), `${f}: min-w fijo ≥400px sin contenedor con scroll horizontal`);
+      }
+    });
+  }
+
+  // ============ V4 · Cazador de productos: tests de CONTRATO (backend de Pedro) ============
+  console.log("\n— V4 · Cazador de productos (contratos, adaptadores, sin métricas inventadas) —");
+  {
+    const contract = await import("../src/lib/product-hunter/__contract_tests__");
+    const casos = contract.runProductHunterContractTests(assert);
+    assert.ok(Array.isArray(casos) && casos.length >= 5, "el módulo del Cazador expone sus tests de contrato");
+    for (const c of casos) {
+      await test(`Cazador · ${c.name}`, async () => {
+        await c.fn();
+      });
+    }
   }
 
   // ============ Resumen ============

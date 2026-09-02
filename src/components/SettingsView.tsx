@@ -33,7 +33,7 @@ import CostsPanel from "./CostsPanel";
 type SettingsSection = "general" | "whatsapp" | "calls" | "integrations" | "costs" | "system";
 
 const SECTIONS: Array<{ id: SettingsSection; label: string }> = [
-  { id: "general", label: "General" },
+  { id: "general", label: "Agente IA" },
   { id: "whatsapp", label: "WhatsApp" },
   { id: "calls", label: "Llamadas" },
   { id: "integrations", label: "Integraciones" },
@@ -735,7 +735,7 @@ function ScrollPane({ children, wide = false }: { children: ReactNode; wide?: bo
 }
 
 export default function SettingsView() {
-  const [section, setSection] = useState<SettingsSection>("general");
+  const [section, setSection] = useState<SettingsSection>("whatsapp");
 
   return (
     <div className="h-full flex flex-col md:flex-row">
