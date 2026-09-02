@@ -51,9 +51,11 @@ import pino from "pino";
 import {
   claimWebhookEvent,
   getOrderByShopifyId,
+  latchOrderAttribution,
   setOrderClosure,
   type ClosureStatus,
 } from "../db";
+import { parseAttribution } from "../orders/attribution";
 import { verifyShopifyHmacEitherSecret } from "./hmac";
 import { logIntegrationEvent } from "../system/repo";
 import { linkDropeaFromShopifyTags } from "../orders/supplier-tags";
@@ -179,11 +181,16 @@ export function processOrdersEventWebhook(
   }
 
   if (topic === "orders/updated") {
-    // Cero efectos en el eje de cierre — eso no cambia con E4. El ÚNICO
-    // campo del espejo acordado es supplier_external_order_id, y solo
-    // cuando el pedido trae el tag `dropea_id:` y aún no estaba enlazado
-    // (ver la lista acordada en la cabecera de este fichero).
+    // Cero efectos en el eje de cierre — eso no cambia con E4. Espejo
+    // acordado: supplier_external_order_id por tag `dropea_id:` (24-08) y,
+    // desde el 02-09 (decisión de Óliver, objetivo de atribución), las
+    // columnas marketing_*/landing/referring/source_name como LATCH de
+    // solo-huecos: COALESCE(col, nuevo) — el PRIMER valor fiable se
+    // conserva y un update sin UTM jamás destruye lo capturado al crear.
+    // Sin protección de orden cronológico A PROPÓSITO: mismo razonamiento
+    // que el latch de Dropea (nada puede pisar un valor ya puesto).
     const enlace = linkDropeaFromShopifyTags(order, payload, "webhook orders/updated");
+    latchOrderAttribution(order.id, parseAttribution(payload as import("../orders/attribution").AttributionPayloadFields));
     logIntegrationEvent(
       "shopify",
       "order_updated_received",

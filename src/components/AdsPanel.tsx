@@ -64,12 +64,36 @@ interface AdsDailyPoint {
   clicks: number;
 }
 
+interface CampaignEcoRow {
+  campaignId: string | null;
+  campaignName: string;
+  attribution: "direct_id" | "name_match";
+  spend: number | null;
+  orders: number;
+  confirmed: number;
+  delivered: number;
+  deliveredRevenue: number;
+  cpaOrder: number | null;
+  cpaDelivered: number | null;
+  grossRoas: number | null;
+  netRoas: number | null;
+}
+
+interface CampaignEconomics {
+  attributionCoveragePct: number;
+  campaignCoveragePct: number;
+  totalOrders: number;
+  campaigns: CampaignEcoRow[];
+  unattributed: { orders: number; confirmed: number; delivered: number; deliveredRevenue: number };
+}
+
 interface AdsData {
   ok: boolean;
   health: AdsHealth;
   header: AdsHeader;
   campaigns: AdsCampaign[];
   daily: AdsDailyPoint[];
+  campaignEconomics?: CampaignEconomics;
 }
 
 const RANGES = [7, 14, 30] as const;
@@ -373,6 +397,91 @@ export default function AdsPanel() {
                 </>
               )}
             </section>
+
+            {/* ── Rendimiento por campaña (atribución REAL, v17) ── */}
+            {data?.campaignEconomics && (
+              <section>
+                <SectionTitle
+                  right={
+                    <span className="text-[11px] text-brand-muted">
+                      Cobertura de atribución: {data.campaignEconomics.campaignCoveragePct.toLocaleString("es-ES")}% de {data.campaignEconomics.totalOrders} pedidos
+                    </span>
+                  }
+                >
+                  Rendimiento por campaña
+                </SectionTitle>
+                {data.campaignEconomics.campaignCoveragePct < 100 && data.campaignEconomics.totalOrders > 0 && (
+                  <p className="text-[11px] text-amber-300/90 mb-2.5">
+                    Cifras PARCIALES: solo cuentan los pedidos cuya campaña se pudo resolver (UTM de Shopify contra las campañas
+                    de Meta). Lo no resuelto está en «Sin atribución» — nunca se reparte proporcionalmente.
+                  </p>
+                )}
+                {data.campaignEconomics.campaigns.length === 0 && data.campaignEconomics.unattributed.orders === 0 ? (
+                  <Card>
+                    <EmptyState
+                      title="Aún sin pedidos con atribución en el periodo"
+                      hint="La captura de UTM empieza con los pedidos creados a partir de hoy: el histórico no trae este dato."
+                    />
+                  </Card>
+                ) : (
+                  <Card className="overflow-x-auto">
+                    <table className="w-full text-sm min-w-[680px]">
+                      <thead>
+                        <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                          <th className="px-4 py-2.5 font-medium">Campaña</th>
+                          <th className="px-4 py-2.5 font-medium text-right">Gasto</th>
+                          <th className="px-4 py-2.5 font-medium text-right">Pedidos</th>
+                          <th className="px-4 py-2.5 font-medium text-right">Confirmados</th>
+                          <th className="px-4 py-2.5 font-medium text-right">Entregados</th>
+                          <th className="px-4 py-2.5 font-medium text-right">Fact. entregada</th>
+                          <th className="px-4 py-2.5 font-medium text-right">CPA pedido</th>
+                          <th className="px-4 py-2.5 font-medium text-right">CPA entregado</th>
+                          <th className="px-4 py-2.5 font-medium text-right">ROAS neto</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.campaignEconomics.campaigns.map((c) => (
+                          <tr key={c.campaignId ?? c.campaignName} className="border-b border-brand-border/40 last:border-0">
+                            <td className="px-4 py-2.5">
+                              <span className="text-brand-text">{c.campaignName}</span>
+                              <span
+                                className="ml-1.5 text-[9px] uppercase tracking-wider text-brand-muted"
+                                title={c.attribution === "direct_id" ? "Atribución directa: utm_campaign trae el ID de la campaña" : "Atribución inferida: coincide el nombre de la campaña"}
+                              >
+                                {c.attribution === "direct_id" ? "directa" : "inferida"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.spend)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(c.orders)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(c.confirmed)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(c.delivered)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.deliveredRevenue)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.cpaOrder)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(c.cpaDelivered)}</td>
+                            <td className={`px-4 py-2.5 text-right tabular-nums ${c.netRoas !== null && c.netRoas < 1 ? "text-red-300" : "text-brand-text"}`}>
+                              {c.netRoas === null ? "—" : `${c.netRoas.toLocaleString("es-ES", { maximumFractionDigits: 2 })}x`}
+                            </td>
+                          </tr>
+                        ))}
+                        {data.campaignEconomics.unattributed.orders > 0 && (
+                          <tr className="text-brand-muted">
+                            <td className="px-4 py-2.5">Sin atribución</td>
+                            <td className="px-4 py-2.5 text-right">—</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(data.campaignEconomics.unattributed.orders)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(data.campaignEconomics.unattributed.confirmed)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatInt(data.campaignEconomics.unattributed.delivered)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums">{formatEuro(data.campaignEconomics.unattributed.deliveredRevenue)}</td>
+                            <td className="px-4 py-2.5 text-right">—</td>
+                            <td className="px-4 py-2.5 text-right">—</td>
+                            <td className="px-4 py-2.5 text-right">—</td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </Card>
+                )}
+              </section>
+            )}
           </>
         )}
       </div>

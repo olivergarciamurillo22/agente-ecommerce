@@ -755,6 +755,47 @@ export function migrateCallAgentVersion(db: Database.Database): void {
   }
 }
 
+/**
+ * Migración (SCHEMA_VERSION 17): atribución de marketing del pedido.
+ *
+ * Lo que Shopify sabe del ORIGEN (landing_site con sus UTM, referrer,
+ * canal) capturado al CREAR el pedido — el dato que no se captura hoy no
+ * se recupera mañana. Columnas de INTERPRETACIÓN: el crudo completo ya
+ * vive en orders.raw_payload (política existente), así que esto siempre
+ * se puede reinterpretar. NULL = el payload no lo traía; jamás se inventa.
+ */
+export function migrateOrderAttribution(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name)
+  );
+  for (const name of [
+    "marketing_source",
+    "marketing_medium",
+    "marketing_campaign",
+    "marketing_content",
+    "marketing_term",
+    "marketing_fbclid",
+    "landing_site",
+    "referring_site",
+    "shopify_source_name",
+  ] as const) {
+    if (!cols.has(name)) {
+      try {
+        db.exec(`ALTER TABLE orders ADD COLUMN ${name} TEXT`);
+      } catch (err) {
+        const mensaje = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(mensaje)) throw err;
+      }
+    }
+  }
+  try {
+    db.exec("CREATE INDEX IF NOT EXISTS idx_orders_mkt_campaign ON orders(marketing_campaign) WHERE marketing_campaign IS NOT NULL");
+  } catch (err) {
+    const mensaje = err instanceof Error ? err.message : String(err);
+    if (!/already exists/i.test(mensaje)) throw err;
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -869,6 +910,17 @@ export interface OrderRow {
   beeping_last_error: string | null;
   /** Nota INTERNA de expedición. NO viaja a Beeping (sin contrato de notas). */
   dispatch_note: string | null;
+
+  // --- Atribución de marketing (v17) — NULL = el payload no lo traía ---
+  marketing_source: string | null;
+  marketing_medium: string | null;
+  marketing_campaign: string | null;
+  marketing_content: string | null;
+  marketing_term: string | null;
+  marketing_fbclid: string | null;
+  landing_site: string | null;
+  referring_site: string | null;
+  shopify_source_name: string | null;
 }
 
 export interface NewOrderInput {
@@ -893,6 +945,18 @@ export interface NewOrderInput {
   /** Fecha real de compra en Shopify (epoch, segundos). `null`/ausente si el
    *  payload no la traía — nunca se inventa. */
   ordered_at?: number | null;
+  /** Atribución de marketing (v17). Ausente = todo NULL. */
+  attribution?: Partial<{
+    source: string | null;
+    medium: string | null;
+    campaign: string | null;
+    content: string | null;
+    term: string | null;
+    fbclid: string | null;
+    landingSite: string | null;
+    referringSite: string | null;
+    sourceName: string | null;
+  }> | null;
 }
 
 // Columnas de `orders` — ÚNICA fuente de verdad del esquema: la usan el CREATE
@@ -1369,6 +1433,7 @@ function build() {
   migrateProductCostHistory(db);
   migrateCodScenarios(db);
   migrateCallAgentVersion(db);
+  migrateOrderAttribution(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1538,7 +1603,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 16;
+export const SCHEMA_VERSION = 17;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -1981,8 +2046,10 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
         shopify_order_id, shopify_order_number, customer_name, phone, email,
         product_summary, total_price, currency,
         address_line1, address_line2, city, province, postal_code, country,
-        status, customer_note, last_error, raw_payload, ordered_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        status, customer_note, last_error, raw_payload, ordered_at,
+        marketing_source, marketing_medium, marketing_campaign, marketing_content,
+        marketing_term, marketing_fbclid, landing_site, referring_site, shopify_source_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.shopify_order_id,
@@ -2003,7 +2070,16 @@ export function insertOrderIfNew(input: NewOrderInput): { created: boolean; orde
       input.customer_note ?? null,
       input.last_error ?? null,
       input.raw_payload ?? null,
-      input.ordered_at ?? null
+      input.ordered_at ?? null,
+      input.attribution?.source ?? null,
+      input.attribution?.medium ?? null,
+      input.attribution?.campaign ?? null,
+      input.attribution?.content ?? null,
+      input.attribution?.term ?? null,
+      input.attribution?.fbclid ?? null,
+      input.attribution?.landingSite ?? null,
+      input.attribution?.referringSite ?? null,
+      input.attribution?.sourceName ?? null
     );
   const order = getOrderByShopifyId(input.shopify_order_id);
   if (!order) {
@@ -2031,6 +2107,55 @@ export function setOrderDispatchNote(id: number, note: string | null): boolean {
        WHERE id = ? AND beeping_sync_status IN ('not_released', 'release_failed')`
     )
     .run(limpia, id);
+  return res.changes > 0;
+}
+
+/**
+ * LATCH de atribución (v17): rellena SOLO los huecos (COALESCE con el valor
+ * existente). Precedencia explícita: el PRIMER valor fiable se conserva —
+ * un orders/updated posterior sin UTM no destruye lo capturado en el
+ * create, y uno con UTM solo puede completar lo que faltaba.
+ */
+export function latchOrderAttribution(
+  id: number,
+  attr: Partial<{
+    source: string | null;
+    medium: string | null;
+    campaign: string | null;
+    content: string | null;
+    term: string | null;
+    fbclid: string | null;
+    landingSite: string | null;
+    referringSite: string | null;
+    sourceName: string | null;
+  }>
+): boolean {
+  const res = ctx()
+    .db.prepare(
+      `UPDATE orders SET
+         marketing_source = COALESCE(marketing_source, ?),
+         marketing_medium = COALESCE(marketing_medium, ?),
+         marketing_campaign = COALESCE(marketing_campaign, ?),
+         marketing_content = COALESCE(marketing_content, ?),
+         marketing_term = COALESCE(marketing_term, ?),
+         marketing_fbclid = COALESCE(marketing_fbclid, ?),
+         landing_site = COALESCE(landing_site, ?),
+         referring_site = COALESCE(referring_site, ?),
+         shopify_source_name = COALESCE(shopify_source_name, ?)
+       WHERE id = ?`
+    )
+    .run(
+      attr.source ?? null,
+      attr.medium ?? null,
+      attr.campaign ?? null,
+      attr.content ?? null,
+      attr.term ?? null,
+      attr.fbclid ?? null,
+      attr.landingSite ?? null,
+      attr.referringSite ?? null,
+      attr.sourceName ?? null,
+      id
+    );
   return res.changes > 0;
 }
 

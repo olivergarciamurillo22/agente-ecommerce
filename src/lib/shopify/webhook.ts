@@ -154,6 +154,8 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
         : "El pedido no trae teléfono — imposible enviar WhatsApp",
     raw_payload: keepRaw ? rawBody.slice(0, 200_000) : null,
     ordered_at: n.orderedAt,
+    // Atribución (v17): capturada al crear — el dato perdido no vuelve.
+    attribution: n.attribution,
   });
 
   if (!created) {

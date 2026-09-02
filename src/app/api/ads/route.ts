@@ -14,6 +14,7 @@
 import { NextResponse } from "next/server";
 import { systemDbHandle } from "../../../lib/db";
 import { getMetaAdsHealth } from "../../../lib/meta-ads/health";
+import { getCampaignEconomics } from "../../../lib/meta-ads/attribution-match";
 import { listMetaAdsDaily, type MetaAdsDailyDbRow } from "../../../lib/meta-ads/repo";
 import { syncMetaAdsInsights } from "../../../lib/meta-ads/sync";
 import { getEconomicsWindowRange } from "../../../lib/system/unit-economics";
@@ -136,6 +137,8 @@ export async function GET(req: Request) {
       },
       campaigns: aggregateCampaigns(campaignRows),
       daily: dailySeries(accountRows),
+      // Economía por campaña con atribución REAL (v17) y cobertura declarada.
+      campaignEconomics: getCampaignEconomics(fromS, toS),
     });
   } catch (err) {
     return NextResponse.json(

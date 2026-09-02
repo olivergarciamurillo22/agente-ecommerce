@@ -10979,6 +10979,196 @@ async function main(): Promise<void> {
     });
   }
 
+  // ============ V3.1 · ATRIBUCIÓN DE MARKETING (el dato que no vuelve) ============
+  console.log("\n— V3.1 · Atribución: UTM capturadas, latch, campañas —");
+  {
+    const attr = await import("../src/lib/orders/attribution");
+    const match = await import("../src/lib/meta-ads/attribution-match");
+
+    await test("attribution parser: UTM completo, decodificado, con fbclid — y NUNCA inventa nada", () => {
+      const a = attr.parseAttribution({
+        landing_site:
+          "/products/limpiador?utm_source=facebook&utm_medium=paid&utm_campaign=Ultras%20Septiembre&utm_content=video1&utm_term=cod&fbclid=IwAR123abc",
+        referring_site: "https://l.facebook.com/",
+        source_name: "web",
+      });
+      assert.equal(a.source, "facebook");
+      assert.equal(a.medium, "paid");
+      assert.equal(a.campaign, "Ultras Septiembre", "URL-decoded");
+      assert.equal(a.content, "video1");
+      assert.equal(a.term, "cod");
+      assert.equal(a.fbclid, "IwAR123abc");
+      assert.equal(a.referringSite, "https://l.facebook.com/");
+      assert.equal(a.sourceName, "web");
+      // Parcial: SOLO lo presente; el resto NULL — jamás se inventa campaña.
+      const parcial = attr.parseAttribution({ landing_site: "/x?utm_source=ig" });
+      assert.equal(parcial.source, "ig");
+      assert.equal(parcial.campaign, null);
+      assert.equal(parcial.medium, null);
+      // Sin nada de nada:
+      const vacio = attr.parseAttribution({});
+      assert.equal(attr.hasAnyAttribution(vacio), false);
+      assert.equal(vacio.campaign, null);
+    });
+
+    await test("attribution parser: URL relativa, mal formada, params duplicados (gana el PRIMERO) y landing_site_ref como fallback", () => {
+      // Relativa sin romper:
+      assert.equal(attr.parseAttribution({ landing_site: "/?utm_campaign=a" }).campaign, "a");
+      // Mal formada: no lanza, devuelve lo que pueda.
+      const rota = attr.parseAttribution({ landing_site: "ht!tp:/// ???utm_campaign=%%%mal" });
+      assert.ok(rota.campaign === null || typeof rota.campaign === "string", "jamás una excepción");
+      // Duplicados: el PRIMER valor gana (precedencia definida).
+      assert.equal(attr.parseAttribution({ landing_site: "/x?utm_source=fb&utm_source=google" }).source, "fb");
+      // Sin '?': sin params, sin drama.
+      assert.equal(attr.parseAttribution({ landing_site: "/products/limpiador" }).campaign, null);
+      // landing_site_ref solo si referring_site falta:
+      assert.equal(attr.parseAttribution({ landing_site_ref: "fb.com" }).referringSite, "fb.com");
+      assert.equal(attr.parseAttribution({ referring_site: "google.com", landing_site_ref: "fb.com" }).referringSite, "google.com");
+    });
+
+    await test("attribution: el webhook orders/create la PERSISTE (v17) y el crudo sigue en raw_payload", () => {
+      const raw = JSON.stringify(codPayload({
+        id: 995101,
+        order_number: 95101,
+        landing_site: "/?utm_source=facebook&utm_medium=paid&utm_campaign=120210000000000001&fbclid=IwTest1",
+        referring_site: "https://l.facebook.com/",
+        source_name: "web",
+        shipping_address: {
+          name: "Atribución Uno", address1: "Calle UTM 1", address2: null, city: "Madrid",
+          province: "Madrid", zip: "28001", country: "Spain", country_code: "ES", phone: "+34 698 951 001",
+        },
+      }));
+      assert.equal(processOrdersCreateWebhook(raw, shopifyHeaders(raw)).status, 200);
+      const o = db.getOrderByShopifyId("995101")!;
+      assert.equal(o.marketing_source, "facebook");
+      assert.equal(o.marketing_campaign, "120210000000000001");
+      assert.equal(o.marketing_fbclid, "IwTest1");
+      assert.equal(o.shopify_source_name, "web");
+      assert.ok((o.raw_payload ?? "").includes("utm_campaign"), "el crudo se conserva para reinterpretar");
+    });
+
+    await test("attribution LATCH: un orders/updated SIN utm no destruye lo capturado; uno CON utm solo rellena huecos", () => {
+      const antes = db.getOrderByShopifyId("995101")!;
+      // updated sin atribución (Shopify a veces no la repite):
+      const sinUtm = JSON.stringify({ id: 995101, updated_at: "2026-09-02T10:00:00Z", tags: "" });
+      const r1 = processOrdersEventWebhook(sinUtm, shopifyHeaders(sinUtm, { topic: "orders/updated", webhookId: "wh-attr-1" }));
+      assert.equal(r1.status, 200);
+      const tras1 = db.getOrderByShopifyId("995101")!;
+      assert.equal(tras1.marketing_campaign, antes.marketing_campaign, "el PRIMER valor fiable se conserva");
+      assert.equal(tras1.marketing_source, "facebook");
+      // updated que trae un hueco nuevo (utm_term no existía):
+      const conTerm = JSON.stringify({ id: 995101, updated_at: "2026-09-02T10:05:00Z", landing_site: "/?utm_term=nuevo&utm_campaign=OTRA" });
+      processOrdersEventWebhook(conTerm, shopifyHeaders(conTerm, { topic: "orders/updated", webhookId: "wh-attr-2" }));
+      const tras2 = db.getOrderByShopifyId("995101")!;
+      assert.equal(tras2.marketing_term, "nuevo", "el hueco se rellena");
+      assert.equal(tras2.marketing_campaign, "120210000000000001", "pero la campaña original NO se pisa (latch)");
+    });
+
+    await test("attribution v17: migración idempotente", () => {
+      db.migrateOrderAttribution(db.systemDbHandle());
+      db.migrateOrderAttribution(db.systemDbHandle());
+      const cols = (db.systemDbHandle().prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name);
+      for (const c of ["marketing_source", "marketing_campaign", "marketing_fbclid", "landing_site", "referring_site", "shopify_source_name"]) {
+        assert.ok(cols.includes(c), c);
+      }
+    });
+
+    await test("campañas: DIRECTA solo con id existente en snapshots; INFERIDA por nombre; lo demás es NONE — sin equivalencias mágicas", () => {
+      const campanas = [
+        { id: "120210000000000001", name: "Ultras Septiembre" },
+        { id: "120210000000000002", name: "Gafas Agosto" },
+      ];
+      const directa = match.resolveCampaignRef("120210000000000001", campanas);
+      assert.equal(directa.kind, "direct_id");
+      assert.equal(directa.campaignName, "Ultras Septiembre");
+      const inferida = match.resolveCampaignRef("  ultras   septiembre ", campanas);
+      assert.equal(inferida.kind, "name_match", "nombre normalizado (case/espacios)");
+      assert.equal(inferida.campaignId, "120210000000000001");
+      // Un número largo que NO está en los snapshots NO es una campaña.
+      assert.equal(match.resolveCampaignRef("999999999999", campanas).kind, "none");
+      assert.equal(match.resolveCampaignRef("verano_generico", campanas).kind, "none");
+      assert.equal(match.resolveCampaignRef(null, campanas).kind, "none");
+    });
+
+    await test("campañas: la economía declara COBERTURA y el cubo 'Sin atribución' jamás se reparte", async () => {
+      const { upsertMetaAdsDaily } = await import("../src/lib/meta-ads/repo");
+      const dia = new Date().toISOString().slice(0, 10);
+      upsertMetaAdsDaily({
+        day: dia, level: "campaign", entityId: "120210000000000001", entityName: "Ultras Septiembre",
+        spend: 50, impressions: 1000, reach: 900, clicks: 40, ctr: 4, cpc: 1.25, cpm: 50, actionsJson: null, currency: "EUR",
+      });
+      // Un pedido más SIN atribución en la misma ventana:
+      const raw = JSON.stringify(codPayload({
+        id: 995102, order_number: 95102,
+        shipping_address: {
+          name: "Sin Utm", address1: "Calle Nada 2", address2: null, city: "Sevilla",
+          province: "Sevilla", zip: "41001", country: "Spain", country_code: "ES", phone: "+34 698 951 002",
+        },
+      }));
+      processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      const now = Math.floor(Date.now() / 1000);
+      const eco = match.getCampaignEconomics(now - 3600, now + 1);
+      assert.ok(eco.totalOrders >= 2);
+      const fila = eco.campaigns.find((c) => c.campaignId === "120210000000000001");
+      assert.ok(fila, "la campaña con pedido atribuido aparece");
+      assert.equal(fila!.attribution, "direct_id");
+      assert.equal(fila!.orders, 1);
+      assert.equal(fila!.spend, 50);
+      assert.equal(fila!.cpaOrder, 50, "gasto / SUS pedidos, no los del total");
+      assert.ok(eco.unattributed.orders >= 1, "lo no resuelto vive en su cubo");
+      assert.ok(eco.campaignCoveragePct < 100, "cobertura declarada, nunca fingida");
+      assert.ok(eco.attributionCoveragePct >= eco.campaignCoveragePct);
+    });
+  }
+
+  // ============ V3.1 · Fixtures de incidentes reales (5.3, 5.5) ============
+  console.log("\n— V3.1 · Incidentes reales: direcciones y cancelación honesta —");
+  {
+    const payloadMod = await import("../src/lib/calls/payload");
+
+    await test("incidente 5.3: bloque/piso/puerta, CP con cero inicial y localidad multi-palabra llegan INTACTOS al payload de llamada", () => {
+      const casos: Array<[string, string, string]> = [
+        ["Calle Real 5", "04007", "Almería"],
+        ["Av. de la Constitución 12, Bloque 3, 2ºB", "08820", "El Prat de Llobregat"],
+        ["C/ Mayor 1, Esc. A, Piso 4, Puerta 2", "03690", "San Vicente del Raspeig"],
+      ];
+      for (const [direccion, cp, localidad] of casos) {
+        const r = payloadMod.buildCallPayload(
+          {
+            customer_name: "Cliente Prueba", phone: "34600111444", product_summary: "1x Limpiador",
+            total_price: "29.99", currency: "EUR", address_line1: direccion, city: localidad,
+            postal_code: cp, shopify_order_number: "1200", created_at: Math.floor(Date.now() / 1000) - 3600, raw_payload: null,
+          } as unknown as import("../src/lib/db").OrderRow,
+          new Date()
+        );
+        assert.equal(r.ok, true, `dirección "${direccion}" no debe bloquearse`);
+        assert.equal(r.variables!.direccion, direccion, "ni un carácter corrompido");
+        assert.equal(r.variables!.codigo_postal, cp, "el CERO inicial del CP sobrevive (es string, no número)");
+        assert.equal(r.variables!.localidad, localidad);
+      }
+    });
+
+    await test("incidente 5.5: 'quiero cancelar' registra la SOLICITUD y el bot no miente diciendo que ya está cancelado", async () => {
+      const { handleOrderReply } = await import("../src/lib/orders/confirmation");
+      const tel = "34600995503";
+      const o = mkOrder("995103", "95103", tel);
+      db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', whatsapp_sent_at=unixepoch() WHERE id=?").run(o.id);
+      // Paso 1: la frase ambigua JAMÁS cancela — el bot pide confirmación.
+      const paso1 = handleOrderReply(tel, "quiero cancelar");
+      assert.equal(paso1.handled, true);
+      assert.equal(db.getOrderById(o.id)!.cancellation_requested_at, null, "una frase suelta no marca nada todavía");
+      assert.ok(!/ya está cancelado|queda cancelado/i.test(paso1.reply ?? ""), "y desde luego no afirma que canceló");
+      // Paso 2: el formato explícito registra la SOLICITUD (decisión humana después).
+      const paso2 = handleOrderReply(tel, "CANCELAR 95103");
+      assert.equal(paso2.handled, true);
+      const tras = db.getOrderById(o.id)!;
+      assert.ok(tras.cancellation_requested_at !== null, "cancellation_requested: la decisión final sigue siendo humana");
+      const respuesta = paso2.reply ?? "";
+      assert.ok(!/ya está cancelado|cancelado ✅|queda cancelado/i.test(respuesta), "JAMÁS afirmar una cancelación que no ocurrió");
+      assert.match(respuesta, /marcado para cancelar|te contactamos/i, "dice la verdad: anotado y pendiente de confirmar");
+    });
+  }
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {

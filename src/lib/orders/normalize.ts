@@ -12,6 +12,8 @@
 //    por eso también buscamos las palabras clave en `tags`.
 // ============================================================
 
+import { parseAttribution, type OrderAttribution } from "./attribution";
+
 /** Subconjunto tipado del payload de orders/create que usamos. */
 export interface ShopifyAddress {
   name?: string | null;
@@ -86,6 +88,12 @@ export interface ShopifyOrderPayload {
   billing_address?: ShopifyAddress | null;
   line_items?: ShopifyLineItem[] | null;
   note_attributes?: Array<{ name?: string; value?: string }> | null;
+  // — Atribución de marketing (02-09): lo que Shopify sabe del ORIGEN —
+  landing_site?: string | null;
+  landing_site_ref?: string | null;
+  referring_site?: string | null;
+  source_name?: string | null;
+  source_identifier?: string | null;
 }
 
 export interface NormalizedOrder {
@@ -114,6 +122,8 @@ export interface NormalizedOrder {
    * compra. `null` si el payload no trae `created_at` o no es parseable.
    */
   orderedAt: number | null;
+  /** Atribución de marketing disponible en el payload (02-09). */
+  attribution: OrderAttribution;
 }
 
 /** ISO 8601 → epoch en segundos. `null` si falta o no es parseable. */
@@ -305,6 +315,7 @@ export function normalizeOrder(order: ShopifyOrderPayload): NormalizedOrder {
     country: addr?.country ?? addr?.country_code ?? null,
     customerNote: customerNote(order),
     orderedAt: toEpochSeconds(order.created_at),
+    attribution: parseAttribution(order),
   };
 }
 
