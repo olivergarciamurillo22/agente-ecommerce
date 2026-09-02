@@ -1,77 +1,81 @@
-# Piloto real 02-09 — hoja de resultados (rellenar con EVIDENCIA)
+# Piloto real 02-09 — MATRIZ ÚNICA DE VALIDACIÓN
 
-Pedro/Óliver: pegad aquí las salidas TAL CUAL (sin tokens ni secretos).
-Cuando esté relleno, se analiza la evidencia — nada se da por hecho antes.
+Rama `feat/control-center-v3-operational-polish` @ `68889de` · esquema 17.
+**Desarrollo CONGELADO**: solo se aceptan P0 (rompe operación/cliente/
+dinero), P1 (impide operar) y P2 (UX observada por Pedro en uso real).
+
+Pedro/Óliver: pegad la evidencia TAL CUAL (sin tokens ni secretos) y
+cambiad PENDING por PASS/FAIL. Nada se analiza antes de estar pegado.
+
+Falta también, para el delta de producción:
+
+```
+PRODUCTION_COMMIT=
+```
 
 ---
 
 ## WHATSAPP
 
-**template doctor** (`npm run whatsapp:templates:doctor`, en el NAS):
+| Comprobación | Estado | Evidencia |
+|---|---|---|
+| Template doctor (`whatsapp:templates:doctor` en el NAS) | PENDING | (pegar salida) |
+| Provider template (nombre real usado) | PENDING | |
+| Language | PENDING | |
+| Status en la WABA (APPROVED) | PENDING | |
+| Variables (aridad real vs 3 del mapping) | PENDING | |
+| Buttons (nº y tipo vs 3 quick-reply) | PENDING | |
+| First message (pedido test de la allowlist) | PENDING | nº pedido: |
+| Delivered (sent → delivered → read) | PENDING | |
+| Button visible y funciona | PENDING | |
+| DB transition (pedido → CONFIRMADO en panel) | PENDING | |
+| Duplicate protection (¿algún mensaje duplicado?) | PENDING | |
 
-```
-(pegar salida completa)
-```
-
-**pedido test** (número de la allowlist, pedido real de prueba):
-
-- Nº de pedido: ______
-- ¿Salió la plantilla `pedido`?: SÍ / NO
-- Hora de envío vs hora del pedido: ______
-
-**delivery** (estado en el panel / webhook de Meta):
-
-- sent → delivered → read: ______
-
-**button** (el cliente de prueba pulsa "Confirmar"):
-
-- ¿Respuesta del bot correcta?: SÍ / NO — texto recibido: ______
-
-**DB** (panel → Pedidos):
-
-- ¿El pedido pasó a CONFIRMADO?: SÍ / NO
-- ¿Tag WA_CONFIRMED en Shopify (si writes abiertos)?: SÍ / NO / N/A
+**VERDICT: BLOCKED** (por defecto hasta evidencia)
+`BLOCKED / PILOT READY / 25% READY` — nunca de piloto a 100% directo.
 
 ---
 
 ## RETELL
 
-**prompt version:**
+| Comprobación | Estado | Evidencia |
+|---|---|---|
+| Prompt validator (`calls:validate-prompt`) | PENDING | |
+| Prompt pegado y PUBLICADO en Retell (nº versión) | PENDING | versión: |
+| Agent version fijada (`RETELL_AGENT_VERSION`) | PENDING | valor: |
+| Doctor (`retell:doctor` donde esté la key) | PENDING | (pegar salida) |
+| Simulator (`calls:simulate` → SAFE TO DIAL) | PENDING | |
+| Real call — nombre correcto (sin placeholders) | PENDING | |
+| Real call — producto correcto | PENDING | |
+| Real call — dirección + CP dígito a dígito | PENDING | |
+| Real call — importe correcto | PENDING | |
+| Real call — ¿ALGÚN placeholder oído? (SI = **P0**) | PENDING | |
+| Result persistence (`resultado` + agent_version en DB) | PENDING | |
+| Naturalness (<90 s, tono natural) — si solo falla esto = P2 | PENDING | |
 
-- ¿Prompt del repo pegado en Retell?: SÍ / NO
-- Nº de versión PUBLICADA: ______
-- `RETELL_AGENT_VERSION` puesto a: ______
-
-**doctor** (`npm run retell:doctor`, donde esté la key):
-
-```
-(pegar salida completa)
-```
-
-**simulate** (`npm run calls:simulate`):
-
-```
-(pegar salida)
-```
-
-**real call** (UNA llamada al número autorizado, escuchada ENTERA):
-
-- ¿Dijo el NOMBRE real (no un placeholder)?: SÍ / NO
-- ¿Producto correcto?: SÍ / NO
-- ¿Dirección + CP dígito a dígito?: SÍ / NO
-- ¿Importe correcto en palabras?: SÍ / NO
-- ¿Tono natural, <90 s?: SÍ / NO
-- Frases raras oídas (si las hubo): ______
-
-**result** (panel → Agente → últimas llamadas / DB):
-
-- `resultado` registrado: ______
-- ¿Coincide con lo que pasó en la llamada?: SÍ / NO
-- agent_version registrado en el intento: ______
+**VERDICT: BLOCKED**
+`BLOCKED / MANUAL READY / AUTO READY` — si falta UNA casilla: MANUAL.
 
 ---
 
-## VEREDICTOS (rellenar al final)
+## Reglas de triage acordadas (para cuando llegue la evidencia)
 
-- WhatsApp automático (subir rampa a 25%): GO / NO-GO — motivo: ______
-- Retell piloto ampliado (más números en allowlist): GO / NO-GO — motivo: ______
+- Placeholder oído en llamada / variable incorrecta / resultado que no
+  persiste → **P0**: fixture + test rojo + fix mínimo + commit.
+- Problema SOLO de prompt/versión → se arregla en Retell/env, **sin tocar
+  scheduler ni DB**.
+- Análisis acotado al circuito Shopify → enqueue → template → Meta →
+  reply → DB. Sin auditorías generales.
+- Feedback de UI de Pedro: registrar LITERAL y clasificar
+  BLOCKER / CONFUSING / COSMETIC / PREFERENCE. Solo se cambian ya los dos
+  primeros; el resto se agrupa para UNA pasada posterior.
+
+## Política de atribución (vigente desde ya, sin cambios de código)
+
+La captura UTM empezó en `68889de`: el histórico NO tiene atribución y
+no se inventa. El ROAS POR CAMPAÑA **no se presenta como métrica fiable**
+hasta acumular muestra: umbral acordado = **cobertura de campaña ≥ 60% y
+≥ 30 pedidos atribuidos en la ventana**; por debajo, la tabla de Anuncios
+se lee con su aviso de cobertura ("Cobertura X% — datos insuficientes
+para comparar campañas") y no se toman decisiones de presupuesto con ella.
+El esquema se queda en v17 salvo bug funcional real.
