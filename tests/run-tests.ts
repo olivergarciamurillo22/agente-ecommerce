@@ -7811,10 +7811,13 @@ async function main(): Promise<void> {
 
   // V3 (incidente 132001): estos tests del flujo BUG1 necesitan el mapping
   // lógico→WABA VERIFICADO — es la nueva condición para que salga una
-  // plantilla. Se siembra la verificación de "pedido" como hará el doctor.
+  // plantilla. Se siembra la verificación de "confirmacion_pedido_cod" (la
+  // plantilla real de la WABA, corregida el 02-09 — el mapping anterior
+  // apuntaba a "pedido", la plantilla de ejemplo de Meta, origen del
+  // incidente) como hará el doctor.
   db.setSetting(
     "wa_tpl_verified:order_confirmation_request",
-    JSON.stringify({ provider: "pedido", language: "es", status: "APPROVED", paramCount: 3, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
+    JSON.stringify({ provider: "confirmacion_pedido_cod", language: "es", status: "APPROVED", paramCount: 4, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
   );
 
   await test("BUG1 · buildConfirmationOutbound: dentro de ventana manda el interactivo, fuera manda la plantilla con los datos reales del pedido", () => {
@@ -7827,8 +7830,12 @@ async function main(): Promise<void> {
     const fuera = interactive.buildConfirmationOutbound(orden, false);
     assert.equal(fuera.message.kind, "template");
     if (fuera.message.kind !== "template") throw new Error("unreachable");
-    assert.equal(fuera.message.templateName, "pedido", "V3: viaja el nombre REAL aprobado en la WABA, no el borrador local");
-    assert.deepEqual(fuera.message.bodyParams, ["Cliente", "Limpiador Ultrasónico", "19,99 €"], "nombre, producto e importe, en ese orden");
+    assert.equal(fuera.message.templateName, "confirmacion_pedido_cod", "V3: viaja el nombre REAL aprobado en la WABA, no el borrador local");
+    assert.deepEqual(
+      fuera.message.bodyParams,
+      ["Cliente", `#${orden.shopify_order_number}`, "Limpiador Ultrasónico", "19,99 €"],
+      "nombre, número de pedido, producto e importe, en ese orden"
+    );
     assert.equal(fuera.fallbackText, dentro.fallbackText, "el fallback (panel / rollback) es el mismo texto en los dos casos");
   });
 
@@ -7841,7 +7848,7 @@ async function main(): Promise<void> {
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "template", "antes de este fix caía en 'interactive_buttons' por defecto");
-    assert.equal(item.template_name, "pedido");
+    assert.equal(item.template_name, "confirmacion_pedido_cod");
   });
 
   await test("WEBHOOK META · verificación inicial: token correcto devuelve el challenge, incorrecto 403, sin configurar 500", async () => {
@@ -8394,7 +8401,7 @@ async function main(): Promise<void> {
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "template", "el bug real: antes esto salía como interactive_buttons y fallaba terminal");
-    assert.equal(item.template_name, "pedido", "V3: el nombre REAL de la WABA");
+    assert.equal(item.template_name, "confirmacion_pedido_cod", "V3: el nombre REAL de la WABA");
     assert.equal(item.failure_reason, null, "no debe fallar — es justo el caso que BUG1 arregla");
     const payload = JSON.parse(item.payload_json!) as { kind: string; buttonPayloads?: string[] };
     assert.equal(payload.kind, "template");
@@ -8458,7 +8465,7 @@ async function main(): Promise<void> {
     };
     assert.equal(fila.sent, 1);
     assert.equal(fila.message_type, "template", "la DB dice lo que salió DE VERDAD, no lo que se encoló");
-    assert.equal(fila.template_name, "pedido");
+    assert.equal(fila.template_name, "confirmacion_pedido_cod");
     assert.equal(fila.provider_message_id, "wamid.degradado1");
     assert.match(fila.failure_reason ?? "", /fallback_reason=outside_24h_window/, "la degradación queda auditada");
     assert.equal(fila.failed_at, null, "degradado con éxito NO es un fallo");
@@ -10521,10 +10528,10 @@ async function main(): Promise<void> {
     };
     const verificar = (over: Partial<import("../src/lib/whatsapp/templates").VerifiedTemplate> = {}) =>
       tpl.storeVerifiedTemplate("order_confirmation_request", {
-        provider: "pedido",
+        provider: "confirmacion_pedido_cod",
         language: "es",
         status: "APPROVED",
-        paramCount: 3,
+        paramCount: 4,
         buttonCount: 3,
         buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"],
         category: "UTILITY",
@@ -10539,22 +10546,30 @@ async function main(): Promise<void> {
       assert.equal(r.blocker, "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED");
       assert.match(r.detail, /whatsapp:templates:doctor/, "el bloqueante dice QUÉ ejecutar");
       assert.throws(
-        () => tpl.buildApprovedTemplateMessage("order_confirmation_request", { nombre: "Marta", producto: "Limpiador", importe: "29,99 €" }),
+        () =>
+          tpl.buildApprovedTemplateMessage("order_confirmation_request", {
+            nombre: "Marta",
+            numero_pedido: "#1042",
+            producto: "Limpiador",
+            importe: "29,99 €",
+          }),
         (e: unknown) => e instanceof tpl.TemplateNotReadyError && e.blocker === "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED"
       );
     });
 
-    await test("132001 VERDE: verificada 'pedido' (es, 3 vars) → el mensaje sale con el nombre REAL de la WABA, jamás el borrador local", () => {
+    await test("132001 VERDE: verificada 'confirmacion_pedido_cod' (es, 4 vars) → el mensaje sale con el nombre REAL de la WABA, jamás el borrador local ni 'pedido' (la plantilla de ejemplo de Meta, origen del incidente)", () => {
       verificar();
       const o = mkOrder("v3wa-1", "94101", "34600994101");
       const spec = buildConfirmationOutbound(o, false); // fuera de ventana → plantilla
       assert.equal(spec.message.kind, "template");
       const m = spec.message as Extract<import("../src/lib/whatsapp/provider").OutboundWhatsAppMessage, { kind: "template" }>;
-      assert.equal(m.templateName, "pedido", "el nombre que viaja a Meta es el APROBADO");
+      assert.equal(m.templateName, "confirmacion_pedido_cod", "el nombre que viaja a Meta es el APROBADO");
       assert.notEqual(m.templateName, "order_confirmation_request", "el nombre del borrador local JAMÁS sale");
+      assert.notEqual(m.templateName, "pedido", "ni la plantilla de ejemplo de Meta — era el mapping erróneo que causó el 132001");
       assert.equal(m.language, "es");
-      assert.equal(m.bodyParams.length, 3);
+      assert.equal(m.bodyParams.length, 4);
       assert.equal(m.bodyParams[0], "Cliente", "nombre de pila");
+      assert.equal(m.bodyParams[1], "#94101", "número de pedido, con # — {{2}} de la plantilla real");
       assert.equal((m.buttonPayloads ?? []).length, 3, "payloads locales para los 3 botones reales");
     });
 

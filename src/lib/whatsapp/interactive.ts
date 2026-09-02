@@ -111,6 +111,7 @@ export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: 
 function confirmationTemplate(order: OrderRow): Extract<OutboundWhatsAppMessage, { kind: "template" }> {
   return buildApprovedTemplateMessage("order_confirmation_request", {
     nombre: firstName(order) || "cliente",
+    numero_pedido: `#${order.shopify_order_number}`,
     producto: shortProductLine(order),
     importe: money(order),
   });
