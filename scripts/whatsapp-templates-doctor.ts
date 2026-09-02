@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   // --check-only. loadProviderMappings/getTemplateSpec leen el JSON de config;
   // storeVerifiedTemplate SÍ escribe, y por eso vive tras el gate de abajo.
   // getTemplateReadiness se retiró a propósito (ver el bloque sin credenciales).
-  const { loadProviderMappings, getTemplateSpec, storeVerifiedTemplate } = await import(
+  const { loadProviderMappings, resolveMappingSpec, storeVerifiedTemplate } = await import(
     "../src/lib/whatsapp/templates"
   );
 
@@ -85,7 +85,8 @@ async function main(): Promise<void> {
   const mappings = loadProviderMappings();
   console.log(`Mappings declarados: ${mappings.length}`);
   for (const m of mappings) {
-    console.log(`  · ${m.logicalKey} → "${m.providerTemplate}" (${m.language}, ${m.params.length} variable(s): ${m.params.join(", ")})`);
+    const off = m.enabled === false ? " ⊘ DESHABILITADO" : "";
+    console.log(`  · ${m.logicalKey} → "${m.providerTemplate}" (${m.language}, ${m.params.length} variable(s): ${m.params.join(", ")})${off}`);
   }
 
   if (!wabaId || !token) {
@@ -115,11 +116,30 @@ async function main(): Promise<void> {
   }
 
   let fallos = 0;
+  let deshabilitados = 0;
+  let activosOk = 0;
   console.log("\n──── Verificación de mappings ────");
   for (const m of mappings) {
-    const spec = getTemplateSpec(m.logicalKey);
+    // El catálogo tiene specs por clave lógica Y por nombre real de la WABA:
+    // resolver por ambas evita el falso negativo de retraso_pedido (2 botones
+    // reales que el flujo de retraso SÍ atiende).
+    const spec = resolveMappingSpec(m);
     const real = templates.find((t) => t.name === m.providerTemplate && t.language.startsWith(m.language));
     const etiqueta = `${m.logicalKey} → "${m.providerTemplate}"`;
+    // Deshabilitado: se INSPECCIONA contra Meta (informativo), pero no se
+    // cachea, no cuenta como fallo del preflight y jamás sale como PASS.
+    if (m.enabled === false) {
+      deshabilitados++;
+      console.log(`⊘ ${etiqueta}: DISABLED / INTENTIONALLY BLOCKED`);
+      if (real) {
+        const b = real.components?.find((c) => c.type === "BUTTONS")?.buttons ?? [];
+        console.log(`    en la WABA: ${real.language} · ${real.status} · ${bodyParamCount(real.components?.find((c) => c.type === "BODY")?.text ?? "")} variable(s) · ${b.length} botón(es)`);
+      } else {
+        console.log(`    no existe en la WABA con idioma ${m.language}`);
+      }
+      if (m.note) console.log(`    motivo: ${m.note.slice(0, 200)}`);
+      continue;
+    }
     if (!real) {
       console.log(`○ ${etiqueta}: NO EXISTE en la WABA con idioma ${m.language} — este nombre daría el 132001`);
       fallos++;
@@ -156,9 +176,20 @@ async function main(): Promise<void> {
       });
       console.log(`    ✓ verificación cacheada: el envío de "${m.logicalKey}" queda DESBLOQUEADO`);
     }
+    activosOk++;
   }
 
-  console.log(fallos === 0 ? "\n● Todos los mappings verificados.\n" : `\n◐ ${fallos} mapping(s) con problemas: el envío de esos mensajes sigue BLOQUEADO (correcto).\n`);
+  // El veredicto depende SOLO de los mappings activos: un mapping apagado a
+  // propósito no puede tumbar el preflight, pero tampoco se cuenta como listo.
+  console.log(`\n──── Resumen ────`);
+  console.log(`  ACTIVE PASS : ${activosOk}`);
+  console.log(`  DISABLED    : ${deshabilitados}`);
+  console.log(`  FAIL        : ${fallos}`);
+  console.log(
+    fallos === 0
+      ? `\n● Todos los mappings ACTIVOS verificados${deshabilitados > 0 ? ` (${deshabilitados} deshabilitado(s) a propósito, no se envían)` : ""}.\n`
+      : `\n◐ ${fallos} mapping(s) con problemas: el envío de esos mensajes sigue BLOQUEADO (correcto).\n`
+  );
   process.exit(fallos === 0 ? 0 : 1);
 }
 

@@ -43,6 +43,19 @@ export function getTemplateSpec(name: string): TemplateSpec | null {
 }
 
 /**
+ * Spec local de un mapping. El catálogo tiene specs con DOS nombres: unos con
+ * la clave lógica (order_confirmation_request) y otros con el nombre real de
+ * la WABA (retraso_pedido). Buscar solo por la clave lógica daba un falso
+ * negativo: `order_delay_restock` no tiene spec propia, pero `retraso_pedido`
+ * sí — y con sus 2 botones, que el flujo de retraso SÍ atiende
+ * (delay_ok/delay_cancel en handleOrderButtonReply). Sin este fallback el
+ * doctor reportaba "la WABA tiene 2 y el flujo local espera 0".
+ */
+export function resolveMappingSpec(mapping: ProviderMapping): TemplateSpec | null {
+  return getTemplateSpec(mapping.logicalKey) ?? getTemplateSpec(mapping.providerTemplate);
+}
+
+/**
  * Construye el mensaje de plantilla. Falla RUIDOSAMENTE si el nombre no
  * está en el catálogo o el número de variables no cuadra: mandar una
  * plantilla con parámetros de menos es un rechazo seguro de Meta, mejor
@@ -92,6 +105,10 @@ export interface ProviderMapping {
   language: string;
   /** Qué variables del builder local van a la plantilla real, en orden. */
   params: string[];
+  /** `false` = mapping DESHABILITADO a propósito: la plantilla existe y puede
+   *  estar APPROVED en la WABA, pero no hay flujo local que la pueda atender
+   *  con seguridad. Nunca se considera lista, ni con caché previa. */
+  enabled?: boolean;
   note?: string;
 }
 
@@ -160,7 +177,6 @@ export interface TemplateReadiness {
  * usa el envío, para pintarla en salud/readiness sin duplicar lógica.
  */
 export function getTemplateReadiness(logicalKey: string): TemplateReadiness {
-  const spec = getTemplateSpec(logicalKey);
   const mapping = getProviderMapping(logicalKey);
   if (!mapping) {
     return {
@@ -173,6 +189,15 @@ export function getTemplateReadiness(logicalKey: string): TemplateReadiness {
   }
   const verified = getVerifiedTemplate(logicalKey);
   const bloquea = (blocker: string, detail: string): TemplateReadiness => ({ ready: false, blocker, detail, mapping, verified });
+  // Deshabilitado a propósito: gana a CUALQUIER otra comprobación, incluida
+  // una caché de verificación previa. Si el mapping se apagó es porque no hay
+  // flujo que atienda la plantilla; que Meta la apruebe no la vuelve segura.
+  if (mapping.enabled === false) {
+    return bloquea(
+      "TEMPLATE_MAPPING_DISABLED",
+      `el mapping "${logicalKey}" → "${mapping.providerTemplate}" está DESHABILITADO a propósito${mapping.note ? `: ${mapping.note}` : ""}`
+    );
+  }
   if (!verified) {
     return bloquea(
       "FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED",
@@ -197,7 +222,7 @@ export function getTemplateReadiness(logicalKey: string): TemplateReadiness {
       `"${mapping.providerTemplate}" tiene ${verified.paramCount} variable(s) y el mapping envía ${mapping.params.length} (${mapping.params.join(", ")}): ajustar 'params' del mapping`
     );
   }
-  const localButtons = spec?.buttons.length ?? 0;
+  const localButtons = resolveMappingSpec(mapping)?.buttons.length ?? 0;
   if (verified.buttonCount > 0 && verified.buttonCount !== localButtons) {
     return bloquea(
       "TEMPLATE_BUTTONS_MISMATCH",

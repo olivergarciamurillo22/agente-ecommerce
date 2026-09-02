@@ -334,7 +334,8 @@
         "nombre",
         "numero_pedido"
       ],
-      "note": "BLOQUEADA: tiene un botón 'Necesito ayuda' sin payload ni handler. No enviar hasta resolverlo. El idioma 'en' es literal en Meta: NO cambiar a 'es'."
+      "note": "DESHABILITADO a propósito: la WABA tiene un botón 'Necesito ayuda' sin payload declarado ni handler en handleOrderButtonReply, y NO existe ningún sender productivo de este mensaje (búsqueda 03-09: cero usos en src/ y scripts/). Se reactiva cuando exista un consumidor de extremo a extremo que sepa atender ese botón. El idioma 'en' es literal en Meta: NO cambiar a 'es'.",
+      "enabled": false
     },
     {
       "logicalKey": "order_confirmed_ack_out_of_window",
