@@ -1,0 +1,54 @@
+# Dependencias
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# TypeScript (caché de compilación incremental — rompe el build de Nixpacks si se sube)
+*.tsbuildinfo
+
+# Runtime
+data/
+auth/
+
+# Variables de entorno locales (NO subir)
+.env
+.env.local
+.env*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Resultados del redteam (contienen respuestas del modelo con tus precios)
+redteam-resultados.json
+
+# Sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Restart flag
+.restart
+.claude/*.lock
+.claude/settings.local.json
+
+# Backup del kit original
+02-kit-agente-whatsapp.zip
+
+# Archivos temporales de diagnóstico
+*.tmp.ts
+
+# Backups locales de la base de datos (nunca a Git)
+backups/
+nas-data/
+
+# Config de producción del NAS
+.env.nas

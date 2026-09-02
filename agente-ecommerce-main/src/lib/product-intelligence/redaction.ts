@@ -1,0 +1,2 @@
+const SECRET_PATTERNS = [/(Bearer\s+)[^\s"']+/gi, /(access[_-]?token["'=:\s]+)[^\s,"'}]+/gi, /(app[_-]?secret["'=:\s]+)[^\s,"'}]+/gi, /(cookie["'=:\s]+)[^\r\n]+/gi];
+export function redactProductIntelligence(value: unknown): string { let output = value instanceof Error ? value.message : typeof value === "string" ? value : JSON.stringify(value); for (const pattern of SECRET_PATTERNS) output = output.replace(pattern, "$1[REDACTED]"); return output; }

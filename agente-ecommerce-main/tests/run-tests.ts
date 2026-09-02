@@ -1,0 +1,3608 @@
+// ============================================================
+// Tests del MVP de confirmación de pedidos COD.
+//
+// Ejecutar con: npm test
+//
+// Usa una base de datos SQLite TEMPORAL (DATA_DIR apunta a un directorio
+// desechable): jamás toca data/messages.db real. Sin red: ni OpenRouter ni
+// la Admin API de Shopify están configuradas aquí.
+// ============================================================
+
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import crypto from "node:crypto";
+import assert from "node:assert/strict";
+
+// --- Entorno de test ANTES de cargar los módulos (usan process.env) ---
+const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pedro-mvp-test-"));
+process.env.DATA_DIR = tmpDir;
+process.env.LOG_LEVEL = "silent";
+process.env.SHOPIFY_WEBHOOK_SECRET = "test_webhook_secret";
+process.env.DEFAULT_COUNTRY_CODE = "34";
+process.env.FIRST_REMINDER_MINUTES = "1"; // recordatorio al minuto
+process.env.NEEDS_CALL_MINUTES = "3"; // llamada a los 3 minutos
+delete process.env.OPENROUTER_API_KEY;
+delete process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+delete process.env.SHOPIFY_STORE_DOMAIN;
+delete process.env.TREAT_ALL_ORDERS_AS_COD;
+delete process.env.COD_PENDING_IS_COD;
+delete process.env.COD_GATEWAY_KEYWORDS;
+
+// Safety gates: los tests de FLUJO corren con WhatsApp habilitado (si no, no
+// habría nada que probar) y Shopify writes CERRADO. Los tests de SEGURIDAD
+// manipulan cada llave individualmente con withEnv().
+process.env.APP_MODE = "production";
+process.env.WHATSAPP_SEND_ENABLED = "1";
+process.env.EMERGENCY_STOP = "0";
+process.env.TEST_MODE = "0";
+process.env.MAX_ORDER_AGE_MINUTES = "9999999"; // los tests de timing viajan al futuro
+delete process.env.SHOPIFY_WRITE_ENABLED;
+delete process.env.TEST_PHONE_ALLOWLIST;
+delete process.env.OUTBOX_MAX_AGE_MINUTES;
+
+/** Aplica variables de entorno solo durante fn() y SIEMPRE las restaura. */
+async function withEnv(
+  overrides: Record<string, string | undefined>,
+  fn: () => void | Promise<void>
+): Promise<void> {
+  const backup: Record<string, string | undefined> = {};
+  for (const k of Object.keys(overrides)) {
+    backup[k] = process.env[k];
+    const v = overrides[k];
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    await fn();
+  } finally {
+    for (const k of Object.keys(backup)) {
+      const v = backup[k];
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+let passed = 0;
+const failures: Array<{ name: string; err: unknown }> = [];
+
+async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
+  try {
+    await fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } catch (err) {
+    failures.push({ name, err });
+    console.error(`  ✗ ${name}`);
+    console.error(`      ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function sign(body: string): string {
+  return crypto.createHmac("sha256", "test_webhook_secret").update(body).digest("base64");
+}
+
+/** Payload realista de orders/create (subconjunto que usamos). */
+function codPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: 900001,
+    order_number: 1101,
+    name: "#1101",
+    email: "cliente@example.com",
+    phone: null,
+    currency: "EUR",
+    total_price: "49.90",
+    financial_status: "pending",
+    gateway: "Cash on Delivery (COD)",
+    payment_gateway_names: ["Cash on Delivery (COD)"],
+    tags: "",
+    customer: {
+      first_name: "María",
+      last_name: "García",
+      email: "cliente@example.com",
+      phone: null,
+    },
+    shipping_address: {
+      name: "María García",
+      address1: "Calle Alcalá 123",
+      address2: "3º B",
+      city: "Madrid",
+      province: "Madrid",
+      zip: "28009",
+      country: "Spain",
+      country_code: "ES",
+      phone: "+34 611 111 111",
+    },
+    billing_address: null,
+    line_items: [
+      { title: "Crema facial hidratante", quantity: 2, price: "19.95" },
+      { title: "Sérum vitamina C", quantity: 1, price: "10.00" },
+    ],
+    note_attributes: [],
+    ...overrides,
+  };
+}
+
+const shopifyHeaders = (raw: string, extra: Record<string, string | null> = {}) => ({
+  hmac: sign(raw),
+  topic: "orders/create",
+  webhookId: "wh-test",
+  shopDomain: "test.myshopify.com",
+  ...extra,
+});
+
+async function main(): Promise<void> {
+  console.log(`\nTests del MVP (DB temporal en ${tmpDir})\n`);
+
+  const db = await import("../src/lib/db");
+  const { normalizePhone, isCodOrder, formatOrderItems, formatAddressForMessage } = await import(
+    "../src/lib/orders/normalize"
+  );
+  const { verifyShopifyHmac } = await import("../src/lib/shopify/hmac");
+  const { processOrdersCreateWebhook } = await import("../src/lib/shopify/webhook");
+  const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
+    "../src/lib/orders/confirmation"
+  );
+  const { tagOrderConfirmed } = await import("../src/lib/shopify/admin");
+  const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
+  const msgs = await import("../src/lib/orders/messages");
+  const { sendWhatsAppMessage } = await import("../src/lib/whatsapp");
+  const safety = await import("../src/lib/safety");
+  const { handleIncomingMessages } = await import("../src/lib/baileys/handler");
+
+  const mkOrder = (shopifyId: string, num: string, phone: string) =>
+    db.insertOrderIfNew({
+      shopify_order_id: shopifyId,
+      shopify_order_number: num,
+      customer_name: "Cliente Test",
+      phone,
+      email: null,
+      product_summary: "Producto de prueba",
+      total_price: "29.90",
+      currency: "EUR",
+      address_line1: "Calle Falsa 1",
+      address_line2: null,
+      city: "Madrid",
+      province: "Madrid",
+      postal_code: "28001",
+      country: "España",
+      status: "pending_send",
+    }).order;
+
+  // ============ 1 · Normalización de teléfono ============
+  console.log("· Teléfonos");
+  await test("9 dígitos nacionales → prefijo 34", () => {
+    assert.equal(normalizePhone("612 34 56 78"), "34612345678");
+  });
+  await test("formato internacional con + y espacios", () => {
+    assert.equal(normalizePhone("+34 612-345-678"), "34612345678");
+  });
+  await test("prefijo internacional 00", () => {
+    assert.equal(normalizePhone("0034612345678"), "34612345678");
+  });
+  await test("vacío/null → cadena vacía", () => {
+    assert.equal(normalizePhone(null), "");
+    assert.equal(normalizePhone("   "), "");
+  });
+
+  // ============ 2 · Detección COD ============
+  console.log("· Detección COD");
+  await test("pedido con gateway 'Cash on Delivery (COD)' es COD", () => {
+    assert.equal(isCodOrder(codPayload()), true);
+  });
+  await test("pedido pagado con Shopify Payments NO es COD", () => {
+    assert.equal(
+      isCodOrder(
+        codPayload({
+          payment_gateway_names: ["shopify_payments"],
+          gateway: "shopify_payments",
+          financial_status: "paid",
+        })
+      ),
+      false
+    );
+  });
+  await test("tag de Releasit en el pedido cuenta como COD", () => {
+    assert.equal(
+      isCodOrder(
+        codPayload({
+          payment_gateway_names: ["manual"],
+          gateway: "manual",
+          tags: "Releasit COD Form",
+        })
+      ),
+      true
+    );
+  });
+  await test("COD_PENDING_IS_COD=1 acepta cualquier pago pendiente", () => {
+    process.env.COD_PENDING_IS_COD = "1";
+    try {
+      assert.equal(
+        isCodOrder(
+          codPayload({ payment_gateway_names: ["manual"], gateway: "manual", tags: "" })
+        ),
+        true
+      );
+    } finally {
+      delete process.env.COD_PENDING_IS_COD;
+    }
+  });
+  await test("TREAT_ALL_ORDERS_AS_COD=1 acepta todo", () => {
+    process.env.TREAT_ALL_ORDERS_AS_COD = "1";
+    try {
+      assert.equal(
+        isCodOrder(codPayload({ payment_gateway_names: ["shopify_payments"], financial_status: "paid" })),
+        true
+      );
+    } finally {
+      delete process.env.TREAT_ALL_ORDERS_AS_COD;
+    }
+  });
+
+  // ============ 3 · HMAC ============
+  console.log("· HMAC Shopify");
+  await test("firma correcta pasa", () => {
+    assert.equal(verifyShopifyHmac("cuerpo", sign("cuerpo"), "test_webhook_secret"), true);
+  });
+  await test("firma incorrecta falla", () => {
+    assert.equal(verifyShopifyHmac("cuerpo", sign("otro cuerpo"), "test_webhook_secret"), false);
+  });
+  await test("sin header o sin secret falla", () => {
+    assert.equal(verifyShopifyHmac("cuerpo", null, "test_webhook_secret"), false);
+    assert.equal(verifyShopifyHmac("cuerpo", sign("cuerpo"), undefined), false);
+  });
+
+  // ============ 4 · Webhook orders/create ============
+  console.log("· Webhook");
+  await test("pedido COD válido se guarda como pending_send", () => {
+    const raw = JSON.stringify(codPayload({ id: 900001, order_number: 1101 }));
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    const row = db.getOrderByShopifyId("900001");
+    assert.ok(row, "el pedido debe existir");
+    assert.equal(row!.status, "pending_send");
+    assert.equal(row!.phone, "34611111111");
+    assert.equal(row!.shopify_order_number, "1101");
+    assert.match(row!.product_summary, /2x Crema facial/);
+  });
+  await test("webhook duplicado NO crea otra fila", () => {
+    const raw = JSON.stringify(codPayload({ id: 900001, order_number: 1101 }));
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.duplicate, true);
+    const all = db.listOrders().filter((o) => o.shopify_order_id === "900001");
+    assert.equal(all.length, 1);
+  });
+  await test("HMAC inválido → 401 y no guarda nada", () => {
+    const raw = JSON.stringify(codPayload({ id: 900002, order_number: 1102 }));
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw, { hmac: sign("manipulado") }));
+    assert.equal(res.status, 401);
+    assert.equal(db.getOrderByShopifyId("900002"), null);
+  });
+  await test("pedido NO COD se ignora con 200", () => {
+    const raw = JSON.stringify(
+      codPayload({
+        id: 900003,
+        order_number: 1103,
+        payment_gateway_names: ["shopify_payments"],
+        gateway: "shopify_payments",
+        financial_status: "paid",
+      })
+    );
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ignored, "no COD");
+    assert.equal(db.getOrderByShopifyId("900003"), null);
+  });
+  await test("pedido COD sin teléfono queda en estado error", () => {
+    const payload = codPayload({ id: 900004, order_number: 1104 });
+    (payload.shipping_address as Record<string, unknown>).phone = null;
+    (payload.customer as Record<string, unknown>).phone = null;
+    const raw = JSON.stringify(payload);
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    const row = db.getOrderByShopifyId("900004");
+    assert.equal(row!.status, "error");
+    assert.match(row!.last_error ?? "", /teléfono/);
+  });
+  await test("sin SHOPIFY_WEBHOOK_SECRET configurado → 500", () => {
+    const backup = process.env.SHOPIFY_WEBHOOK_SECRET;
+    delete process.env.SHOPIFY_WEBHOOK_SECRET;
+    try {
+      const raw = JSON.stringify(codPayload({ id: 900005 }));
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 500);
+    } finally {
+      process.env.SHOPIFY_WEBHOOK_SECRET = backup;
+    }
+  });
+
+  // ============ 5 · Envío inicial + respuesta "1" ============
+  console.log("· Flujo de confirmación");
+  db.setConnectionState({ status: "connected", phone: "34600000000" });
+  const T0 = Math.floor(Date.now() / 1000);
+
+  await test("scheduler envía la confirmación inicial (via outbox)", async () => {
+    mkOrder("910001", "1201", "34600000001");
+    const r = await runSchedulerTick(T0);
+    assert.ok(r.sent >= 1, "debe enviar al menos 1");
+    const row = db.getOrderByShopifyId("910001")!;
+    assert.equal(row.status, "awaiting_reply");
+    assert.equal(row.whatsapp_sent_at, T0);
+    const out = db.getPendingOutbox(100).find((o) => o.phone === "34600000001");
+    assert.ok(out, "el mensaje debe estar en el outbox");
+    assert.match(out!.content, /Soy Pedro, de atención al cliente de Casamable™/);
+    assert.match(out!.content, /1 - Todo correcto/);
+    assert.match(out!.content, /2 - Quiero cambiar la dirección/);
+    assert.match(out!.content, /3 - Quiero dejar una nota al repartidor/);
+    assert.match(out!.content, /en efectivo para pagar al repartidor/);
+    assert.match(out!.content, /Calle Falsa 1/);
+    assert.doesNotMatch(out!.content, /bot|asistente|autom|IA\b/i);
+  });
+
+  await test("respuesta '1' confirma el pedido", () => {
+    const res = handleOrderReply("34600000001", "1");
+    assert.equal(res.handled, true);
+    assert.equal(res.reply, msgs.MSG_CONFIRMED);
+    const row = db.getOrderByShopifyId("910001")!;
+    assert.equal(row.status, "confirmed");
+    assert.ok(row.confirmed_at, "confirmed_at debe quedar registrado");
+  });
+
+  await test("un pedido confirmado no recibe recordatorios ni escala", async () => {
+    await runSchedulerTick(T0 + 999_999);
+    assert.equal(db.getOrderByShopifyId("910001")!.status, "confirmed");
+  });
+
+  // ============ 6 · Respuesta "2" + dirección propuesta ============
+  await test("respuesta '2' pide la dirección (needs_correction)", async () => {
+    mkOrder("910002", "1202", "34600000002");
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    const res = handleOrderReply("34600000002", "2");
+    assert.equal(res.handled, true);
+    assert.equal(res.reply, msgs.MSG_ASK_ADDRESS);
+    assert.equal(db.getOrderByShopifyId("910002")!.status, "needs_correction");
+  });
+
+  await test("el siguiente mensaje se guarda como dirección propuesta", () => {
+    const res = handleOrderReply("34600000002", "Calle Mayor 5, 3º B, 28001 Madrid");
+    assert.equal(res.handled, true);
+    assert.equal(res.reply, msgs.MSG_ADDRESS_SAVED);
+    const row = db.getOrderByShopifyId("910002")!;
+    assert.equal(row.status, "needs_correction");
+    assert.match(row.proposed_address ?? "", /Calle Mayor 5/);
+  });
+
+  await test("mensajes extra amplían la dirección sin repetir el 'gracias'", () => {
+    const res = handleOrderReply("34600000002", "portal 2, timbre B");
+    assert.equal(res.handled, true);
+    assert.equal(res.reply, undefined);
+    const row = db.getOrderByShopifyId("910002")!;
+    assert.match(row.proposed_address ?? "", /Calle Mayor 5/);
+    assert.match(row.proposed_address ?? "", /portal 2/);
+  });
+
+  // ============ 7 · Número desconocido ============
+  await test("un número sin pedidos activos no lo maneja el flujo (handled=false)", () => {
+    const res = handleOrderReply("34999888777", "1");
+    assert.equal(res.handled, false);
+  });
+
+  // ============ 8 · Varios pedidos activos del mismo teléfono ============
+  await test("con 2 pedidos activos, '1' a secas pide desambiguar (no confirma nada)", async () => {
+    mkOrder("910003", "1203", "34600000003");
+    mkOrder("910004", "1204", "34600000003");
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    const res = handleOrderReply("34600000003", "1");
+    assert.equal(res.handled, true);
+    assert.match(res.reply ?? "", /1203/);
+    assert.match(res.reply ?? "", /1204/);
+    assert.equal(db.getOrderByShopifyId("910003")!.status, "awaiting_reply");
+    assert.equal(db.getOrderByShopifyId("910004")!.status, "awaiting_reply");
+  });
+
+  await test("'1204 1' confirma SOLO el pedido 1204", () => {
+    const res = handleOrderReply("34600000003", "1204 1");
+    assert.equal(res.handled, true);
+    assert.equal(res.reply, msgs.MSG_CONFIRMED);
+    assert.equal(db.getOrderByShopifyId("910004")!.status, "confirmed");
+    assert.equal(db.getOrderByShopifyId("910003")!.status, "awaiting_reply");
+  });
+
+  // ============ 9 · Respuestas ambiguas ============
+  await test("respuesta ambigua → aclaración; segunda ambigua → needs_call", async () => {
+    mkOrder("910005", "1205", "34600000004");
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    const r1 = handleOrderReply("34600000004", "hola, quién eres?");
+    assert.equal(r1.reply, msgs.MSG_CLARIFY);
+    assert.equal(db.getOrderByShopifyId("910005")!.status, "awaiting_reply");
+    const r2 = handleOrderReply("34600000004", "no entiendo nada");
+    assert.equal(r2.reply, msgs.MSG_WILL_CALL);
+    assert.equal(db.getOrderByShopifyId("910005")!.status, "needs_call");
+  });
+
+  // ============ 10 · Recordatorio y needs_call por tiempo ============
+  console.log("· Recordatorios y escalado (FIRST_REMINDER=1min, NEEDS_CALL=3min)");
+  const T = T0 + 500_000; // base futura aislada para este bloque
+  await test("recordatorio al minuto sin respuesta", async () => {
+    mkOrder("910006", "1206", "34600000005");
+    await runSchedulerTick(T); // envío inicial en T
+    assert.equal(db.getOrderByShopifyId("910006")!.status, "awaiting_reply");
+
+    await runSchedulerTick(T + 30); // a los 30s aún nada
+    assert.equal(db.getOrderByShopifyId("910006")!.status, "awaiting_reply");
+
+    const r = await runSchedulerTick(T + 61); // pasado 1 min → recordatorio
+    assert.ok(r.reminders >= 1);
+    const row = db.getOrderByShopifyId("910006")!;
+    assert.equal(row.status, "reminder_sent");
+    assert.equal(row.reminder_sent_at, T + 61);
+    const out = db.getPendingOutbox(300).filter((o) => o.phone === "34600000005");
+    assert.equal(out.length, 2, "inicial + recordatorio");
+    const reminder = out.find((o) => /solo nos falta confirmar tu pedido de Casamable™/.test(o.content));
+    assert.ok(reminder, "el recordatorio debe mencionar Casamable");
+    assert.match(reminder!.content, /3 - Quiero dejar una nota al repartidor/);
+  });
+
+  await test("a los 3 minutos sin respuesta → needs_call", async () => {
+    await runSchedulerTick(T + 181);
+    const row = db.getOrderByShopifyId("910006")!;
+    assert.equal(row.status, "needs_call");
+  });
+
+  await test("quien contestó algo (aunque ilegible) no recibe recordatorio", async () => {
+    // 910003 quedó awaiting_reply con customer_replied_at puesto (test 8):
+    // en los ticks de este bloque escala a needs_call por tiempo, pero NUNCA
+    // debe haber recibido recordatorio (contestó: no era silencio).
+    const out = db.getPendingOutbox(500).filter(
+      (o) => o.phone === "34600000003" && /solo nos falta confirmar/.test(o.content)
+    );
+    assert.equal(out.length, 0);
+  });
+
+  // ============ 11 · Acciones manuales (reenviar) ============
+  await test("resetOrderForResend devuelve el pedido a la cola y se reenvía", async () => {
+    const before = db.getOrderByShopifyId("910005")!; // estaba en needs_call
+    db.resetOrderForResend(before.id);
+    const queued = db.getOrderByShopifyId("910005")!;
+    assert.equal(queued.status, "pending_send");
+    const r = await runSchedulerTick(T + 300);
+    assert.ok(r.sent >= 1);
+    assert.equal(db.getOrderByShopifyId("910005")!.status, "awaiting_reply");
+  });
+
+  // ============ 12 · Casamable: detección COD real ============
+  console.log("· Casamable — detección COD (releasit_cod_form)");
+  await test("tag releasit_cod_form es señal primaria (aunque las keywords no ayuden)", () => {
+    process.env.COD_GATEWAY_KEYWORDS = "zzz-sin-coincidencias";
+    try {
+      assert.equal(
+        isCodOrder(codPayload({ payment_gateway_names: [], gateway: "", tags: "releasit_cod_form" })),
+        true
+      );
+      assert.equal(
+        isCodOrder(
+          codPayload({ payment_gateway_names: [], gateway: "", tags: "releasit_cod_form, error Dropi" })
+        ),
+        true,
+        "el tag 'error Dropi' no bloquea"
+      );
+    } finally {
+      delete process.env.COD_GATEWAY_KEYWORDS;
+    }
+  });
+  await test("pending SIN releasit y COD_PENDING_IS_COD=0 → NO es COD solo por pending", () => {
+    assert.equal(
+      isCodOrder(
+        codPayload({
+          payment_gateway_names: ["manual"],
+          gateway: "manual",
+          tags: "",
+          financial_status: "pending",
+        })
+      ),
+      false
+    );
+  });
+
+  // ============ 13 · Casamable: formatos ============
+  console.log("· Casamable — formatos (productos, EUR, dirección)");
+  const nbsp = (s: string) => s.replace(/[\u00a0\u202f]/g, " ");
+  await test("formatMoney: '39,97 €', nunca '39.97 EUR'", () => {
+    assert.equal(nbsp(msgs.formatMoney("39.97", "EUR")), "39,97 €");
+    assert.equal(nbsp(msgs.formatMoney(34.98, "EUR")), "34,98 €");
+  });
+  await test("formatOrderItems: varios line_items, una línea por producto", () => {
+    assert.equal(
+      formatOrderItems({
+        line_items: [
+          { title: "Cortaúñas y Pulidor Eléctrico 3 en 1", quantity: 1, price: "34.99" },
+          { title: "Seguro de Envío", quantity: 1, price: "4.98" },
+        ],
+      }),
+      "1x Cortaúñas y Pulidor Eléctrico 3 en 1\n1x Seguro de Envío"
+    );
+    assert.equal(
+      formatOrderItems({
+        line_items: [{ title: "Limpiador Ultrasónico Multiusos", quantity: 2, price: "17.49" }],
+      }),
+      "2x Limpiador Ultrasónico Multiusos"
+    );
+    assert.equal(
+      formatOrderItems({ line_items: [{ title: "Suplemento Intelecto Forte", quantity: 1 }] }),
+      "Suplemento Intelecto Forte"
+    );
+  });
+  await test("dirección: address2 presente aparece; campos vacíos no dejan huecos", () => {
+    const con = formatAddressForMessage({
+      address_line1: "Calle Alcalá 123",
+      address_line2: "3º B",
+      city: "Madrid",
+      province: "Madrid",
+      postal_code: "28009",
+      country: "España",
+    });
+    assert.match(con, /3º B/);
+    // Caso real (pedido Releasit): sin address2 y SIN ciudad (Releasit a veces no la manda)
+    const sin = formatAddressForMessage({
+      address_line1: "Avda Ejemplo 4 (no comunidad)",
+      address_line2: null,
+      city: null,
+      province: "Málaga",
+      postal_code: "29327",
+      country: "España",
+    });
+    assert.doesNotMatch(sin, /undefined|null/);
+    assert.doesNotMatch(sin, /, ,/);
+    assert.match(sin, /29327/);
+    assert.match(sin, /Málaga/);
+    assert.doesNotMatch(sin, /España|Spain/, "el país español no se muestra: sobra");
+    assert.ok(sin.split("\n").every((l) => l.trim().length > 0), "sin líneas vacías");
+
+    // Caso REAL del pedido #1056: Releasit mandó city="-" y country="Spain".
+    const basura = formatAddressForMessage({
+      address_line1: "Calle Ejemplo 5B",
+      address_line2: null,
+      city: "-",
+      province: "Almería",
+      postal_code: "04007",
+      country: "Spain",
+    });
+    assert.doesNotMatch(basura, /04007 -|Spain/, "ni relleno '-' ni país en inglés");
+    assert.match(basura, /04007/);
+    assert.match(basura, /Almería/);
+  });
+  await test("el nombre del cliente se presenta capitalizado (caso real: 'oliver')", () => {
+    const base = mkOrder("950001", "1601", "34600000090");
+    const conNombre = (n: string) => ({ ...base, customer_name: n });
+    assert.match(msgs.buildConfirmationMessage(conNombre("oliver ruiz")), /Hola Oliver, buenas/);
+    assert.match(msgs.buildConfirmationMessage(conNombre("PEDRO SANCHEZ")), /Hola Pedro, buenas/);
+    assert.match(msgs.buildConfirmationMessage(conNombre("Pedro")), /Hola Pedro, buenas/);
+    // Nombres con mayúscula interna se respetan (no los destrozamos):
+    assert.match(msgs.buildConfirmationMessage(conNombre("McCarthy")), /Hola McCarthy, buenas/);
+    // Sin nombre, el saludo sigue siendo correcto:
+    assert.match(msgs.buildConfirmationMessage(conNombre("")), /^Hola, buenas\./);
+  });
+
+  await test("classifyOrderReply: variantes naturales sin IA", () => {
+    for (const t of ["1", "sí", "Sí.", "todo correcto", "está bien", "ok"])
+      assert.equal(classifyOrderReply(t), "confirm", `"${t}"`);
+    for (const t of ["2", "cambiar dirección", "direccion incorrecta"])
+      assert.equal(classifyOrderReply(t), "change_address", `"${t}"`);
+    for (const t of ["3", "nota", "Nota repartidor", "dejar nota"])
+      assert.equal(classifyOrderReply(t), "delivery_note", `"${t}"`);
+    for (const t of ["creo que sí pero la dirección no sé", "mañana os digo", "quién eres"])
+      assert.equal(classifyOrderReply(t), "unknown", `"${t}"`);
+  });
+
+  // ============ 14 · Casamable: opción 3 (nota para el repartidor) ============
+  console.log("· Casamable — opción 3 (nota repartidor)");
+  await test("respuesta '3' pide la nota y NO recibe recordatorio mientras espera", async () => {
+    mkOrder("920001", "1301", "34600000010");
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+    const res = handleOrderReply("34600000010", "3");
+    assert.equal(res.reply, msgs.MSG_ASK_NOTE);
+    assert.equal(db.getOrderByShopifyId("920001")!.status, "awaiting_delivery_note");
+    // Pasada la ventana de recordatorio (1 min en tests), sigue sin reminder:
+    await runSchedulerTick(Math.floor(Date.now() / 1000) + 61);
+    assert.equal(db.getOrderByShopifyId("920001")!.status, "awaiting_delivery_note");
+    const rem = db
+      .getPendingOutbox(500)
+      .filter((o) => o.phone === "34600000010" && /solo nos falta/.test(o.content));
+    assert.equal(rem.length, 0);
+  });
+
+  await test("el siguiente mensaje se guarda como delivery_note y NO confirma", () => {
+    const res = handleOrderReply("34600000010", "Llamar antes de subir");
+    assert.equal(res.reply, msgs.MSG_NOTE_SAVED);
+    const row = db.getOrderByShopifyId("920001")!;
+    assert.equal(row.delivery_note, "Llamar antes de subir");
+    assert.equal(row.status, "awaiting_reply", "guardar la nota NO confirma");
+    assert.equal(row.confirmed_at, null);
+  });
+
+  await test("confirmar después de la nota (responde 1)", () => {
+    const res = handleOrderReply("34600000010", "1");
+    assert.equal(res.reply, msgs.MSG_CONFIRMED);
+    const row = db.getOrderByShopifyId("920001")!;
+    assert.equal(row.status, "confirmed");
+    assert.equal(row.delivery_note, "Llamar antes de subir", "la nota se conserva");
+  });
+
+  await test("multipedido + opción 3: la nota JAMÁS va al pedido equivocado", async () => {
+    mkOrder("920002", "1302", "34600000011");
+    mkOrder("920003", "1303", "34600000011");
+    await runSchedulerTick(Math.floor(Date.now() / 1000));
+
+    const amb = handleOrderReply("34600000011", "3"); // ambiguo con 2 pedidos
+    assert.match(amb.reply ?? "", /1302/);
+    assert.match(amb.reply ?? "", /1303/);
+    assert.equal(db.getOrderByShopifyId("920002")!.status, "awaiting_reply");
+    assert.equal(db.getOrderByShopifyId("920003")!.status, "awaiting_reply");
+
+    const ask = handleOrderReply("34600000011", "1303 3");
+    assert.equal(ask.reply, msgs.MSG_ASK_NOTE);
+    assert.equal(db.getOrderByShopifyId("920003")!.status, "awaiting_delivery_note");
+
+    const saved = handleOrderReply("34600000011", "El timbre no funciona, llamad al móvil");
+    assert.equal(saved.reply, msgs.MSG_NOTE_SAVED);
+    assert.equal(db.getOrderByShopifyId("920003")!.delivery_note, "El timbre no funciona, llamad al móvil");
+    assert.equal(db.getOrderByShopifyId("920002")!.delivery_note, null, "nota solo en el 1303");
+
+    handleOrderReply("34600000011", "1302 1");
+    assert.equal(db.getOrderByShopifyId("920002")!.status, "confirmed");
+    const last = handleOrderReply("34600000011", "1"); // ya solo queda el 1303 activo
+    assert.equal(last.reply, msgs.MSG_CONFIRMED);
+    assert.equal(db.getOrderByShopifyId("920003")!.status, "confirmed");
+  });
+
+  // ============ 15 · Casamable: webhook con forma de pedido real ============
+  console.log("· Casamable — webhook realista y tag Shopify");
+  await test("pedido tipo Releasit (tags + note_attributes + ciudad vacía) entra bien", () => {
+    const payload = codPayload({
+      id: 18064595714378,
+      order_number: 35010484,
+      name: "#35010484",
+      email: null,
+      total_price: "34.98",
+      financial_status: "pending",
+      gateway: "",
+      payment_gateway_names: [],
+      tags: "releasit_cod_form, error Dropi",
+      customer: { first_name: "Clienta", last_name: "-", email: null, phone: null },
+      shipping_address: {
+        name: "Clienta -",
+        address1: "Avda Ejemplo 4 (no comunidad)",
+        address2: null,
+        city: null,
+        province: "Málaga",
+        zip: "29327",
+        country: "España",
+        country_code: "ES",
+        phone: "+34600555666",
+      },
+      line_items: [{ title: "Limpiador Ultrasónico Multiusos", quantity: 2, price: "17.49" }],
+      note_attributes: [{ name: "A que hora estare en casa", value: "siempre" }],
+    });
+    const raw = JSON.stringify(payload);
+    const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(res.status, 200);
+    const row = db.getOrderByShopifyId("18064595714378")!;
+    assert.equal(row.status, "pending_send");
+    assert.equal(row.phone, "34600555666");
+    assert.equal(row.product_summary, "2x Limpiador Ultrasónico Multiusos");
+    assert.equal(row.customer_note, "A que hora estare en casa: siempre");
+    assert.equal(row.province, "Málaga");
+  });
+
+  await test("WA_CONFIRMED va por tagsAdd (añade SIN machacar los tags existentes)", async () => {
+    const realFetch = global.fetch;
+    process.env.SHOPIFY_STORE_DOMAIN = "qmbr1z-vf.myshopify.com";
+    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN = "token-de-prueba";
+    process.env.SHOPIFY_WRITE_ENABLED = "1"; // gate abierto SOLO en este test
+    let capturedUrl = "";
+    let capturedBody = "";
+    let capturedToken = "";
+    global.fetch = (async (url: unknown, init?: RequestInit) => {
+      capturedUrl = String(url);
+      capturedBody = String(init?.body ?? "");
+      capturedToken = String(
+        (init?.headers as Record<string, string> | undefined)?.["X-Shopify-Access-Token"] ?? ""
+      );
+      return new Response(
+        JSON.stringify({
+          data: { tagsAdd: { node: { id: "gid://shopify/Order/18064595714378" }, userErrors: [] } },
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    try {
+      const ok = await tagOrderConfirmed("18064595714378");
+      assert.equal(ok, true);
+      assert.equal(capturedUrl, "https://qmbr1z-vf.myshopify.com/admin/api/2026-07/graphql.json");
+      assert.equal(capturedToken, "token-de-prueba");
+      assert.match(capturedBody, /tagsAdd/);
+      assert.doesNotMatch(capturedBody, /orderUpdate/, "orderUpdate machacaría los tags");
+      assert.match(capturedBody, /gid:\/\/shopify\/Order\/18064595714378/);
+      assert.match(capturedBody, /WA_CONFIRMED/);
+    } finally {
+      global.fetch = realFetch;
+      delete process.env.SHOPIFY_STORE_DOMAIN;
+      delete process.env.SHOPIFY_ADMIN_ACCESS_TOKEN;
+      delete process.env.SHOPIFY_WRITE_ENABLED;
+    }
+  });
+
+  // ============ 16 · SEGURIDAD: safety gates ============
+  console.log("· Seguridad — safety gates (probados directamente)");
+
+  await test("safe mode JAMÁS envía WhatsApp (bloquea y no encola nada)", async () => {
+    await withEnv({ APP_MODE: "safe" }, () => {
+      assert.equal(safety.canSendRealWhatsApp("34600000050"), false);
+      const ok = sendWhatsAppMessage("34600000050", "hola, esto no debe salir");
+      assert.equal(ok, false);
+      assert.equal(
+        db.getPendingOutbox(500).some((o) => o.phone === "34600000050"),
+        false,
+        "nada en outbox"
+      );
+      assert.equal(
+        db.listConversations().some((c) => c.phone === "34600000050"),
+        false,
+        "ni siquiera crea conversación"
+      );
+    });
+  });
+
+  await test("APP_MODE desconocido o ausente = safe (nunca asumir producción)", async () => {
+    await withEnv({ APP_MODE: "produccion-typo" }, () => {
+      assert.equal(safety.appMode(), "safe");
+      assert.equal(safety.canSendRealWhatsApp("34600000050"), false);
+    });
+    await withEnv({ APP_MODE: undefined }, () => {
+      assert.equal(safety.appMode(), "safe");
+    });
+  });
+
+  await test("matriz de llaves: cualquier llave cerrada = NO SEND / NO WRITE", async () => {
+    const phone = "34600000052";
+    // producción pero sin flag de envío:
+    await withEnv({ WHATSAPP_SEND_ENABLED: "0" }, () => {
+      assert.equal(safety.canSendRealWhatsApp(phone), false);
+      assert.equal(sendWhatsAppMessage(phone, "no debe salir"), false);
+    });
+    // producción + envío, pero EMERGENCY_STOP:
+    await withEnv({ EMERGENCY_STOP: "1" }, () => {
+      assert.equal(safety.canSendRealWhatsApp(phone), false);
+      assert.equal(safety.canWriteToShopify(), false);
+    });
+    // EMERGENCY_STOP ausente = activado (default seguro):
+    await withEnv({ EMERGENCY_STOP: undefined }, () => {
+      assert.equal(safety.canSendRealWhatsApp(phone), false);
+    });
+    // escrituras Shopify: sin flag → bloqueado incluso en producción:
+    assert.equal(safety.canWriteToShopify(), false);
+    await withEnv({ SHOPIFY_WRITE_ENABLED: "1", APP_MODE: "safe" }, () => {
+      assert.equal(safety.canWriteToShopify(), false, "safe mode manda sobre el flag");
+    });
+  });
+
+  await test("TEST_MODE: fuera de allowlist bloqueado, dentro permitido", async () => {
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000052, +34 600 333 444" }, () => {
+      assert.equal(safety.phoneAllowed("34600000052"), true);
+      assert.equal(safety.phoneAllowed("34600333444"), true, "acepta formatos con espacios/+");
+      assert.equal(safety.phoneAllowed("34699999999"), false);
+      assert.equal(safety.canSendRealWhatsApp("34600000052"), true);
+      assert.equal(safety.canSendRealWhatsApp("34699999999"), false);
+    });
+  });
+
+  await test("EMERGENCY_STOP=1 detiene el scheduler entero", async () => {
+    mkOrder("930001", "1401", "34600000051");
+    await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+      const r = await runSchedulerTick(Math.floor(Date.now() / 1000));
+      assert.deepEqual(r, { sent: 0, reminders: 0, escalated: 0 });
+    });
+    assert.equal(db.getOrderByShopifyId("930001")!.status, "pending_send");
+    assert.equal(
+      db.getPendingOutbox(500).some((o) => o.phone === "34600000051"),
+      false
+    );
+  });
+
+  await test("TEST_MODE=1: el scheduler ignora pedidos fuera de allowlist", async () => {
+    mkOrder("930002", "1402", "34688888888");
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000052" }, async () => {
+      await runSchedulerTick(Math.floor(Date.now() / 1000));
+    });
+    assert.equal(db.getOrderByShopifyId("930002")!.status, "pending_send", "ni enviado ni transicionado");
+    assert.equal(
+      db.getPendingOutbox(500).some((o) => o.phone === "34688888888"),
+      false
+    );
+  });
+
+  await test("pedido antiguo en cola → ignored_old, sin mensaje", async () => {
+    // Backdatear el pedido del test anterior como si fuera de hace días:
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("UPDATE orders SET created_at = created_at - 999999 WHERE shopify_order_id = '930002'").run();
+    raw.close();
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, async () => {
+      await runSchedulerTick(Math.floor(Date.now() / 1000));
+    });
+    const row = db.getOrderByShopifyId("930002")!;
+    assert.equal(row.status, "ignored_old");
+    assert.equal(
+      db.getPendingOutbox(500).some((o) => o.phone === "34688888888"),
+      false,
+      "jamás se le envió nada"
+    );
+  });
+
+  await test("webhook con created_at antiguo → ignored_old (anti-replay)", async () => {
+    await withEnv({ MAX_ORDER_AGE_MINUTES: "30" }, () => {
+      const payload = codPayload({
+        id: 930003,
+        order_number: 1403,
+        created_at: "2026-08-01T10:00:00+02:00", // semanas antes de hoy
+      });
+      const raw = JSON.stringify(payload);
+      const res = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+      assert.equal(res.status, 200);
+      assert.equal(db.getOrderByShopifyId("930003")!.status, "ignored_old");
+    });
+  });
+
+  await test("idempotencia fuerte: doble tick no duplica inicial ni reminder", async () => {
+    const T2 = T0 + 800_000;
+    mkOrder("930004", "1404", "34600000053");
+    await runSchedulerTick(T2);
+    await runSchedulerTick(T2); // repetido: el claim atómico debe impedir otro envío
+    let out = db.getPendingOutbox(900).filter((o) => o.phone === "34600000053");
+    assert.equal(out.length, 1, "un solo mensaje inicial");
+
+    await runSchedulerTick(T2 + 61);
+    await runSchedulerTick(T2 + 61); // reminder repetido → solo uno
+    out = db.getPendingOutbox(900).filter((o) => o.phone === "34600000053");
+    assert.equal(out.length, 2, "inicial + UN reminder");
+    assert.equal(db.getOrderByShopifyId("930004")!.status, "reminder_sent");
+  });
+
+  await test("mensaje de GRUPO → completamente ignorado", async () => {
+    const before = db.listConversations().length;
+    const fakeSock = {} as unknown as Parameters<typeof handleIncomingMessages>[0];
+    const groupEvent = {
+      type: "notify",
+      messages: [
+        {
+          key: { remoteJid: "120363000000000000@g.us", fromMe: false },
+          message: { conversation: "1" },
+          pushName: "Grupo Familia",
+        },
+      ],
+    } as unknown as Parameters<typeof handleIncomingMessages>[1];
+    await handleIncomingMessages(fakeSock, groupEvent);
+    assert.equal(db.listConversations().length, before, "ni conversación ni nada");
+  });
+
+  await test("número SIN pedido activo y sin IA: se guarda pero JAMÁS se responde", async () => {
+    const fakeSock = {} as unknown as Parameters<typeof handleIncomingMessages>[0];
+    const event = {
+      type: "notify",
+      messages: [
+        {
+          key: { remoteJid: "34699000111@s.whatsapp.net", fromMe: false },
+          message: { conversation: "hola! soy un amigo de Pedro" },
+          pushName: "Amigo",
+        },
+      ],
+    } as unknown as Parameters<typeof handleIncomingMessages>[1];
+    await handleIncomingMessages(fakeSock, event);
+    assert.equal(
+      db.listConversations().some((c) => c.phone === "34699000111"),
+      true,
+      "el mensaje queda visible en Chats"
+    );
+    assert.equal(
+      db.getPendingOutbox(900).some((o) => o.phone === "34699000111"),
+      false,
+      "cero respuestas automáticas"
+    );
+  });
+
+  await test("guardar nota NO escribe en Shopify; confirmar SÍ (y por el gate)", async () => {
+    const T3 = T0 + 900_000;
+    mkOrder("930006", "1406", "34600000055");
+    await runSchedulerTick(T3); // envío inicial con writes CERRADOS
+    handleOrderReply("34600000055", "3");
+
+    const realFetch = global.fetch;
+    let fetchCalls = 0;
+    global.fetch = (async () => {
+      fetchCalls++;
+      return new Response(
+        JSON.stringify({ data: { tagsAdd: { node: { id: "x" }, userErrors: [] } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        {
+          SHOPIFY_WRITE_ENABLED: "1",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_ADMIN_ACCESS_TOKEN: "token-de-prueba",
+        },
+        async () => {
+          handleOrderReply("34600000055", "dejadlo en conserjería");
+          await new Promise((r) => setTimeout(r, 50));
+          assert.equal(fetchCalls, 0, "la nota no toca Shopify");
+          handleOrderReply("34600000055", "1"); // confirmar → tagsAdd vía gate
+          await new Promise((r) => setTimeout(r, 50));
+          assert.equal(fetchCalls, 1, "el tag sale exactamente una vez");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+    assert.equal(db.getOrderByShopifyId("930006")!.status, "confirmed");
+  });
+
+  await test("acción manual 'confirmar' en safe mode: estado interno sí, Shopify NO", async () => {
+    mkOrder("930007", "1407", "34600000056");
+    const realFetch = global.fetch;
+    let fetchCalls = 0;
+    global.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        {
+          APP_MODE: "safe",
+          SHOPIFY_WRITE_ENABLED: "1",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_ADMIN_ACCESS_TOKEN: "token-de-prueba",
+        },
+        async () => {
+          confirmOrder(db.getOrderByShopifyId("930007")!, "manual");
+          await new Promise((r) => setTimeout(r, 50));
+          assert.equal(fetchCalls, 0, "safe mode manda: cero mutaciones");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+    const row = db.getOrderByShopifyId("930007")!;
+    assert.equal(row.status, "confirmed", "el estado interno sí cambia");
+    assert.equal(row.shopify_tagged, 0, "sin tag: se reintentará cuando se abra el gate");
+  });
+
+  // ============ 17 · AUDITORÍA ADVERSARIAL ============
+  console.log("· Auditoría — allowlist y formatos de teléfono");
+
+  await test("allowlist: '600111222', '+34 600 33 34 44' y '34600111222' son el MISMO teléfono", async () => {
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "600111222, +34 600 33 34 44" }, () => {
+      assert.equal(safety.phoneAllowed("34600111222"), true, "9 dígitos en allowlist casa con pedido");
+      assert.equal(safety.phoneAllowed("34600333444"), true, "formato +34 con espacios casa");
+      assert.equal(safety.phoneAllowed("600111222"), true);
+      assert.equal(safety.phoneAllowed("+34 600-11-12-22"), true);
+      assert.equal(safety.phoneAllowed("34600111223"), false, "un dígito distinto NO pasa");
+      assert.equal(safety.phoneAllowed(""), false, "sin teléfono jamás es elegible");
+    });
+  });
+
+  await test("acción manual en TEST_MODE: bloqueada fuera de allowlist, permitida dentro", async () => {
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, () => {
+      assert.equal(safety.canOperateOnOrderManually("34699999999").ok, false);
+      assert.match(safety.canOperateOnOrderManually("34699999999").reason ?? "", /TEST_MODE/);
+      assert.equal(safety.canOperateOnOrderManually("600111222").ok, true);
+    });
+    assert.equal(safety.canOperateOnOrderManually("34699999999").ok, true, "sin TEST_MODE no bloquea");
+  });
+
+  console.log("· Auditoría — concurrencia e idempotencia");
+
+  await test("webhook duplicado concurrente: INSERT atómico, 1 fila, sin excepción", () => {
+    const payload = codPayload({ id: 940001, order_number: 1501 });
+    (payload.shipping_address as Record<string, unknown>).phone = "+34 600 00 00 70";
+    const raw = JSON.stringify(payload);
+    const r1 = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    const r2 = processOrdersCreateWebhook(raw, shopifyHeaders(raw));
+    assert.equal(r1.status, 200);
+    assert.equal(r2.status, 200);
+    assert.equal(r2.body.duplicate, true);
+    // Y el primitivo de DB directamente (base de la garantía anti-carrera):
+    const dup = db.insertOrderIfNew({
+      shopify_order_id: "940001",
+      shopify_order_number: "1501",
+      customer_name: null,
+      phone: "34600000070",
+      email: null,
+      product_summary: "x",
+      total_price: "1",
+      currency: "EUR",
+      address_line1: null,
+      address_line2: null,
+      city: null,
+      province: null,
+      postal_code: null,
+      country: null,
+      status: "pending_send",
+    });
+    assert.equal(dup.created, false, "no lanza ni duplica: OR IGNORE + re-select");
+    assert.equal(db.listOrders().filter((o) => o.shopify_order_id === "940001").length, 1);
+  });
+
+  await test("doble '1' → una confirmación y UN solo intento de tag", async () => {
+    const o = mkOrder("940002", "1502", "34600000060");
+    db.claimOrderInitialSend(o.id); // awaiting_reply sin pasar por el scheduler
+    const realFetch = global.fetch;
+    let fetchCalls = 0;
+    global.fetch = (async () => {
+      fetchCalls++;
+      return new Response(
+        JSON.stringify({ data: { tagsAdd: { node: { id: "x" }, userErrors: [] } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        {
+          SHOPIFY_WRITE_ENABLED: "1",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_ADMIN_ACCESS_TOKEN: "token-de-prueba",
+        },
+        async () => {
+          const r1 = handleOrderReply("34600000060", "1");
+          assert.equal(r1.reply, msgs.MSG_CONFIRMED);
+          const r2 = handleOrderReply("34600000060", "1"); // ya no hay pedido activo
+          assert.equal(r2.handled, false, "el segundo '1' es inerte");
+          await new Promise((r) => setTimeout(r, 50));
+          assert.equal(fetchCalls, 1, "exactamente un tagsAdd");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+    assert.equal(db.markOrderConfirmed(o.id, true), false, "el claim de confirmación no se repite");
+  });
+
+  await test("carrera respuesta-vs-reminder: confirmado jamás recibe el reminder del tick en vuelo", () => {
+    // El claim del reminder exige status='awaiting_reply': si el cliente
+    // confirma entre el SELECT del tick y el claim, el claim falla.
+    const o = mkOrder("940003", "1503", "34600000061");
+    db.claimOrderInitialSend(o.id);
+    db.markOrderConfirmed(o.id, true);
+    assert.equal(db.claimOrderReminder(o.id), false);
+    assert.equal(db.claimOrderInitialSend(o.id), false, "tampoco un inicial repetido");
+  });
+
+  console.log("· Auditoría — máquina de estados");
+
+  await test("transiciones inválidas: rechazadas sin side effects", () => {
+    const o = mkOrder("940004", "1504", "34600000062"); // pending_send
+    assert.equal(db.claimOrderReminder(o.id), false, "pending_send no recibe reminder");
+    assert.equal(db.saveOrderDeliveryNote(o.id, "x"), false, "nota solo esperando nota");
+    assert.equal(db.appendOrderProposedAddress(o.id, "x"), false, "dirección solo en corrección");
+    db.claimOrderInitialSend(o.id);
+    db.markOrderConfirmed(o.id, true);
+    assert.equal(db.markOrderNeedsCall(o.id), false, "confirmed → needs_call imposible");
+    assert.equal(db.resetOrderForResend(o.id), false, "confirmed no se reenvía");
+    assert.equal(db.markOrderCancelled(o.id), false, "confirmed no se descarta");
+    assert.equal(db.markOrderIgnoredOld(o.id), false, "confirmed no pasa a ignored_old");
+    assert.equal(db.getOrderByShopifyId("940004")!.status, "confirmed", "el estado no se movió");
+
+    const o2 = mkOrder("940005", "1505", "34600000063");
+    db.markOrderCancelled(o2.id);
+    assert.equal(db.markOrderConfirmed(o2.id, true), false, "cancelled → confirmed imposible");
+    assert.equal(db.claimOrderInitialSend(o2.id), false, "cancelled no vuelve a la cola solo");
+    assert.equal(db.getOrderByShopifyId("940005")!.status, "cancelled");
+  });
+
+  console.log("· Auditoría — Baileys y clasificador");
+
+  await test("el bot IGNORA sus propios mensajes (echo fromMe con un '1' dentro)", async () => {
+    const o = mkOrder("940006", "1506", "34600000064");
+    db.claimOrderInitialSend(o.id); // awaiting_reply: un '1' entrante confirmaría
+    const fakeSock = {} as unknown as Parameters<typeof handleIncomingMessages>[0];
+    const echo = {
+      type: "notify",
+      messages: [
+        {
+          // El propio mensaje del bot ("...Responde: 1 - Todo correcto...")
+          key: { remoteJid: "34600000064@s.whatsapp.net", fromMe: true },
+          message: { conversation: "Respóndeme: 1 - Todo correcto" },
+        },
+      ],
+    } as unknown as Parameters<typeof handleIncomingMessages>[1];
+    await handleIncomingMessages(fakeSock, echo);
+    assert.equal(db.getOrderByShopifyId("940006")!.status, "awaiting_reply", "el echo NO confirma");
+  });
+
+  await test("clasificador adversarial: solo confirma lo inequívoco", () => {
+    assert.equal(classifyOrderReply("1 gracias"), "confirm");
+    assert.equal(classifyOrderReply("2, me he equivocado"), "change_address");
+    assert.equal(classifyOrderReply("3 quiero poner una nota"), "delivery_note");
+    for (const t of ["👍", "?", "si perfecto", "correcto gracias", "hola", "creo que sí"]) {
+      assert.equal(classifyOrderReply(t), "unknown", `"${t}" debe pedir aclaración`);
+    }
+    // Caso REAL (#1057, Pedro): un typo NO se adivina. Pedir aclaración cuesta
+    // un mensaje; confirmar por error manda un pedido COD sin confirmar.
+    assert.equal(classifyOrderReply("todo crrrrreectro"), "unknown");
+  });
+
+  await test("tags como ARRAY (payload no confiable) también detecta releasit_cod_form", () => {
+    const payload = codPayload({
+      payment_gateway_names: [],
+      gateway: "",
+      tags: ["releasit_cod_form", "error Dropi"] as unknown as string,
+    });
+    assert.equal(isCodOrder(payload), true);
+  });
+
+  console.log("· Auditoría — TEST_MODE, Shopify y outbox");
+
+  await test("TEST_MODE: la respuesta de un cliente NO elegible se ignora por completo", async () => {
+    const o = mkOrder("940007", "1507", "34688888877");
+    db.claimOrderInitialSend(o.id);
+    const realFetch = global.fetch;
+    let fetchCalls = 0;
+    global.fetch = (async () => {
+      fetchCalls++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        {
+          TEST_MODE: "1",
+          TEST_PHONE_ALLOWLIST: "34600111222",
+          SHOPIFY_WRITE_ENABLED: "1",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_ADMIN_ACCESS_TOKEN: "token-de-prueba",
+        },
+        async () => {
+          // Fuera de allowlist y sin autorizar: ni siquiera se le atiende, así
+          // que nunca se confirma un pedido al que jamás escribimos.
+          const r = handleOrderReply("34688888877", "1");
+          assert.equal(r.handled, false, "no se procesa a un cliente no elegible");
+          await new Promise((r2) => setTimeout(r2, 50));
+          assert.equal(fetchCalls, 0, "el pedido de un cliente real jamás se taggea en pruebas");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+    const row = db.getOrderByShopifyId("940007")!;
+    assert.equal(row.status, "awaiting_reply", "su estado no se toca");
+    assert.equal(row.shopify_tagged, 0);
+  });
+
+  await test("Dev Dashboard: pide token por client-credentials, lo cachea y lo usa", async () => {
+    const admin = await import("../src/lib/shopify/admin");
+    const realFetch = global.fetch;
+    let tokenCalls = 0;
+    let usedToken = "";
+    admin._resetTokenCache();
+    global.fetch = (async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/admin/oauth/access_token")) {
+        tokenCalls++;
+        const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, string>;
+        assert.equal(body.grant_type, "client_credentials");
+        assert.equal(body.client_id, "id-de-prueba");
+        return new Response(JSON.stringify({ access_token: "token-fresco", expires_in: 86399 }), {
+          status: 200,
+        });
+      }
+      usedToken = String((init?.headers as Record<string, string>)?.["X-Shopify-Access-Token"] ?? "");
+      return new Response(
+        JSON.stringify({ data: { tagsAdd: { node: { id: "x" }, userErrors: [] } } }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        {
+          SHOPIFY_ADMIN_ACCESS_TOKEN: undefined, // sin token estático: usa la vía B
+          SHOPIFY_CLIENT_ID: "id-de-prueba",
+          SHOPIFY_CLIENT_SECRET: "secret-de-prueba",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_WRITE_ENABLED: "1",
+        },
+        async () => {
+          assert.equal(admin.shopifyAdminConfigured(), true, "client id+secret bastan");
+          assert.equal(await admin.tagOrderConfirmed("1"), true);
+          assert.equal(usedToken, "token-fresco", "usa el token recién pedido");
+          assert.equal(tokenCalls, 1);
+          await admin.tagOrderConfirmed("2");
+          assert.equal(tokenCalls, 1, "segundo tag reutiliza el token cacheado");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+      admin._resetTokenCache();
+    }
+  });
+
+  await test("sin credenciales de Admin API, tagsAdd no revienta y devuelve false", async () => {
+    const admin = await import("../src/lib/shopify/admin");
+    await withEnv(
+      {
+        SHOPIFY_ADMIN_ACCESS_TOKEN: undefined,
+        SHOPIFY_CLIENT_ID: undefined,
+        SHOPIFY_CLIENT_SECRET: undefined,
+        SHOPIFY_WRITE_ENABLED: "1",
+        SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+      },
+      async () => {
+        assert.equal(admin.shopifyAdminConfigured(), false);
+        assert.equal(await admin.tagOrderConfirmed("1"), false);
+      }
+    );
+  });
+
+  await test("tagsAdd: userErrors, red caída y 429 → false sin excepción", async () => {
+    const realFetch = global.fetch;
+    try {
+      await withEnv(
+        {
+          SHOPIFY_WRITE_ENABLED: "1",
+          SHOPIFY_STORE_DOMAIN: "qmbr1z-vf.myshopify.com",
+          SHOPIFY_ADMIN_ACCESS_TOKEN: "token-de-prueba",
+        },
+        async () => {
+          global.fetch = (async () =>
+            new Response(
+              JSON.stringify({ data: { tagsAdd: { node: null, userErrors: [{ message: "no permission" }] } } }),
+              { status: 200 }
+            )) as typeof fetch;
+          assert.equal(await tagOrderConfirmed("1"), false, "userErrors detectados");
+
+          global.fetch = (async () => {
+            throw new Error("network down");
+          }) as typeof fetch;
+          assert.equal(await tagOrderConfirmed("1"), false, "error de red no revienta");
+
+          global.fetch = (async () => new Response("slow down", { status: 429 })) as typeof fetch;
+          assert.equal(await tagOrderConfirmed("1"), false, "429 tratado como fallo suave");
+        }
+      );
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("outbox: claim→revert deja el mensaje pendiente para reintento (sin duplicar)", () => {
+    const convo = db.getOrCreateConversation("34600000065");
+    const obId = db.enqueueOutbox(convo.id, "34600000065", "prueba de revert");
+    db.markOutboxSent(obId); // claim
+    assert.equal(
+      db.getPendingOutbox(999).some((i) => i.id === obId),
+      false,
+      "reclamado: nadie más lo puede enviar"
+    );
+    db.revertOutboxSent(obId); // el envío falló de forma controlada
+    assert.equal(
+      db.getPendingOutbox(999).some((i) => i.id === obId),
+      true,
+      "vuelve a la cola exactamente una vez"
+    );
+  });
+
+  // ============ 18 · PRE-PILOTO: ventana horaria ============
+  console.log("· Pre-piloto — ventana horaria");
+
+  await test("insideSendWindow respeta la franja (y la nocturna que cruza medianoche)", async () => {
+    // 2026-08-20 a las 03:00 y 12:00 hora de Madrid (verano, UTC+2)
+    const madrugada = Date.parse("2026-08-20T01:00:00Z"); // 03:00 local
+    const mediodia = Date.parse("2026-08-20T10:00:00Z"); // 12:00 local
+    await withEnv({ WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
+      assert.equal(safety.insideSendWindow(madrugada), false, "03:00 está fuera");
+      assert.equal(safety.insideSendWindow(mediodia), true, "12:00 está dentro");
+      assert.equal(safety.localMinutesNow(mediodia), 12 * 60);
+    });
+    // Franja nocturna (cruza medianoche): 22:00-06:00
+    await withEnv({ WHATSAPP_WINDOW_START: "22:00", WHATSAPP_WINDOW_END: "06:00" }, () => {
+      assert.equal(safety.insideSendWindow(madrugada), true, "03:00 entra en la nocturna");
+      assert.equal(safety.insideSendWindow(mediodia), false);
+    });
+    // Valores inválidos → se usa el default 09:00-21:00 (fail safe)
+    await withEnv({ WHATSAPP_WINDOW_START: "99:99", WHATSAPP_WINDOW_END: "basura" }, () => {
+      assert.equal(safety.windowStartMinutes(), 9 * 60);
+      assert.equal(safety.windowEndMinutes(), 21 * 60);
+    });
+    await withEnv({ WHATSAPP_WINDOW_ENABLED: "0" }, () => {
+      assert.equal(safety.insideSendWindow(madrugada), true, "desactivada = siempre dentro");
+    });
+  });
+
+  await test("nextWindowOpen apunta a la siguiente apertura", async () => {
+    await withEnv({ WHATSAPP_WINDOW_START: "09:00", WHATSAPP_WINDOW_END: "21:00" }, () => {
+      const madrugada = Date.parse("2026-08-20T01:00:00Z"); // 03:00 local → faltan 6h
+      const abre = safety.nextWindowOpen(madrugada);
+      assert.equal(abre - Math.floor(madrugada / 1000), 6 * 3600);
+      const noche = Date.parse("2026-08-20T20:00:00Z"); // 22:00 local → faltan 11h
+      assert.equal(safety.nextWindowOpen(noche) - Math.floor(noche / 1000), 11 * 3600);
+    });
+  });
+
+  await test("fuera de ventana: NO se envía, NO se pierde y NO caduca a ignored_old", async () => {
+    const o = mkOrder("960001", "1701", "34600000100");
+    await withEnv(
+      {
+        TEST_MODE: "0",
+        WHATSAPP_WINDOW_START: "09:00",
+        WHATSAPP_WINDOW_END: "09:01", // ventana de 1 minuto: casi seguro cerrada
+        MAX_ORDER_AGE_MINUTES: "30",
+      },
+      async () => {
+        if (safety.insideSendWindow()) return; // por si el test corre justo a las 09:00
+        const r = await runSchedulerTick();
+        assert.equal(r.sent, 0, "no envía fuera de horario");
+        const row = db.getOrderById(o.id)!;
+        assert.equal(row.status, "pending_send", "sigue en cola, no se pierde");
+        assert.ok(row.deferred_until, "queda marcada la próxima apertura");
+        assert.equal(
+          db.getPendingOutbox(900).some((x) => x.phone === "34600000100"),
+          false
+        );
+
+        // Aunque pase mucho tiempo esperando, NO se marca ignored_old:
+        const muchoDespues = (row.deferred_until as number) + 60;
+        await runSchedulerTick(muchoDespues);
+        assert.notEqual(db.getOrderById(o.id)!.status, "ignored_old", "esperar no lo caduca");
+      }
+    );
+  });
+
+  await test("dentro de ventana: el pedido diferido se envía con normalidad", async () => {
+    const o = mkOrder("960002", "1702", "34600000101");
+    await withEnv({ TEST_MODE: "0", WHATSAPP_WINDOW_ENABLED: "0" }, async () => {
+      await runSchedulerTick();
+      const row = db.getOrderById(o.id)!;
+      assert.equal(row.status, "awaiting_reply");
+      assert.equal(
+        db.getPendingOutbox(900).some((x) => x.phone === "34600000101"),
+        true
+      );
+    });
+  });
+
+  // ============ 19 · PRE-PILOTO: autorización manual por pedido ============
+  console.log("· Pre-piloto — autorización manual de piloto");
+
+  await test("sin autorizar, un cliente fuera de allowlist no recibe NADA", async () => {
+    const o = mkOrder("960003", "1703", "34777000111"); // NO está en la allowlist
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, async () => {
+      assert.equal(safety.orderActionAllowed(db.getOrderById(o.id)!), false);
+      await runSchedulerTick();
+      assert.equal(db.getOrderById(o.id)!.status, "pending_send");
+      assert.equal(
+        db.getPendingOutbox(900).some((x) => x.phone === "34777000111"),
+        false
+      );
+    });
+  });
+
+  await test("tras autorizar, ESE pedido recibe mensaje, reminder y tag", async () => {
+    const o = db.getOrderByShopifyId("960003")!;
+    assert.equal(db.authorizeOrderForPilot(o.id), true);
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, async () => {
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.pilot_authorized, 1);
+      assert.equal(safety.orderActionAllowed(fresco), true);
+      assert.equal(
+        safety.canSendRealWhatsApp("34777000111", { orderAuthorized: true }),
+        true,
+        "el gate deja pasar SOLO con la marca del pedido"
+      );
+      assert.equal(
+        safety.canSendRealWhatsApp("34777000111"),
+        false,
+        "sin la marca, el mismo teléfono sigue bloqueado"
+      );
+
+      const T = Math.floor(Date.now() / 1000);
+      await runSchedulerTick(T);
+      const enviado = db.getOrderById(o.id)!;
+      assert.equal(enviado.status, "awaiting_reply", "ya se le envió el inicial");
+      const items = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111");
+      assert.equal(items.length, 1);
+      assert.equal(items[0].authorized, 1, "el mensaje viaja marcado como autorizado");
+
+      // Recordatorio: también permitido para este pedido.
+      await runSchedulerTick(T + 61);
+      assert.equal(db.getOrderById(o.id)!.status, "reminder_sent");
+
+      // Y su respuesta se procesa y se le contesta.
+      const r = handleOrderReply("34777000111", "1");
+      assert.equal(r.handled, true);
+      assert.equal(r.reply, msgs.MSG_CONFIRMED);
+      assert.equal(r.authorized, true, "la respuesta hereda la autorización");
+      assert.equal(db.getOrderById(o.id)!.status, "confirmed");
+    });
+  });
+
+  await test("AISLAMIENTO: autorizar un pedido NO autoriza otro del MISMO teléfono", async () => {
+    const autorizado = db.getOrderByShopifyId("960003")!; // ya autorizado y confirmado
+    const otro = mkOrder("960004", "1704", "34777000111"); // mismo teléfono, pedido nuevo
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, async () => {
+      assert.equal(autorizado.pilot_authorized, 1);
+      assert.equal(db.getOrderById(otro.id)!.pilot_authorized, 0, "el nuevo nace sin autorizar");
+      assert.equal(safety.orderActionAllowed(db.getOrderById(otro.id)!), false);
+      const antes = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111").length;
+      await runSchedulerTick();
+      assert.equal(db.getOrderById(otro.id)!.status, "pending_send", "no se le envía nada");
+      const despues = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111").length;
+      assert.equal(despues, antes, "ni un mensaje nuevo para el pedido sin autorizar");
+      // Y su respuesta tampoco se procesa (no hay pedido elegible activo):
+      assert.equal(handleOrderReply("34777000111", "1").handled, false);
+    });
+  });
+
+  await test("AISLAMIENTO: autorizar un pedido NO autoriza a otros clientes", async () => {
+    const ajeno = mkOrder("960005", "1705", "34777000222"); // otro cliente distinto
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, async () => {
+      assert.equal(safety.orderActionAllowed(db.getOrderById(ajeno.id)!), false);
+      await runSchedulerTick();
+      assert.equal(db.getOrderById(ajeno.id)!.status, "pending_send");
+      assert.equal(
+        db.getPendingOutbox(900).some((x) => x.phone === "34777000222"),
+        false
+      );
+    });
+  });
+
+  await test("la autorización NO salta el kill switch ni el APP_MODE", async () => {
+    const o = db.getOrderByShopifyId("960003")!;
+    assert.equal(o.pilot_authorized, 1);
+    await withEnv({ EMERGENCY_STOP: "1" }, () => {
+      assert.equal(safety.canSendRealWhatsApp(o.phone, { orderAuthorized: true }), false);
+    });
+    await withEnv({ APP_MODE: "safe" }, () => {
+      assert.equal(safety.canSendRealWhatsApp(o.phone, { orderAuthorized: true }), false);
+    });
+    await withEnv({ WHATSAPP_SEND_ENABLED: "0" }, () => {
+      assert.equal(safety.canSendRealWhatsApp(o.phone, { orderAuthorized: true }), false);
+    });
+  });
+
+  await test("la autorización persiste y no se puede dar a pedidos terminales", async () => {
+    const cancelado = mkOrder("960006", "1706", "34777000333");
+    db.markOrderCancelled(cancelado.id);
+    assert.equal(db.authorizeOrderForPilot(cancelado.id), false, "cancelado no se autoriza");
+    assert.equal(db.getOrderById(cancelado.id)!.pilot_authorized, 0);
+
+    // Persistencia real en disco:
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path.join(tmpDir, "messages.db"), { readonly: true });
+    try {
+      const row = raw
+        .prepare("SELECT pilot_authorized FROM orders WHERE shopify_order_id='960003'")
+        .get() as { pilot_authorized: number };
+      assert.equal(row.pilot_authorized, 1, "sobrevive a un reinicio");
+    } finally {
+      raw.close();
+    }
+    // Y se puede retirar:
+    const o = db.getOrderByShopifyId("960003")!;
+    db.revokeOrderPilotAuthorization(o.id);
+    assert.equal(db.getOrderById(o.id)!.pilot_authorized, 0);
+    db.authorizeOrderForPilot(o.id); // restaurar para no afectar a otros tests
+  });
+
+  // ============ 20 · PROVEEDORES (Dropi/Dropea) — fase 2, simulación ============
+  console.log("· Proveedores — routing, dirección y gates");
+
+  const suppliers = await import("../src/lib/suppliers/service");
+  const { validateSupplierAddress } = await import("../src/lib/suppliers/address");
+  const { resolveSupplier } = await import("../src/lib/suppliers/router");
+  const { ProviderNotConfiguredError } = await import("../src/lib/suppliers/types");
+  const { dropiProvider } = await import("../src/lib/suppliers/dropi");
+  const { dropeaProvider } = await import("../src/lib/suppliers/dropea");
+
+  /** Crea un pedido ya ENVIADO (awaiting_reply), listo para responder. */
+  const mkSent = (
+    shopifyId: string,
+    num: string,
+    extra: Partial<{ city: string | null; postal_code: string | null; address_line1: string | null }> = {}
+  ) => {
+    const o = db.insertOrderIfNew({
+      shopify_order_id: shopifyId,
+      shopify_order_number: num,
+      customer_name: "Cliente Proveedor",
+      phone: "34600111222",
+      email: null,
+      product_summary: "1x Limpiador Ultrasónico Multiusos",
+      total_price: "34.98",
+      currency: "EUR",
+      address_line1: "address_line1" in extra ? extra.address_line1! : "Calle Ejemplo 5B",
+      address_line2: null,
+      city: "city" in extra ? extra.city! : "Almería",
+      province: "Almería",
+      postal_code: "postal_code" in extra ? extra.postal_code! : "04007",
+      country: "España",
+      status: "pending_send",
+    }).order;
+    db.claimOrderInitialSend(o.id);
+    return db.getOrderById(o.id)!;
+  };
+
+  /** Pedido ya enviado Y confirmado por el cliente. */
+  const mkConfirmed = (
+    shopifyId: string,
+    num: string,
+    extra: Partial<{ city: string | null; postal_code: string | null; address_line1: string | null }> = {}
+  ) => {
+    const o = mkSent(shopifyId, num, extra);
+    db.markOrderConfirmed(o.id, true);
+    return db.getOrderById(o.id)!;
+  };
+
+  await test("validateSupplierAddress: bloquea city '-', vacía y corta", () => {
+    const ok = validateSupplierAddress({
+      address_line1: "Calle Ejemplo 5B",
+      city: "Almería",
+      postal_code: "04007",
+    });
+    assert.equal(ok.valid, true);
+
+    // El caso REAL de Casamable: Releasit manda city = "-"
+    const guion = validateSupplierAddress({
+      address_line1: "Calle Ejemplo 5B",
+      city: "-",
+      postal_code: "04007",
+    });
+    assert.equal(guion.valid, false);
+    assert.ok(guion.issues.includes("invalid_city"));
+
+    for (const c of ["", "   ", "AB", ".", "n/a"]) {
+      const r = validateSupplierAddress({ address_line1: "Calle X 1", city: c, postal_code: "04007" });
+      assert.equal(r.valid, false, `city "${c}" debe bloquear`);
+      assert.ok(r.issues.includes("invalid_city"));
+    }
+
+    const sinCp = validateSupplierAddress({ address_line1: "Calle X 1", city: "Madrid", postal_code: "" });
+    assert.ok(sinCp.issues.includes("missing_postal_code"));
+    const sinCalle = validateSupplierAddress({ address_line1: "-", city: "Madrid", postal_code: "28001" });
+    assert.ok(sinCalle.issues.includes("missing_address"));
+  });
+
+  await test("routing: sin reglas configuradas SIEMPRE unknown (nunca adivina)", () => {
+    const o = mkConfirmed("970001", "1801");
+    assert.equal(resolveSupplier(o).platform, "unknown");
+    const ev = suppliers.evaluateOrderForSupplier(o);
+    assert.equal(ev.status, "manual_review");
+    assert.match(ev.reason, /sin reglas de enrutado/);
+  });
+
+  await test("routing con reglas: enruta por producto y detecta ambigüedad", async () => {
+    const o = db.getOrderByShopifyId("970001")!;
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      assert.equal(resolveSupplier(o).platform, "dropi");
+    });
+    // Dos proveedores compiten por el mismo pedido → decisión humana
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador,dropea:ultrasónico" }, () => {
+      const r = resolveSupplier(o);
+      assert.equal(r.platform, "unknown");
+      assert.match(r.reason, /varios proveedores/);
+    });
+  });
+
+  await test("pedido con city '-' → blocked_address, nunca ready", async () => {
+    const o = mkConfirmed("970002", "1802", { city: "-" });
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(o);
+      assert.equal(ev.status, "blocked_address");
+      assert.match(ev.reason, /localidad/);
+      assert.equal(suppliers.canSyncSupplier(o, "dropi").allowed, false);
+    });
+  });
+
+  await test("dirección válida + routing → ready, con el DTO completo", async () => {
+    const o = mkConfirmed("970003", "1803");
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "ready");
+      assert.equal(ev.platform, "dropi");
+      assert.ok(ev.input, "debe construir el DTO");
+      assert.equal(ev.input!.shopifyOrderId, "970003", "la referencia es nuestro id de Shopify");
+      assert.equal(ev.input!.finalAddress.city, "Almería");
+      assert.equal(ev.input!.addressSource, "original");
+      assert.equal(ev.input!.codAmount, "34.98");
+      assert.equal(ev.input!.items[0].quantity, 1);
+      assert.match(ev.input!.items[0].title, /Limpiador/);
+    });
+  });
+
+  await test("delivery_note del cliente llega al DTO", async () => {
+    // Ruta real del cliente: recibe el mensaje → "3" → escribe la nota → "1"
+    const o = mkSent("970004", "1804");
+    assert.equal(db.markOrderAwaitingDeliveryNote(o.id), true);
+    assert.equal(db.saveOrderDeliveryNote(o.id, "Llamar antes de subir"), true);
+    db.markOrderConfirmed(o.id, true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.input?.deliveryNote, "Llamar antes de subir");
+    });
+  });
+
+  await test("dirección propuesta SIN aprobar → manual_review (no se envía sola)", async () => {
+    // Ruta real: el cliente respondió "2", mandó su dirección y luego confirmó.
+    const o = mkSent("970005", "1805");
+    assert.equal(db.markOrderNeedsCorrection(o.id), true);
+    assert.equal(db.appendOrderProposedAddress(o.id, "Calle Nueva 7, 2B, 28004 Madrid"), true);
+    db.markOrderConfirmed(o.id, true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "manual_review");
+      assert.match(ev.reason, /nadie ha decidido/);
+      assert.equal(ev.input, null, "no se construye DTO con una dirección sin decidir");
+    });
+  });
+
+  await test("propuesta aprobada → sigue exigiendo revisión (texto libre)", async () => {
+    const o = db.getOrderByShopifyId("970005")!;
+    assert.equal(db.setOrderFinalAddressSource(o.id, "proposed"), true);
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const ev = suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!);
+      assert.equal(ev.status, "manual_review");
+      assert.match(ev.reason, /texto libre/);
+    });
+    // Y si se decide usar la original, vuelve a ser enviable:
+    db.setOrderFinalAddressSource(o.id, "original");
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      assert.equal(suppliers.evaluateOrderForSupplier(db.getOrderById(o.id)!).status, "ready");
+    });
+  });
+
+  await test("pedido NO confirmado nunca sale (not_ready)", () => {
+    const o = mkOrder("970006", "1806", "34600111222"); // pending_send
+    const ev = suppliers.evaluateOrderForSupplier(o);
+    assert.equal(ev.status, "not_ready");
+    assert.equal(suppliers.canSyncSupplier(o, "dropi").allowed, false);
+  });
+
+  console.log("· Proveedores — safety gates e idempotencia");
+
+  await test("gate cerrado por defecto: nada sale sin abrir varias llaves", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      // Con todo por defecto, el primer freno es el candado de la
+      // integración antigua (el más peligroso: duplicaría envíos).
+      const g = suppliers.canSyncSupplier(o, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /LEGACY_SUPPLIER_INTEGRATIONS_DISABLED/);
+    });
+    // Y quitando ese, sigue frenando el interruptor maestro.
+    await withEnv(
+      { SUPPLIER_ROUTING_RULES: "dropi:limpiador", LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1" },
+      () => {
+        const g = suppliers.canSyncSupplier(o, "dropi");
+        assert.equal(g.allowed, false);
+        assert.match(g.reason ?? "", /SUPPLIER_SYNC_ENABLED/);
+      }
+    );
+  });
+
+  await test("matriz de llaves del proveedor: cualquiera cerrada = NO SYNC", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    const base = {
+      SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+      SUPPLIER_SYNC_ENABLED: "1",
+      SUPPLIER_TEST_MODE: "0",
+      DROPIPRO_WRITE_ENABLED: "1",
+      SUPPLIER_PILOT_MODE: "0", // el piloto se prueba aparte
+      LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1", // el candado se prueba aparte
+    };
+    // Todas abiertas… pero el provider NO está implementado:
+    await withEnv(base, () => {
+      const g = suppliers.canSyncSupplier(o, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /no está configurado/);
+    });
+    // Test mode activo → solo simulación
+    await withEnv({ ...base, SUPPLIER_TEST_MODE: "1" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /SUPPLIER_TEST_MODE/);
+    });
+    // Llave de plataforma cerrada
+    await withEnv({ ...base, DROPIPRO_WRITE_ENABLED: "0" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /escritura no habilitada/);
+    });
+    // Kill switch global
+    await withEnv({ ...base, EMERGENCY_STOP: "1" }, () => {
+      assert.match(suppliers.canSyncSupplier(o, "dropi").reason ?? "", /EMERGENCY_STOP/);
+    });
+  });
+
+  await test("idempotencia: con external_order_id no se recrea jamás", async () => {
+    const o = mkConfirmed("970007", "1807");
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw
+      .prepare("UPDATE orders SET supplier_external_order_id = 'DROPI-XYZ' WHERE shopify_order_id = '970007'")
+      .run();
+    raw.close();
+    const fresco = db.getOrderById(o.id)!;
+    await withEnv(
+      {
+        SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+        SUPPLIER_SYNC_ENABLED: "1",
+        SUPPLIER_TEST_MODE: "0",
+        DROPIPRO_WRITE_ENABLED: "1",
+        LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
+      },
+      () => {
+        const ev = suppliers.evaluateOrderForSupplier(fresco);
+        assert.equal(ev.status, "synced");
+        assert.match(ev.reason, /no se recrea/);
+        const g = suppliers.canSyncSupplier(fresco, "dropi");
+        assert.equal(g.allowed, false);
+        assert.match(g.reason ?? "", /idempotencia/);
+      }
+    );
+  });
+
+  await test("providers stub: createOrder LANZA, no finge éxito ni toca la red", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const input = {
+        shopifyOrderId: "1",
+        orderNumber: "1",
+        customerName: "X",
+        phone: "34600111222",
+        email: null,
+        finalAddress: {
+          line1: "Calle X 1",
+          line2: null,
+          city: "Madrid",
+          province: null,
+          postalCode: "28001",
+          country: "España",
+        },
+        addressSource: "original" as const,
+        items: [{ title: "P", quantity: 1, price: null, sku: null }],
+        total: "10",
+        currency: "EUR",
+        codAmount: "10",
+        deliveryNote: null,
+      };
+      for (const p of [dropiProvider, dropeaProvider]) {
+        assert.equal(p.isConfigured(), false, `${p.platform} no debe declararse configurado`);
+        await assert.rejects(() => p.createOrder(input), ProviderNotConfiguredError);
+        await assert.rejects(() => p.cancelOrder("x"), ProviderNotConfiguredError);
+        await assert.rejects(() => p.getStatus("x"), ProviderNotConfiguredError);
+        // La simulación sí funciona, y es evidente que es simulada:
+        const sim = p.simulateCreateOrder(input);
+        assert.equal(sim.simulated, true);
+        assert.match(sim.externalOrderId, /^SIMULATED-/);
+      }
+      assert.equal(llamadas, 0, "ningún provider hizo una sola petición de red");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("el scheduler evalúa proveedores SIN ningún efecto externo", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const o = mkConfirmed("970008", "1808", { city: "-" });
+      await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, async () => {
+        await runSchedulerTick();
+      });
+      const row = db.getOrderById(o.id)!;
+      assert.equal(row.supplier_sync_status, "blocked_address", "queda anotado en la DB");
+      assert.equal(row.supplier_platform, "dropi");
+      assert.match(row.supplier_last_error ?? "", /localidad/);
+      assert.equal(row.supplier_reference, "970008", "guarda la referencia estable");
+      assert.equal(row.supplier_external_order_id, null, "no inventa un id");
+      assert.equal(llamadas, 0, "el tick no hizo ninguna llamada de red a proveedores");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("simulateSupplierSync no toca la DB ni la red", async () => {
+    const o = db.getOrderByShopifyId("970003")!;
+    const antes = JSON.stringify(db.getOrderById(o.id));
+    await withEnv({ SUPPLIER_ROUTING_RULES: "dropi:limpiador" }, () => {
+      const r = suppliers.simulateSupplierSync(db.getOrderById(o.id)!);
+      assert.equal(r.evaluation.status, "ready");
+      assert.equal(r.simulated?.simulated, true);
+      assert.match(r.simulated?.externalOrderId ?? "", /^SIMULATED-DROPI-/);
+      assert.equal(r.gate.allowed, false, "simular NUNCA implica permiso de envío");
+    });
+    assert.equal(JSON.stringify(db.getOrderById(o.id)), antes, "el pedido no se modificó");
+  });
+
+  // ============ 21 · TRACKING Y AVISOS DE POSTVENTA ============
+  console.log("· Tracking — normalización y transiciones");
+
+  const tracking = await import("../src/lib/tracking/service");
+  const { normalizeSupplierStatus } = await import("../src/lib/tracking/normalizer");
+  const { isTerminalTracking } = await import("../src/lib/tracking/types");
+  const supplierWebhook = await import("../src/lib/suppliers/dropea/webhook");
+  const { runTrackingPollTick } = await import("../src/lib/tracking/scheduler");
+
+  /** Pedido confirmado Y ya sincronizado con un proveedor ficticio. */
+  const mkSynced = (shopifyId: string, num: string, phone = "34600111222") => {
+    const o = mkConfirmed(shopifyId, num);
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw
+      .prepare(
+        `UPDATE orders SET supplier_platform='dropea', supplier_sync_status='synced',
+         supplier_external_order_id=?, phone=? WHERE id=?`
+      )
+      .run(String(shopifyId), phone, o.id);
+    raw.close();
+    return db.getOrderById(o.id)!;
+  };
+
+  await test("normalizeSupplierStatus: traduce lo conocido, jamás adivina", () => {
+    assert.equal(normalizeSupplierStatus("ENTREGADO"), "delivered");
+    assert.equal(normalizeSupplierStatus("En reparto"), "out_for_delivery");
+    assert.equal(normalizeSupplierStatus("in_transit"), "in_transit");
+    assert.equal(normalizeSupplierStatus("En tránsito"), "in_transit");
+    assert.equal(normalizeSupplierStatus("devuelto"), "returned");
+    // Vocabulario propio del proveedor que aún no conocemos → unknown
+    assert.equal(normalizeSupplierStatus("GUIA_GENERADA_BODEGA"), "unknown");
+    assert.equal(normalizeSupplierStatus(null), "unknown");
+  });
+
+  await test("SUPPLIER_STATUS_MAP permite añadir estados sin tocar código", async () => {
+    await withEnv({ SUPPLIER_STATUS_MAP: "GUIA_GENERADA:shipped,EN_BODEGA:processing" }, () => {
+      assert.equal(normalizeSupplierStatus("GUIA_GENERADA"), "shipped");
+      assert.equal(normalizeSupplierStatus("en bodega"), "processing");
+    });
+  });
+
+  await test("terminales identificados correctamente", () => {
+    for (const s of ["delivered", "returned", "cancelled"]) assert.equal(isTerminalTracking(s), true);
+    for (const s of ["in_transit", "out_for_delivery", "incident"]) assert.equal(isTerminalTracking(s), false);
+  });
+
+  await test("aparece tracking → UN aviso; repetir el update → NINGUNO más", () => {
+    const o = mkSynced("980001", "1901");
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+
+    const r1 = tracking.processSupplierUpdate(o, {
+      rawStatus: "shipped",
+      trackingNumber: "TRK123",
+      trackingUrl: "https://track.example/TRK123",
+      carrier: "SEUR",
+    });
+    assert.ok(r1.events.includes("TRACKING_AVAILABLE"));
+    assert.ok(r1.notified.includes("TRACKING_AVAILABLE"));
+    const tras1 = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+    assert.equal(tras1.length, antes + 1, "exactamente un mensaje");
+    assert.match(tras1[tras1.length - 1].content, /ya está en camino/);
+    assert.match(tras1[tras1.length - 1].content, /TRK123/);
+
+    // Mismo update otra vez (webhook duplicado): ni un mensaje más.
+    const r2 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, {
+      rawStatus: "shipped",
+      trackingNumber: "TRK123",
+    });
+    assert.equal(r2.events.length, 0, "sin cambios = sin eventos");
+    assert.equal(
+      db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length,
+      antes + 1,
+      "no se reenvía"
+    );
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.tracking_number, "TRK123");
+    assert.equal(row.carrier, "SEUR");
+    assert.ok(row.tracking_first_seen_at, "queda registrado cuándo apareció");
+    assert.ok(row.tracking_notification_sent_at, "queda el sello del aviso");
+  });
+
+  await test("out_for_delivery → UN aviso con el importe; repetido → ninguno", () => {
+    const o = db.getOrderByShopifyId("980001")!;
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+
+    const r1 = tracking.processSupplierUpdate(o, { rawStatus: "En reparto" });
+    assert.ok(r1.notified.includes("OUT_FOR_DELIVERY"));
+    const msgs2 = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+    assert.equal(msgs2.length, antes + 1);
+    const texto = msgs2[msgs2.length - 1].content;
+    assert.match(texto, /está en reparto/);
+    assert.match(texto, /en efectivo/);
+    assert.match(texto, /34,98/, "recuerda el importe en formato español");
+
+    // Otro webhook con el mismo estado: nada.
+    const r2 = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "out_for_delivery" });
+    assert.equal(r2.notified.length, 0);
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes + 1);
+  });
+
+  await test("delivered con el aviso DESACTIVADO → no manda nada", () => {
+    const o = db.getOrderByShopifyId("980001")!;
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const r = tracking.processSupplierUpdate(o, { rawStatus: "ENTREGADO" });
+    assert.ok(r.events.includes("DELIVERED"));
+    assert.equal(r.notified.length, 0, "DELIVERED_WHATSAPP_ENABLED=0 por defecto");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length, antes);
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered");
+  });
+
+  await test("delivered ACTIVADO → un solo aviso", async () => {
+    const o = mkSynced("980002", "1902", "34600111333");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit", trackingNumber: "TRK9" });
+    await withEnv({ DELIVERED_WHATSAPP_ENABLED: "1" }, () => {
+      const antes = db.getPendingOutbox(999).filter((x) => x.phone === "34600111333").length;
+      const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered" });
+      assert.ok(r.notified.includes("DELIVERED"));
+      const despues = db.getPendingOutbox(999).filter((x) => x.phone === "34600111333");
+      assert.equal(despues.length, antes + 1);
+      assert.match(despues[despues.length - 1].content, /entregado/);
+      // Repetir no reenvía
+      tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "delivered" });
+      assert.equal(
+        db.getPendingOutbox(999).filter((x) => x.phone === "34600111333").length,
+        antes + 1
+      );
+    });
+  });
+
+  await test("incidencia: NO escribe al cliente y manda el pedido a revisión", () => {
+    const o = mkSynced("980003", "1903", "34600111444");
+    const antes = db.getPendingOutbox(999).filter((x) => x.phone === "34600111444").length;
+    const r = tracking.processSupplierUpdate(o, { rawStatus: "incidencia" });
+    assert.ok(r.events.includes("INCIDENT"));
+    assert.equal(r.notified.length, 0, "ningún mensaje automático ante incidencias");
+    assert.equal(db.getPendingOutbox(999).filter((x) => x.phone === "34600111444").length, antes);
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_sync_status, "manual_review", "visible en el panel");
+    assert.equal(row.status, "confirmed", "la confirmación del cliente no se altera");
+  });
+
+  await test("update atrasado no hace retroceder el estado", () => {
+    const o = mkSynced("980004", "1904", "34600111555");
+    tracking.processSupplierUpdate(o, { rawStatus: "out_for_delivery" });
+    // Llega tarde un "in_transit" (webhooks desordenados)
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "in_transit" });
+    assert.equal(r.newStatus, "out_for_delivery", "no retrocede");
+    assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+  });
+
+  await test("estado desconocido no pisa lo que ya sabíamos", () => {
+    const o = mkSynced("980005", "1905", "34600111666");
+    tracking.processSupplierUpdate(o, { rawStatus: "in_transit" });
+    const r = tracking.processSupplierUpdate(db.getOrderById(o.id)!, { rawStatus: "PALABRA_RARA" });
+    assert.equal(r.newStatus, "in_transit");
+  });
+
+  console.log("· Tracking — webhooks de proveedor y polling");
+
+  /** Firma como la calcula Dropea: sha256=<base64 de HMAC-SHA256(raw_body)>. */
+  const firmaDropea = (body: string, secret = "secreto-de-prueba") =>
+    "sha256=" + crypto.createHmac("sha256", secret).update(body, "utf8").digest("base64");
+
+  /** Envoltorio v2 de Dropea con un pedido dentro. */
+  const sobreDropea = (resourceId: number, order: Record<string, unknown>, topic = "order.status.changed") =>
+    JSON.stringify({
+      topic,
+      market: "ES",
+      event_id: `evt-${resourceId}-${topic}`,
+      event_at: "2026-08-22T10:00:00.000Z",
+      resource_id: resourceId,
+      resource: order,
+    });
+
+  await test("webhook sin secreto configurado → 503 (fail closed)", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: undefined }, () => {
+      const r = supplierWebhook.processDropeaWebhook("{}", {});
+      assert.equal(r.status, 503);
+    });
+  });
+
+  await test("firma inválida → 401 y sin efectos", async () => {
+    const o = mkSynced("980006", "1906", "34600111777");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING", sub_status: "OUT_FOR_DELIVERY" });
+      // Firma con otro secreto
+      const r = supplierWebhook.processDropeaWebhook(body, {
+        "x-dropea-signature": firmaDropea(body, "otro-secreto"),
+      });
+      assert.equal(r.status, 401);
+      assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "unknown", "no se tocó");
+      assert.equal(db.getPendingOutbox(999).some((x) => x.phone === "34600111777"), false);
+    });
+  });
+
+  await test("firma sin el prefijo sha256= o en hex → 401 (solo su formato)", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING" });
+      const base64Pelado = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
+      const hex = crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("hex");
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": base64Pelado }).status, 401);
+      assert.equal(supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": `sha256=${hex}` }).status, 401);
+    });
+  });
+
+  await test("firma VÁLIDA (X-Dropea-Signature, base64) → procesa y es idempotente", async () => {
+    const o = db.getOrderByShopifyId("980006")!;
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111777").length;
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, {
+        id: 980006,
+        status: "SHIPPING",
+        sub_status: "OUT_FOR_DELIVERY",
+        tracking_number: "TRKW1",
+        tracking_url: "https://track.example/TRKW1",
+        carrier: "GLS",
+      });
+      const firma = firmaDropea(body);
+
+      const antes = contar();
+      const r1 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r1.status, 200);
+      assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "out_for_delivery");
+      assert.ok(contar() > antes, "avisó al cliente");
+      const tras1 = contar();
+
+      // Reintento idéntico de Dropea
+      const r2 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r2.status, 200);
+      assert.equal(contar(), tras1, "ni un mensaje duplicado");
+    });
+  });
+
+  await test("topic desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(980006, { id: 980006, status: "SHIPPING" }, "order.something.new");
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "topic desconocido");
+    });
+  });
+
+  await test("envoltorio inválido → 400", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({ topic: "order.created" }); // sin resource_id
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 400);
+      const roto = "{no-json";
+      assert.equal(
+        supplierWebhook.processDropeaWebhook(roto, { "x-dropea-signature": firmaDropea(roto) }).status,
+        400
+      );
+    });
+  });
+
+  await test("incidencia (issue.*) → revisión manual, SIN mensaje al cliente", async () => {
+    const o = mkSynced("980010", "1910", "34600111999");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111999").length;
+    const antes = contar();
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(
+        5,
+        { id: 5, order_id: 980010, status: "PENDING", is_active: true, tracking_number: "X" },
+        "issue.created"
+      );
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.requiereAccion, true);
+      assert.equal(db.getOrderById(o.id)!.supplier_sync_status, "manual_review");
+      assert.equal(contar(), antes, "las incidencias no escriben al cliente");
+    });
+  });
+
+  await test("emparejado por external_order_id (nuestra referencia)", async () => {
+    const o = mkConfirmed("980011", "1911");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(444555, {
+        id: 444555,
+        status: "PROCESSING",
+        sub_status: "PICKING",
+        external_order_id: "980011",
+      });
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, "1911");
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.supplier_external_order_id, "444555", "adopta el id de Dropea");
+      assert.equal(fresco.supplier_status_normalized, "processing");
+    });
+  });
+
+  await test("webhook de un pedido desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = sobreDropea(99887766, { id: 99887766, status: "FINISH", sub_status: "DELIVERED" });
+      const r = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firmaDropea(body) });
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "pedido desconocido");
+    });
+  });
+
+  await test("polling: bloqueado por gates y sin tocar la red", async () => {
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = await runTrackingPollTick();
+      assert.equal(r.blocked, "SUPPLIER_SYNC_ENABLED=0");
+      assert.equal(r.checked, 0);
+      // Con sync habilitado sigue sin haber provider implementado:
+      await withEnv({ SUPPLIER_SYNC_ENABLED: "1" }, async () => {
+        const r2 = await runTrackingPollTick();
+        assert.equal(r2.blocked, null);
+        assert.equal(r2.checked, 0, "ningún provider configurado: no consulta");
+      });
+      assert.equal(llamadas, 0, "el polling no hizo ninguna petición");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("polling NO consulta pedidos ya entregados/devueltos", () => {
+    const entregados = db
+      .getOrdersForTrackingPolling(Math.floor(Date.now() / 1000) + 999)
+      .filter((o) => ["delivered", "returned", "cancelled"].includes(o.supplier_status_normalized));
+    assert.equal(entregados.length, 0, "los terminales quedan fuera de la cola");
+  });
+
+  await test("piloto de proveedores: hace falta aprobar el pedido UNO A UNO", async () => {
+    const o = mkConfirmed("980008", "1908");
+    await withEnv(
+      {
+        SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+        SUPPLIER_SYNC_ENABLED: "1",
+        SUPPLIER_TEST_MODE: "0",
+        DROPIPRO_WRITE_ENABLED: "1",
+        SUPPLIER_PILOT_MODE: "1",
+        LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
+      },
+      () => {
+        const g1 = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+        assert.equal(g1.allowed, false);
+        assert.match(g1.reason ?? "", /no está aprobado/);
+
+        assert.equal(db.setOrderSupplierPilotApproval(o.id, true), true);
+        const g2 = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+        // Aprobado, pero el provider sigue sin implementación real:
+        assert.equal(g2.allowed, false);
+        assert.match(g2.reason ?? "", /no está configurado/);
+      }
+    );
+  });
+
+  await test("los avisos de tracking pasan por el outbox y respetan los gates", async () => {
+    const o = mkSynced("980009", "1909", "34799000111"); // fuera de allowlist
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, () => {
+      const r = tracking.processSupplierUpdate(o, {
+        rawStatus: "shipped",
+        trackingNumber: "TRK-BLOCK",
+      });
+      assert.ok(r.events.includes("TRACKING_AVAILABLE"));
+      assert.equal(r.notified.length, 0, "el gate bloquea el envío a un no autorizado");
+      assert.equal(
+        db.getPendingOutbox(999).some((x) => x.phone === "34799000111"),
+        false,
+        "nada en el outbox"
+      );
+    });
+  });
+
+  // ============ 22 · DROPI: webhook de actualizaciones ============
+  console.log("· Dropi — webhook de actualizaciones (estructura confirmada)");
+
+  const dropiWebhook = await import("../src/lib/suppliers/dropi/webhook");
+  const { validateDropiPayload } = await import("../src/lib/suppliers/dropi/types");
+  const { normalizeDropiStatus } = await import("../src/lib/suppliers/dropi/status-map");
+
+  /** Payload con la estructura EXACTA que muestra el panel de Dropi. */
+  const dropiPayload = (over: Record<string, unknown> = {}) => ({
+    order_id: 555001,
+    event_date: "2026-08-22T10:15:00Z",
+    status_id: 4,
+    status_name: "EN REPARTO",
+    details: "Actualización de prueba",
+    tracking_code: "DRP-TRK-001",
+    tracking_url: "https://tracking.example/DRP-TRK-001",
+    shopify_order_id: null,
+    shipping_company: "Transportista Test",
+    total: "34.98",
+    ...over,
+  });
+
+  await test("webhook Dropi DESHABILITADO → 503 y sin efectos", () => {
+    const r = dropiWebhook.processDropiWebhook(JSON.stringify(dropiPayload()));
+    assert.equal(r.status, 503, "fail-closed mientras no sepamos cómo autentica Dropi");
+  });
+
+  await test("validación del payload: acepta el válido, rechaza lo que no encaja", () => {
+    assert.equal(validateDropiPayload(dropiPayload()).ok, true);
+
+    const casos: Array<[string, Record<string, unknown>]> = [
+      ["order_id no numérico", { order_id: "abc" }],
+      ["order_id cero", { order_id: 0 }],
+      ["fecha inválida", { event_date: "no-es-una-fecha" }],
+      ["status_id inválido", { status_id: "x" }],
+      ["status_name vacío", { status_name: "   " }],
+      ["tracking_url con tipo raro", { tracking_url: 123 }],
+      ["shopify_order_id no entero", { shopify_order_id: "abc" }],
+      ["total no numérico", { total: "muchos euros" }],
+    ];
+    for (const [desc, over] of casos) {
+      assert.equal(validateDropiPayload(dropiPayload(over)).ok, false, desc);
+    }
+    // No-objetos
+    assert.equal(validateDropiPayload("texto").ok, false);
+    assert.equal(validateDropiPayload([1, 2]).ok, false);
+    assert.equal(validateDropiPayload(null).ok, false);
+  });
+
+  await test("nulos permitidos: tracking_url y shopify_order_id", () => {
+    const v = validateDropiPayload(dropiPayload({ tracking_url: null, shopify_order_id: null }));
+    assert.equal(v.ok, true);
+    assert.equal(v.payload!.tracking_url, null);
+    assert.equal(v.payload!.shopify_order_id, null);
+    // tracking_code vacío también es válido (pedido aún sin guía)
+    assert.equal(validateDropiPayload(dropiPayload({ tracking_code: "" })).ok, true);
+  });
+
+  await test("payload inválido → 400 y sin efectos", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r1 = dropiWebhook.processDropiWebhook("{no es json");
+      assert.equal(r1.status, 400);
+      const r2 = dropiWebhook.processDropiWebhook(JSON.stringify(dropiPayload({ order_id: "x" })));
+      assert.equal(r2.status, 400);
+      assert.ok(Array.isArray(r2.body.issues));
+    });
+  });
+
+  await test("estados de Dropi SIN confirmar → unknown (no se adivina)", () => {
+    assert.equal(normalizeDropiStatus(4, "EN REPARTO"), "unknown");
+    assert.equal(normalizeDropiStatus(99, "ENTREGADO"), "unknown");
+  });
+
+  await test("DROPI_STATUS_MAP permite confirmar estados por id o por nombre", async () => {
+    await withEnv({ DROPI_STATUS_MAP: "4:out_for_delivery,ENTREGADO:delivered" }, () => {
+      assert.equal(normalizeDropiStatus(4, "EN REPARTO"), "out_for_delivery");
+      assert.equal(normalizeDropiStatus(88, "ENTREGADO"), "delivered");
+      assert.equal(normalizeDropiStatus(77, "OTRA COSA"), "unknown");
+    });
+  });
+
+  await test("emparejado por shopify_order_id (vía preferente) y adopción del id externo", async () => {
+    const o = mkConfirmed("990001", "2001");
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(dropiPayload({ order_id: 777001, shopify_order_id: 990001 }))
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, "2001");
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.supplier_platform, "dropi");
+      assert.equal(fresco.supplier_external_order_id, "777001", "adopta el id de Dropi");
+      assert.equal(fresco.tracking_number, "DRP-TRK-001");
+      assert.equal(fresco.carrier, "Transportista Test");
+      assert.equal(fresco.supplier_status_raw, "EN REPARTO", "guarda el estado tal cual");
+      assert.equal(fresco.supplier_status_normalized, "unknown", "pero sin interpretarlo");
+    });
+  });
+
+  await test("emparejado alternativo por order_id cuando no viene shopify_order_id", async () => {
+    const o = db.getOrderByShopifyId("990001")!;
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777001, shopify_order_id: null, tracking_code: "DRP-TRK-001" })
+        )
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.order, o.shopify_order_number);
+    });
+  });
+
+  await test("tracking nuevo → UN aviso; el mismo webhook repetido → ninguno", async () => {
+    const o = mkConfirmed("990002", "2002");
+    const tel = o.phone;
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === tel).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const body = JSON.stringify(
+        dropiPayload({ order_id: 777002, shopify_order_id: 990002, tracking_code: "DRP-XYZ" })
+      );
+      const r1 = dropiWebhook.processDropiWebhook(body);
+      assert.deepEqual(r1.body.events, ["TRACKING_AVAILABLE"]);
+      assert.equal(contar(), antes + 1, "exactamente un aviso");
+
+      const r2 = dropiWebhook.processDropiWebhook(body); // reintento idéntico
+      assert.deepEqual(r2.body.events, [], "sin cambios = sin eventos");
+      assert.equal(contar(), antes + 1, "ni un duplicado");
+    });
+  });
+
+  await test("sin tracking_code no se avisa de nada", async () => {
+    const o = mkConfirmed("990003", "2003");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777003, shopify_order_id: 990003, tracking_code: "", tracking_url: null })
+        )
+      );
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body.events, []);
+      assert.equal(contar(), antes);
+    });
+  });
+
+  await test("estado desconocido NUNCA dispara el aviso de reparto", async () => {
+    const o = mkConfirmed("990004", "2004");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1", DROPI_STATUS_MAP: "" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({ order_id: 777004, shopify_order_id: 990004, tracking_code: "" , status_name: "EN REPARTO" })
+        )
+      );
+      assert.deepEqual(r.body.events, [], "un estado sin confirmar no genera eventos");
+      assert.equal(db.getOrderById(o.id)!.out_for_delivery_notification_sent_at, null);
+      assert.equal(contar(), antes, "ni un mensaje nuevo con un estado sin confirmar");
+    });
+  });
+
+  await test("con el estado CONFIRMADO sí avisa del reparto, una sola vez", async () => {
+    const o = mkConfirmed("990005", "2005");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === o.phone).length;
+    const antes = contar();
+    await withEnv(
+      { DROPIPRO_WEBHOOK_ENABLED: "1", DROPI_STATUS_MAP: "4:out_for_delivery" },
+      () => {
+        const body = JSON.stringify(
+          dropiPayload({ order_id: 777005, shopify_order_id: 990005, tracking_code: "" })
+        );
+        const r1 = dropiWebhook.processDropiWebhook(body);
+        assert.ok((r1.body.events as string[]).includes("OUT_FOR_DELIVERY"));
+        const msgs = db.getPendingOutbox(999).filter((x) => x.phone === o.phone);
+        assert.equal(msgs.length, antes + 1);
+        assert.match(msgs[msgs.length - 1].content, /en reparto/);
+        assert.match(msgs[msgs.length - 1].content, /efectivo/);
+
+        dropiWebhook.processDropiWebhook(body); // repetido
+        assert.equal(contar(), antes + 1, "sin duplicados");
+      }
+    );
+  });
+
+  await test("pedido desconocido → 200 sin efectos", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const r = dropiWebhook.processDropiWebhook(
+        JSON.stringify(dropiPayload({ order_id: 999999999, shopify_order_id: 888888888 }))
+      );
+      assert.equal(r.status, 200);
+      assert.equal(r.body.ignored, "pedido desconocido");
+    });
+  });
+
+  await test("no pisa datos válidos con cadenas vacías", async () => {
+    const o = db.getOrderByShopifyId("990002")!; // ya tiene tracking DRP-XYZ y carrier
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      dropiWebhook.processDropiWebhook(
+        JSON.stringify(
+          dropiPayload({
+            order_id: 777002,
+            shopify_order_id: 990002,
+            tracking_code: "",
+            tracking_url: null,
+            shipping_company: "",
+          })
+        )
+      );
+      const fresco = db.getOrderById(o.id)!;
+      assert.equal(fresco.tracking_number, "DRP-XYZ", "el tracking anterior se conserva");
+      assert.ok(fresco.carrier, "el transportista anterior se conserva");
+    });
+  });
+
+  await test("CANDADO doble integración: bloquea la creación aunque todo esté abierto", async () => {
+    const o = mkConfirmed("990010", "2010");
+    db.setOrderSupplierPilotApproval(o.id, true);
+    const todoAbierto = {
+      SUPPLIER_ROUTING_RULES: "dropi:limpiador",
+      SUPPLIER_SYNC_ENABLED: "1",
+      SUPPLIER_TEST_MODE: "0",
+      DROPIPRO_WRITE_ENABLED: "1",
+      SUPPLIER_PILOT_MODE: "0",
+    };
+    // Con el candado cerrado (por defecto), NO se puede crear:
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "0" }, () => {
+      const g = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /LEGACY_SUPPLIER_INTEGRATIONS_DISABLED/);
+      assert.match(g.reason ?? "", /duplicar/i);
+    });
+    // Sin la variable puesta se asume lo peor (integración antigua viva):
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: undefined }, () => {
+      assert.equal(suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi").allowed, false);
+    });
+    // Abriéndolo, el bloqueo pasa a ser el siguiente de la cadena:
+    await withEnv({ ...todoAbierto, LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1" }, () => {
+      const g = suppliers.canSyncSupplier(db.getOrderById(o.id)!, "dropi");
+      assert.equal(g.allowed, false);
+      assert.match(g.reason ?? "", /no está configurado/, "ahora frena el provider sin implementar");
+    });
+  });
+
+  await test("Dropi createOrder SIGUE bloqueado (esto solo confirmó el tracking)", async () => {
+    const { dropiProvider } = await import("../src/lib/suppliers/dropi");
+    assert.equal(dropiProvider.isConfigured(), false);
+    await assert.rejects(
+      () =>
+        dropiProvider.createOrder({
+          shopifyOrderId: "1",
+          orderNumber: "1",
+          customerName: "X",
+          phone: "34600111222",
+          email: null,
+          finalAddress: {
+            line1: "Calle X 1",
+            line2: null,
+            city: "Madrid",
+            province: null,
+            postalCode: "28001",
+            country: "España",
+          },
+          addressSource: "original",
+          items: [{ title: "P", quantity: 1, price: null, sku: null }],
+          total: "10",
+          currency: "EUR",
+          codAmount: "10",
+          deliveryNote: null,
+        }),
+      ProviderNotConfiguredError
+    );
+  });
+
+  // ============ 23 · DROPEA: contrato oficial ============
+  console.log("· Dropea — contrato oficial (URL, auth, mapper, estados)");
+
+  const dropeaClient = await import("../src/lib/suppliers/dropea/client");
+  const dropeaMod = await import("../src/lib/suppliers/dropea");
+  const { normalizeDropeaStatus, DROPEA_SUB_STATUSES, DROPEA_STATUSES } = await import(
+    "../src/lib/suppliers/dropea/status-map"
+  );
+  const { mapToDropeaCreateOrder, splitName, toInternationalPhone } = await import(
+    "../src/lib/suppliers/dropea/mapper"
+  );
+
+  await test("URL base: se deriva del mercado (host por país)", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_BASE_URL: undefined, DROPEA_MARKET: "es" }, () => {
+      assert.equal(dropeaClient.dropeaConfig()?.baseUrl, "https://es.public-api.dropea.com");
+    });
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_BASE_URL: undefined, DROPEA_MARKET: "pt" }, () => {
+      assert.equal(dropeaClient.dropeaConfig()?.baseUrl, "https://pt.public-api.dropea.com");
+    });
+    await withEnv({ DROPEA_API_KEY: undefined }, () => {
+      assert.equal(dropeaClient.dropeaConfig(), null, "sin API key no hay configuración");
+    });
+  });
+
+  await test("auth: Authorization Bearer + Idempotency-Key, y la key no se filtra", async () => {
+    const realFetch = global.fetch;
+    let capturado: { url: string; headers: Record<string, string> } | null = null;
+    global.fetch = (async (url: unknown, init?: RequestInit) => {
+      capturado = { url: String(url), headers: (init?.headers ?? {}) as Record<string, string> };
+      return new Response(JSON.stringify({ success: true, data: { id: 1 } }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      await withEnv(
+        { DROPEA_API_KEY: "clave-secreta-de-prueba", DROPEA_API_ENABLED: "1", DROPEA_MARKET: "es" },
+        async () => {
+          await dropeaClient.dropeaRequest({
+            path: "/dropshipper/orders",
+            method: "POST",
+            body: { x: 1 },
+            idempotencyKey: "1057",
+          });
+          assert.equal(capturado!.url, "https://es.public-api.dropea.com/dropshipper/orders");
+          assert.equal(capturado!.headers["Authorization"], "Bearer clave-secreta-de-prueba");
+          assert.equal(capturado!.headers["Idempotency-Key"], "1057");
+        }
+      );
+
+      // Un 401 NO debe incluir la credencial en el mensaje de error.
+      global.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            success: false,
+            failure: { type: "UnauthorizedFailure", message: "API key is invalid", httpStatusCode: 401 },
+          }),
+          { status: 401 }
+        )) as typeof fetch;
+      await withEnv({ DROPEA_API_KEY: "clave-secreta-de-prueba", DROPEA_API_ENABLED: "1" }, async () => {
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/me" }),
+          (err: Error) => {
+            assert.doesNotMatch(err.message, /clave-secreta-de-prueba/, "la key no aparece en el error");
+            assert.match(err.message, /inválida o caducada/);
+            return true;
+          }
+        );
+      });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("errores: 429 con Retry-After, 422 con código de negocio, 504 en curso", async () => {
+    const realFetch = global.fetch;
+    try {
+      await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1" }, async () => {
+        global.fetch = (async () =>
+          new Response(JSON.stringify({ success: false, failure: { type: "RateLimitFailure", message: "too many", httpStatusCode: 429 } }), {
+            status: 429,
+            headers: { "retry-after": "60" },
+          })) as typeof fetch;
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/orders" }),
+          (e: InstanceType<typeof dropeaClient.DropeaApiError>) => {
+            assert.equal(e.httpStatus, 429);
+            assert.equal(e.retryAfterSeconds, 60);
+            assert.equal(e.retryable, true);
+            return true;
+          }
+        );
+
+        global.fetch = (async () =>
+          new Response(
+            JSON.stringify({
+              success: false,
+              failure: {
+                type: "BusinessFailure",
+                message: "Order total 5 is below the wholesale cost 8",
+                code: "ORDER_TOTAL_BELOW_COST",
+                httpStatusCode: 422,
+              },
+            }),
+            { status: 422 }
+          )) as typeof fetch;
+        await assert.rejects(
+          () => dropeaClient.dropeaRequest({ path: "/dropshipper/orders", method: "POST", body: {} }),
+          (e: InstanceType<typeof dropeaClient.DropeaApiError>) => {
+            assert.equal(e.businessCode, "ORDER_TOTAL_BELOW_COST");
+            assert.equal(e.retryable, false, "un 422 no se reintenta: duplicaría el pedido");
+            return true;
+          }
+        );
+
+        global.fetch = (async () =>
+          new Response(JSON.stringify({ success: false, data: { operation_id: "op-123", status: "pending" } }), {
+            status: 504,
+          })) as typeof fetch;
+        await assert.rejects(
+          () =>
+            dropeaClient.dropeaRequest({ path: "/dropshipper/orders", method: "POST", body: {}, idempotencyKey: "op-123" }),
+          dropeaClient.DropeaOperationPendingError
+        );
+      });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("estados: los 22 sub_status y los 8 status del spec están cubiertos", () => {
+    // Se aísla el sub_status usando un status padre inexistente: así se ve
+    // qué sub-estados se resuelven por sí solos. Solo PENDING queda fuera
+    // a propósito (significa cosas distintas según su padre).
+    const sinMapear = DROPEA_SUB_STATUSES.filter(
+      (s) => normalizeDropeaStatus("__SIN_PADRE__", s) === "unknown"
+    );
+    assert.deepEqual(sinMapear, ["PENDING"], "solo PENDING depende del status padre");
+    // Y con padre, PENDING sí se resuelve:
+    assert.equal(normalizeDropeaStatus("SHIPPING", "PENDING"), "in_transit");
+    assert.equal(normalizeDropeaStatus("PENDING", "PENDING"), "created");
+
+    // Los pares clave del ciclo de vida:
+    assert.equal(normalizeDropeaStatus("SHIPPING", "OUT_FOR_DELIVERY"), "out_for_delivery");
+    assert.equal(normalizeDropeaStatus("FINISH", "DELIVERED"), "delivered");
+    assert.equal(normalizeDropeaStatus("FINISH", "PAID"), "delivered");
+    assert.equal(normalizeDropeaStatus("FINISH", "CANCELLED"), "cancelled");
+    assert.equal(normalizeDropeaStatus("PROCESSING", "PICKING"), "processing");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "SHIPPED"), "shipped");
+    assert.equal(normalizeDropeaStatus("ERROR", null), "incident");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "DELIVERY_EXCEPTION"), "incident");
+    assert.equal(normalizeDropeaStatus("SHIPPING", "REFUSED"), "returned");
+    // El sub_status manda sobre el status padre:
+    assert.equal(normalizeDropeaStatus("PROCESSING", "OUT_FOR_DELIVERY"), "out_for_delivery");
+    // FINISH sin sub_status NO se asume entregado:
+    assert.equal(normalizeDropeaStatus("FINISH", null), "unknown");
+    // Todos los status de primer nivel dan algo (salvo FINISH, que exige sub):
+    for (const st of DROPEA_STATUSES.filter((s) => s !== "FINISH")) {
+      assert.notEqual(normalizeDropeaStatus(st, null), "unknown", `status ${st}`);
+    }
+    // Basura → unknown
+    assert.equal(normalizeDropeaStatus("INVENTADO", "TAMBIEN"), "unknown");
+  });
+
+  await test("mapper: construye el pedido con los campos reales del contrato", () => {
+    const input = {
+      shopifyOrderId: "1057",
+      orderNumber: "1057",
+      customerName: "María García López",
+      phone: "34600111222",
+      email: "maria@example.com",
+      finalAddress: {
+        line1: "Calle Ejemplo 5B",
+        line2: "3º B",
+        city: "Almería",
+        province: "Almería",
+        postalCode: "04007",
+        country: "España",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "Limpiador Ultrasónico", quantity: 2, price: null, sku: null }],
+      total: "34.98",
+      currency: "EUR",
+      codAmount: "34.98",
+      deliveryNote: "Llamar antes de subir",
+    };
+    const ctx = {
+      storeId: 7,
+      variantByTitle: new Map([["Limpiador Ultrasónico", { variantId: 42, unitPrice: 17.49 }]]),
+    };
+    const r = mapToDropeaCreateOrder(input, ctx);
+    assert.deepEqual(r.errors, []);
+    const req = r.request!;
+    assert.equal(req.store_id, 7);
+    assert.equal(req.payment_method, "COD", "contra reembolso");
+    assert.equal(req.external_order_id, "1057", "nuestra referencia viaja a Dropea");
+    assert.deepEqual(req.line_items, [{ variant_id: 42, quantity: 2, unit_price: 17.49 }]);
+    // El importe COD se DERIVA de las líneas: 2 × 17.49 = 34.98
+    const derivado = req.line_items.reduce((s, l) => s + l.unit_price * l.quantity, 0);
+    assert.equal(derivado.toFixed(2), "34.98");
+    const dir = req.customer_details.shipping_address;
+    assert.equal(dir.first_name, "María");
+    assert.equal(dir.last_name, "García López");
+    assert.equal(dir.city, "Almería");
+    assert.equal(dir.state, "Almería", "state es la PROVINCIA");
+    assert.equal(dir.postal_code, "04007");
+    assert.equal(dir.country, "ES", "país en ISO-2");
+    assert.equal(dir.address_line_2, "3º B");
+    assert.equal(req.customer_details.phone, "+34600111222", "teléfono internacional con +");
+    // La nota del repartidor NO cabe en su API: debe avisarse
+    assert.ok(
+      r.warnings.some((w) => /nota/i.test(w)),
+      "avisa de que la nota no se puede enviar"
+    );
+    assert.equal(JSON.stringify(req).includes("Llamar antes de subir"), false);
+  });
+
+  await test("mapper: bloquea si falta variante, localidad o email", () => {
+    const base = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: "x@example.com",
+      finalAddress: {
+        line1: "Calle 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "Producto A", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: null,
+    };
+    const conVariante = {
+      storeId: 1,
+      variantByTitle: new Map([["Producto A", { variantId: 9, unitPrice: 10 }]]),
+    };
+    // Sin correspondencia de producto:
+    const sinVariante = mapToDropeaCreateOrder(base, { storeId: 1, variantByTitle: new Map() });
+    assert.equal(sinVariante.request, null);
+    assert.match(sinVariante.errors.join(" "), /variant_id/);
+    // Sin email (habitual en Releasit): Dropea lo exige.
+    const sinEmail = mapToDropeaCreateOrder({ ...base, email: null }, conVariante);
+    assert.equal(sinEmail.request, null);
+    assert.match(sinEmail.errors.join(" "), /email/);
+    // La localidad "-" ya viene bloqueada antes, pero si llegara vacía:
+    const sinCiudad = mapToDropeaCreateOrder(
+      { ...base, finalAddress: { ...base.finalAddress, city: "" } },
+      conVariante
+    );
+    assert.equal(sinCiudad.request, null);
+    assert.match(sinCiudad.errors.join(" "), /localidad/);
+  });
+
+  await test("helpers del mapper: nombre y teléfono", () => {
+    assert.deepEqual(splitName("Pedro Sánchez Ejemplo"), { first: "Pedro", last: "Sánchez Ejemplo" });
+    assert.deepEqual(splitName("Trinidad"), { first: "Trinidad", last: "-" });
+    assert.deepEqual(splitName(null), { first: "Cliente", last: "-" });
+    assert.equal(toInternationalPhone("34600111222"), "+34600111222");
+    assert.equal(toInternationalPhone(""), "");
+  });
+
+  await test("lectura y escritura son llaves SEPARADAS", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1", DROPEA_WRITE_ENABLED: "0" }, () => {
+      assert.equal(dropeaClient.dropeaReadEnabled(), true, "se puede consultar");
+      assert.equal(dropeaMod.dropeaWriteEnabled(), false, "pero no escribir");
+      assert.equal(dropeaMod.dropeaProvider.isConfigured(), true);
+    });
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "0", DROPEA_WRITE_ENABLED: "1" }, () => {
+      assert.equal(dropeaClient.dropeaReadEnabled(), false);
+      assert.equal(dropeaMod.dropeaWriteEnabled(), false, "sin lectura tampoco hay escritura");
+    });
+  });
+
+  await test("createOrder y cancelOrder de Dropea siguen bloqueados", async () => {
+    await withEnv({ DROPEA_API_KEY: "k", DROPEA_API_ENABLED: "1", DROPEA_WRITE_ENABLED: "1" }, async () => {
+      const realFetch = global.fetch;
+      let llamadas = 0;
+      global.fetch = (async () => {
+        llamadas++;
+        return new Response("{}", { status: 200 });
+      }) as typeof fetch;
+      try {
+        await assert.rejects(
+          () =>
+            dropeaMod.dropeaProvider.createOrder({
+              shopifyOrderId: "1",
+              orderNumber: "1",
+              customerName: "X",
+              phone: "34600111222",
+              email: "x@example.com",
+              finalAddress: {
+                line1: "C 1",
+                line2: null,
+                city: "Madrid",
+                province: "Madrid",
+                postalCode: "28001",
+                country: "ES",
+              },
+              addressSource: "original",
+              items: [{ title: "P", quantity: 1, price: null, sku: null }],
+              total: "10",
+              currency: "EUR",
+              codAmount: "10",
+              deliveryNote: null,
+            }),
+          ProviderNotConfiguredError
+        );
+        await assert.rejects(() => dropeaMod.dropeaProvider.cancelOrder("1"), ProviderNotConfiguredError);
+        assert.equal(llamadas, 0, "ni una petición: no se intenta crear nada");
+      } finally {
+        global.fetch = realFetch;
+      }
+    });
+  });
+
+  // ============ 24 · DROPEA: modo de creación, mapping y piloto ============
+  console.log("· Dropea — modo de creación (external_app) y piloto");
+
+  const createGate = await import("../src/lib/suppliers/dropea/create-gate");
+  const createOrderMod = await import("../src/lib/suppliers/dropea/create-order");
+  const { MISSING_EMAIL_CODE } = await import("../src/lib/suppliers/dropea/mapper");
+
+  /** Todas las llaves abiertas MENOS la que se quiera probar. */
+  const llavesAbiertas = {
+    APP_MODE: "production",
+    EMERGENCY_STOP: "0",
+    SUPPLIER_SYNC_ENABLED: "1",
+    SUPPLIER_TEST_MODE: "1",
+    TEST_MODE: "1",
+    TEST_PHONE_ALLOWLIST: "34600111222",
+    LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "1",
+    DROPEA_API_KEY: "clave",
+    DROPEA_API_ENABLED: "1",
+    DROPEA_WRITE_ENABLED: "1",
+    DROPEA_CREATE_MODE: "our_api",
+    DROPEA_LEGACY_CREATE_ACTIVE: "0",
+    SUPPLIER_PILOT_MODE: "1",
+  };
+
+  await test("external_app (por defecto) BLOQUEA la creación", async () => {
+    const o = mkConfirmed("991001", "3001");
+    db.setOrderSupplierPilotApproval(o.id, true);
+    // Por defecto, sin tocar nada:
+    const porDefecto = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+    assert.equal(porDefecto.allowed, false);
+    assert.equal(createGate.dropeaCreateMode(), "external_app");
+
+    // Y aun con TODAS las demás llaves abiertas:
+    await withEnv({ ...llavesAbiertas, DROPEA_CREATE_MODE: "external_app" }, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, false);
+      assert.equal(g.blocker, "create_mode_external_app");
+      assert.match(g.reason ?? "", /app oficial/);
+    });
+  });
+
+  await test("la app oficial activa bloquea aunque el modo sea our_api", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    await withEnv({ ...llavesAbiertas, DROPEA_LEGACY_CREATE_ACTIVE: "1" }, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, false);
+      assert.equal(g.blocker, "legacy_app_active");
+    });
+    // Sin la variable puesta se asume que sigue activa (lo peor):
+    await withEnv({ ...llavesAbiertas, DROPEA_LEGACY_CREATE_ACTIVE: undefined }, () => {
+      assert.equal(createGate.canCreateDropeaOrder(db.getOrderById(o.id)!).blocker, "legacy_app_active");
+    });
+  });
+
+  await test("matriz completa: quitar CUALQUIER llave bloquea la creación", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    // Con todas abiertas, el gate deja pasar:
+    await withEnv(llavesAbiertas, () => {
+      const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+      assert.equal(g.allowed, true, `esperaba permitido, bloqueó: ${g.blocker}`);
+    });
+    // Quitando una cada vez:
+    const casos: Array<[string, Record<string, string | undefined>, string]> = [
+      ["emergency stop", { EMERGENCY_STOP: "1" }, "emergency_stop"],
+      ["sync general", { SUPPLIER_SYNC_ENABLED: "0" }, "supplier_sync"],
+      ["api deshabilitada", { DROPEA_API_ENABLED: "0" }, "api_disabled"],
+      ["escritura", { DROPEA_WRITE_ENABLED: "0" }, "write_disabled"],
+      ["candado general", { LEGACY_SUPPLIER_INTEGRATIONS_DISABLED: "0" }, "legacy_integrations"],
+      ["test mode en piloto", { TEST_MODE: "0" }, "pilot_without_test_mode"],
+    ];
+    for (const [desc, override, blocker] of casos) {
+      await withEnv({ ...llavesAbiertas, ...override }, () => {
+        const g = createGate.canCreateDropeaOrder(db.getOrderById(o.id)!);
+        assert.equal(g.allowed, false, desc);
+        assert.equal(g.blocker, blocker, desc);
+      });
+    }
+  });
+
+  await test("piloto sin aprobar y pedido sin confirmar bloquean", async () => {
+    const sinAprobar = mkConfirmed("991002", "3002");
+    await withEnv(llavesAbiertas, () => {
+      assert.equal(
+        createGate.canCreateDropeaOrder(db.getOrderById(sinAprobar.id)!).blocker,
+        "pilot_not_approved"
+      );
+    });
+    const sinConfirmar = mkOrder("991003", "3003", "34600111222");
+    db.setOrderSupplierPilotApproval(sinConfirmar.id, true);
+    await withEnv(llavesAbiertas, () => {
+      assert.equal(
+        createGate.canCreateDropeaOrder(db.getOrderById(sinConfirmar.id)!).blocker,
+        "not_confirmed"
+      );
+    });
+  });
+
+  await test("createDropeaOrderForOrder NO toca la red en modo external_app", async () => {
+    const o = db.getOrderByShopifyId("991001")!;
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    global.fetch = (async () => {
+      llamadas++;
+      return new Response("{}", { status: 200 });
+    }) as typeof fetch;
+    try {
+      const r = await createOrderMod.createDropeaOrderForOrder(
+        db.getOrderById(o.id)!,
+        { storeId: 1, variantByTitle: new Map() },
+        {
+          shopifyOrderId: "991001",
+          orderNumber: "3001",
+          customerName: "X Y",
+          phone: "34600111222",
+          email: "x@example.com",
+          finalAddress: {
+            line1: "C 1",
+            line2: null,
+            city: "Madrid",
+            province: "Madrid",
+            postalCode: "28001",
+            country: "ES",
+          },
+          addressSource: "original",
+          items: [{ title: "P", quantity: 1, price: null, sku: null }],
+          total: "10",
+          currency: "EUR",
+          codAmount: "10",
+          deliveryNote: null,
+        }
+      );
+      assert.equal(r.ok, false);
+      assert.equal(r.blocker, "create_mode_external_app");
+      assert.equal(llamadas, 0, "ni una petición a Dropea");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  console.log("· Dropea — idempotencia, adopción y mapping");
+
+  await test("la clave de idempotencia es ESTABLE y válida para su contrato", () => {
+    const k1 = createOrderMod.buildIdempotencyKey("18066042290506", "create");
+    const k2 = createOrderMod.buildIdempotencyKey("18066042290506", "create");
+    assert.equal(k1, k2, "misma entrada → misma clave (nunca aleatoria)");
+    assert.equal(k1, "casamable-shopify-18066042290506-create");
+    assert.notEqual(k1, createOrderMod.buildIdempotencyKey("18066042290506", "confirm"));
+    // Debe cumplir el patrón del contrato: ^[A-Za-z0-9_-]{1,255}$
+    for (const k of [k1, createOrderMod.buildIdempotencyKey("#3305/raro", "confirm")]) {
+      assert.match(k, /^[A-Za-z0-9_-]{1,255}$/);
+    }
+  });
+
+  await test("máquina de estados create→confirm sobrevive a un reinicio", () => {
+    const o = mkConfirmed("991010", "3010");
+    const key = createOrderMod.buildIdempotencyKey("991010", "create");
+
+    // Reclamar la creación: solo el primero gana.
+    assert.equal(db.claimSupplierCreate(o.id, key), true);
+    assert.equal(db.claimSupplierCreate(o.id, key), false, "no se reclama dos veces");
+    let row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "creating");
+    assert.equal(row.supplier_idempotency_key, key, "la clave queda persistida");
+
+    // Simular: creado en Dropea y CAÍDA justo después.
+    db.markSupplierCreated(o.id, "dropea", "77001");
+    row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "created");
+    assert.equal(row.supplier_external_order_id, "77001");
+
+    // Tras el reinicio, intentar crear otra vez NO procede:
+    assert.equal(db.claimSupplierCreate(o.id, key), false, "jamás un segundo create");
+
+    // Confirmar sí procede, una sola vez.
+    const ck = createOrderMod.buildIdempotencyKey("991010", "confirm");
+    assert.equal(db.claimSupplierConfirm(o.id, ck), true);
+    assert.equal(db.claimSupplierConfirm(o.id, ck), false);
+    db.markSupplierConfirmed(o.id);
+    assert.equal(db.getOrderById(o.id)!.supplier_create_phase, "confirmed");
+    // Y la clave del confirm también quedó guardada:
+    assert.equal(db.getOrderById(o.id)!.supplier_confirm_idempotency_key, ck);
+  });
+
+  await test("un fallo de creación NO borra la clave de idempotencia", () => {
+    const o = mkConfirmed("991011", "3011");
+    const key = createOrderMod.buildIdempotencyKey("991011", "create");
+    db.claimSupplierCreate(o.id, key);
+    db.markSupplierCreateFailed(o.id, "error de red");
+    const row = db.getOrderById(o.id)!;
+    assert.equal(row.supplier_create_phase, "failed");
+    assert.equal(row.supplier_idempotency_key, key, "se reutiliza en el reintento");
+    assert.equal(row.supplier_sync_attempts, 1);
+    // Y se puede reintentar (fase failed sí permite reclamar):
+    assert.equal(db.claimSupplierCreate(o.id, key), true);
+  });
+
+  await test("mapping de productos: exacto se usa, ausente bloquea", () => {
+    const id = db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "LIMPIADOR-ULTRA",
+      shopify_title: "Limpiador Ultrasónico Multiusos",
+      supplier_variant_id: "42",
+      supplier_unit_price: 17.49,
+    });
+    assert.ok(id > 0);
+    const todos = db.listSupplierProductMappings("dropea");
+    const m = todos.find((x) => x.shopify_sku === "LIMPIADOR-ULTRA")!;
+    assert.equal(m.supplier_variant_id, "42");
+    assert.equal(m.supplier_unit_price, 17.49);
+    assert.equal(m.active, 1);
+
+    // Upsert por el mismo SKU actualiza en vez de duplicar:
+    db.upsertSupplierProductMapping({
+      supplier_platform: "dropea",
+      shopify_sku: "LIMPIADOR-ULTRA",
+      supplier_variant_id: "43",
+    });
+    const tras = db.listSupplierProductMappings("dropea").filter((x) => x.shopify_sku === "LIMPIADOR-ULTRA");
+    assert.equal(tras.length, 1, "no duplica");
+    assert.equal(tras[0].supplier_variant_id, "43", "actualiza");
+    db.deleteSupplierProductMapping(tras[0].id);
+  });
+
+  await test("email ausente bloquea con su código explícito", () => {
+    const base = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: null,
+      finalAddress: {
+        line1: "C 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "P", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: null,
+    };
+    const ctx = { storeId: 1, variantByTitle: new Map([["P", { variantId: 1, unitPrice: 10 }]]) };
+    const r = mapToDropeaCreateOrder(base, ctx);
+    assert.equal(r.request, null);
+    assert.ok(r.errors.some((e) => e.includes(MISSING_EMAIL_CODE)));
+    // Con email, pasa:
+    assert.ok(mapToDropeaCreateOrder({ ...base, email: "a@b.com" }, ctx).request);
+  });
+
+  await test("delivery note: se marca unsupported y es configurable bloquear", async () => {
+    const conNota = {
+      shopifyOrderId: "1",
+      orderNumber: "1",
+      customerName: "X Y",
+      phone: "34600111222",
+      email: "a@b.com",
+      finalAddress: {
+        line1: "C 1",
+        line2: null,
+        city: "Madrid",
+        province: "Madrid",
+        postalCode: "28001",
+        country: "ES",
+      },
+      addressSource: "original" as const,
+      items: [{ title: "P", quantity: 1, price: null, sku: null }],
+      total: "10",
+      currency: "EUR",
+      codAmount: "10",
+      deliveryNote: "Llamar antes de subir",
+    };
+    const ctx = { storeId: 1, variantByTitle: new Map([["P", { variantId: 1, unitPrice: 10 }]]) };
+
+    // Por defecto: no bloquea, pero queda registrado como unsupported.
+    const r = mapToDropeaCreateOrder(conNota, ctx);
+    assert.equal(r.deliveryNoteStatus, "unsupported");
+    assert.ok(r.request, "no bloquea por defecto");
+    assert.equal(JSON.stringify(r.request).includes("Llamar antes de subir"), false, "no se cuela en otro campo");
+
+    // Sin nota: not_present
+    assert.equal(mapToDropeaCreateOrder({ ...conNota, deliveryNote: null }, ctx).deliveryNoteStatus, "not_present");
+
+    // Configurable: puede bloquear
+    await withEnv({ DROPEA_BLOCK_ON_DELIVERY_NOTE: "1" }, () => {
+      const b = mapToDropeaCreateOrder(conNota, ctx);
+      assert.equal(b.request, null);
+      assert.match(b.errors.join(" "), /nota para el repartidor/);
+    });
+
+    // Y el estado se persiste en el pedido:
+    const o = mkConfirmed("991020", "3020");
+    db.setOrderDeliveryNoteStatus(o.id, "unsupported");
+    assert.equal(db.getOrderById(o.id)!.supplier_delivery_note_status, "unsupported");
+  });
+
+  await test("webhook duplicado por event_id → un solo efecto", async () => {
+    const o = mkSynced("991030", "3030", "34600111222");
+    const contar = () => db.getPendingOutbox(999).filter((x) => x.phone === "34600111222").length;
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-prueba" }, () => {
+      const body = JSON.stringify({
+        topic: "order.status.changed",
+        market: "ES",
+        event_id: "evento-unico-123",
+        event_at: "2026-08-22T10:00:00.000Z",
+        resource_id: 991030,
+        resource: { id: 991030, status: "SHIPPING", sub_status: "SHIPPED", tracking_number: "TRK-DUP" },
+      });
+      const firma =
+        "sha256=" + crypto.createHmac("sha256", "secreto-de-prueba").update(body).digest("base64");
+
+      const antes = contar();
+      const r1 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r1.status, 200);
+      assert.equal(r1.body.duplicate, undefined);
+      const tras1 = contar();
+      assert.ok(tras1 > antes, "avisó del tracking");
+
+      // Mismo event_id otra vez: se corta ANTES de procesar nada.
+      const r2 = supplierWebhook.processDropeaWebhook(body, { "x-dropea-signature": firma });
+      assert.equal(r2.status, 200);
+      assert.equal(r2.body.duplicate, true, "detectado como repetido por event_id");
+      assert.equal(contar(), tras1, "sin efectos");
+    });
+  });
+
+  // ============ 25 · Reinicio del proceso (persistencia) ============
+  await test("el estado sobrevive a un reinicio (conexión nueva al mismo .db)", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      const row = raw.prepare("SELECT status FROM orders WHERE shopify_order_id = '910001'").get() as {
+        status: string;
+      };
+      assert.equal(row.status, "confirmed");
+      // La nota del repartidor también sobrevive al reinicio:
+      const nota = raw
+        .prepare("SELECT status, delivery_note FROM orders WHERE shopify_order_id = '920001'")
+        .get() as { status: string; delivery_note: string };
+      assert.equal(nota.status, "confirmed");
+      assert.equal(nota.delivery_note, "Llamar antes de subir");
+      // Un pedido en plena corrección conserva estado Y dirección propuesta:
+      const corr = raw
+        .prepare("SELECT status, proposed_address FROM orders WHERE shopify_order_id = '910002'")
+        .get() as { status: string; proposed_address: string };
+      assert.equal(corr.status, "needs_correction");
+      assert.match(corr.proposed_address, /Calle Mayor 5/);
+      const vivos = raw
+        .prepare(
+          "SELECT COUNT(*) AS n FROM orders WHERE status IN ('awaiting_reply','reminder_sent','needs_correction','needs_call')"
+        )
+        .get() as { n: number };
+      assert.ok(vivos.n >= 1, "los pedidos en curso siguen ahí tras 'reiniciar'");
+    } finally {
+      raw.close();
+    }
+  });
+
+
+  // ============================================================
+  // CONTROL CENTER (observabilidad): sanitizado, repo, health services
+  // ============================================================
+  console.log("\n— Control Center —");
+
+  const sanitizeMod = await import("../src/lib/system/sanitize");
+  const sysRepo = await import("../src/lib/system/repo");
+  const sysCore = await import("../src/lib/system/health-core");
+  const sysInteg = await import("../src/lib/system/health-integrations");
+  const sysTracking = await import("../src/lib/system/tracking-overview");
+  const sysOverview = await import("../src/lib/system/overview");
+
+  await test("sanitize: emails, tokens, JWT y hex largos fuera; teléfonos enmascarados", () => {
+    const sucia =
+      "cliente pedro@casamable.es tel 34644313917 token shpat_abcdef123456 " +
+      "Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc123def456 " +
+      "hmac a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    const limpia = sanitizeMod.sanitizeForEvents(sucia);
+    assert.ok(!limpia.includes("pedro@casamable.es"), "email fuera");
+    assert.ok(!limpia.includes("34644313917"), "teléfono completo fuera");
+    assert.ok(!limpia.includes("shpat_abcdef123456"), "token de Shopify fuera");
+    assert.ok(!limpia.includes("eyJhbGciOiJIUzI1NiJ9"), "JWT fuera");
+    assert.ok(!limpia.includes("a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"), "hex largo fuera");
+    // Idempotente y acotado
+    assert.equal(sanitizeMod.sanitizeForEvents(limpia), limpia);
+    assert.ok(sanitizeMod.sanitizeForEvents("x".repeat(2000)).length <= 300);
+  });
+
+  await test("integration_events: se guarda sanitizado y con filtros", () => {
+    sysRepo.logIntegrationEvent(
+      "dropea",
+      "test_event",
+      "warning",
+      "fallo con email test@x.com y tel 34600111222",
+      "#9001"
+    );
+    const [ev] = sysRepo.listIntegrationEvents({ integration: "dropea", limit: 1 });
+    assert.ok(ev, "evento guardado");
+    assert.equal(ev.event_type, "test_event");
+    assert.equal(ev.order_ref, "#9001");
+    assert.ok(!ev.message.includes("test@x.com"), "email sanitizado al guardar");
+    assert.ok(!ev.message.includes("34600111222"), "teléfono sanitizado al guardar");
+    const soloCriticos = sysRepo.listIntegrationEvents({ severity: "critical" });
+    assert.ok(soloCriticos.every((e) => e.severity === "critical"));
+  });
+
+  await test("countIntegrationEvents cuenta por tipo y ventana temporal", () => {
+    const antes = sysRepo.countIntegrationEvents("dropea", "test_event", 0);
+    sysRepo.logIntegrationEvent("dropea", "test_event", "info", "otro");
+    assert.equal(sysRepo.countIntegrationEvents("dropea", "test_event", 0), antes + 1);
+    // Ventana futura: no cuenta nada
+    const futuro = Math.floor(Date.now() / 1000) + 3600;
+    assert.equal(sysRepo.countIntegrationEvents("dropea", "test_event", futuro), 0);
+  });
+
+  await test("service_health: transición a peor deja alerta en el feed, y la recuperación también", () => {
+    sysRepo.recordServiceCheck("dropi", { status: "healthy", ok: true });
+    const antesCrit = sysRepo.listIntegrationEvents({ integration: "dropi" }).length;
+    sysRepo.recordServiceCheck("dropi", { status: "critical", ok: false, error: "se rompió" });
+    const trasCrit = sysRepo.listIntegrationEvents({ integration: "dropi" });
+    assert.equal(trasCrit.length, antesCrit + 1, "el empeoramiento genera evento");
+    assert.equal(trasCrit[0].severity, "critical");
+    sysRepo.recordServiceCheck("dropi", { status: "healthy", ok: true });
+    const trasRecuperar = sysRepo.listIntegrationEvents({ integration: "dropi" });
+    assert.equal(trasRecuperar.length, antesCrit + 2, "la recuperación genera evento info");
+    assert.equal(trasRecuperar[0].severity, "info");
+    const row = sysRepo.getServiceHealth("dropi");
+    assert.ok(row && row.status === "healthy" && row.last_error_message, "el último error se conserva");
+  });
+
+  await test("service_health: metadata se sanitiza y el error nunca guarda secretos", () => {
+    sysRepo.recordServiceCheck("shopify", {
+      status: "warning",
+      ok: false,
+      error: "401 con token shpat_supersecreto999 de pedro@x.com",
+      metadata: { nota: "Bearer eyJaaa.bbb.ccc y tel 34644313917" },
+    });
+    const row = sysRepo.getServiceHealth("shopify")!;
+    assert.ok(!String(row.last_error_message).includes("shpat_supersecreto999"));
+    assert.ok(!String(row.last_error_message).includes("pedro@x.com"));
+    assert.ok(!String(row.metadata_json).includes("34644313917"));
+  });
+
+  await test("runInstrumented: con trabajo crea fila; el error se registra Y se relanza", async () => {
+    await sysRepo.runInstrumented("scheduler:orders", "orders", async () => ({
+      processed: 3,
+      errors: 0,
+    }));
+    const [run] = sysRepo.listSchedulerRuns("orders", 1);
+    assert.ok(run && run.processed_count === 3 && run.status === "ok");
+
+    let relanzado = false;
+    try {
+      await sysRepo.runInstrumented("scheduler:orders", "orders", async () => {
+        throw new Error("tick roto");
+      });
+    } catch {
+      relanzado = true;
+    }
+    assert.ok(relanzado, "el error del tick NO se traga");
+    const [runErr] = sysRepo.listSchedulerRuns("orders", 1);
+    assert.equal(runErr.status, "error");
+    assert.ok(String(runErr.last_error).includes("tick roto"));
+  });
+
+  await test("runInstrumented: un tick sin trabajo NO crea fila (solo latido)", async () => {
+    const antes = sysRepo.listSchedulerRuns("tracking").length;
+    await sysRepo.runInstrumented("scheduler:tracking", "tracking", async () => ({
+      processed: 0,
+      errors: 0,
+    }));
+    assert.equal(sysRepo.listSchedulerRuns("tracking").length, antes, "sin fila nueva");
+    assert.ok(sysRepo.getServiceHealth("scheduler:tracking"), "pero el latido existe");
+  });
+
+  await test("SYSTEM_HEALTH_ENABLED=0 apaga la instrumentación sin romper nada", async () => {
+    await withEnv({ SYSTEM_HEALTH_ENABLED: "0" }, () => {
+      const antes = sysRepo.listIntegrationEvents({ limit: 500 }).length;
+      sysRepo.logIntegrationEvent("system", "apagado", "info", "no debería guardarse");
+      assert.equal(sysRepo.listIntegrationEvents({ limit: 500 }).length, antes);
+    });
+  });
+
+  await test("getDatabaseHealth: DB sana → healthy, WAL, esquema al día, filas y última escritura", () => {
+    const h = sysCore.getDatabaseHealth();
+    assert.equal(h.status, "healthy");
+    assert.equal(h.reachable, true);
+    assert.equal(h.integrity, "ok");
+    assert.equal(h.journalMode.toLowerCase(), "wal");
+    assert.equal(h.schemaVersion, h.expectedSchemaVersion, "user_version estampada");
+    assert.ok((h.rowCounts["orders"] ?? 0) > 0, "cuenta filas de orders");
+    assert.ok(h.lastWriteAt, "última escritura detectada");
+    assert.ok(h.dbSizeBytes && h.dbSizeBytes > 0);
+    // integrity_check completo también funciona
+    assert.equal(sysCore.getDatabaseHealth({ full: true }).integrity, "ok");
+  });
+
+  await test("getBackupHealth: carpeta inexistente → unknown SIN crash (modo local)", async () => {
+    await withEnv({ BACKUP_DIR: path.join(tmpDir, "no-existe") }, () => {
+      const h = sysCore.getBackupHealth();
+      assert.equal(h.status, "unknown");
+      assert.ok(h.message.includes("inexistente"));
+    });
+  });
+
+  await test("getBackupHealth: carpeta vacía → warning (existe pero sin copias)", async () => {
+    const dirVacia = path.join(tmpDir, "backups-vacia");
+    fs.mkdirSync(dirVacia, { recursive: true });
+    await withEnv({ BACKUP_DIR: dirVacia }, () => {
+      assert.equal(sysCore.getBackupHealth().status, "warning");
+    });
+  });
+
+  await test("getBackupHealth: copia fresca e íntegra → healthy; vieja → warning; muy vieja → critical", async () => {
+    const dir = path.join(tmpDir, "backups-ok");
+    fs.mkdirSync(dir, { recursive: true });
+    // Copia REAL: un sqlite válido que pasa quick_check
+    const Database = require("better-sqlite3");
+    const fichero = path.join(dir, "messages-2026-01-01_0200.db");
+    const bdb = new Database(fichero);
+    bdb.exec("CREATE TABLE t (id INTEGER)");
+    bdb.close();
+    for (const sufijo of ["-wal", "-shm"]) fs.rmSync(fichero + sufijo, { force: true });
+
+    await withEnv({ BACKUP_DIR: dir }, () => {
+      assert.equal(sysCore.getBackupHealth().status, "healthy", "recién creada → healthy");
+      assert.equal(sysCore.getBackupHealth().integrity, "ok");
+
+      const h30 = new Date(Date.now() - 30 * 3600 * 1000);
+      fs.utimesSync(fichero, h30, h30);
+      assert.equal(sysCore.getBackupHealth().status, "warning", ">24h → warning");
+
+      const h50 = new Date(Date.now() - 50 * 3600 * 1000);
+      fs.utimesSync(fichero, h50, h50);
+      assert.equal(sysCore.getBackupHealth().status, "critical", ">48h → critical");
+    });
+  });
+
+  await test("getBackupHealth: copia corrupta → critical aunque sea reciente", async () => {
+    const dir = path.join(tmpDir, "backups-mal");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "messages-rota.db"), "esto no es un sqlite");
+    await withEnv({ BACKUP_DIR: dir }, () => {
+      const h = sysCore.getBackupHealth();
+      assert.equal(h.status, "critical");
+      assert.ok(h.message.includes("comprobación"), "explica que no pasa la comprobación");
+    });
+  });
+
+  await test("getOutboxHealth: cola vacía o al día → healthy; sent_at se estampa al enviar", () => {
+    const conv = db.getOrCreateConversation("34600999888", "Salud Outbox");
+    const encolado = db.enqueueOutbox(conv.id, conv.phone, "mensaje de prueba salud");
+    db.markOutboxSent(encolado);
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    const fila = raw.prepare("SELECT sent, sent_at FROM outbox WHERE id = ?").get(encolado);
+    raw.close();
+    assert.equal(fila.sent, 1);
+    assert.ok(fila.sent_at, "sent_at estampado al enviar");
+    const h = sysCore.getOutboxHealth();
+    assert.equal(h.status, "healthy");
+    assert.ok(h.sentLast24h >= 1);
+    assert.ok(h.lastSentAt);
+  });
+
+  await test("getOutboxHealth: pendiente atascado → warning; retenidos masivos → critical", async () => {
+    const conv = db.getOrCreateConversation("34600999888", "Salud Outbox");
+    const id = db.enqueueOutbox(conv.id, conv.phone, "atascado");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      // 20 min de antigüedad: supera OUTBOX_STALE_MINUTES (15) pero no la
+      // edad máxima (60) → warning "¿el bot corre?"
+      raw.prepare("UPDATE outbox SET created_at = created_at - 1200 WHERE id = ?").run(id);
+      assert.equal(sysCore.getOutboxHealth().status, "warning");
+
+      // 2h: retenido (no saldrá solo) → warning con aviso de outbox:inspect
+      raw.prepare("UPDATE outbox SET created_at = created_at - 6000 WHERE id = ?").run(id);
+      const h = sysCore.getOutboxHealth();
+      assert.equal(h.status, "warning");
+      assert.equal(h.retained, 1);
+      assert.ok(h.message.includes("outbox:inspect"));
+
+      // 12 retenidos → critical
+      const ids: number[] = [];
+      for (let i = 0; i < 11; i++) {
+        ids.push(db.enqueueOutbox(conv.id, conv.phone, `retenido ${i}`));
+      }
+      raw
+        .prepare(
+          `UPDATE outbox SET created_at = created_at - 7200 WHERE id IN (${ids.join(",")})`
+        )
+        .run();
+      assert.equal(sysCore.getOutboxHealth().status, "critical");
+      // Limpieza: fuera los artificiales para no ensuciar el resto
+      raw.prepare(`DELETE FROM outbox WHERE id IN (${[...ids, id].join(",")})`).run();
+    } finally {
+      raw.close();
+    }
+  });
+
+  await test("getSchedulersHealth: sin latido → unknown; latido fresco → healthy; latido viejo → critical", () => {
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      raw.prepare("DELETE FROM service_health WHERE service = 'scheduler:watchdog'").run();
+      let wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "unknown");
+
+      sysRepo.recordServiceCheck("scheduler:watchdog", { status: "healthy", ok: true });
+      wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "healthy");
+
+      raw
+        .prepare(
+          "UPDATE service_health SET last_checked_at = last_checked_at - 999999 WHERE service = 'scheduler:watchdog'"
+        )
+        .run();
+      wd = sysCore.getSchedulersHealth().find((s) => s.name === "watchdog")!;
+      assert.equal(wd.status, "critical");
+      assert.ok(wd.message.includes("sin latido"));
+    } finally {
+      raw.close();
+    }
+  });
+
+  await test("getWhatsAppHealth: desconectado → critical; conectado → healthy con número ENMASCARADO", () => {
+    db.setConnectionState({ status: "disconnected", phone: null });
+    let h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "critical");
+
+    db.setConnectionState({ status: "connected", phone: "34641308254" });
+    // "Conectado" sin latido del proceso del bot NO se cree: warning.
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("DELETE FROM service_health WHERE service = 'scheduler:outbox'").run();
+    raw.close();
+    h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "warning", "conectado sin bot vivo = estado obsoleto");
+    assert.ok(h.message.includes("no da señales"));
+
+    // Con latido fresco del bot: healthy de verdad.
+    sysRepo.recordServiceCheck("scheduler:outbox", { status: "healthy", ok: true });
+    h = sysInteg.getWhatsAppHealth();
+    assert.equal(h.status, "healthy");
+    assert.ok(h.businessNumberMasked && !h.businessNumberMasked.includes("641308254"),
+      "el número jamás sale completo");
+    assert.ok(h.lastInboundAt !== undefined && h.outboxPending >= 0);
+  });
+
+  await test("getShopifyHealth: sin credenciales → no healthy; con error 401 reciente → critical", async () => {
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: undefined, SHOPIFY_CLIENT_ID: undefined, SHOPIFY_CLIENT_SECRET: undefined, SHOPIFY_STORE_DOMAIN: undefined },
+      () => {
+        const h = sysInteg.getShopifyHealth();
+        assert.notEqual(h.status, "healthy");
+        assert.equal(h.configured, false);
+        assert.ok(h.lastWebhookAt, "el último webhook se deriva de orders");
+      }
+    );
+    await withEnv(
+      { SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_token_de_prueba", SHOPIFY_STORE_DOMAIN: "x.myshopify.com" },
+      () => {
+        sysRepo.recordServiceCheck("shopify", { status: "critical", ok: false, error: "tagsAdd 401: credencial inválida" });
+        const h = sysInteg.getShopifyHealth();
+        assert.equal(h.authMode, "static");
+        assert.equal(h.status, "critical", "401 reciente → critical");
+        sysRepo.recordServiceCheck("shopify", { status: "healthy", ok: true });
+        assert.equal(sysInteg.getShopifyHealth().status, "healthy");
+      }
+    );
+  });
+
+  await test("getDropeaHealth: sin key → disabled; habilitada sin llamadas → unknown; con éxito → healthy read-only", async () => {
+    await withEnv({ DROPEA_API_KEY: undefined, DROPEA_API_ENABLED: undefined }, () => {
+      assert.equal(sysInteg.getDropeaHealth().status, "disabled");
+    });
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    raw.prepare("DELETE FROM service_health WHERE service = 'dropea'").run();
+    // Estado virgen de verdad: sin firmas inválidas heredadas de otros tests
+    // (si las hubiera, el warning sería CORRECTO, pero aquí probamos "nunca llamada")
+    raw
+      .prepare("DELETE FROM integration_events WHERE integration = 'dropea' AND event_type = 'webhook_bad_signature'")
+      .run();
+    raw.close();
+    await withEnv({ DROPEA_API_KEY: "clave-test", DROPEA_API_ENABLED: "1" }, () => {
+      let h = sysInteg.getDropeaHealth();
+      assert.equal(h.status, "unknown", "sin llamadas: unknown, jamás datos inventados");
+      assert.ok(h.message.includes("doctor"));
+      sysRepo.recordServiceCheck("dropea", { status: "healthy", ok: true });
+      h = sysInteg.getDropeaHealth();
+      assert.equal(h.status, "healthy");
+      assert.equal(h.createMode, "external_app");
+      assert.ok(h.message.includes("app oficial"), "deja claro quién crea los pedidos");
+    });
+  });
+
+  await test("getDropeaHealth: firmas inválidas recientes degradan a warning", async () => {
+    await withEnv({ DROPEA_API_KEY: "clave-test", DROPEA_API_ENABLED: "1" }, () => {
+      sysRepo.logIntegrationEvent("dropea", "webhook_bad_signature", "warning", "firma inválida");
+      const h = sysInteg.getDropeaHealth();
+      assert.ok(h.counters.webhookBadSignature >= 1);
+      assert.equal(h.status, "warning");
+    });
+  });
+
+  await test("getDropiHealth: apagado → disabled; encendido sin auth confirmada → warning, NUNCA healthy", async () => {
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: undefined }, () => {
+      assert.equal(sysInteg.getDropiHealth().status, "disabled");
+    });
+    await withEnv({ DROPIPRO_WEBHOOK_ENABLED: "1" }, () => {
+      const h = sysInteg.getDropiHealth();
+      assert.equal(h.status, "warning");
+      assert.ok(h.message.includes("sin autenticación"));
+    });
+  });
+
+  await test("getTrackingOverview: cuenta activos, stale configurable y bloqueados por dirección", async () => {
+    const o = mkSynced("77001", "#77001");
+    const Database = require("better-sqlite3");
+    const raw = new Database(path.join(tmpDir, "messages.db"));
+    try {
+      raw
+        .prepare(
+          `UPDATE orders SET supplier_status_normalized='in_transit',
+           tracking_last_checked_at = unixepoch() - 8 * 3600 WHERE id = ?`
+        )
+        .run(o.id);
+      // Umbral 12h: 8h sin mirar NO es stale
+      let t = sysTracking.getTrackingOverview();
+      assert.ok(t.activeShipments >= 1);
+      assert.ok(!t.staleOrders.some((x) => x.orderNumber === "#77001"));
+      // Umbral 6h (env): ahora sí
+      await withEnv({ TRACKING_STALE_HOURS: "6" }, () => {
+        const t2 = sysTracking.getTrackingOverview();
+        assert.ok(t2.staleOrders.some((x) => x.orderNumber === "#77001"));
+        assert.equal(t2.status, "warning");
+      });
+      // Bloqueado por dirección (el hallazgo de la city "-")
+      raw
+        .prepare("UPDATE orders SET supplier_sync_status='blocked_address' WHERE id = ?")
+        .run(o.id);
+      t = sysTracking.getTrackingOverview();
+      assert.ok(t.blockedAddress >= 1, "los city '-' se ven en el panel");
+    } finally {
+      raw
+        .prepare(
+          "UPDATE orders SET supplier_status_normalized='delivered', supplier_sync_status='synced' WHERE id = ?"
+        )
+        .run(o.id);
+      raw.close();
+    }
+  });
+
+  await test("getSystemOverview: 9 tarjetas, overall = peor estado OPERATIVO (disabled/unknown no arrastran)", () => {
+    db.setConnectionState({ status: "connected", phone: "34641308254" });
+    const ov = sysOverview.getSystemOverview();
+    assert.equal(ov.cards.length, 9);
+    const rank: Record<string, number> = { healthy: 0, disabled: 0, unknown: 0, warning: 1, critical: 2 };
+    const esperado = ov.cards.reduce((acc, c) => (rank[c.status] > rank[acc] ? c.status : acc),
+      "healthy" as string);
+    const rankEsperado = rank[esperado];
+    assert.equal(rank[ov.overall], rankEsperado, "overall coherente con las tarjetas");
+    assert.equal(ov.emergencyStop, false);
+  });
+
+  await test("getSystemOverview: JAMÁS filtra secretos ni teléfonos completos", async () => {
+    await withEnv(
+      {
+        SHOPIFY_ADMIN_ACCESS_TOKEN: "shpat_absolutamente_secreto_123",
+        DROPEA_API_KEY: "clave-dropea-secretisima",
+        DROPEA_WEBHOOK_SECRET: "firma-secreta-webhook",
+        SHOPIFY_STORE_DOMAIN: "x.myshopify.com",
+        DROPEA_API_ENABLED: "1",
+      },
+      () => {
+        db.setConnectionState({ status: "connected", phone: "34641308254" });
+        const json = JSON.stringify(sysOverview.getSystemOverview());
+        assert.ok(!json.includes("shpat_absolutamente_secreto_123"), "token Shopify fuera");
+        assert.ok(!json.includes("clave-dropea-secretisima"), "API key Dropea fuera");
+        assert.ok(!json.includes("firma-secreta-webhook"), "signing secret fuera");
+        assert.ok(!json.includes("34641308254"), "número del negocio nunca completo");
+      }
+    );
+  });
+
+  await test("webhook Dropea con firma inválida deja evento webhook_bad_signature en el feed", async () => {
+    const { processDropeaWebhook } = await import("../src/lib/suppliers/dropea/webhook");
+    await withEnv({ DROPEA_WEBHOOK_SECRET: "secreto-de-firma" }, () => {
+      const antes = sysRepo.countIntegrationEvents("dropea", "webhook_bad_signature", 0);
+      const r = processDropeaWebhook('{"topic":"order.created","resource_id":1}', {
+        "x-dropea-signature": "sha256=firmafalsa",
+      });
+      assert.equal(r.status, 401);
+      assert.equal(sysRepo.countIntegrationEvents("dropea", "webhook_bad_signature", 0), antes + 1);
+    });
+  });
+
+  // ============ Resumen ============
+  console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
+  if (failures.length > 0) {
+    process.exit(1);
+  }
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

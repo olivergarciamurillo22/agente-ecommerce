@@ -1,0 +1,17 @@
+providers = ["node"]
+
+[variables]
+NIXPACKS_NODE_VERSION = "22"
+
+[phases.setup]
+# better-sqlite3 se compila nativamente. Sin python3 + gcc + gnumake el build remoto falla.
+nixPkgs = ["nodejs_22", "npm-10_x", "python3", "gcc", "gnumake"]
+
+[phases.install]
+cmds = ["npm ci --include=dev"]
+
+[phases.build]
+cmds = ["npm run build"]
+
+[start]
+cmd = "npm run start:all"

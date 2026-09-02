@@ -1,0 +1,99 @@
+# ============================================================
+# Casamable™ — despliegue en el NAS UGREEN DXP2800 (UGOS Pro + Docker)
+#
+#   docker compose up -d --build
+#
+# Antes de levantar:
+#   1. cp .env.nas.example .env   y rellenar los huecos
+#   2. crear en el NAS la carpeta persistente con auth/ data/ backups/
+#   3. ajustar PERSIST_DIR abajo (por defecto ./ = junto al repo)
+#
+# El estado que NO se puede perder (sesión de WhatsApp y base de datos) vive
+# en volúmenes del NAS, nunca dentro de la imagen: reconstruir el contenedor
+# no toca esos datos.
+# ============================================================
+
+services:
+  casamable-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: casamable-agent:latest
+    container_name: casamable-agent
+
+    # Vuelve a arrancar si cae el proceso, si se reinicia Docker o el NAS.
+    # (unless-stopped: si lo paras a mano, se queda parado.)
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      NODE_ENV: production
+      # Crítico: sin TZ, SQLite calcularía los contadores "de hoy" en UTC y
+      # la ventana horaria de envío se desviaría respecto a España.
+      TZ: ${TZ:-Europe/Madrid}
+      PORT: "3000"
+
+    ports:
+      # host:contenedor — cambia el 3000 de la IZQUIERDA si ese puerto ya
+      # está ocupado en el NAS (p.ej. "3100:3000").
+      - "${HOST_PORT:-3000}:3000"
+
+    volumes:
+      # PERSISTENCIA CRÍTICA. PERSIST_DIR se define en el .env y debe apuntar
+      # a una carpeta REAL del NAS (ver docs/UGREEN-DXP2800-DEPLOY.md).
+      - ${PERSIST_DIR:-./nas-data}/auth:/app/auth
+      - ${PERSIST_DIR:-./nas-data}/data:/app/data
+      - ${PERSIST_DIR:-./nas-data}/backups:/app/backups
+
+    healthcheck:
+      # Liveness: app + base de datos. Un WhatsApp desconectado NO marca
+      # unhealthy (Baileys reconecta solo; reiniciar cortaría la reconexión).
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health/live"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+    # 8 GB en el NAS: reservamos poco y limitamos para no ahogar UGOS.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+        reservations:
+          cpus: "0.25"
+          memory: 384M
+
+    # Logs acotados: 3 ficheros de 10 MB = 30 MB como máximo.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ------------------------------------------------------------
+  # Túnel de Cloudflare (OPCIONAL pero recomendado para el acceso externo).
+  #
+  # Da HTTPS y una URL FIJA (https://agente.casamable.es) sin abrir ni un
+  # puerto del router. Se activa con:  docker compose --profile tunnel up -d
+  #
+  # El token se crea en el panel de Cloudflare Zero Trust y va en el .env
+  # como CLOUDFLARE_TUNNEL_TOKEN. NUNCA en Git.
+  # ------------------------------------------------------------
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: casamable-tunnel
+    profiles: ["tunnel"]
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - casamable-agent
+    environment:
+      TZ: ${TZ:-Europe/Madrid}
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
