@@ -9,7 +9,7 @@
 // panel entero vive aquí.
 // ============================================================
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 // --- Formateadores compartidos ---
 
@@ -288,6 +288,15 @@ export function ModalShell({
   children: ReactNode;
   title?: string;
 }) {
+  // Escape cierra (accesibilidad): el hook va ANTES del return condicional.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center" role="dialog" aria-modal>

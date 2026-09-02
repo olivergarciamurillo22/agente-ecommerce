@@ -9391,6 +9391,12 @@ async function main(): Promise<void> {
   // ============ T2 · MAX_ORDER_AGE_MINUTES contra ordered_at ============
   console.log("\n— T2: antigüedad medida por ordered_at, no por created_at —");
 
+  // El guardia de edad vive DENTRO del bloque whatsappReady() del tick: si
+  // otro test dejó la conexión simulada en 'disconnected', estos tests
+  // fallaban por acoplamiento, no por la edad (flaky real del 02-09, ~1/5
+  // ejecuciones). Su tema es la EDAD: la precondición se fija explícita.
+  db.setConnectionState({ status: "connected", phone: "34600000000" });
+
   await test("T2 scheduler: ordered_at viejo caduca la fila aunque created_at sea de ahora mismo (import en tiempo real, compra vieja)", async () => {
     const o = mkOrder("972001", "2801", "34600000200");
     const nowSec = Math.floor(Date.now() / 1000);

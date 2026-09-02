@@ -168,7 +168,7 @@ export default function NavRail({
         onClick={() => onViewChange(id)}
         aria-current={active ? "page" : undefined}
         title={collapsed ? label : undefined}
-        className={`group flex items-center gap-3 w-full rounded-xl px-3 h-10 text-[13px] font-medium transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/50 ${
+        className={`group relative flex items-center gap-3 w-full rounded-xl px-3 h-10 text-[13px] font-medium transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/50 ${
           active
             ? "bg-brand-surface-2 text-brand-text shadow-[inset_2px_0_0_0_var(--color-brand-gold)]"
             : "text-brand-muted hover:text-brand-text hover:bg-brand-surface-2/60"
