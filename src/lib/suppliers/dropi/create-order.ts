@@ -3,7 +3,7 @@
 // cuando se creía que la documentación llegaría — NO llegará salvo nueva
 // evidencia. NO "terminar" esta integración: la vía real de Dropi es su app
 // de Shopify (el vínculo se hace con el campo *vendor* del producto, ver
-// docs/DROPI-API-CONTRACT.md y CONTEXTO-2026-08-25 §2). Se conserva porque
+// docs/DROPI-API-CONTRACT.md y docs/archive/sesiones-2026-08/CONTEXTO-2026-08-25.md §2). Se conserva porque
 // el router y los gates lo importan y porque falla cerrado — no porque
 // exista un plan de implementarlo.
 // ============================================================

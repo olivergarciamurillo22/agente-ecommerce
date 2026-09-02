@@ -1,55 +1,48 @@
-# Dependencias
+# ── Node ──
 node_modules/
 
-# Next.js
+# ── Next.js / TypeScript ──
 .next/
 out/
-
-# TypeScript (caché de compilación incremental — rompe el build de Nixpacks si se sube)
+# Caché de compilación incremental — rompe el build de Nixpacks si se sube
 *.tsbuildinfo
 
-# Runtime
-data/
-auth/
-
-# Variables de entorno locales (NO subir)
+# ── Env (NUNCA subir: aquí viven los secretos) ──
 .env
 .env.local
 .env*.local
+# Config de producción del NAS (copia local para pegar; en el NAS se llama .env)
+.env.nas
+ENV-NAS-PENDIENTE.local.txt
 
-# Logs
+# ── DB y runtime (SQLite + sesión de WhatsApp) ──
+data/
+auth/
+.restart
+
+# ── Backups (nunca a git) ──
+backups/
+nas-data/
+
+# ── Logs y salidas locales ──
 *.log
 npm-debug.log*
-
-# Resultados del redteam (contienen respuestas del modelo con tus precios)
+# Resultados del redteam (contienen respuestas del modelo con precios reales)
 redteam-resultados.json
+*.tmp.ts
 
-# Sistema
+# ── OS / IDE ──
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# Editor
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Restart flag
-.restart
+# ── Claude Code local ──
 .claude/*.lock
 .claude/settings.local.json
 
-# Backup del kit original
+# ── Artefactos del kit original ──
 02-kit-agente-whatsapp.zip
-
-# Archivos temporales de diagnóstico
-*.tmp.ts
-
-# Backups locales de la base de datos (nunca a Git)
-backups/
-nas-data/
-
-# Config de producción del NAS
-.env.nas
-ENV-NAS-PENDIENTE.local.txt

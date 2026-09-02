@@ -1,11 +1,14 @@
+// ⛔ DROPI NO DISPONE DE API PÚBLICA (confirmado con su soporte, 25-08-2026).
+// NO implementar writes/API sin evidencia nueva. La vía real es su app de
+// Shopify (campo *vendor* del producto). Ver docs/DROPI-API-CONTRACT.md.
 // ============================================================
 // Puerta de CREACIÓN de pedidos en Dropi PRO.
 //
-// Contexto real (22-08-2026): la app "Dropify PRO" de Shopify está ROTA y
-// nunca ha creado pedidos; Pedro los mete a mano. Por eso Dropi es el
-// proveedor donde SÍ queremos crear nosotros — pero su API aún no está
-// documentada. Mientras tanto, esta puerta falla cerrada: cada llave tiene
-// que estar explícitamente abierta Y el cliente HTTP tiene que existir.
+// Contexto real: la app "Dropify PRO" de Shopify está ROTA y Pedro mete
+// los pedidos a mano. DROPI NO TIENE API PÚBLICA (confirmado 25-08): esta
+// puerta existe como capa de seguridad fail-closed, NO como preparación de
+// una integración futura — cada llave tiene que estar explícitamente
+// abierta Y el cliente HTTP tiene que existir (y no existe a propósito).
 //
 // Mismo patrón que Dropea (`dropea/create-gate.ts`): el orden de los frenos
 // va del más peligroso al más específico, para que el motivo mostrado sea

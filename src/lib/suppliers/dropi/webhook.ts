@@ -1,3 +1,6 @@
+// ⛔ DROPI NO DISPONE DE API PÚBLICA (confirmado con su soporte, 25-08-2026).
+// NO implementar writes/API sin evidencia nueva. La vía real es su app de
+// Shopify (campo *vendor* del producto). Ver docs/DROPI-API-CONTRACT.md.
 // ============================================================
 // Receptor del webhook de actualizaciones de Dropi PRO.
 //

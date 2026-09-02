@@ -1,3 +1,11 @@
+// ============================================================
+// PRODUCTION_ARTIFACT — entrypoint del proceso de OUTBOX en el NAS.
+// PURPOSE: drenar la cola de WhatsApp en un proceso separado del web.
+// SAFE/WRITE: envía mensajes REALES (pasa por los safety gates).
+// PRODUCTION/LOCAL: producción (docker compose del NAS lo referencia por
+// ruta). NO renombrar ni borrar aunque no aparezca en package.json:
+// recuperado del working tree real del NAS el 30-08 (commit ddfbd97).
+// ============================================================
 import "./env-loader";
 
 import pino from "pino";
