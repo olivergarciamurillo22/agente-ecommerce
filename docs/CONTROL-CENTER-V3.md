@@ -14,16 +14,22 @@ reintentaba cada tick **en silencio** — sin evento, sin panel, sin fin.
 
 **2-5. Plantilla real.** El catálogo separa ahora clave LÓGICA de nombre
 del PROVEEDOR (`provider_mappings`): `order_confirmation_request` →
-**`pedido`** (es), variables `nombre, producto, importe`, 3 botones.
-**No verificada todavía**: el token local (Ads) no ve la WABA, así que
-`npm run whatsapp:templates:doctor` debe correr donde estén
-`META_WHATSAPP_ACCESS_TOKEN` + `BUSINESS_ACCOUNT_ID` (el NAS). El doctor
-comprueba nombre + idioma + APPROVED + aridad ({{n}} del cuerpo real) +
-botones, y cachea la verificación que DESBLOQUEA el envío. Hasta
-entonces: bloqueado con `FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED`
+**`confirmacion_pedido_cod`** (es), variables `nombre, numero_pedido,
+producto, importe` (4 — {{2}} es el número de pedido, ej. `#1042`), 3
+botones. Corregido el 02-09 contra el inventario real de la WABA
+(`docs/CONTEXTO-2026-09-01.md` §5): el mapping anterior apuntaba a
+**`pedido`**, que resultó ser la plantilla de ejemplo de Meta sin
+adaptar — nunca una plantilla de Casamable — y era la causa de que la
+verificación no pudiera encajar nunca. **Sigue sin verificar contra Meta**
+(el token local no ve la WABA), así que `npm run whatsapp:templates:doctor`
+debe correr donde estén `META_WHATSAPP_ACCESS_TOKEN` + `BUSINESS_ACCOUNT_ID`
+(el NAS). El doctor comprueba nombre + idioma + APPROVED + aridad ({{n}}
+del cuerpo real) + botones, y cachea la verificación que DESBLOQUEA el
+envío. Hasta entonces: bloqueado con `FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED`
 visible (evento + Ajustes), el pedido NO se consume, y al verificar sale
-solo en el siguiente tick. Si `pedido` no encaja (aridad/botones), el
-mapping se ajusta en el JSON sin tocar código.
+solo en el siguiente tick. Si `confirmacion_pedido_cod` no encaja
+(aridad/botones) al verificar de verdad, el mapping se ajusta en el JSON
+sin tocar código.
 
 **6. Flujo del piloto.** Pedido → elegible → cloud → fuera de ventana →
 plantilla VERIFICADA → provider_message_id → sent/delivered/read → botón

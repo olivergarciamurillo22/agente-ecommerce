@@ -244,14 +244,15 @@
   "provider_mappings": [
     {
       "logicalKey": "order_confirmation_request",
-      "providerTemplate": "pedido",
+      "providerTemplate": "confirmacion_pedido_cod",
       "language": "es",
       "params": [
         "nombre",
+        "numero_pedido",
         "producto",
         "importe"
       ],
-      "note": "Candidata real de la WABA para la confirmación inicial COD. Verificar antes de usar: si su cuerpo/botones no encajan semánticamente con 'tienes este pedido, ¿lo confirmas?', NO forzarla — bloqueante FIRST_CONFIRMATION_TEMPLATE_NOT_APPROVED."
+      "note": "Confirmada contra el inventario real de la WABA (sesión 01-09, docs/CONTEXTO-2026-09-01.md §5): 4 variables — {{1}} nombre, {{2}} nº pedido (ej. '#1042'), {{3}} producto, {{4}} importe — y 3 botones en este orden: Confirmar pedido→confirm_order, Cambiar dirección→change_address, Dejar una nota→delivery_note. 'pedido' (el mapping anterior) era la plantilla de ejemplo de Meta sin adaptar, nunca la real — origen del incidente 132001. Sigue exigiendo whatsapp:templates:doctor antes de activarse: esto declara intención, no aprobación."
     }
   ]
 }

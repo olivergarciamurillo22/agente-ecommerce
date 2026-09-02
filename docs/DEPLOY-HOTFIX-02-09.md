@@ -60,19 +60,23 @@ Nada más cambia en el `.env`. Todo lo demás sigue igual.
 # 1. ¿Las 4 suscripciones de Shopify siguen vivas en la tienda?
 npm run shopify:webhooks -- --ensure
 
-# 2. DESBLOQUEA EL PRIMER WHATSAPP: verifica la plantilla real 'pedido'
-#    contra Meta y cachea la verificación. Hasta que esto salga en verde,
-#    la confirmación inicial NO sale (bloqueada con motivo, sin 404s).
+# 2. DESBLOQUEA EL PRIMER WHATSAPP: verifica la plantilla real
+#    'confirmacion_pedido_cod' contra Meta y cachea la verificación.
+#    (mapping corregido el 02-09: apuntaba a 'pedido', la plantilla de
+#    ejemplo de Meta — nunca una plantilla de Casamable). Hasta que esto
+#    salga en verde, la confirmación inicial NO sale (bloqueada con
+#    motivo, sin 404s).
 npm run whatsapp:templates:doctor
 
 # 3. Estado de Retell: agente, versión publicada, prompt EN VIVO validado.
 npm run retell:doctor
 ```
 
-**Si el doctor de plantillas dice que `pedido` no encaja** (variables o
-botones distintos de 3): no forzar nada — mandar la salida a Óliver y se
-ajusta el mapping en un minuto. El sistema seguirá reteniendo los envíos
-con el motivo visible en el panel (Ajustes → WhatsApp).
+**Si el doctor de plantillas dice que `confirmacion_pedido_cod` no encaja**
+(variables distintas de 4 o botones distintos de 3): no forzar nada —
+mandar la salida a Óliver y se ajusta el mapping en un minuto. El sistema
+seguirá reteniendo los envíos con el motivo visible en el panel (Ajustes
+→ WhatsApp).
 
 ## PASO 5 · Verificar (30 min de observación)
 
@@ -81,7 +85,8 @@ con el motivo visible en el panel (Ajustes → WhatsApp).
 2. Ajustes → WhatsApp: **AUTOMATIZACIÓN WHATSAPP: READY** (si corriste el
    doctor del paso 4 y salió verde).
 3. Pedido de prueba (teléfono de la allowlist) → llega la plantilla
-   `pedido` → botón "Confirmar" → el pedido pasa a CONFIRMADO en el panel.
+   `confirmacion_pedido_cod` → botón "Confirmar pedido" → el pedido pasa a
+   CONFIRMADO en el panel.
 4. Ajustes → Llamadas: versión del agente visible; "Prompt: Validado".
 5. Esquema **16** en Ajustes → Sistema.
 6. Ningún secreto en `docker compose logs`.
