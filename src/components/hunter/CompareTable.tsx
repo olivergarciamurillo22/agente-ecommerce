@@ -221,7 +221,7 @@ export default function CompareTable({
                       <button
                         type="button"
                         onClick={() => onOpenDetail(c)}
-                        className={`text-left text-sm font-semibold leading-snug line-clamp-2 hover:text-brand-gold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 rounded ${c.productName ? "text-brand-text" : "text-brand-muted italic"}`}
+                        className={`text-left text-sm font-semibold leading-snug line-clamp-2 hover:text-brand-gold transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded ${c.productName ? "text-brand-text" : "text-brand-muted italic"}`}
                       >
                         {displayName(c)}
                       </button>
@@ -229,7 +229,7 @@ export default function CompareTable({
                         type="button"
                         onClick={() => onRemove(c.id)}
                         aria-label={`Quitar ${displayName(c)} de la comparación`}
-                        className="shrink-0 flex h-7 w-7 items-center justify-center rounded-md border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                        className="shrink-0 flex h-7 w-7 items-center justify-center rounded-md border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
                       >
                         <CloseIcon />
                       </button>

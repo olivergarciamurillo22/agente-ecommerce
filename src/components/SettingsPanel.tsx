@@ -97,7 +97,7 @@ export default function SettingsPanel() {
           <select
             value={modelInList ? s.model : "__custom__"}
             onChange={(e) => e.target.value !== "__custom__" && save("model", e.target.value)}
-            className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-gold/50"
+            className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-border-strong"
           >
             {MODELOS.map((m) => (
               <option key={m.id} value={m.id}>{m.label}</option>
@@ -111,7 +111,7 @@ export default function SettingsPanel() {
               value={customModel}
               onChange={(e) => setCustomModel(e.target.value)}
               placeholder="p. ej. anthropic/claude-sonnet-5"
-              className="flex-1 bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text placeholder:text-brand-muted focus:outline-none focus:border-brand-gold/50"
+              className="flex-1 bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text placeholder:text-brand-muted focus:outline-none focus:border-brand-border-strong"
             />
             <button
               onClick={() => customModel.trim() && save("model", customModel.trim())}
@@ -146,7 +146,7 @@ export default function SettingsPanel() {
               value={s.buffer_seconds}
               onChange={(e) => setS((p) => (p ? { ...p, buffer_seconds: e.target.value } : p))}
               onBlur={(e) => save("buffer_seconds", e.target.value)}
-              className="w-24 bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-gold/50"
+              className="w-24 bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-border-strong"
             />
             <span className="text-sm text-brand-muted">segundos</span>
             {savedTag("buffer_seconds")}
@@ -174,7 +174,7 @@ export default function SettingsPanel() {
             <select
               value={s.transcription_model}
               onChange={(e) => save("transcription_model", e.target.value)}
-              className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-gold/50"
+              className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm text-brand-text focus:outline-none focus:border-brand-border-strong"
             >
               {TRANS_MODELOS.map((m) => (
                 <option key={m.id} value={m.id}>{m.label}</option>

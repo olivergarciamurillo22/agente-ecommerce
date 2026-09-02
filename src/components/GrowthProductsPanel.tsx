@@ -69,7 +69,7 @@ export default function GrowthProductsPanel({ onNavigate }: { onNavigate: (v: Do
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-5">
+      <div className="max-w-[1280px] space-y-5">
         <div className="flex flex-wrap items-end justify-between gap-3">
           <div>
             <h1 className="font-display text-2xl font-semibold text-brand-text">Productos</h1>
@@ -102,7 +102,7 @@ export default function GrowthProductsPanel({ onNavigate }: { onNavigate: (v: Do
             <Card className="hidden md:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                  <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
                     <th className="px-4 py-2.5 font-medium">Producto</th>
                     <th className="px-4 py-2.5 font-medium text-right">Enviados</th>
                     <th className="px-4 py-2.5 font-medium text-right">Entregados</th>

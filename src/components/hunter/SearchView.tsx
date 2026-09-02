@@ -230,7 +230,7 @@ export default function SearchView({
       </form>
 
       {/* ── Filtros rápidos + orden + filtros avanzados ── */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex items-center gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 [scrollbar-width:none] md:flex-wrap md:gap-2">
         <Chip active={form.activeOnly} onClick={() => quick({ activeOnly: !form.activeOnly })}>
           Solo activos
         </Chip>
@@ -259,7 +259,7 @@ export default function SearchView({
           <GhostButton onClick={openFilters}>
             <FilterIcon />
             Filtros
-            {nAdvanced > 0 ? <span className="rounded-full bg-brand-gold/15 px-1.5 text-[10px] font-semibold text-brand-gold">{nAdvanced}</span> : null}
+            {nAdvanced > 0 ? <span className="rounded-full bg-brand-surface-2 px-1.5 text-[10px] font-semibold text-brand-gold">{nAdvanced}</span> : null}
           </GhostButton>
         </span>
       </div>

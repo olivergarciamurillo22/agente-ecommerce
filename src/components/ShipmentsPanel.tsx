@@ -240,7 +240,7 @@ export default function ShipmentsPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-5">
+      <div className="max-w-[1280px] space-y-5">
         {/* ── Cabecera: corte de Beeping + sync manual ── */}
         <section>
           <SectionTitle
@@ -310,7 +310,7 @@ export default function ShipmentsPanel() {
           {!data ? (
             <div className="flex gap-2 overflow-x-auto pb-1">
               {Array.from({ length: 6 }).map((_, i) => (
-                <Skeleton key={i} className="h-8 w-24 shrink-0 rounded-full" />
+                <Skeleton key={i} className="h-8 w-24 shrink-0" />
               ))}
             </div>
           ) : (
@@ -338,7 +338,7 @@ export default function ShipmentsPanel() {
               <Card className="hidden md:block overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                    <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
                       <th className="px-4 py-2.5 font-semibold">Pedido</th>
                       <th className="px-3 py-2.5 font-semibold">Cliente</th>
                       <th className="px-3 py-2.5 font-semibold">Proveedor</th>

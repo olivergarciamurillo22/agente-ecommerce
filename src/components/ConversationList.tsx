@@ -28,10 +28,10 @@ export default function ConversationList({
   return (
     <aside className="border-r border-brand-border bg-brand-bg/60 overflow-y-auto min-h-0">
       <div className="px-4 py-3 border-b border-brand-border sticky top-0 bg-brand-bg/95 backdrop-blur z-10 flex items-center justify-between">
-        <h2 className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold">
+        <h2 className="text-[12px] font-medium text-brand-muted">
           Conversaciones
         </h2>
-        <span className="text-[11px] font-semibold text-brand-gold bg-brand-gold/10 border border-brand-gold/20 rounded-full px-2 py-0.5">
+        <span className="text-[11px] font-semibold text-brand-gold bg-brand-surface-2 border border-brand-border-strong rounded-full px-2 py-0.5">
           {conversations.length}
         </span>
       </div>
@@ -69,7 +69,7 @@ export default function ConversationList({
                     <span
                       className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold shrink-0 ${
                         c.mode === "AI"
-                          ? "bg-brand-gold/15 text-brand-gold"
+                          ? "bg-brand-surface-2 text-brand-text"
                           : "bg-wa-green/15 text-wa-green"
                       }`}
                     >

@@ -71,7 +71,7 @@ export default function QRScreen({ status, qrPng }: QRScreenProps) {
         </div>
 
         {elapsed > 60 && (
-          <div className="mt-6 p-3 bg-brand-gold/10 border border-brand-gold/25 rounded-lg text-sm text-brand-gold">
+          <div className="mt-6 p-3 bg-brand-surface-2 border border-brand-border-strong rounded-lg text-sm text-brand-gold">
             ¿Llevas más de 1 minuto? El QR puede haber caducado. Recarga la página.
           </div>
         )}

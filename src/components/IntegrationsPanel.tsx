@@ -391,7 +391,7 @@ export default function IntegrationsPanel() {
                   type="button"
                   onClick={() => setOpenId(open ? null : card.id)}
                   aria-expanded={open}
-                  className="w-full flex items-center gap-3.5 px-4 py-3.5 text-left transition-colors duration-150 hover:bg-brand-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                  className="w-full flex items-center gap-3.5 px-4 py-3.5 text-left transition-colors duration-150 hover:bg-brand-surface-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
                 >
                   <span className="shrink-0 text-brand-muted">
                     <Glyph id={card.id} />
@@ -433,7 +433,7 @@ export default function IntegrationsPanel() {
                     {card.message ? <div className="md:hidden mb-2 text-xs text-brand-text leading-snug">{card.message}</div> : null}
 
                     <div className="rounded-xl border border-brand-border bg-brand-surface-2/50 px-3.5 py-3 space-y-3">
-                      <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold">Detalles técnicos</div>
+                      <div className="text-[12px] font-medium text-brand-muted">Detalles técnicos</div>
 
                       <div className="space-y-1 text-[11px]">
                         <div className="flex justify-between gap-3">
@@ -483,7 +483,7 @@ export default function IntegrationsPanel() {
                               <select
                                 value={selectedShopId ?? undefined}
                                 onChange={(e) => setSelectedShopId(parseInt(e.target.value, 10))}
-                                className="w-full rounded-xl border border-brand-border bg-brand-surface px-3 py-2 text-xs text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                                className="w-full rounded-xl border border-brand-border bg-brand-surface px-3 py-2 text-xs text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
                               >
                                 {discoveryShops.map((s) => (
                                   <option key={s.id} value={s.id}>

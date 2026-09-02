@@ -228,7 +228,7 @@ export default function AdsPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-7">
+      <div className="max-w-[1280px] space-y-7">
         {/* ── Cabecera ── */}
         <section>
           <SectionTitle
@@ -331,7 +331,7 @@ export default function AdsPanel() {
                   <Card className="hidden md:block overflow-x-auto">
                     <table className="w-full text-sm">
                       <thead>
-                        <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                        <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
                           <th className="px-4 py-2.5 font-medium">Campaña</th>
                           <th className="px-4 py-2.5 font-medium text-right">Gasto</th>
                           <th className="px-4 py-2.5 font-medium text-right">Impresiones</th>
@@ -367,27 +367,27 @@ export default function AdsPanel() {
                         <div className="text-[10px] text-brand-muted">{c.id}</div>
                         <div className="mt-2 grid grid-cols-3 gap-x-3 gap-y-2 text-xs">
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">Gasto</div>
+                            <div className="text-[12px] font-medium text-brand-muted">Gasto</div>
                             <div className="text-brand-text">{formatEuro(c.spend)}</div>
                           </div>
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">Impresiones</div>
+                            <div className="text-[12px] font-medium text-brand-muted">Impresiones</div>
                             <div className="text-brand-text">{formatInt(c.impressions)}</div>
                           </div>
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">Clics</div>
+                            <div className="text-[12px] font-medium text-brand-muted">Clics</div>
                             <div className="text-brand-text">{formatInt(c.clicks)}</div>
                           </div>
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">CTR</div>
+                            <div className="text-[12px] font-medium text-brand-muted">CTR</div>
                             <div className="text-brand-text">{formatPct(c.ctr)}</div>
                           </div>
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">CPC</div>
+                            <div className="text-[12px] font-medium text-brand-muted">CPC</div>
                             <div className="text-brand-text">{formatEuro(c.cpc, { decimals: 2 })}</div>
                           </div>
                           <div>
-                            <div className="text-[10px] uppercase tracking-wider text-brand-muted">CPM</div>
+                            <div className="text-[12px] font-medium text-brand-muted">CPM</div>
                             <div className="text-brand-text">{formatEuro(c.cpm)}</div>
                           </div>
                         </div>
@@ -427,7 +427,7 @@ export default function AdsPanel() {
                   <Card className="overflow-x-auto">
                     <table className="w-full text-sm min-w-[680px]">
                       <thead>
-                        <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                        <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
                           <th className="px-4 py-2.5 font-medium">Campaña</th>
                           <th className="px-4 py-2.5 font-medium text-right">Gasto</th>
                           <th className="px-4 py-2.5 font-medium text-right">Pedidos</th>

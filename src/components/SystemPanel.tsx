@@ -326,7 +326,7 @@ function bytes(n: number | null | undefined): string {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-2xl border border-brand-border bg-brand-surface p-4">
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-3">{title}</div>
+      <div className="text-[12px] font-medium text-brand-muted mb-3">{title}</div>
       {children}
     </div>
   );
@@ -504,7 +504,7 @@ function CostsEditor({ onSaved, suggested }: { onSaved: () => void; suggested: A
           />
         ))}
       </div>
-      <div className="mt-4 text-[11px] uppercase tracking-wider text-brand-muted mb-1">Gasto en ads por día</div>
+      <div className="mt-4 text-[12px] font-medium text-brand-muted mb-1">Gasto en ads por día</div>
       <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
         <input className={input} type="date" value={adDay} onChange={(e) => setAdDay(e.target.value)} />
         <input className={input} placeholder="Importe €" value={adAmount} onChange={(e) => setAdAmount(e.target.value)} />
@@ -1020,7 +1020,7 @@ export default function SystemPanel() {
               <button
                 key={c.service}
                 onClick={() => c.detail && setTab(c.detail as Tab)}
-                className="text-left rounded-2xl border border-brand-border bg-brand-surface px-4 py-3 hover:border-brand-gold/40 transition-colors"
+                className="text-left rounded-2xl border border-brand-border bg-brand-surface px-4 py-3 hover:border-brand-border-strong transition-colors"
               >
                 <div className="flex items-center justify-between mb-1">
                   <span className="font-semibold text-sm">{c.label}</span>
@@ -1197,7 +1197,7 @@ export default function SystemPanel() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+                <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
                   <th className="px-2 py-2">Tarea</th>
                   <th className="px-2 py-2">Estado</th>
                   <th className="px-2 py-2">Cada</th>

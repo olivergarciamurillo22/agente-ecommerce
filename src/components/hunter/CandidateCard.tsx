@@ -60,16 +60,16 @@ export function ToggleButton({
   size?: "md" | "sm";
   className?: string;
 }) {
-  const sizeClass = size === "sm" ? "min-h-9 px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm";
+  const sizeClass = size === "sm" ? "min-h-11 md:min-h-9 px-2.5 py-1 text-xs" : "min-h-11 md:min-h-9 px-3.5 py-2 text-sm";
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       aria-pressed={active}
-      className={`inline-flex items-center justify-center gap-1.5 rounded-xl border ${sizeClass} transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 disabled:opacity-40 disabled:cursor-not-allowed ${
+      className={`inline-flex items-center justify-center gap-1.5 rounded-xl border ${sizeClass} transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 disabled:opacity-40 disabled:cursor-not-allowed ${
         active
-          ? "border-brand-gold/60 bg-brand-gold/10 text-brand-gold"
+          ? "border-brand-border-strong bg-brand-surface-2 text-brand-text"
           : "border-brand-border text-brand-text hover:border-brand-muted/70 hover:bg-brand-surface-2"
       } ${className}`}
     >
@@ -112,7 +112,7 @@ export default function CandidateCard({
         type="button"
         onClick={onOpenDetail}
         aria-label={`Ver detalle de ${name}`}
-        className="relative aspect-video w-full bg-brand-surface-2 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-gold/60"
+        className="relative aspect-video w-full bg-brand-surface-2 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-text/30"
       >
         <PreviewImage src={result.previewUrl} alt="" />
         <span className="absolute left-2.5 top-2.5">
@@ -147,7 +147,7 @@ export default function CandidateCard({
         </div>
 
         <div className="flex items-baseline justify-between gap-3">
-          <span className="text-[11px] uppercase tracking-wider text-brand-muted">Precio detectado</span>
+          <span className="text-[12px] font-medium text-brand-muted">Precio detectado</span>
           <span className={`text-sm tabular-nums ${result.detectedPrice ? "font-semibold text-brand-text" : "text-brand-muted"}`}>{formatPrice(result.detectedPrice)}</span>
         </div>
 

@@ -49,3 +49,4 @@ desktop.ini
 
 # ── QA visual (capturas Playwright, temporales) ──
 .playwright-mcp/
+/artifacts/

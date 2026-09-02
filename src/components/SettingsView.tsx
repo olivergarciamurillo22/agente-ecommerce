@@ -273,7 +273,7 @@ function WhatsAppSection() {
 
       {/* Rampa (§9) */}
       <section>
-        <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold mb-2">Rampa de envío automático</div>
+        <div className="text-[13px] font-medium text-brand-muted mb-2">Rampa de envío automático</div>
         <Card className="px-4 py-4 space-y-3">
           <p className="text-xs text-brand-muted leading-snug">
             Controla a cuántos clientes reales llega la confirmación automática. La asignación es estable por teléfono: subir y bajar la rampa no cambia quién está dentro.
@@ -303,7 +303,7 @@ function WhatsAppSection() {
       {/* Sesión de WhatsApp Web — SOLO Baileys (§47: con cloud_api no existe esta semántica) */}
       {isBaileys ? (
         <section>
-          <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold mb-2">Sesión de WhatsApp Web</div>
+          <div className="text-[13px] font-medium text-brand-muted mb-2">Sesión de WhatsApp Web</div>
           <Card className="px-4 py-4 flex flex-col sm:flex-row sm:items-center gap-3">
             <p className="flex-1 text-xs text-brand-muted leading-snug">
               Cierra la sesión de Baileys en este servidor. Para volver a conectar habrá que escanear el código QR otra vez desde el móvil.
@@ -324,7 +324,7 @@ function WhatsAppSection() {
               <span className="font-semibold">{ROLLOUT_OPTIONS.find((o) => o.value === rolloutTarget)?.label}</span>.
             </p>
             <div className="rounded-xl border border-brand-border bg-brand-surface-2 px-3.5 py-3">
-              <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold mb-1">Quién recibirá mensajes ahora mismo</div>
+              <div className="text-[12px] font-medium text-brand-muted mb-1">Quién recibirá mensajes ahora mismo</div>
               <p className="text-sm text-brand-text leading-snug">{rolloutAudience(rolloutTarget)}</p>
             </div>
             {rolloutError ? <div className="text-xs text-red-600 leading-snug">{rolloutError}</div> : null}
@@ -510,7 +510,7 @@ function CallsSection() {
             });
           }
         }}
-        className="w-full sm:w-24 rounded-xl border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text text-right focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+        className="w-full sm:w-24 rounded-xl border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text text-right focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
       />
     </div>
   );
@@ -541,7 +541,7 @@ function CallsSection() {
             if (dangerousTurnOn) setConfirmAction(key === "ai_calls_enabled" ? "enable_calls" : "disable_shadow");
             else void saveConfig(key, "1");
           }}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
             on ? "bg-brand-gold text-white" : "text-brand-muted hover:text-brand-text"
           }`}
         >
@@ -554,7 +554,7 @@ function CallsSection() {
             if (dangerousTurnOff) setConfirmAction(key === "ai_calls_enabled" ? "enable_calls" : "disable_shadow");
             else void saveConfig(key, "0");
           }}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
             !on ? "bg-brand-surface-2 text-brand-text" : "text-brand-muted hover:text-brand-text"
           }`}
         >
@@ -631,7 +631,7 @@ function CallsSection() {
 
       {/* Configuración editable */}
       <section>
-        <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold mb-2">Configuración</div>
+        <div className="text-[13px] font-medium text-brand-muted mb-2">Configuración</div>
         <Card className="divide-y divide-brand-border">
           {toggle(
             "ai_calls_enabled",
@@ -678,7 +678,7 @@ function CallsSection() {
                 }
               }}
               placeholder="34600111222, 34600333444"
-              className="w-full rounded-xl border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 placeholder:text-brand-muted"
+              className="w-full rounded-xl border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 placeholder:text-brand-muted"
             />
           </div>
         </Card>
@@ -729,7 +729,7 @@ function CallsSection() {
 function ScrollPane({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className={`${wide ? "max-w-6xl" : "max-w-3xl"} mx-auto`}>{children}</div>
+      <div className={wide ? "max-w-[1280px]" : "max-w-[880px]"}>{children}</div>
     </div>
   );
 }
@@ -750,7 +750,7 @@ export default function SettingsView() {
 
       {/* md+: mini-navegación vertical */}
       <nav className="hidden md:flex flex-col gap-0.5 w-52 shrink-0 border-r border-brand-border px-3 py-5" aria-label="Secciones de ajustes">
-        <div className="px-3 pb-2 text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold">Ajustes</div>
+        <div className="px-3 pb-2 text-[12px] font-medium text-brand-tertiary">Ajustes</div>
         {SECTIONS.map((s) => {
           const active = section === s.id;
           return (
@@ -758,9 +758,9 @@ export default function SettingsView() {
               key={s.id}
               type="button"
               onClick={() => setSection(s.id)}
-              className={`text-left rounded-lg px-3 py-2 text-sm transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+              className={`text-left rounded-lg px-3 py-2 text-sm transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
                 active
-                  ? "bg-brand-gold/10 text-brand-gold font-semibold"
+                  ? "bg-brand-surface-2 text-brand-text font-medium"
                   : "text-brand-muted hover:text-brand-text hover:bg-brand-surface-2"
               }`}
             >

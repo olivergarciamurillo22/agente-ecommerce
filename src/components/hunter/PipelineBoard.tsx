@@ -45,7 +45,7 @@ function CompactCard({
       <button
         type="button"
         onClick={onOpenDetail}
-        className="w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 rounded-lg"
+        className="w-full text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded-lg"
       >
         <div className="flex items-start justify-between gap-2">
           <div className={`text-sm font-semibold leading-snug line-clamp-2 ${c.productName ? "text-brand-text" : "text-brand-muted italic"}`}>{displayName(c)}</div>
@@ -247,7 +247,7 @@ export default function PipelineBoard({
                 {(mobileStatus === "all" ? candidates : byStatus(mobileStatus)).map((c) => (
                   <div key={c.id}>
                     {mobileStatus === "all" ? (
-                      <div className="px-1 pb-1 text-[10px] uppercase tracking-wider text-brand-muted">{PRODUCT_RESEARCH_STATUS_LABEL[c.status]}</div>
+                      <div className="px-1 pb-1 text-[12px] font-medium text-brand-muted">{PRODUCT_RESEARCH_STATUS_LABEL[c.status]}</div>
                     ) : null}
                     {cardFor(c)}
                   </div>

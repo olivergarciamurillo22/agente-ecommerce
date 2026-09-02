@@ -225,7 +225,7 @@ export default function ConversationPanel({
               onClick={() => fileInputRef.current?.click()}
               disabled={sending}
               title="Enviar una imagen (el texto del cuadro será el pie de foto)"
-              className="px-3 rounded-lg border border-brand-border text-lg text-brand-muted hover:text-brand-gold hover:border-brand-gold/40 disabled:opacity-40 transition"
+              className="px-3 rounded-lg border border-brand-border text-lg text-brand-muted hover:text-brand-gold hover:border-brand-border-strong disabled:opacity-40 transition"
             >
               📷
             </button>

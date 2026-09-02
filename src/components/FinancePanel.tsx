@@ -45,7 +45,7 @@ const PRESET_LABELS: Array<{ preset: FinancePreset; label: string }> = [
 ];
 
 const DATE_INPUT_CLS =
-  "rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 [color-scheme:dark]";
+  "rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 [color-scheme:dark]";
 
 function todayIso(): string {
   const d = new Date();
@@ -108,7 +108,7 @@ function Waterfall({ data }: { data: FinanceOverview }) {
         const pct = Math.max(1, Math.round((Math.abs(r.value) / max) * 100));
         const barCls =
           r.kind === "in"
-            ? "bg-brand-gold/85"
+            ? "bg-brand-surface-2"
             : r.kind === "cost"
               ? "bg-red-500/40"
               : r.value >= 0
@@ -252,7 +252,7 @@ function DailyChart({ series }: { series: FinanceDayPoint[] }) {
 
       {/* Tasa de entrega por día */}
       <div className="mt-4 border-t border-brand-border pt-3">
-        <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-1.5">Tasa de entrega por día</div>
+        <div className="text-[12px] font-medium text-brand-muted mb-1.5">Tasa de entrega por día</div>
         {ratePoints.length === 0 ? (
           <div className="text-xs text-brand-muted py-2">Todavía no hay pedidos resueltos en este periodo para medir la tasa.</div>
         ) : (
@@ -291,7 +291,7 @@ function ProductTable({ rows }: { rows: ProductPerformanceRow[] }) {
       <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+            <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
               <th className={TH_CLS}>Producto</th>
               <th className={`${TH_CLS} text-right`}>Enviados</th>
               <th className={`${TH_CLS} text-right`}>Entregados</th>
@@ -348,7 +348,7 @@ function CourierTable({ rows }: { rows: CourierPerformanceRow[] }) {
       <div className="hidden md:block overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
+            <tr className="text-left text-[12px] font-medium text-brand-muted border-b border-brand-border">
               <th className={TH_CLS}>Transportista</th>
               <th className={`${TH_CLS} text-right`}>Enviados</th>
               <th className={`${TH_CLS} text-right`}>Entregados</th>
@@ -475,7 +475,7 @@ export default function FinancePanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-7">
+      <div className="max-w-[1280px] space-y-7">
         {/* ── Cabecera: título + presets ── */}
         <section>
           <SectionTitle

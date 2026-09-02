@@ -115,8 +115,8 @@ function ChatList({
     <aside className="border-r border-brand-border bg-brand-bg/60 overflow-y-auto min-h-0">
       <div className="sticky top-0 z-10 bg-brand-bg/95 backdrop-blur border-b border-brand-border">
         <div className="px-4 pt-3 pb-2 flex items-center justify-between">
-          <h2 className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold">Conversaciones</h2>
-          <span className="text-[11px] font-semibold text-brand-gold bg-brand-gold/10 border border-brand-gold/20 rounded-full px-2 py-0.5">
+          <h2 className="text-[13px] font-medium text-brand-muted">Conversaciones</h2>
+          <span className="text-[11px] font-semibold text-brand-gold bg-brand-surface-2 border border-brand-border-strong rounded-full px-2 py-0.5">
             {conversations.length}
           </span>
         </div>
@@ -142,7 +142,7 @@ function ChatList({
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Buscar por nombre o teléfono…"
               aria-label="Buscar conversaciones"
-              className="w-full rounded-xl border border-brand-border bg-brand-surface px-3 py-2 pl-9 text-xs text-brand-text placeholder:text-brand-muted focus:outline-none focus:border-brand-gold/60"
+              className="w-full rounded-xl border border-brand-border bg-brand-surface px-3 py-2 pl-9 text-xs text-brand-text placeholder:text-brand-muted focus:outline-none focus:border-brand-border-strong"
             />
           </div>
         </div>
@@ -166,7 +166,7 @@ function ChatList({
               <li key={c.id}>
                 <button
                   onClick={() => onSelect(c.id)}
-                  className={`w-full text-left px-4 py-3.5 border-b border-brand-border/40 transition-colors duration-150 flex gap-3 items-start relative focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 ${
+                  className={`w-full text-left px-4 py-3.5 border-b border-brand-border/40 transition-colors duration-150 flex gap-3 items-start relative focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
                     isSelected ? "bg-brand-surface-2" : "hover:bg-brand-surface"
                   }`}
                 >
@@ -189,7 +189,7 @@ function ChatList({
                     <div className="flex items-center gap-2">
                       <span
                         className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                          c.mode === "AI" ? "bg-brand-gold/15 text-brand-gold" : "bg-emerald-500/15 text-emerald-600"
+                          c.mode === "AI" ? "bg-brand-surface-2 text-brand-text" : "bg-emerald-500/15 text-emerald-600"
                         }`}
                       >
                         {c.mode === "AI" ? "IA" : "TÚ"}
@@ -289,7 +289,7 @@ function OrderContext({
 
   return (
     <div className="h-full overflow-y-auto px-3 py-3 space-y-3">
-      <h3 className="text-[11px] uppercase tracking-[0.18em] text-brand-muted font-semibold px-1">
+      <h3 className="text-[13px] font-medium text-brand-muted px-1">
         Pedido del cliente
       </h3>
 
@@ -378,7 +378,7 @@ function OrderContext({
           onChange={(e) => setNoteText(e.target.value)}
           rows={4}
           placeholder="Nota interna para la expedición (no viaja a Beeping)…"
-          className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-brand-gold/60 text-brand-text placeholder:text-brand-muted"
+          className="w-full bg-brand-bg border border-brand-border rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:border-brand-border-strong text-brand-text placeholder:text-brand-muted"
         />
         {noteError ? <div className="mt-2 text-xs text-red-600 leading-snug">{noteError}</div> : null}
         <div className="mt-3 flex justify-end gap-2">
@@ -458,7 +458,7 @@ export default function ChatsView({
               <button
                 type="button"
                 onClick={() => setMobileChatOpen(false)}
-                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-brand-text hover:bg-brand-surface-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-brand-text hover:bg-brand-surface-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
               >
                 ← Conversaciones
               </button>

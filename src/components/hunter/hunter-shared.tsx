@@ -32,13 +32,13 @@ export const MAX_COMPARE = COMPARE_MAX;
 // conflicto entre dos utilidades de la misma propiedad lo decide el orden de la
 // hoja, no el del atributo, así que nunca se "sobrescribe" un tamaño anexando.
 const CONTROL_BASE =
-  "rounded-xl border border-brand-border bg-brand-surface text-brand-text placeholder:text-brand-muted/60 transition-colors duration-150 hover:border-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 disabled:opacity-40";
+  "rounded-xl border border-brand-border bg-brand-surface text-brand-text placeholder:text-brand-muted/60 transition-colors duration-150 hover:border-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 disabled:opacity-40";
 export const INPUT_CLASS = `${CONTROL_BASE} w-full min-h-11 px-3 py-2 text-sm`;
 export const SELECT_CLASS = `${INPUT_CLASS} cursor-pointer`;
 /** Select pequeño para barras de herramientas (orden, "Mover a…"). */
-export const SELECT_COMPACT_CLASS = `${CONTROL_BASE} w-auto min-h-9 px-3 py-1.5 text-xs cursor-pointer`;
+export const SELECT_COMPACT_CLASS = `${CONTROL_BASE} w-auto min-h-11 md:min-h-9 px-3 py-1.5 text-xs cursor-pointer`;
 export const TEXTAREA_CLASS = `${CONTROL_BASE} w-full min-h-24 px-3 py-2 text-sm resize-y leading-relaxed`;
-export const LABEL_CLASS = "block text-[11px] uppercase tracking-wider text-brand-muted mb-1.5";
+export const LABEL_CLASS = "block text-[12px] font-medium text-brand-muted mb-1.5";
 
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
@@ -153,7 +153,7 @@ const PILL_TONE: Record<PillTone, string> = {
   ok: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600",
   warn: "border-amber-500/30 bg-amber-500/10 text-amber-600",
   error: "border-red-500/30 bg-red-500/10 text-red-600",
-  accent: "border-brand-gold/40 bg-brand-gold/10 text-brand-gold",
+  accent: "border-brand-border-strong bg-brand-surface-2 text-brand-text",
 };
 
 export function Pill({ tone = "neutral", children, title }: { tone?: PillTone; children: ReactNode; title?: string }) {
@@ -317,7 +317,7 @@ export function Drawer({
             type="button"
             onClick={onClose}
             aria-label="Cerrar"
-            className="shrink-0 flex h-11 w-11 md:h-9 md:w-9 items-center justify-center rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+            className="shrink-0 flex h-11 w-11 md:h-9 md:w-9 items-center justify-center rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
           >
             <CloseIcon />
           </button>

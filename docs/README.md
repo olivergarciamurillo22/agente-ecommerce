@@ -26,6 +26,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 - Dropi: [DROPI-API-CONTRACT.md](DROPI-API-CONTRACT.md) — **Dropi NO tiene API pública; no implementar writes sin evidencia nueva**
 - Meta Ads: [META-ADS-INTEGRATION.md](META-ADS-INTEGRATION.md)
 - Finanzas/Calculadora: [FINANCE-MODEL.md](FINANCE-MODEL.md) · [BUSINESS-METRICS.md](BUSINESS-METRICS.md)
+- Cazador/Landing: [PRODUCT-HUNTER-CONTRACT.md](PRODUCT-HUNTER-CONTRACT.md) · [LANDING-STUDIO.md](LANDING-STUDIO.md)
 
 ## OPERATIONS
 

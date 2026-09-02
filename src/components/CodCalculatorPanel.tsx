@@ -128,7 +128,7 @@ export default function CodCalculatorPanel() {
   if (!inputs || !auto || !be || !light || !real)
     return (
       <div className="h-full overflow-y-auto px-4 md:px-8 py-5">
-        <div className="max-w-5xl mx-auto space-y-3">
+        <div className="max-w-[1280px] space-y-3">
           <Skeleton className="h-24" />
           <Skeleton className="h-40" />
           <Skeleton className="h-56" />
@@ -137,7 +137,7 @@ export default function CodCalculatorPanel() {
     );
 
   const inputCls =
-    "w-full rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60";
+    "w-full rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30";
 
   function SourceLine({ field, src }: { field: string; src?: CODInputWithSource }) {
     if (touched.has(field)) {
@@ -156,7 +156,7 @@ export default function CodCalculatorPanel() {
   function NumField({ label, field, value, step = 0.01, src, hint }: { label: string; field: keyof CODCalculatorInputs; value: number; step?: number; src?: CODInputWithSource; hint?: string }) {
     return (
       <div>
-        <label className="text-[10px] uppercase tracking-wider text-brand-muted" title={hint}>{label}</label>
+        <label className="text-[12px] font-medium text-brand-muted" title={hint}>{label}</label>
         <input type="number" step={step} className={inputCls} value={value} onChange={(e) => set(field, parseFloat(e.target.value) || 0)} />
         <SourceLine field={field} src={src} />
       </div>
@@ -166,7 +166,7 @@ export default function CodCalculatorPanel() {
   function RateField({ label, field, value, min, src, hint }: { label: string; field: "deliveryRate" | "shippingRate"; value: number; min: number; src?: CODInputWithSource; hint?: string }) {
     return (
       <div>
-        <label className="text-[10px] uppercase tracking-wider text-brand-muted" title={hint}>{label}</label>
+        <label className="text-[12px] font-medium text-brand-muted" title={hint}>{label}</label>
         <div className="flex items-center gap-2">
           <input type="range" min={min} max={100} step={0.5} value={value * 100} onChange={(e) => set(field, parseFloat(e.target.value) / 100)} className="flex-1 accent-[color:var(--color-brand-gold)]" />
           <input type="number" step={0.5} className={`${inputCls} w-20`} value={Math.round(value * 1000) / 10} onChange={(e) => set(field, (parseFloat(e.target.value) || 0) / 100)} />
@@ -246,7 +246,7 @@ export default function CodCalculatorPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-6">
+      <div className="max-w-[1280px] space-y-6">
         {/* Cabecera + modelo */}
         <div>
           <SectionTitle
@@ -296,36 +296,36 @@ export default function CodCalculatorPanel() {
           <div className="text-sm text-brand-muted mt-0.5">{light.detail}</div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-4">
             <div>
-              <div className="text-[10px] uppercase tracking-wider text-brand-muted">Profit / pedido</div>
+              <div className="text-[12px] font-medium text-brand-muted">Profit / pedido</div>
               <div className={`text-xl font-semibold font-display ${(profitPerOrder(model, inputs) ?? 0) < 0 ? "text-red-600" : "text-brand-text"}`}>{eur(profitPerOrder(model, inputs))}</div>
             </div>
             <div>
-              <div className="text-[10px] uppercase tracking-wider text-brand-muted">Margen</div>
+              <div className="text-[12px] font-medium text-brand-muted">Margen</div>
               <div className="text-xl font-semibold font-display text-brand-text">{pct(marginOf(model, inputs), 2)}</div>
             </div>
             {model === "pedro" ? (
               <>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-brand-muted">CPA real</div>
+                  <div className="text-[12px] font-medium text-brand-muted">CPA real</div>
                   <div className="text-xl font-semibold font-display text-brand-text">{eur(pedro?.realCPA ?? null)}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-brand-muted">ROI</div>
+                  <div className="text-[12px] font-medium text-brand-muted">ROI</div>
                   <div className="text-xl font-semibold font-display text-brand-text">{pct(pedro?.roi ?? null, 2)}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-brand-muted" title="Replica el cálculo original. No constituye cálculo fiscal.">Tras ajuste 20% (Excel)</div>
+                  <div className="text-[12px] font-medium text-brand-muted" title="Replica el cálculo original. No constituye cálculo fiscal.">Tras ajuste 20% (Excel)</div>
                   <div className="text-xl font-semibold font-display text-brand-text">{eur(pedro?.afterIrpf ?? null)}</div>
                 </div>
               </>
             ) : (
               <>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-brand-muted">Profit / enviado</div>
+                  <div className="text-[12px] font-medium text-brand-muted">Profit / enviado</div>
                   <div className="text-xl font-semibold font-display text-brand-text">{eur(real.profitPerSent)}</div>
                 </div>
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-brand-muted">Profit / entregado</div>
+                  <div className="text-[12px] font-medium text-brand-muted">Profit / entregado</div>
                   <div className="text-xl font-semibold font-display text-brand-text">{eur(real.profitPerDelivered)}</div>
                 </div>
               </>
@@ -357,7 +357,7 @@ export default function CodCalculatorPanel() {
               <NumField label="Otros costes €" field="otherCostPerOrder" value={inputs.otherCostPerOrder ?? 0} />
               <NumField label="Recuperación devuelto" field="returnedProductRecoveryRate" value={inputs.returnedProductRecoveryRate ?? 0} hint="Qué parte del coste del producto recuperas cuando vuelve. 0 = pérdida completa." />
               <div>
-                <label className="text-[10px] uppercase tracking-wider text-brand-muted">Margen objetivo %</label>
+                <label className="text-[12px] font-medium text-brand-muted">Margen objetivo %</label>
                 <input type="number" step={1} className={inputCls} value={Math.round(targetMargin * 1000) / 10} onChange={(e) => setTargetMargin((parseFloat(e.target.value) || 0) / 100)} />
               </div>
             </div>
@@ -366,7 +366,7 @@ export default function CodCalculatorPanel() {
 
         {/* POR CADA 100 PEDIDOS */}
         <Card className="p-4">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-2">Por cada 100 pedidos</div>
+          <div className="text-[12px] font-medium text-brand-muted mb-2">Por cada 100 pedidos</div>
           <div className="text-sm text-brand-text mb-1">
             100 pedidos → <strong>{real.sent}</strong> enviados → <strong>{real.delivered}</strong> entregados
           </div>
@@ -396,7 +396,7 @@ export default function CodCalculatorPanel() {
 
         {/* BREAK-EVEN */}
         <Card className="p-4 space-y-1.5 text-sm">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-1">Break-even</div>
+          <div className="text-[12px] font-medium text-brand-muted mb-1">Break-even</div>
           <div className="text-brand-muted">Entrega break-even: <strong className="text-brand-text">{pct(be.deliveryRateBreakEven)}</strong> — por debajo pierdes dinero.</div>
           <div className="text-brand-muted">CPA máximo: <strong className="text-brand-text">{eur(be.cpaBreakEven)}</strong> — más caro que esto y pierdes.</div>
           <div className="text-brand-muted">Precio mínimo: <strong className="text-brand-text">{eur(be.minSalePrice)}</strong>.</div>
@@ -408,7 +408,7 @@ export default function CodCalculatorPanel() {
 
         {/* SENSIBILIDAD */}
         <Card className="p-4">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-2">Sensibilidad · beneficio por pedido</div>
+          <div className="text-[12px] font-medium text-brand-muted mb-2">Sensibilidad · beneficio por pedido</div>
           <div className="overflow-x-auto">
             <table className="text-xs min-w-[420px]">
               <thead>
@@ -442,12 +442,12 @@ export default function CodCalculatorPanel() {
         {/* SIMULADORES */}
         <div className="grid md:grid-cols-2 gap-3">
           <Card className="p-4">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-1">Beneficio según CPA</div>
+            <div className="text-[12px] font-medium text-brand-muted mb-1">Beneficio según CPA</div>
             <MiniChart points={curvaCPA} current={inputs.rawCPA} breakEvenX={be.cpaBreakEven} xLabel="CPA" />
             <div className="text-[10px] text-brand-muted">Línea roja: CPA de equilibrio ({eur(be.cpaBreakEven)}).</div>
           </Card>
           <Card className="p-4">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-1">Beneficio según tasa de entrega</div>
+            <div className="text-[12px] font-medium text-brand-muted mb-1">Beneficio según tasa de entrega</div>
             <MiniChart points={curvaEntrega} current={inputs.deliveryRate} breakEvenX={be.deliveryRateBreakEven} xLabel="entrega" />
             <div className="text-[10px] text-brand-muted">Línea roja: entrega de equilibrio ({pct(be.deliveryRateBreakEven)}).</div>
           </Card>
@@ -456,7 +456,7 @@ export default function CodCalculatorPanel() {
         {/* PROYECCIÓN */}
         <Card className="p-4">
           <div className="flex flex-wrap items-center gap-2 mb-3">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted">Proyección</div>
+            <div className="text-[12px] font-medium text-brand-muted">Proyección</div>
             <input type="number" className={`${inputCls} w-24`} value={ordersPerDay} onChange={(e) => setOrdersPerDay(Math.max(0, parseInt(e.target.value, 10) || 0))} />
             <span className="text-xs text-brand-muted">pedidos/día</span>
             {[20, 50, 100].map((n) => (
@@ -482,7 +482,7 @@ export default function CodCalculatorPanel() {
         {/* ESCENARIOS */}
         <Card className="p-4">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted">Escenarios</div>
+            <div className="text-[12px] font-medium text-brand-muted">Escenarios</div>
             <PrimaryButton onClick={() => setSaveOpen(true)}>Guardar escenario</PrimaryButton>
           </div>
           {scenarios.length === 0 ? (
@@ -552,7 +552,7 @@ export default function CodCalculatorPanel() {
 
         {/* COMPARADOR */}
         <Card className="p-4">
-          <div className="text-[11px] uppercase tracking-[0.18em] text-brand-muted mb-2">Comparar productos</div>
+          <div className="text-[12px] font-medium text-brand-muted mb-2">Comparar productos</div>
           <div className="flex flex-wrap gap-1.5 mb-3">
             {productosComparables.map((p) => (
               <Chip

@@ -119,7 +119,7 @@ export default function CostsPanel() {
   }
 
   const inputCls =
-    "w-full rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60";
+    "w-full rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-sm text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30";
 
   function DraftForm({ draft, onChange }: { draft: Draft; onChange: (d: Draft) => void }) {
     return (
@@ -148,7 +148,7 @@ export default function CostsPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-4">
+      <div className="max-w-[1280px] space-y-4">
         <SectionTitle
           right={
             !adding ? (

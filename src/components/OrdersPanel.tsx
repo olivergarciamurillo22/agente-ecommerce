@@ -27,8 +27,10 @@ import {
   GhostButton,
   ModalShell,
   OrderStateBadge,
+  PageHeader,
   PrimaryButton,
-  SectionTitle,
+  SearchInput,
+  SelectInput,
   SkeletonRows,
   StatusDot,
   timeAgo,
@@ -135,13 +137,14 @@ export function orderUiState(o: OrderItem): OrderUiState {
 
 type Filter = "all" | "attention" | "waiting" | "needs_call" | "correction" | "confirmed" | "ready_beeping" | "in_fulfillment" | "incident" | "closed";
 
-const FILTERS: Array<{ key: Filter; label: string; critical?: boolean }> = [
-  { key: "all", label: "Todos" },
-  { key: "attention", label: "Necesita atención", critical: true },
-  { key: "waiting", label: "Esperando cliente" },
-  { key: "needs_call", label: "Necesitan llamada", critical: true },
-  { key: "correction", label: "Corrección" },
-  { key: "ready_beeping", label: "Listo Beeping" },
+/** `primary` = visible en la fila de estados; el resto vive en "Más filtros". */
+const FILTERS: Array<{ key: Filter; label: string; critical?: boolean; primary?: boolean }> = [
+  { key: "all", label: "Todos", primary: true },
+  { key: "attention", label: "Necesita atención", critical: true, primary: true },
+  { key: "waiting", label: "Esperando cliente", primary: true },
+  { key: "needs_call", label: "Necesitan llamada", critical: true, primary: true },
+  { key: "correction", label: "Corrección", primary: true },
+  { key: "ready_beeping", label: "Listo Beeping", primary: true },
   { key: "in_fulfillment", label: "Preparando/Enviado" },
   { key: "incident", label: "Incidencias" },
   { key: "closed", label: "Cerrados" },
@@ -254,9 +257,9 @@ const ENVIO_META: Record<string, string> = {
 /** Celda de KPI dentro de la franja agrupada (§40.2). */
 function KpiCell({ label, value, valueCls = "text-brand-text", span2Mobile = false }: { label: string; value: number; valueCls?: string; span2Mobile?: boolean }) {
   return (
-    <div className={`bg-brand-surface px-4 py-3 ${span2Mobile ? "col-span-2 md:col-span-1" : ""}`}>
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted leading-tight">{label}</div>
-      <div className={`mt-1 font-display text-2xl font-semibold leading-tight tabular-nums ${valueCls}`}>{value}</div>
+    <div className={`bg-brand-surface px-5 py-4 ${span2Mobile ? "col-span-2 md:col-span-1" : ""}`}>
+      <div className="text-[13px] font-medium text-brand-muted leading-snug">{label}</div>
+      <div className={`mt-1.5 font-display text-[26px] font-semibold leading-none tabular-nums ${valueCls}`}>{value}</div>
     </div>
   );
 }
@@ -265,7 +268,7 @@ function KpiCell({ label, value, valueCls = "text-brand-text", span2Mobile = fal
 function DrawerSection({ title, children }: { title: string; children: ReactNode }) {
   return (
     <section className="px-5 py-4">
-      <div className="text-[11px] uppercase tracking-wider text-brand-muted mb-2">{title}</div>
+      <div className="text-[12px] font-medium text-brand-muted mb-2">{title}</div>
       {children}
     </section>
   );
@@ -566,68 +569,74 @@ export default function OrdersPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-6 py-5 pb-24 md:pb-8">
-      {/* Cabecera: título + búsqueda en vivo (§40.1) */}
-      <SectionTitle
-        right={
-          <div className="relative">
-            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-brand-muted pointer-events-none">
-              <SearchIcon />
-            </span>
-            <input
-              type="search"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Buscar pedido, cliente, teléfono…"
-              aria-label="Buscar pedidos"
-              className="w-48 sm:w-72 rounded-xl border border-brand-border bg-brand-surface-2 pl-8 pr-3 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 transition-colors duration-150 hover:border-brand-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
-            />
-          </div>
-        }
-      >
-        Pedidos
-      </SectionTitle>
+      <PageHeader title="Pedidos" description="Confirmar, corregir y liberar pedidos contra reembolso." />
 
       {/* KPIs — una sola superficie agrupada con divisiones finas (§40.2, §39) */}
-      <Card className="overflow-hidden mb-5">
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-brand-border/50">
+      <Card className="overflow-hidden mt-6 mb-5">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-px bg-brand-border">
           <KpiCell label="Pedidos hoy" value={counts?.today ?? 0} />
           <KpiCell label="Confirmados hoy" value={counts?.confirmedToday ?? 0} valueCls="text-emerald-600" />
           <KpiCell label="Esperando respuesta" value={counts?.awaiting ?? 0} />
-          <KpiCell label="Corrección" value={counts?.correction ?? 0} valueCls="text-sky-600" />
+          <KpiCell label="Corrección" value={counts?.correction ?? 0} valueCls={(counts?.correction ?? 0) > 0 ? "text-amber-600" : "text-brand-text"} />
           <KpiCell
             label="Necesitan llamada"
             value={counts?.needsCall ?? 0}
-            valueCls={(counts?.needsCall ?? 0) > 0 ? "text-red-600" : "text-brand-text"}
+            valueCls={(counts?.needsCall ?? 0) > 0 ? "text-amber-600" : "text-brand-text"}
             span2Mobile
           />
         </div>
       </Card>
 
-      {/* Filtros como chips (§21) */}
-      <div className="flex gap-2 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 md:flex-wrap mb-3 pb-1 [scrollbar-width:none]">
-        {FILTERS.map((f) => (
-          <Chip key={f.key} active={filter === f.key} onClick={() => setFilter(f.key)} count={f.key === "all" ? undefined : countBy(f.key)}>
-            {f.label}
-          </Chip>
-        ))}
-      </div>
-      <div className="flex items-center gap-2 mb-4 text-xs overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 md:flex-wrap pb-1 [scrollbar-width:none]">
-        <span className="text-brand-muted shrink-0">Fecha</span>
-        {([["all", "Todo"], ["today", "24 h"], ["7d", "7 días"], ["30d", "30 días"]] as const).map(([k, l]) => (
-          <Chip key={k} active={range === k} onClick={() => setRange(k)}>{l}</Chip>
-        ))}
-        <span className="ml-2 text-brand-muted">Orden</span>
-        <select
-          value={sort}
-          onChange={(e) => setSort(e.target.value as typeof sort)}
-          aria-label="Ordenar pedidos"
-          className="h-9 rounded-full border border-brand-border bg-brand-surface px-3 text-xs text-brand-text focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
-        >
-          <option value="recent">Más recientes</option>
-          <option value="oldest">Más antiguos</option>
-          <option value="amount">Mayor importe</option>
-        </select>
-        <span className="ml-auto text-brand-muted tabular-nums">{visible.length} pedidos</span>
+      {/* Toolbar: búsqueda + fecha + orden; debajo, la fila compacta de estados */}
+      <div className="space-y-3 mb-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <SearchInput value={query} onChange={setQuery} placeholder="Pedido, cliente o teléfono" label="Buscar pedidos" className="w-full sm:w-[260px]" />
+          <SelectInput
+            value={range}
+            onChange={(v) => setRange(v as typeof range)}
+            label="Fecha"
+            options={[
+              { value: "all", label: "Cualquier fecha" },
+              { value: "today", label: "Últimas 24 h" },
+              { value: "7d", label: "Últimos 7 días" },
+              { value: "30d", label: "Últimos 30 días" },
+            ]}
+          />
+          <SelectInput
+            value={sort}
+            onChange={(v) => setSort(v as typeof sort)}
+            label="Ordenar pedidos"
+            options={[
+              { value: "recent", label: "Más recientes" },
+              { value: "oldest", label: "Más antiguos" },
+              { value: "amount", label: "Mayor importe" },
+            ]}
+          />
+          {(filter !== "all" || range !== "all" || sort !== "recent" || query.trim() !== "") && (
+            <button type="button" onClick={() => { setFilter("all"); setRange("all"); setSort("recent"); setQuery(""); }} className="h-9 px-2 text-[13px] font-medium text-brand-muted hover:text-brand-text rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20">
+              Limpiar
+            </button>
+          )}
+          <span className="ml-auto text-[13px] text-brand-tertiary tabular-nums">{visible.length} pedidos</span>
+        </div>
+        <div className="flex items-center gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 [scrollbar-width:none]" role="group" aria-label="Filtrar por estado">
+          {FILTERS.filter((f) => f.primary).map((f) => (
+            <Chip key={f.key} active={filter === f.key} onClick={() => setFilter(f.key)} count={f.key === "all" ? undefined : countBy(f.key)}>
+              {f.label}
+            </Chip>
+          ))}
+          <select
+            value={FILTERS.find((f) => f.key === filter && !f.primary) ? filter : ""}
+            onChange={(e) => e.target.value && setFilter(e.target.value as Filter)}
+            aria-label="Más filtros"
+            className={`h-8 w-auto max-w-[200px] rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${FILTERS.find((f) => f.key === filter && !f.primary) ? "text-brand-text" : "text-brand-muted"}`}
+          >
+            <option value="">Más filtros</option>
+            {FILTERS.filter((f) => !f.primary).map((f) => (
+              <option key={f.key} value={f.key}>{f.label} · {countBy(f.key)}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {!loaded ? (
@@ -658,16 +667,16 @@ export default function OrdersPanel() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wider text-brand-muted border-b border-brand-border">
-                    <th className="px-3 py-3 font-semibold">Pedido</th>
-                    <th className="px-3 py-3 font-semibold">Cliente</th>
-                    <th className="px-3 py-3 font-semibold">Producto</th>
-                    <th className="px-3 py-3 font-semibold text-right">Importe</th>
-                    <th className="px-3 py-3 font-semibold">Estado</th>
-                    <th className="px-3 py-3 font-semibold">WhatsApp</th>
-                    <th className="px-3 py-3 font-semibold">Beeping</th>
-                    <th className="px-3 py-3 font-semibold">Envío</th>
-                    <th className="px-3 py-3 font-semibold text-right">Acción</th>
+                  <tr className="text-left text-[11px] uppercase tracking-[0.06em] text-brand-tertiary bg-brand-surface-subtle border-b border-brand-border">
+                    <th className="px-3 h-10 font-medium">Pedido</th>
+                    <th className="px-3 h-10 font-medium">Cliente</th>
+                    <th className="px-3 h-10 font-medium">Producto</th>
+                    <th className="px-3 h-10 font-medium text-right">Importe</th>
+                    <th className="px-3 h-10 font-medium">Estado</th>
+                    <th className="px-3 h-10 font-medium">WhatsApp</th>
+                    <th className="px-3 h-10 font-medium">Beeping</th>
+                    <th className="px-3 h-10 font-medium">Envío</th>
+                    <th className="px-3 h-10 font-medium text-right">Acción</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -677,7 +686,7 @@ export default function OrdersPanel() {
                     return (
                       <tr
                         key={o.id}
-                        className="h-[52px] border-b border-brand-border/40 last:border-0 hover:bg-brand-surface-2/50 transition-colors duration-150 cursor-pointer"
+                        className="h-[60px] border-b border-brand-border last:border-0 hover:bg-brand-surface-subtle transition-colors duration-150 cursor-pointer"
                         onClick={() => openDetail(o)}
                       >
                         <td className="px-3 py-2.5 font-mono font-medium text-brand-text whitespace-nowrap tabular-nums">
@@ -698,7 +707,7 @@ export default function OrdersPanel() {
                           <div className="truncate leading-snug" title={o.customer_name ?? ""}>{o.customer_name ?? "—"}</div>
                           <div className="text-[11px] text-brand-muted truncate leading-snug">{o.city ?? ""}</div>
                         </td>
-                        <td className="px-3 py-2.5 max-w-[180px] truncate text-brand-muted" title={o.product_summary.replace(/\n/g, " · ")}>
+                        <td className="px-3 py-2.5 max-w-[240px] truncate text-brand-muted" title={o.product_summary.replace(/\n/g, " · ")}>
                           {o.product_summary.replace(/\n/g, " · ")}
                         </td>
                         <td className="px-3 py-2.5 whitespace-nowrap text-right tabular-nums">{fmtMoney(o.total_price, o.currency)}</td>
@@ -734,7 +743,7 @@ export default function OrdersPanel() {
                           ) : o.status === "confirmed" && ["not_released", "release_failed"].includes(o.beeping_sync_status) ? (
                             <button
                               onClick={() => openDetail(o)}
-                              className="px-2.5 py-1.5 rounded-lg border border-brand-gold/50 text-brand-gold hover:bg-brand-gold/10 transition-colors duration-150 text-xs font-semibold"
+                              className="px-2.5 py-1.5 rounded-lg border border-brand-border-strong text-brand-gold hover:bg-brand-surface-2 transition-colors duration-150 text-xs font-semibold"
                             >
                               Enviar a Beeping
                             </button>
@@ -814,14 +823,14 @@ export default function OrdersPanel() {
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-600 border border-amber-500/30">POSIBLE DUPLICADO</span>
                   )}
                   {detail.pilot_authorized === 1 && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-violet-500/15 text-violet-600 border border-violet-500/30">PILOTO AUTORIZADO</span>
+                    <span className="px-1.5 py-0.5 rounded text-[11px] font-medium bg-brand-surface-2 text-brand-muted">Piloto autorizado</span>
                   )}
                 </div>
               </div>
               <button
                 onClick={() => setDetail(null)}
                 aria-label="Cerrar"
-                className="shrink-0 p-2 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                className="shrink-0 p-2 rounded-lg border border-brand-border text-brand-muted hover:text-brand-text hover:border-brand-muted/60 transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
               >
                 <CloseIcon />
               </button>
@@ -877,8 +886,8 @@ export default function OrdersPanel() {
                     {fmtMoney(detail.total_price, detail.currency)} <span className="text-xs text-brand-muted font-normal">contra reembolso</span>
                   </div>
                   {detail.delivery_note && (
-                    <div className="mt-2.5 rounded-lg border border-violet-500/40 bg-violet-500/5 p-2.5">
-                      <div className="text-[10px] uppercase tracking-wider text-violet-600">Nota para el repartidor (cliente)</div>
+                    <div className="mt-2.5 rounded-lg border border-brand-border bg-brand-surface-subtle p-2.5">
+                      <div className="text-[12px] font-medium text-brand-muted">Nota para el repartidor (cliente)</div>
                       <div className="text-xs whitespace-pre-line mt-1">{detail.delivery_note}</div>
                     </div>
                   )}
@@ -953,7 +962,7 @@ export default function OrdersPanel() {
 
                   {/* Nota de expedición (§12): INTERNA hasta tener contrato de Beeping */}
                   <div className="mt-3">
-                    <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-brand-muted">
+                    <div className="flex items-center gap-2 text-[12px] font-medium text-brand-muted">
                       Nota de expedición
                       <span className="px-1.5 py-0.5 rounded bg-brand-surface-2 border border-brand-border text-[9px] normal-case tracking-normal">
                         Nota interna — todavía no se envía a Beeping
@@ -966,7 +975,7 @@ export default function OrdersPanel() {
                           onChange={(e) => setNoteDraft(e.target.value)}
                           placeholder='p.ej. "Llamar antes de entregar"'
                           maxLength={500}
-                          className="flex-1 rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+                          className="flex-1 rounded-lg border border-brand-border bg-brand-surface-2 px-2.5 py-1.5 text-xs text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
                         />
                         <GhostButton disabled={noteSaving || noteDraft === (detail.dispatch_note ?? "")} onClick={() => void saveDispatchNote(detail)} className="!px-2.5 !py-1.5 text-xs">
                           {noteSaving ? "Guardando…" : "Guardar"}

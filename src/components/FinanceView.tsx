@@ -28,7 +28,7 @@ export default function FinanceView() {
   return (
     <div className="h-full flex flex-col">
       <div className="px-4 md:px-8 pt-4">
-        <div className="max-w-5xl mx-auto w-full flex flex-wrap gap-1.5">
+        <div className="max-w-[1280px] w-full flex flex-wrap gap-1.5">
           {TABS.map((t) => (
             <Chip key={t.id} active={tab === t.id} onClick={() => setTab(t.id)}>
               {t.label}

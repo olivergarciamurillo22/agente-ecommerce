@@ -88,7 +88,7 @@ export default function ActionCenter() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-4xl mx-auto space-y-4">
+      <div className="max-w-[1280px] space-y-4">
         <SectionTitle
           right={
             data && data.total > 0 ? (
@@ -172,7 +172,7 @@ export default function ActionCenter() {
             if (e.key === "Enter" && nota.trim()) void confirmarResolucion();
           }}
           placeholder='p.ej. "hablado con el cliente, mantiene el pedido"'
-          className="w-full rounded-lg border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60"
+          className="w-full rounded-lg border border-brand-border bg-brand-surface-2 px-3 py-2 text-sm text-brand-text placeholder:text-brand-muted/60 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
         />
         <div className="mt-4 flex justify-end gap-2">
           <GhostButton onClick={() => setResolverItem(null)}>Cancelar</GhostButton>

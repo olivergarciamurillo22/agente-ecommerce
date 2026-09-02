@@ -8,13 +8,13 @@
 // inventados.
 // ============================================================
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import AdsPanel from "./AdsPanel";
 import CodCalculatorPanel from "./CodCalculatorPanel";
 import FinancePanel from "./FinancePanel";
 import GrowthProductsPanel from "./GrowthProductsPanel";
 import type { DockView } from "./NavRail";
-import { Card, Chip, EmptyState, SectionTitle } from "./ui";
+import { Card, Chip, EmptyState, ErrorState, SectionTitle, SkeletonRows, TabBar, formatInt } from "./ui";
 
 export type GrowthTab = "summary" | "funnel" | "products" | "ads" | "calculator" | "audit" | "repurchase" | "competition";
 
@@ -40,45 +40,45 @@ export function DataKind({ kind }: { kind: "real" | "hypothesis" | "scenario" | 
   return <span className={`inline-block rounded-md border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${map.cls}`}>{map.label}</span>;
 }
 
-const FUNNEL_STEPS = [
-  { label: "Visita", source: "Shopify Web Pixels", available: false },
-  { label: "Producto visto", source: "Shopify Web Pixels", available: false },
-  { label: "Añadido al carrito", source: "Shopify Web Pixels", available: false },
-  { label: "Checkout iniciado", source: "Shopify Web Pixels", available: false },
-  { label: "Pedido COD", source: "Shopify webhooks", available: true },
-  { label: "WhatsApp enviado", source: "outbox", available: true },
-  { label: "Pedido confirmado", source: "máquina de confirmación", available: true },
-  { label: "Pedido enviado", source: "tracking (Dropea/Beeping)", available: true },
-  { label: "Pedido entregado", source: "eje de cierre", available: true },
-  { label: "Pedido devuelto", source: "eje de cierre", available: true },
-];
+interface FunnelSnapshot { steps: Array<{ id: string; label: string; source: string; value: number | null; available: boolean }>; missingIntegrations: string[]; period: "30d" }
 
 function ScrollRoot({ children }: { children: React.ReactNode }) {
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-5">{children}</div>
+      <div className="max-w-[1280px] space-y-5">{children}</div>
     </div>
   );
 }
 
 function FunnelPanel() {
+  const [data, setData] = useState<FunnelSnapshot | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const response = await fetch("/api/growth/funnel", { cache: "no-store" });
+      const json = await response.json() as { ok: boolean; data?: FunnelSnapshot; error?: string };
+      if (!response.ok || !json.ok || !json.data) throw new Error(json.error ?? "respuesta inválida");
+      setData(json.data); setError(null);
+    } catch { setError("No se pudo cargar el embudo real."); }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
   return (
     <ScrollRoot>
       <div>
         <h1 className="font-display text-2xl font-semibold text-brand-text">Embudo</h1>
         <p className="mt-1 text-sm text-brand-muted">De la visita a la entrega. Los pasos de la tienda (visita → checkout) necesitan Shopify Web Pixels, que todavía no está integrado: se muestran sin cifras, no con cifras inventadas.</p>
       </div>
-      <Card className="divide-y divide-brand-border">
-        {FUNNEL_STEPS.map((s, i) => (
+      {error && !data ? <ErrorState message={error} onRetry={load} /> : !data ? <SkeletonRows rows={10} /> : <Card className="divide-y divide-brand-border">
+        {data.steps.map((s, i) => (
           <div key={s.label} className="flex items-center gap-3 px-4 py-3">
             <span className="w-6 text-xs text-brand-muted tabular-nums">{i + 1}</span>
             <span className="flex-1 text-sm text-brand-text">{s.label}</span>
             <span className="text-xs text-brand-muted hidden sm:inline">{s.source}</span>
-            {s.available ? <DataKind kind="real" /> : <span className="text-xs text-brand-muted">No disponible</span>}
+            {s.available ? <><span className="min-w-10 text-right text-sm font-semibold tabular-nums text-brand-text">{formatInt(s.value)}</span><DataKind kind="real" /></> : <span className="text-xs text-brand-muted">No disponible</span>}
           </div>
         ))}
-      </Card>
-      <p className="text-xs text-brand-muted">Los pasos con «Dato real» ya se miden en Resumen y Productos (pedidos, confirmación, entrega, devolución). Para los cuatro primeros hace falta activar Web Pixels en Shopify y un endpoint que los reciba — no forma parte de esta versión.</p>
+      </Card>}
+      <p className="text-xs text-brand-muted">Ventana: últimos 30 días. Pedido, WhatsApp, confirmación, envío y cierre son recuentos reales de pedidos; no se presentan como ventas ni como margen. «Devuelto» es un cierre alternativo a «Entregado», no un paso posterior. Falta: Shopify Web Pixels para visita, producto, carrito y checkout.</p>
     </ScrollRoot>
   );
 }
@@ -146,13 +146,9 @@ export default function GrowthView({ initialTab, onNavigate }: { initialTab?: Gr
   const [tab, setTab] = useState<GrowthTab>(initialTab ?? "summary");
   return (
     <div className="h-full flex flex-col">
-      <div className="shrink-0 px-4 md:px-8 pt-4">
-        <div className="max-w-5xl mx-auto flex gap-1.5 overflow-x-auto pb-1 [scrollbar-width:none]" role="tablist" aria-label="Secciones de Growth">
-          {TABS.map((t) => (
-            <Chip key={t.id} active={tab === t.id} onClick={() => setTab(t.id)}>
-              {t.label}
-            </Chip>
-          ))}
+      <div className="shrink-0 px-4 md:px-8 bg-brand-surface border-b border-brand-border">
+        <div className="-mb-px">
+          <TabBar tabs={TABS} value={tab} onChange={setTab} label="Secciones de Growth" />
         </div>
       </div>
       <div className="flex-1 min-h-0 overflow-hidden">

@@ -10,7 +10,7 @@ function initials(label: string): string {
 export default function Avatar({ label, size = 40 }: { label: string; size?: number }) {
   return (
     <div
-      className="shrink-0 rounded-full flex items-center justify-center font-semibold text-brand-gold border border-brand-gold/25"
+      className="shrink-0 rounded-full flex items-center justify-center font-semibold text-brand-gold border border-brand-border-strong"
       style={{
         width: size,
         height: size,

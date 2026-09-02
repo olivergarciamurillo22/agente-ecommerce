@@ -107,7 +107,7 @@ function accentClass(urgency: number): string {
 function MicroSection({ label, children }: { label: string; children: string }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold mb-1">{label}</div>
+      <div className="text-[12px] font-medium text-brand-muted mb-1">{label}</div>
       <div className="text-sm text-brand-text leading-snug">{children}</div>
     </div>
   );
@@ -116,7 +116,7 @@ function MicroSection({ label, children }: { label: string; children: string }) 
 function IdentityFact({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <div className="text-[10px] uppercase tracking-[0.14em] text-brand-muted font-semibold">{label}</div>
+      <div className="text-[12px] font-medium text-brand-muted">{label}</div>
       <div className="mt-0.5 text-sm text-brand-text whitespace-nowrap">{children}</div>
     </div>
   );
@@ -181,7 +181,7 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-6">
+      <div className="max-w-[1280px] space-y-6">
         {/* ── Identidad de Lucía (§43) ── */}
         <section>
           <SectionTitle>Agente</SectionTitle>
@@ -192,7 +192,7 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
               <div className="flex flex-wrap items-center gap-x-7 gap-y-3">
                 <div className="flex items-center gap-3">
                   <span
-                    className="shrink-0 h-11 w-11 rounded-full flex items-center justify-center font-semibold text-brand-gold border border-brand-gold/25 bg-brand-gold/10"
+                    className="shrink-0 h-11 w-11 rounded-full flex items-center justify-center font-semibold text-brand-gold border border-brand-border-strong bg-brand-surface-2"
                     aria-hidden
                   >
                     L

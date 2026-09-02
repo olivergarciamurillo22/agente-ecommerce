@@ -43,6 +43,7 @@ const HASH_TO_TARGET: Record<string, DockView> = {
   "#pedidos": "orders",
   "#seguimiento": "followup",
   "#cazador": "hunter",
+  "#landing-studio": "hunter",
   "#growth": "growth",
   "#ajustes": "settings",
   // alias heredados (enlaces antiguos siguen funcionando)
@@ -108,20 +109,24 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
   // Cambia de clave para forzar el remount de Seguimiento/Growth con la pestaña pedida.
   const [navKey, setNavKey] = useState(0);
 
-  const changeView = useCallback((t: DockView) => {
+  const changeView = useCallback((t: DockView, hashOverride?: string) => {
     const r = resolveTarget(t);
     setArea(r.area);
     if (r.followTab) setFollowTab(r.followTab);
     if (r.growthTab) setGrowthTab(r.growthTab);
     if (r.followTab || r.growthTab) setNavKey((k) => k + 1);
-    if (typeof window !== "undefined") window.history.replaceState(null, "", AREA_TO_HASH[r.area]);
+    if (typeof window !== "undefined") window.history.replaceState(null, "", hashOverride ?? AREA_TO_HASH[r.area]);
   }, []);
 
   useEffect(() => {
     const onHash = () => {
       const t = HASH_TO_TARGET[window.location.hash];
-      if (t) changeView(t);
+      if (t) changeView(t, window.location.hash);
     };
+    // La renderización inicial ocurre también en servidor; reconciliar el hash
+    // al montar evita que una URL profunda (#pedidos, #landing-studio…) vuelva
+    // visualmente a Inicio hasta el siguiente hashchange.
+    onHash();
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, [changeView]);

@@ -327,7 +327,7 @@ export default function CandidateDetail({
                       href={candidate.landingUrl}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-brand-gold hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/60 rounded"
+                      className="text-brand-gold hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded"
                     >
                       {landingDomain(candidate.landingUrl) ?? candidate.landingUrl} ↗
                     </a>
@@ -428,13 +428,13 @@ export default function CandidateDetail({
               </div>
               <div className="mt-4 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-brand-border bg-brand-border/50">
                 <div className="bg-brand-surface px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Margen bruto</div>
+                  <div className="text-[12px] font-medium text-brand-muted">Margen bruto</div>
                   <div className={`mt-1 font-display text-xl font-semibold tabular-nums ${margin.grossMargin === null ? "text-brand-muted" : margin.grossMargin >= 0 ? "text-brand-text" : "text-red-600"}`}>
                     {margin.grossMargin === null ? UNAVAILABLE_LABEL : formatEuro(margin.grossMargin)}
                   </div>
                 </div>
                 <div className="bg-brand-surface px-4 py-3">
-                  <div className="text-[11px] uppercase tracking-wider text-brand-muted">Beneficio / pedido</div>
+                  <div className="text-[12px] font-medium text-brand-muted">Beneficio / pedido</div>
                   <div className={`mt-1 font-display text-xl font-semibold tabular-nums ${margin.profitPerOrder === null ? "text-brand-muted" : margin.profitPerOrder >= 0 ? "text-emerald-600" : "text-red-600"}`}>
                     {margin.profitPerOrder === null ? UNAVAILABLE_LABEL : formatEuro(margin.profitPerOrder)}
                   </div>

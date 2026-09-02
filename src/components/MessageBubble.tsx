@@ -31,7 +31,7 @@ export default function MessageBubble({ role, content, timestamp }: MessageBubbl
       <div
         className={`max-w-[75%] rounded-2xl rounded-br-md px-4 py-2.5 shadow-sm border ${
           isAI
-            ? "bg-brand-gold/10 border-brand-gold/25"
+            ? "bg-brand-surface-2 border-brand-border-strong"
             : "bg-wa-green/10 border-wa-green/30"
         }`}
       >

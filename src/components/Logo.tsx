@@ -38,7 +38,7 @@ export default function Logo({ size = 22, subtitle = true }: { size?: number; su
           Casamable
         </div>
         {subtitle && (
-          <div className="mt-0.5 text-[9px] font-semibold tracking-[0.32em] uppercase text-brand-muted">
+          <div className="mt-0.5 text-[11px] text-brand-muted">
             Control Center
           </div>
         )}

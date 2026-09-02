@@ -82,10 +82,10 @@ function Delta({ now, before }: { now: number; before: number }) {
 
 function Kpi({ label, value, support, status }: { label: string; value: ReactNode; support?: ReactNode; status?: UiStatus }) {
   return (
-    <div className="bg-brand-surface px-4 py-4">
-      <div className="text-[12px] text-brand-muted">{label}</div>
-      <div className={`mt-1 font-display text-[22px] font-semibold leading-tight tabular-nums ${status ? STATUS_TEXT[status] : "text-brand-text"}`}>{value}</div>
-      {support ? <div className="mt-0.5 text-[11px] text-brand-muted leading-snug">{support}</div> : null}
+    <div className="bg-brand-surface px-5 py-4">
+      <div className="text-[13px] font-medium text-brand-muted leading-snug">{label}</div>
+      <div className={`mt-1.5 font-display text-[26px] font-semibold leading-none tabular-nums ${status ? STATUS_TEXT[status] : "text-brand-text"}`}>{value}</div>
+      {support ? <div className="mt-1.5 text-[12px] text-brand-tertiary leading-snug">{support}</div> : null}
     </div>
   );
 }
@@ -121,17 +121,17 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-24 md:pb-8">
-      <div className="max-w-5xl mx-auto space-y-8">
+      <div className="max-w-[1280px] space-y-8">
         {/* ── Saludo + estado del sistema (§6, bloque 1) ── */}
         <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
           <div>
-            <h1 className="font-display text-[28px] md:text-[34px] font-semibold text-brand-text leading-tight">{greeting()}, Pedro.</h1>
-            <p className="mt-1 text-sm text-brand-muted">{todayLabel()}</p>
+            <h1 className="font-display text-[26px] md:text-[30px] font-semibold text-brand-text leading-[1.15] tracking-[-0.02em]">{greeting()}, Pedro.</h1>
+            <p className="mt-1.5 text-[14px] text-brand-muted">{todayLabel()}</p>
           </div>
           {data && (
-            <div className="flex flex-wrap gap-2" aria-label="Estado del sistema">
+            <div className="flex flex-wrap gap-x-4 gap-y-1" aria-label="Estado del sistema">
               {flow.filter((f) => ["shopify", "whatsapp", "calls", "beeping"].includes(f.id)).map((f) => (
-                <span key={f.id} className="inline-flex items-center gap-1.5 rounded-full border border-brand-border bg-brand-surface px-2.5 py-1 text-[12px] text-brand-text" title={f.message}>
+                <span key={f.id} className="inline-flex items-center gap-1.5 text-[13px] text-brand-muted" title={f.message}>
                   <StatusDot status={healthToUi(f.status)} pulse={f.status === "critical"} />
                   {f.id === "calls" ? "Llamadas" : f.label}
                 </span>
@@ -142,7 +142,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
         {/* ── KPIs (§6) ── */}
         <section>
-          <SectionTitle right={data ? <span className="text-[11px] text-brand-muted">Beeping: {data.beepingCutoff.message}</span> : null}>Hoy</SectionTitle>
+          <SectionTitle right={data ? <span className="text-[13px] text-brand-tertiary">Beeping: {data.beepingCutoff.message}</span> : null}>Hoy</SectionTitle>
           {!data ? (
             <Skeleton className="h-48" />
           ) : (
@@ -166,7 +166,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
         {/* ── Lo que necesita tu atención (§6) ── */}
         <section>
-          <SectionTitle right={data && data.attentionTotal > 0 ? <span className="text-[11px] text-brand-muted">{formatInt(data.attentionTotal)} elementos</span> : null}>Lo que necesita tu atención</SectionTitle>
+          <SectionTitle right={data && data.attentionTotal > 0 ? <span className="text-[13px] text-brand-tertiary tabular-nums">{formatInt(data.attentionTotal)} elementos</span> : null}>Lo que necesita tu atención</SectionTitle>
           {!data ? (
             <Skeleton className="h-36" />
           ) : data.attention.length === 0 ? (
@@ -183,23 +183,23 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
                 const u = URGENCY[a.urgency];
                 const money = ex?.attentionAmounts[a.type];
                 return (
-                  <div key={a.type} className="flex flex-col sm:flex-row sm:items-center gap-3 px-4 py-3.5">
+                  <div key={a.type} className="flex flex-col sm:flex-row sm:items-center gap-3 px-5 py-4">
                     <div className="flex items-start gap-3 flex-1 min-w-0">
                       <StatusDot status={u.status} pulse={a.urgency === "urgent"} />
                       <div className="min-w-0">
-                        <div className="text-sm text-brand-text">
+                        <div className="text-[14px] text-brand-text">
                           <span className="font-semibold tabular-nums">{a.count}</span> {a.label}
-                          <span className="ml-2 text-[11px] uppercase tracking-wider text-brand-muted">{u.label}</span>
+                          <span className="ml-2 text-[12px] font-medium text-brand-tertiary">{u.label}</span>
                         </div>
-                        <div className="text-xs text-brand-muted mt-0.5">{WHY[a.type] ?? "Requiere una decisión tuya."}</div>
+                        <div className="text-[13px] text-brand-muted mt-0.5">{WHY[a.type] ?? "Requiere una decisión tuya."}</div>
                       </div>
                     </div>
                     <div className="flex items-center justify-between sm:justify-end gap-4 sm:pl-3">
-                      {money && <span className="text-sm text-brand-text tabular-nums" title="Importe de los pedidos afectados">{formatEuro(money.amount)}</span>}
+                      {money && <span className="text-[14px] font-semibold text-brand-text tabular-nums" title="Importe de los pedidos afectados">{formatEuro(money.amount)}</span>}
                       <button
                         type="button"
                         onClick={() => onNavigate(a.target)}
-                        className="h-10 rounded-xl bg-brand-gold px-4 text-sm font-semibold text-white hover:bg-brand-gold-soft transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/50"
+                        className="h-9 rounded-lg bg-brand-gold px-3.5 text-[13px] font-semibold text-white hover:bg-brand-gold-soft transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
                       >
                         {CTA[a.type] ?? "Ver"}
                       </button>
@@ -213,7 +213,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
         {/* ── Rentabilidad (modelo COD) ── */}
         <section>
-          <SectionTitle right={<button type="button" onClick={() => onNavigate("finance")} className="h-10 -my-2 px-3 rounded-lg text-[12px] font-medium text-brand-gold hover:bg-brand-gold/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-gold/50">Ver Growth →</button>}>Rentabilidad</SectionTitle>
+          <SectionTitle right={<button type="button" onClick={() => onNavigate("finance")} className="text-[13px] font-medium text-brand-text hover:underline underline-offset-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded-sm">Ver Growth →</button>}>Rentabilidad</SectionTitle>
           {!data ? (
             <Skeleton className="h-24" />
           ) : (
@@ -230,39 +230,39 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
         {/* ── Estado del negocio + actividad reciente ── */}
         <section className="grid md:grid-cols-2 gap-6">
-          <div>
+          <div className="min-w-0">
             <SectionTitle>Estado del sistema</SectionTitle>
             {!data ? (
               <Skeleton className="h-40" />
             ) : (
               <Card className="divide-y divide-brand-border">
                 {flow.map((f) => (
-                  <div key={f.id} className="flex items-center gap-3 px-4 py-3">
+                  <div key={f.id} className="flex items-center gap-3 px-5 h-12">
                     <StatusDot status={healthToUi(f.status)} pulse={f.status === "critical"} />
-                    <span className="text-sm text-brand-text w-20 sm:w-24 shrink-0">{f.id === "calls" ? "Llamadas" : f.label}</span>
-                    <span className="min-w-0 flex-1 text-xs text-brand-muted truncate" title={f.message}>{f.message || "—"}</span>
+                    <span className="text-[14px] text-brand-text w-20 sm:w-24 shrink-0">{f.id === "calls" ? "Llamadas" : f.label}</span>
+                    <span className="min-w-0 flex-1 text-[13px] text-brand-muted truncate" title={f.message}>{f.message || "—"}</span>
                   </div>
                 ))}
                 {!systemOk && (
-                  <button type="button" onClick={() => onNavigate("settings")} className="w-full text-left px-4 h-11 text-xs text-brand-gold hover:bg-brand-surface-2 rounded-b-2xl">Ver detalles en Ajustes →</button>
+                  <button type="button" onClick={() => onNavigate("settings")} className="w-full text-left px-5 h-11 text-[13px] font-medium text-brand-text hover:bg-brand-surface-2 rounded-b-2xl">Ver detalles en Ajustes →</button>
                 )}
               </Card>
             )}
           </div>
-          <div>
+          <div className="min-w-0">
             <SectionTitle>Actividad reciente</SectionTitle>
             {!data ? (
               <Skeleton className="h-40" />
             ) : !ex || ex.recentActivity.length === 0 ? (
-              <Card className="px-4 py-6 text-sm text-brand-muted">Sin actividad registrada todavía.</Card>
+              <Card className="px-5 py-6 text-[14px] text-brand-muted">Sin actividad registrada todavía.</Card>
             ) : (
               <Card className="divide-y divide-brand-border">
                 {ex.recentActivity.map((e, i) => (
-                  <div key={i} className="flex items-start gap-3 px-4 py-2.5">
-                    <StatusDot status={e.severity === "critical" ? "error" : e.severity === "warning" ? "warn" : "muted"} />
+                  <div key={i} className="flex items-start gap-3 px-5 py-3">
+                    <span className="mt-1.5"><StatusDot status={e.severity === "critical" ? "error" : e.severity === "warning" ? "warn" : "muted"} /></span>
                     <div className="min-w-0 flex-1">
-                      <div className="text-xs text-brand-text break-words">{e.orderRef ? <span className="font-mono">#{e.orderRef} · </span> : null}{e.message}</div>
-                      <div className="text-[11px] text-brand-muted">{e.integration} · {timeAgo(e.at)}</div>
+                      <div className="text-[13px] text-brand-text break-words">{e.orderRef ? <span className="font-semibold tabular-nums">#{e.orderRef} · </span> : null}{e.message}</div>
+                      <div className="text-[12px] text-brand-tertiary">{e.integration} · {timeAgo(e.at)}</div>
                     </div>
                   </div>
                 ))}

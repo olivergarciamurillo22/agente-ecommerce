@@ -11023,7 +11023,8 @@ async function main(): Promise<void> {
       const nav = fs.readFileSync(path.join(process.cwd(), "src/components/NavRail.tsx"), "utf8");
       for (const label of ["Inicio", "Pedidos", "Seguimiento", "Cazador", "Growth", "Ajustes"]) assert.ok(nav.includes(`"${label}"`), `falta la sección ${label}`);
       assert.ok(/collapsed/.test(nav) && /localStorage/.test(nav), "colapsable con preferencia recordada");
-      assert.ok(/w-\[232px\]/.test(nav), "rail con presencia real, no un dock diminuto");
+      assert.ok(/w-\[24[08]px\]/.test(nav), "sidebar con presencia real (232–248 px), no un dock diminuto");
+      assert.ok(/bg-brand-text text-white/.test(nav), "selección activa en carbón, no una cápsula tintada");
     });
     await test("UI · móvil: CUATRO áreas + 'Más' con icono + label, y sheet — no 9 iconos minúsculos", () => {
       const nav = fs.readFileSync(path.join(process.cwd(), "src/components/NavRail.tsx"), "utf8");
@@ -11280,10 +11281,57 @@ async function main(): Promise<void> {
       const css = src("src/app/globals.css");
       assert.match(css, /--color-brand-bg: #f5f5f7/);
       assert.match(css, /--color-brand-surface: #ffffff/);
-      assert.match(css, /-apple-system, BlinkMacSystemFont, "Inter"/);
+      assert.match(css, /-apple-system, BlinkMacSystemFont, "SF Pro Display"/);
       assert.ok(!/next\/font\/google/.test(src("src/app/layout.tsx")), "sin fuentes remotas");
       assert.ok(!/linear-gradient/.test(css), "sin degradados en el sistema de diseño");
       assert.match(css, /prefers-reduced-motion/);
+    });
+
+    await test("V4.1 dirección de arte: paleta restringida, selección carbón, dorado solo de marca, radios contenidos", () => {
+      const css = src("src/app/globals.css");
+      assert.match(css, /--color-brand-gold: #1d1d1f/, "la acción principal es carbón, no un color saturado");
+      assert.match(css, /--color-brand-accent: #d5aa14/, "un único color de marca (dorado)");
+      assert.match(css, /--color-brand-tertiary: #92929b/, "tres niveles de texto");
+      assert.match(css, /--radius-2xl: 12px/, "contenedores a 12 px");
+      assert.match(css, /--radius-lg: 8px/, "controles a 8–10 px");
+      for (const sem of ["--color-emerald-600: #248a3d", "--color-amber-600: #b66a00", "--color-red-600: #d92d20", "--color-sky-600: #1769e0"]) assert.ok(css.includes(sem), `semántico unificado: ${sem}`);
+      const ui = src("src/components/ui.tsx");
+      const chip = ui.slice(ui.indexOf("export function Chip"), ui.indexOf("export function Toolbar"));
+      assert.ok(!/rounded-full/.test(chip), "los filtros NO son píldoras");
+      assert.ok(/bg-brand-text text-white/.test(chip), "filtro activo: fondo oscuro y texto blanco");
+      assert.ok(/export function TabBar/.test(ui) && /export function Badge/.test(ui) && /export function Drawer/.test(ui), "pestañas, badge y drawer como primitivas únicas");
+      const tabs = ui.slice(ui.indexOf("export function TabBar"), ui.indexOf("export function Chip"));
+      assert.ok(/h-\[2px\]/.test(tabs) && !/rounded-full border/.test(tabs), "pestañas con indicador inferior, distintas de los filtros");
+    });
+
+    await test("V4.1 barra de entorno: compacta, sin morado, con el detalle técnico en un popover", () => {
+      const bar = src("src/components/SafetyBanner.tsx");
+      assert.ok(!/violet|purple|TEST MODE/.test(bar), "el banner morado ha desaparecido");
+      assert.match(bar, /Entorno de prueba/);
+      assert.match(bar, /Ver estado/);
+      assert.match(bar, /h-9 /, "≈36 px de alto");
+      assert.match(bar, /Parada de emergencia/, "los interruptores viven en el popover, no en badges permanentes");
+      const header = src("src/components/DashboardHeader.tsx");
+      assert.ok(!/Casamable<\/div>/.test(header), "sin breadcrumb 'Casamable' repetido en la cabecera");
+    });
+
+    await test("V4.1 seguimiento: pestañas operativas, lista con columnas, antigüedad como frase y sheet de filtros en móvil", () => {
+      const view = src("src/components/FollowUpView.tsx");
+      for (const t of ["Vista general", "Acciones", "Conversaciones", "Envíos", "Automatización"]) assert.ok(view.includes(`"${t}"`), `pestaña ${t}`);
+      assert.match(view, /TabBar/);
+      const panel = src("src/components/FollowUpPanel.tsx");
+      assert.match(panel, /Sin resolver · \$\{/, "la antigüedad se comunica como 'Sin resolver · N días', no con un punto rojo");
+      assert.match(panel, /grid-cols-\[minmax/, "lista con columnas reales en escritorio");
+      assert.match(panel, /Pedido \/ cliente/);
+      assert.match(panel, /ModalShell/, "filtros de móvil en un bottom sheet");
+      assert.match(panel, /urgency/, "ordenada por urgencia");
+      assert.ok(!/rounded-full/.test(panel.replace(/h-1\.5 w-1\.5 rounded-full/g, "")), "sin píldoras salvo la marca de atención");
+    });
+
+    await test("V4.1 galería /design-system: existe solo en desarrollo", () => {
+      const page = src("src/app/design-system/page.tsx");
+      assert.match(page, /NODE_ENV === "production"\) notFound\(\)/, "404 en producción");
+      assert.match(src("src/components/DesignSystemGallery.tsx"), /Solo desarrollo/);
     });
 
     await test("V4 seguimiento: buckets por lo que toca hacer, teléfono ENMASCARADO y antigüedad desde el último contacto", async () => {
@@ -11346,10 +11394,24 @@ async function main(): Promise<void> {
 
     await test("V4 growth: el embudo declara qué pasos NO tienen integración (sin porcentajes inventados)", () => {
       const g = src("src/components/GrowthView.tsx");
+      const source = src("src/lib/system/growth-funnel.ts");
       assert.match(g, /Shopify Web Pixels/);
-      assert.match(g, /available: false/);
-      assert.ok(!/\d+%/.test(g.split("FUNNEL_STEPS")[1]?.split("function ScrollRoot")[0] ?? ""), "ningún porcentaje hardcodeado en el embudo");
+      assert.match(source, /available: false/);
+      assert.match(g, /fetch\("\/api\/growth\/funnel"/);
+      assert.ok(!/\d+%/.test(source), "ningún porcentaje hardcodeado en el embudo");
       assert.match(g, /Dato real|Hipótesis|Escenario|Recomendación IA/);
+    });
+
+    await test("V4 growth: pedido, WhatsApp, confirmado, enviado, entregado y devuelto salen de la DB real", async () => {
+      const funnel = await import("../src/lib/system/growth-funnel");
+      const before = funnel.getGrowthFunnel();
+      const value = (id: string, snapshot = before) => snapshot.steps.find((step) => step.id === id)!.value ?? 0;
+      const o = mkOrder("v4-growth-1", "97301", "34600997301");
+      db.systemDbHandle().prepare("UPDATE orders SET whatsapp_sent_at=unixepoch(), confirmed_at=unixepoch(), closure_status='delivered' WHERE id=?").run(o.id);
+      const after = funnel.getGrowthFunnel();
+      for (const id of ["cod_order", "whatsapp", "confirmed", "shipped", "delivered"]) assert.equal(value(id, after), value(id) + 1, id);
+      assert.equal(value("refused", after), value("refused"), "entregado no cuenta como devuelto");
+      for (const id of ["visit", "product_view", "cart", "checkout"]) assert.equal(after.steps.find((step) => step.id === id)!.value, null, id);
     });
 
     await test("V4 responsive: sin anchos fijos en píxeles fuera de contenedores con scroll propio", () => {
@@ -11374,6 +11436,110 @@ async function main(): Promise<void> {
         await c.fn();
       });
     }
+  }
+
+  // ============ V4 · Landing Studio: blueprint, viabilidad, claims y Shopify ==========
+  console.log("\n— V4 · Landing Studio (blueprint, validación, versiones y exportación) —");
+  {
+    const studio = await import("../src/lib/landing-studio/types");
+    const viability = await import("../src/lib/landing-studio/viability");
+    const validation = await import("../src/lib/landing-studio/validation");
+    const shopify = await import("../src/lib/landing-studio/shopify-export");
+    const candidate = {
+      id: "candidate-test-1", productName: "Producto prueba", advertiser: "Anunciante de prueba", countries: ["ES"], format: "image" as const,
+      cta: "Comprar", startedAt: "2026-08-01", activeDays: 32, variations: 3, landingUrl: "https://example.test/producto",
+      detectedPrice: { amount: 29.99, currency: "EUR" }, previewUrl: "https://example.test/product.jpg", adCopy: "Una propuesta pendiente de demostrar",
+      dataStatus: "partial" as const, winnerScore: null, status: "saved" as const,
+      economics: { costEstimate: 6.5, salePriceEstimate: 29.99, shippingCost: 5.5, returnCost: 4.5 }, notes: [], decisions: [], savedAt: "2026-09-02T10:00:00.000Z", risks: [], saturation: null,
+    };
+
+    await test("Landing · el candidato genera un LandingBlueprint estructurado y conserva el anuncio de origen", () => {
+      const bp = studio.createLandingBlueprint(candidate, "2026-09-02T12:00:00.000Z");
+      assert.equal(bp.schemaVersion, 1);
+      assert.equal(bp.candidateId, candidate.id);
+      assert.equal(bp.sourceAd.id, candidate.id);
+      assert.equal(bp.product.name, candidate.productName);
+      assert.ok(bp.sections.length >= 4 && bp.sections.every((section) => typeof section.id === "string" && typeof section.visible === "boolean"));
+      assert.ok(Array.isArray(bp.assets) && Array.isArray(bp.claims) && Array.isArray(bp.experiments));
+      assert.ok(!("html" in bp), "el HTML no es la fuente de verdad");
+    });
+
+    await test("Landing · la viabilidad incompleta devuelve campos ausentes, nunca cero plausible", () => {
+      const bp = studio.createLandingBlueprint(candidate);
+      const result = viability.calculateLandingViability(bp.economics);
+      assert.equal(result.complete, false);
+      assert.equal(result.expectedContribution, null);
+      assert.ok(result.missing.includes("IVA aplicable") && result.missing.includes("CAC"));
+    });
+
+    await test("Landing · la viabilidad usa la fórmula determinista completa y distingue escenario no viable", () => {
+      const bp = studio.createLandingBlueprint(candidate);
+      for (const [key, value] of Object.entries({ salePrice: 29.99, deliveryRate: 0.7, productCost: 6.5, vat: 2, shipping: 5.5, codFee: 0.7, handling: 1, returnCost: 4.5, cac: 5 })) {
+        const field = bp.economics[key as keyof typeof bp.economics]; field.value = value; field.kind = "scenario";
+      }
+      const result = viability.calculateLandingViability(bp.economics);
+      assert.equal(result.complete, true);
+      assert.ok(Math.abs((result.expectedNetRevenue ?? 0) - 20.993) < 0.001);
+      assert.ok(Math.abs((result.expectedReturnCost ?? 0) - 1.35) < 0.001);
+      assert.ok(Math.abs((result.expectedContribution ?? 0) - (-0.847)) < 0.001);
+      assert.equal(result.viable, false);
+    });
+
+    await test("Landing · claims pendientes, bloqueados y promesas prohibidas bloquean la exportación", () => {
+      const bp = studio.createLandingBlueprint(candidate);
+      bp.claims = [{ id: "c1", text: "4.9/5 estrellas y científicamente probado", status: "hypothesis", evidence: null }];
+      const issues = validation.validateLandingBlueprint(bp);
+      assert.ok(issues.some((issue) => issue.code === "CLAIM_PENDING"));
+      assert.ok(issues.some((issue) => issue.code === "FAKE_REVIEW"));
+      assert.ok(issues.some((issue) => issue.code === "FAKE_STUDY"));
+      assert.equal(validation.canExportLanding(bp), false);
+    });
+
+    await test("Landing · un precio anterior sin evidencia no produce descuento", () => {
+      const bp = studio.createLandingBlueprint(candidate);
+      bp.price.compareAt = 49.99;
+      bp.price.compareAtEvidence = null;
+      assert.ok(validation.validateLandingBlueprint(bp).some((issue) => issue.code === "COMPARE_PRICE_UNPROVEN"));
+    });
+
+    await test("Landing · assets ausentes bloquean y no se reemplazan por imágenes ficticias", () => {
+      const bp = studio.createLandingBlueprint({ ...candidate, previewUrl: null });
+      assert.ok(validation.validateLandingBlueprint(bp).some((issue) => issue.code === "ASSET_MISSING"));
+      assert.equal(bp.assets[0].url, null);
+    });
+
+    await test("Landing · exportación bloqueada no genera un bundle parcial", () => {
+      const bp = studio.createLandingBlueprint(candidate);
+      assert.throws(() => shopify.buildShopifyThemeBundle(bp), /Exportación bloqueada/);
+    });
+
+    await test("Landing · Liquid, schema, template, assets, locales, manifest y ZIP son válidos y no publican", () => {
+      const bp = studio.createLandingBlueprint(candidate, "2026-09-02T12:00:00.000Z");
+      bp.claims[0].status = "verified"; bp.claims[0].evidence = "Documento interno TEST-EVIDENCE-1";
+      bp.brief.audience = "Adultos que valoran una compra sencilla"; bp.brief.promise = "Explicar el producto sin exageraciones";
+      const bundle = shopify.buildShopifyThemeBundle(bp, "2026-09-02T12:30:00.000Z");
+      assert.deepEqual(shopify.validateShopifyThemeBundle(bundle), []);
+      assert.equal(bundle.manifest.published, false);
+      assert.ok(bundle.files.some((file) => file.path.startsWith("sections/") && file.path.endsWith(".liquid")));
+      assert.ok(bundle.files.some((file) => file.path.startsWith("templates/") && file.path.endsWith(".json")));
+      const liquid = bundle.files.find((file) => file.path.endsWith(".liquid"))!.content;
+      for (const native of ["image_picker", "video", "product", "font_picker", "color_scheme"]) assert.ok(liquid.includes(native), native);
+      assert.match(liquid, /#cm-\{\{ section\.id \}\}/, "scoping por section.id");
+      assert.ok(!bundle.files.some((file) => /!important/i.test(file.content)));
+      const zip = shopify.bundleToZip(bundle);
+      assert.deepEqual(Array.from(zip.slice(0, 4)), [0x50, 0x4b, 0x03, 0x04], "cabecera ZIP estándar");
+      assert.ok(zip.length > 1000);
+    });
+
+    await test("Landing · la UI incluye editor de tres paneles, preview responsive, versiones, restauración y A/B", () => {
+      const code = fs.readFileSync(path.join(process.cwd(), "src/components/landing-studio/LandingStudio.tsx"), "utf8");
+      assert.match(code, /xl:grid-cols-\[240px_minmax\(0,1fr\)_300px\]/, "estructura · canvas · inspector");
+      for (const viewport of ["desktop", "tablet", "mobile"]) assert.ok(code.includes(`\"${viewport}\"`), viewport);
+      for (const action of ["Añadir sección", "Duplicar", "Eliminar", "Restaurar"]) assert.ok(code.includes(action), action);
+      assert.match(code, /Experimento A\/B/);
+      assert.match(code, /No se ha escrito ni publicado nada en Shopify/);
+      assert.ok(!/overflow-x-scroll/.test(code), "sin scroll horizontal forzado en móvil");
+    });
   }
 
   // ============ Resumen ============
