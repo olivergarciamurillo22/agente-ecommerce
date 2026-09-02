@@ -28,7 +28,12 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "conversación no encontrada" }, { status: 404 });
   }
 
-  const form = await req.formData();
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return NextResponse.json({ ok: false, error: "el cuerpo no es multipart/form-data válido" }, { status: 400 });
+  }
   const file = form.get("image");
   const caption = ((form.get("caption") as string | null) ?? "").trim();
 

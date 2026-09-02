@@ -43,8 +43,14 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "conversación no encontrada" }, { status: 404 });
   }
 
-  const body = (await req.json()) as { content?: string };
-  const content = (body.content ?? "").trim();
+  // Cuerpo malformado → 400 con motivo, nunca un 500 con stack.
+  let body: { content?: string };
+  try {
+    body = (await req.json()) as { content?: string };
+  } catch {
+    return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
+  }
+  const content = (typeof body?.content === "string" ? body.content : "").trim();
   if (content === "") {
     return NextResponse.json({ ok: false, error: "contenido vacío" }, { status: 400 });
   }

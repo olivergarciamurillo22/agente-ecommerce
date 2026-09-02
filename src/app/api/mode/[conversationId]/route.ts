@@ -18,8 +18,13 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
   }
 
-  const body = (await req.json()) as { mode?: string };
-  const mode = body.mode;
+  let body: { mode?: string };
+  try {
+    body = (await req.json()) as { mode?: string };
+  } catch {
+    return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
+  }
+  const mode = body?.mode;
 
   if (mode !== "AI" && mode !== "HUMAN") {
     return NextResponse.json(
