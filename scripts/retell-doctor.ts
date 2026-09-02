@@ -105,29 +105,46 @@ async function main(): Promise<void> {
     contractFail("falta config/retell/casamable-agent-prompt.md");
   }
 
-  // Golden fixture: el cuerpo EXACTO de create-phone-call que los tests fijan.
-  const fixturePath = path.join("tests", "fixtures", "retell", "create-phone-call.expected.json");
+  // Forma EXACTA del cuerpo de create-phone-call (contrato oficial). Se
+  // comprueba con el builder real y un juego de variables sintético: así
+  // funciona también dentro de la imagen Docker, que NO lleva tests/.
+  // Si el golden fixture está disponible (repo), se contrasta además con él.
+  const CAMPOS_OFICIALES = ["from_number", "to_number", "retell_llm_dynamic_variables", "metadata", "override_agent_id", "override_agent_version"];
   try {
-    const fx = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, unknown>;
-    const vars = fx.retell_llm_dynamic_variables as Record<string, string>;
-    const issues = validateRetellCallVariables(vars);
+    const varsSinteticas: Record<string, string> = {
+      nombre_cliente: "Marta", producto: "1x Cortaúñas Eléctrico 3 en 1", unidades: "una unidad",
+      importe_total: "veintinueve euros con noventa y cinco céntimos", direccion: "Calle Mayor 5", localidad: "Almería",
+      codigo_postal: "04001", telefono: "+34600000000", fecha_pedido: "ayer", numero_pedido: "4242",
+      current_datetime: "martes, 1 de septiembre de 2026, 10:30",
+    };
     const prevAgent = process.env.RETELL_AGENT_ID;
-    if (typeof fx.override_agent_id === "string") process.env.RETELL_AGENT_ID = fx.override_agent_id;
+    process.env.RETELL_AGENT_ID = agentId || "agent_DOCTOR_SELFTEST";
     const body = buildCreatePhoneCallBody(
-      { toNumber: String(fx.to_number), fromNumber: String(fx.from_number), dynamicVariables: vars, metadata: (fx.metadata as Record<string, string>) ?? {} },
-      String(fx.override_agent_version)
+      { toNumber: "+34600000000", fromNumber: fromNumber || "+34950835615", dynamicVariables: varsSinteticas, metadata: { attempt_id: "0", order_number: "4242" } },
+      "7"
     );
     if (prevAgent === undefined) delete process.env.RETELL_AGENT_ID;
     else process.env.RETELL_AGENT_ID = prevAgent;
-    const keysOk = Object.keys(body).sort().join(",") === Object.keys(fx).sort().join(",");
+    const keysOk = Object.keys(body).sort().join(",") === [...CAMPOS_OFICIALES].sort().join(",");
     const versionNum = typeof body.override_agent_version === "number" && Number.isInteger(body.override_agent_version);
-    console.log(`   ${ok(keysOk && versionNum && issues.length === 0)} golden fixture create-phone-call: campos ${keysOk ? "iguales" : "DISTINTOS"} · override_agent_version ${versionNum ? "numérico" : "NO numérico"} · variables ${issues.length === 0 ? "seguras" : issues.join("; ")}`);
-    if (!keysOk) contractFail("el cuerpo de create-phone-call ya no coincide con el golden fixture");
+    const issues = validateRetellCallVariables(varsSinteticas);
+    console.log(`   ${ok(keysOk && versionNum && issues.length === 0)} cuerpo de create-phone-call: campos ${keysOk ? "oficiales" : "DISTINTOS de los oficiales"} · override_agent_version ${versionNum ? "numérico" : "NO numérico"} · variables sintéticas ${issues.length === 0 ? "seguras" : issues.join("; ")}`);
+    if (!keysOk) contractFail("el cuerpo de create-phone-call ya no tiene los campos oficiales");
     if (!versionNum) contractFail("override_agent_version no es un entero");
-    if (issues.length) contractFail("el fixture de variables no pasa el preflight");
+    if (issues.length) contractFail("las variables sintéticas no pasan el preflight (contrato roto)");
+    const fixturePath = path.join("tests", "fixtures", "retell", "create-phone-call.expected.json");
+    if (fs.existsSync(fixturePath)) {
+      const fx = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, unknown>;
+      const fxOk = Object.keys(fx).sort().join(",") === [...CAMPOS_OFICIALES].sort().join(",")
+        && Object.keys((fx.retell_llm_dynamic_variables as Record<string, string>) ?? {}).sort().join(",") === [...RETELL_CALL_VARIABLE_KEYS].sort().join(",");
+      console.log(`   ${ok(fxOk)} golden fixture (tests/fixtures/retell): ${fxOk ? "coincide" : "NO coincide con el contrato"}`);
+      if (!fxOk) contractFail("el golden fixture no coincide con el contrato");
+    } else {
+      console.log("   · golden fixture no disponible en esta imagen (se verifica en la suite del repo)");
+    }
   } catch (err) {
-    console.log(`   ○ no se pudo comprobar el golden fixture: ${err instanceof Error ? err.message : "error"}`);
-    contractFail("golden fixture ilegible");
+    console.log(`   ○ no se pudo construir el cuerpo de create-phone-call: ${err instanceof Error ? err.message : "error"}`);
+    contractFail("el builder del cuerpo falla");
   }
   console.log(`   ${ok(!pinIssue)} pin numérico de versión${pinIssue ? ` — ${pinIssue}` : ""}`);
   if (pinIssue) verdict.liveIssues.push(pinIssue);
