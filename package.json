@@ -53,7 +53,8 @@
     "beeping:doctor": "tsx scripts/beeping-doctor.ts",
     "beeping:sync": "tsx scripts/beeping-sync.ts",
     "meta-ads:doctor": "tsx scripts/meta-ads-doctor.ts",
-    "meta-ads:sync": "tsx scripts/meta-ads-sync.ts"
+    "meta-ads:sync": "tsx scripts/meta-ads-sync.ts",
+    "retell:pilot": "tsx scripts/retell-pilot.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

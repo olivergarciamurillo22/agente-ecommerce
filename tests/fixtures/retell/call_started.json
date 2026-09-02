@@ -1,0 +1,1 @@
+{"event":"call_started","call":{"call_id":"call_fx_001","agent_id":"agent_TEST_ONLY","agent_version":7,"call_status":"ongoing","start_timestamp":1788341400000,"direction":"outbound","call_type":"phone_call","from_number":"+34950835615","to_number":"+34999000001","metadata":{"attempt_id":"42","order_number":"TEST_1501"}}}

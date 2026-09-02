@@ -1,0 +1,1 @@
+{"event":"call_analyzed","call":{"call_id":"call_fx_005","agent_id":"agent_TEST_ONLY","agent_version":7,"call_status":"not_connected","start_timestamp":1788341800000,"end_timestamp":1788341830000,"disconnection_reason":"dial_no_answer","call_analysis":{"call_summary":"","user_sentiment":"Unknown","call_successful":false,"custom_analysis_data":{}}}}

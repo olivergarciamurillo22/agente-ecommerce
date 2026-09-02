@@ -58,10 +58,14 @@ import {
   callsShadowMode,
 } from "./config";
 import { buildCallPayload } from "./payload";
-import { ProviderRequestError, type CallProvider, type ParsedCallEvent } from "./provider";
+import { ProviderRequestError, providerErrorRetryable, type CallProvider, type ParsedCallEvent } from "./provider";
 import { retellProvider } from "./retell";
 import { insideCallWindow, madridDate, madridParts, nextCallableDayAfter, nextCallSlot, windowStart } from "./schedule";
 import { normalizeRetellAnalysis } from "./analysis";
+import { agentVersionDrift } from "./retell";
+import { externalActionsLocked, logOnce } from "../safety";
+import { callsBlockedReason, setCallsBlocked } from "./config";
+import { technicalResultFromDisconnection } from "./results";
 import { parseCallResult, RESULT_OUTCOMES, type CallResult } from "./results";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -106,9 +110,19 @@ function fallbackMinutes(): number {
 /** Candidatos: (A) WhatsApp enviado hace ≥ trigger sin respuesta;
  *  (B) el envío inicial no ha conseguido salir en `CALL_FALLBACK_MINUTES`
  *      (sin WhatsApp / bot caído / fallo persistente) → entra ya. */
+/** Cuántos candidatos se miran por tick. Es un tope de trabajo, no de cola. */
+export const CALL_CANDIDATE_SCAN_LIMIT = 500;
+
 export function findCallCandidates(nowS: number): OrderRow[] {
   const trigger = nowS - Math.round(callTriggerMinutes() * 60);
   const fallback = nowS - Math.round(fallbackMinutes() * 60);
+  // INANICIÓN (bug real 03-09, misma familia que el 132001 de WhatsApp): el
+  // LIMIT iba ANTES de descartar los pedidos que ya tienen un intento vivo
+  // o en revisión manual. Con 50 pedidos antiguos "aparcados" en revisión
+  // (más caros o más viejos), los 50 huecos se llenaban siempre con ellos y
+  // ningún pedido nuevo entraba en la cola de llamadas — en silencio. Los
+  // descartes por intento van ahora en el SQL; el resto (elegibilidad, DNC,
+  // cupo de contactos) sigue en TypeScript, sobre un barrido amplio.
   return systemDbHandle()
     .prepare(
       `SELECT * FROM orders
@@ -120,8 +134,13 @@ export function findCallCandidates(nowS: number): OrderRow[] {
            OR status = 'needs_call'
            OR (status = 'pending_send' AND whatsapp_sent_at IS NULL AND created_at <= ?)
          )
+         AND NOT EXISTS (
+           SELECT 1 FROM call_attempts a
+           WHERE a.order_id = orders.id
+             AND a.state IN ('planned','reserved','dialing','in_flight','manual_review')
+         )
        ORDER BY CAST(total_price AS REAL) DESC, created_at ASC
-       LIMIT 50`
+       LIMIT ${CALL_CANDIDATE_SCAN_LIMIT}`
     )
     .all(trigger, fallback) as OrderRow[];
 }
@@ -177,7 +196,15 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
   reviews: number;
 }> {
   const out = { dialed: 0, shadowLogged: 0, cancelled: 0, reviews: 0 };
-  const now = deps.now;
+
+  // KILL SWITCH GLOBAL (P0 hardening 03-09): con EMERGENCY_STOP=1 (o modo
+  // safe) NO se crea ninguna llamada, tenga lo que tenga ai_calls_enabled.
+  // Hasta hoy el orquestador solo miraba sus llaves propias: el interruptor
+  // de emergencia del sistema no apagaba las llamadas.
+  if (externalActionsLocked()) {
+    logOnce("calls-emergency", "[SAFETY] EMERGENCY_STOP/safe mode: no se marcan llamadas");
+    return out;
+  }  const now = deps.now;
   const nowS = toS(now);
 
   // Fuera de franja no se marca nada (los planned esperan su scheduled_at,
@@ -256,6 +283,13 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
       break;
     }
 
+    // Bloqueo GLOBAL (401/402/deriva de versión): no se marca nada hasta
+    // que un humano lo revise y desbloquee.
+    const bloqueo = callsBlockedReason();
+    if (bloqueo) {
+      logOnce("calls-blocked", `[CALLS] llamadas bloqueadas: ${bloqueo}`);
+      break;
+    }
     // Claim atómico: solo un worker gana este intento.
     if (!claimCallAttempt(attempt.id)) continue;
 
@@ -284,25 +318,82 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
         agent_id: accepted.agentId ?? null,
         agent_version: accepted.agentVersion ?? null,
       });
+      noteAgentVersionDrift(accepted.requestedAgentVersion ?? null, accepted.agentVersion ?? null, order.shopify_order_number);
       out.dialed++;
       logger.info(
         `[CALLS] #${order.shopify_order_number} llamada aceptada (${accepted.providerCallId}), contacto ${attempt.contact_number}`
       );
     } catch (err) {
-      // Petición RECHAZADA antes de aceptarse: no hubo llamada. No consume
-      // contacto; reintenta con la cadencia técnica y su propio tope.
-      const msg = err instanceof ProviderRequestError ? err.message : String(err);
-      logger.warn(`[CALLS] #${order.shopify_order_number} el proveedor rechazó la petición: ${msg.slice(0, 200)}`);
-      transitionCallAttempt(attempt.id, ["dialing"], "completed", {
-        result: "fallo_tecnico",
-        retry_consumed: 0,
-        reason: `provider_request_failed: ${msg.slice(0, 200)}`,
-        ended_at: nowS,
-      });
-      planNextAfterResult(order, attempt, "fallo_tecnico", now, deps.isHoliday, null);
+      handleProviderCreateError(attempt, order, err, now, deps.isHoliday);
     }
   }
   return out;
+}
+
+/**
+ * Qué hacer cuando Create Phone Call falla. La API de Retell NO tiene
+ * idempotency key, así que la pregunta clave no es "¿falló?" sino "¿pudo
+ * haberse creado la llamada?":
+ *   · rate_limit / transient → la petición fue RECHAZADA: reintentar es
+ *     seguro (fallo_tecnico, cadencia técnica, tope propio).
+ *   · auth / billing → nada saldrá hasta que un humano lo arregle: bloqueo
+ *     GLOBAL de llamadas + revisión manual.
+ *   · invalid_payload / config / unknown → repetir es inútil: revisión manual.
+ *   · ambiguous (timeout, red, 5xx, 2xx ilegible) → PUDO crearse: revisión
+ *     manual con instrucción de comprobar en Retell (metadata.attempt_id).
+ *     Jamás un reintento automático: sería la segunda llamada al cliente.
+ */
+/**
+ * Deriva de versión (§91): pedimos la versión X (pin) y Retell resolvió Y.
+ * La llamada YA salió (no se puede deshacer), pero NO sale ninguna más hasta
+ * que un humano confirme qué versión está hablando con los clientes.
+ */
+export function noteAgentVersionDrift(requested: string | null, resolved: string | null, ref: string): boolean {
+  if (!agentVersionDrift(requested, resolved)) return false;
+  const detalle = `agent_version_drift: pedida ${requested}, Retell usó ${resolved}`;
+  setCallsBlocked(detalle);
+  logIntegrationEvent("system", "call_agent_version_drift", "critical", `${detalle} — llamadas BLOQUEADAS hasta revisar (retell:doctor --unblock)`, ref);
+  return true;
+}
+
+export function handleProviderCreateError(
+  attempt: CallAttemptRow,
+  order: OrderRow,
+  err: unknown,
+  now: Date,
+  isHoliday: HolidayCalendar,
+  opts: { manual?: boolean } = {}
+): { retried: boolean; kind: string } {
+  const e = err instanceof ProviderRequestError ? err : null;
+  const kind = e?.kind ?? "unknown";
+  const msg = (e?.message ?? String(err)).slice(0, 200);
+  const nowS = toS(now);
+  const ref = order.shopify_order_number;
+  logger.warn(`[CALLS] #${ref} create-call falló (${kind}${e?.httpStatus ? ` HTTP ${e.httpStatus}` : ""}): ${msg}`);
+
+  if (providerErrorRetryable(kind)) {
+    transitionCallAttempt(attempt.id, ["dialing"], "completed", {
+      result: "fallo_tecnico",
+      retry_consumed: 0,
+      reason: `${opts.manual ? "manual_" : ""}provider_request_failed(${kind}): ${msg}`,
+      ended_at: nowS,
+    });
+    logIntegrationEvent("system", "call_provider_rejected", "warning", `Retell rechazó la petición (${kind}): se reintentará`, ref);
+    if (!opts.manual) planNextAfterResult(order, attempt, "fallo_tecnico", now, isHoliday, null);
+    return { retried: !opts.manual, kind };
+  }
+
+  if (kind === "auth" || kind === "billing") {
+    setCallsBlocked(`${kind}: ${msg}`);
+    logIntegrationEvent("system", "call_provider_blocked", "critical", `llamadas BLOQUEADAS (${kind}): ${msg} — revisar credenciales/facturación de Retell y desbloquear con retell:doctor --unblock`, ref);
+  }
+  const razon =
+    kind === "ambiguous"
+      ? `provider_ambiguous: Retell no confirmó ni rechazó (${msg}). COMPROBAR en Retell si la llamada salió (metadata.attempt_id=${attempt.id}) antes de volver a marcar`
+      : `provider_permanent(${kind}): ${msg}`;
+  transitionCallAttempt(attempt.id, ["dialing"], "manual_review", { reason: razon, ended_at: nowS });
+  logIntegrationEvent("system", kind === "ambiguous" ? "call_provider_ambiguous" : "call_manual_review", "warning", razon.slice(0, 300), ref);
+  return { retried: false, kind };
 }
 
 // ------------------------------------------------------------
@@ -450,7 +541,15 @@ export function applyCallAnalysis(
   // entrega `resultado_llamada`/`datos_corregidos`; el repo declara
   // `resultado` + campos planos). A partir de aquí solo se usa lo normalizado.
   const norm = normalizeRetellAnalysis(event.analysis);
-  const result = parseCallResult(norm.resultado);
+  // Sin conversación (no cogió, comunicando, buzón, fallo de red) Retell no
+  // rellena el análisis: `resultado` llega vacío. Eso tiene mapeo técnico
+  // determinista por disconnection_reason; solo lo que no se pueda mapear va
+  // a revisión manual. NUNCA se confirma ni se corrige nada por esta vía.
+  const result =
+    parseCallResult(norm.resultado) ??
+    (norm.resultado === undefined || norm.resultado === null || norm.resultado === ""
+      ? technicalResultFromDisconnection(event.disconnectionReason ?? event.providerStatus)
+      : null);
   if (!result) {
     transitionCallAttempt(attempt.id, ["in_flight", "dialing"], "manual_review", {
       reason: `unknown_retell_result: "${str(norm.resultado).slice(0, 60)}"`,
@@ -460,6 +559,9 @@ export function applyCallAnalysis(
     return;
   }
 
+  if (event.agentVersion && attempt.agent_version && agentVersionDrift(attempt.agent_version, event.agentVersion)) {
+    noteAgentVersionDrift(attempt.agent_version, event.agentVersion, order.shopify_order_number);
+  }
   const outcome = RESULT_OUTCOMES[result];
   const moved = transitionCallAttempt(attempt.id, ["in_flight", "dialing"], "completed", {
     result,

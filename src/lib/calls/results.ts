@@ -79,3 +79,36 @@ export function parseCallResult(raw: unknown): CallResult | null {
   const limpio = raw.trim().toLowerCase().replace(/\s+/g, "_");
   return (CALL_RESULTS as readonly string[]).includes(limpio) ? (limpio as CallResult) : null;
 }
+
+
+/**
+ * Cuando NO hubo conversación (no cogió, comunicando, buzón, fallo de red)
+ * Retell no rellena el análisis personalizado: `resultado` llega vacío. Eso
+ * no es "resultado desconocido → revisión manual": es un caso técnico con
+ * mapeo determinista. Enumeración oficial de disconnection_reason
+ * (docs.retellai.com/api-references/get-call, 03-09-2026).
+ *   → null = no se puede clasificar aquí (revisión manual).
+ */
+export function technicalResultFromDisconnection(reason: string | null | undefined): CallResult | null {
+  const r = (reason ?? "").trim().toLowerCase();
+  if (!r) return null;
+  if (r === "voicemail_reached" || r === "ivr_reached") return "buzon_de_voz";
+  if (r === "dial_no_answer" || r === "dial_busy" || r === "user_declined" || r === "registered_call_timeout") return "no_contesta";
+  if (
+    r === "dial_failed" ||
+    r === "invalid_destination" ||
+    r === "telephony_provider_permission_denied" ||
+    r === "telephony_provider_unavailable" ||
+    r === "sip_routing_error" ||
+    r === "concurrency_limit_reached" ||
+    r === "no_concurrency_fallback" ||
+    r === "no_valid_payment" ||
+    r === "error_no_audio_received" ||
+    r.startsWith("error_")
+  ) {
+    return "fallo_tecnico";
+  }
+  // marked_as_spam, scam_detected, inactivity, max_duration, hangups sin
+  // análisis… aquí no se adivina: revisión humana.
+  return null;
+}

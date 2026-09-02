@@ -1,6 +1,6 @@
 // ============================================================
 // Adaptador de Retell — contrato verificado contra docs.retellai.com el
-// 24-08-2026:
+// 24-08-2026 y re-verificado el 03-09-2026 (hardening):
 //   POST https://api.retellai.com/v2/create-phone-call
 //     Authorization: Bearer <RETELL_API_KEY>
 //     body: { from_number, to_number, retell_llm_dynamic_variables,
@@ -10,12 +10,13 @@
 //     constante + frescura del timestamp (5 min).
 //   Eventos: call_started | call_ended | call_analyzed, con { event, call }
 //     y call.call_analysis.custom_analysis_data para el análisis.
-//
-// Fallback defensivo de firma: si el header no trae el formato v=,d= se
-// acepta también el HMAC-SHA256(raw_body) en hex (formato del SDK antiguo).
+//   Política 03-09: override_agent_version SIEMPRE numérico (pin);
+//   errores clasificados (ambiguo → revisión manual, nunca reintento ciego);
+//   firma SOLO en formato oficial con timestamp (sin fallback replayable).
 // ============================================================
 
 import crypto from "node:crypto";
+import { validateRetellCallVariables } from "./payload";
 import {
   ProviderRequestError,
   type CallProvider,
@@ -50,6 +51,42 @@ export function retellAgentVersion(): string {
   return (process.env.RETELL_AGENT_VERSION ?? "").trim();
 }
 
+/**
+ * Política de pin (hardening 03-09): SOLO un número de versión PUBLICADA.
+ * La API admite también "latest", "latest_published" o un tag de entorno
+ * (docs create-phone-call), pero todos ellos SE MUEVEN: alguien publica o
+ * mueve el tag y las llamadas cambian sin que nadie toque el .env. Con un
+ * número, "qué versión dijo esto" tiene una sola respuesta.
+ */
+export function agentVersionPinIssue(version: string): string | null {
+  if (!version) return "RETELL_AGENT_VERSION no está fijada";
+  if (!/^\d+$/.test(version)) return `RETELL_AGENT_VERSION="${version}" no es un número de versión publicada (los tags y "latest*" se mueven solos)`;
+  return null;
+}
+
+/** Deriva: pedimos la versión X y Retell resolvió Y. */
+export function agentVersionDrift(requested: string | null, resolved: string | null): boolean {
+  if (!requested || !resolved) return false;
+  return requested.trim() !== resolved.trim();
+}
+
+/**
+ * Cuerpo EXACTO de POST /v2/create-phone-call (contrato verificado contra
+ * docs.retellai.com el 03-09-2026). Exportado para el golden test: cualquier
+ * campo nuevo tiene que pasar por aquí y por el fixture.
+ */
+export function buildCreatePhoneCallBody(req: OutboundCallRequest, version: string): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    from_number: req.fromNumber,
+    to_number: req.toNumber,
+    retell_llm_dynamic_variables: req.dynamicVariables,
+    metadata: req.metadata,
+  };
+  if (agentId()) body.override_agent_id = agentId();
+  body.override_agent_version = Number(version);
+  return body;
+}
+
 function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
@@ -66,19 +103,19 @@ export const retellProvider: CallProvider = {
 
   async createOutboundCall(req: OutboundCallRequest): Promise<OutboundCallAccepted> {
     if (!this.isConfigured()) {
-      throw new ProviderRequestError("Retell no configurado (RETELL_API_KEY / RETELL_FROM_NUMBER)");
+      throw new ProviderRequestError("Retell no configurado (RETELL_API_KEY / RETELL_FROM_NUMBER)", null, "config");
     }
-    const body: Record<string, unknown> = {
-      from_number: req.fromNumber,
-      to_number: req.toNumber,
-      retell_llm_dynamic_variables: req.dynamicVariables,
-      metadata: req.metadata,
-    };
-    if (agentId()) body.override_agent_id = agentId();
+    // PIN OBLIGATORIO: sin número de versión publicada no sale NINGUNA
+    // llamada, ni manual. (incidente "[password 1]": el draft cambió solo)
     const version = retellAgentVersion();
-    if (version) {
-      body.override_agent_version = /^\d+$/.test(version) ? Number(version) : version;
-    }
+    const pinIssue = agentVersionPinIssue(version);
+    if (pinIssue) throw new ProviderRequestError(`agent_version_not_pinned: ${pinIssue}`, null, "config");
+    // PREFLIGHT de variables aquí también (cinturón y tirantes): el builder ya
+    // lo hace, pero esta es la última puerta antes de la red.
+    const issues = validateRetellCallVariables(req.dynamicVariables);
+    if (issues.length > 0) throw new ProviderRequestError(`unsafe_dynamic_variables: ${issues.join("; ").slice(0, 250)}`, null, "config");
+
+    const body = buildCreatePhoneCallBody(req, version);
 
     let res: Response;
     try {
@@ -92,8 +129,12 @@ export const retellProvider: CallProvider = {
         signal: AbortSignal.timeout(15_000),
       });
     } catch (err) {
+      // Timeout / red: la petición PUDO llegar. Sin idempotency key en la
+      // API de Retell, esto es AMBIGUO: jamás se reintenta solo.
       throw new ProviderRequestError(
-        `Retell inaccesible: ${err instanceof Error ? err.message : String(err)}`
+        `Retell inaccesible o sin respuesta: ${err instanceof Error ? err.message : String(err)}`,
+        null,
+        "ambiguous"
       );
     }
     if (!res.ok) {
@@ -101,12 +142,18 @@ export const retellProvider: CallProvider = {
       const detalle = await res.text().catch(() => "");
       throw new ProviderRequestError(`Retell HTTP ${res.status}: ${detalle.slice(0, 300)}`, res.status);
     }
-    const json = (await res.json()) as { call_id?: string; agent_id?: string; agent_version?: number | string };
-    if (!json.call_id) throw new ProviderRequestError("Retell aceptó pero sin call_id en la respuesta");
+    let json: { call_id?: string; agent_id?: string; agent_version?: number | string };
+    try {
+      json = (await res.json()) as typeof json;
+    } catch {
+      throw new ProviderRequestError("Retell respondió 2xx sin JSON legible: comprobar en el dashboard si la llamada salió", null, "ambiguous");
+    }
+    if (!json.call_id) throw new ProviderRequestError("Retell aceptó pero sin call_id en la respuesta", null, "ambiguous");
     return {
       providerCallId: json.call_id,
       agentId: typeof json.agent_id === "string" ? json.agent_id : null,
-      agentVersion: json.agent_version !== undefined ? String(json.agent_version) : version || null,
+      agentVersion: json.agent_version !== undefined && json.agent_version !== null ? String(json.agent_version) : null,
+      requestedAgentVersion: version,
     };
   },
 
@@ -114,16 +161,17 @@ export const retellProvider: CallProvider = {
     const key = apiKey();
     if (!key || !signatureHeader) return false;
 
+    // Formato oficial y ÚNICO (docs "Secure webhook", 03-09-2026):
+    //   X-Retell-Signature: v={ts_ms},d={HMAC-SHA256(raw_body + ts_ms, api_key)}
+    // con ventana de 5 minutos. El antiguo fallback "HMAC del cuerpo sin
+    // timestamp" se retiró: Retell no lo envía y, sin timestamp, una firma
+    // capturada valdría para siempre (replay).
     const m = /^v=(\d+),d=([0-9a-f]+)$/i.exec(signatureHeader.trim());
-    if (m) {
-      const ts = Number(m[1]);
-      if (!Number.isFinite(ts) || Math.abs(nowMs - ts) > SIGNATURE_MAX_AGE_MS) return false;
-      const esperado = crypto.createHmac("sha256", key).update(rawBody + m[1]).digest("hex");
-      return safeEqual(esperado, m[2].toLowerCase());
-    }
-    // Fallback: firma simple del cuerpo (hex), sin timestamp.
-    const simple = crypto.createHmac("sha256", key).update(rawBody).digest("hex");
-    return safeEqual(simple, signatureHeader.trim().toLowerCase());
+    if (!m) return false;
+    const ts = Number(m[1]);
+    if (!Number.isFinite(ts) || Math.abs(nowMs - ts) > SIGNATURE_MAX_AGE_MS) return false;
+    const esperado = crypto.createHmac("sha256", key).update(rawBody + m[1]).digest("hex");
+    return safeEqual(esperado, m[2].toLowerCase());
   },
 
   parseEvent(rawBody: string): ParsedCallEvent | null {
@@ -152,6 +200,7 @@ export const retellProvider: CallProvider = {
     return {
       type: event as ParsedCallEventType,
       providerCallId: callId,
+      agentVersion: call.agent_version !== undefined && call.agent_version !== null ? String(call.agent_version) : null,
       eventAt: eventMs !== null ? Math.floor(eventMs / 1000) : null,
       providerStatus: typeof call.call_status === "string" ? call.call_status : null,
       disconnectionReason:

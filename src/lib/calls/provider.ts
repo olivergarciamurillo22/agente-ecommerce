@@ -20,6 +20,8 @@ export interface OutboundCallAccepted {
   /** Qué agente/versión usó el proveedor de verdad (si lo reporta). */
   agentId?: string | null;
   agentVersion?: string | null;
+  /** Versión que NOSOTROS pedimos (pin). Si difiere de agentVersion: deriva. */
+  requestedAgentVersion?: string | null;
 }
 
 export type ParsedCallEventType = "call_started" | "call_ended" | "call_analyzed";
@@ -27,6 +29,8 @@ export type ParsedCallEventType = "call_started" | "call_ended" | "call_analyzed
 export interface ParsedCallEvent {
   type: ParsedCallEventType;
   providerCallId: string;
+  /** Versión del agente según el propio evento (call.agent_version). */
+  agentVersion?: string | null;
   /** epoch segundos del evento si el proveedor lo da. */
   eventAt: number | null;
   /** Estado técnico del proveedor (call_status / disconnection_reason). */
@@ -37,13 +41,53 @@ export interface ParsedCallEvent {
   analysis: Record<string, unknown> | null;
 }
 
-/** Se lanza cuando el proveedor RECHAZA la petición antes de aceptarla. */
+/**
+ * Clase del fallo, porque NO todos los errores admiten reintento:
+ *   config          → nuestra configuración (versión sin fijar…): no hay llamada
+ *   invalid_payload → 400/422: repetir el MISMO payload es inútil
+ *   auth            → 401: bloquear llamadas hasta arreglar la key
+ *   billing         → 402: bloquear llamadas (cuestan dinero)
+ *   rate_limit      → 429: la petición fue RECHAZADA, reintentar es seguro
+ *   transient       → rechazo claro y temporal (sin llamada creada)
+ *   ambiguous       → timeout / red / 5xx: Retell PUDO haber creado la
+ *                     llamada. Sin idempotency key en la API, reintentar
+ *                     = riesgo de DOS llamadas al cliente → revisión manual.
+ *   unknown         → cualquier otra cosa: revisión manual.
+ */
+export type ProviderErrorKind =
+  | "config"
+  | "invalid_payload"
+  | "auth"
+  | "billing"
+  | "rate_limit"
+  | "transient"
+  | "ambiguous"
+  | "unknown";
+
+export function classifyProviderHttpStatus(status: number | null): ProviderErrorKind {
+  if (status === null || status === 0) return "ambiguous";
+  if (status === 400 || status === 422) return "invalid_payload";
+  if (status === 401 || status === 403) return "auth";
+  if (status === 402) return "billing";
+  if (status === 429) return "rate_limit";
+  if (status >= 500) return "ambiguous";
+  return "unknown";
+}
+
+/** ¿Se puede volver a intentar sin riesgo de crear una segunda llamada? */
+export function providerErrorRetryable(kind: ProviderErrorKind): boolean {
+  return kind === "rate_limit" || kind === "transient";
+}
+
+/** Se lanza cuando el proveedor RECHAZA la petición (o no sabemos si la aceptó). */
 export class ProviderRequestError extends Error {
   readonly httpStatus: number | null;
-  constructor(message: string, httpStatus: number | null = null) {
+  readonly kind: ProviderErrorKind;
+  constructor(message: string, httpStatus: number | null = null, kind?: ProviderErrorKind) {
     super(message);
     this.name = "ProviderRequestError";
     this.httpStatus = httpStatus;
+    this.kind = kind ?? classifyProviderHttpStatus(httpStatus);
   }
 }
 

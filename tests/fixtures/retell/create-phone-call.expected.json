@@ -1,0 +1,23 @@
+{
+  "from_number": "+34950835615",
+  "to_number": "+34999000001",
+  "retell_llm_dynamic_variables": {
+    "nombre_cliente": "Cliente Prueba",
+    "producto": "Producto de prueba",
+    "unidades": "una unidad",
+    "importe_total": "veintinueve euros con noventa y cinco céntimos",
+    "direccion": "Calle Ensayo 1",
+    "localidad": "Ciudad Ensayo",
+    "codigo_postal": "04001",
+    "telefono": "+34999000001",
+    "fecha_pedido": "ayer",
+    "numero_pedido": "TEST_1501",
+    "current_datetime": "martes 1 de septiembre de 2026, 10:30"
+  },
+  "metadata": {
+    "attempt_id": "42",
+    "order_number": "TEST_1501"
+  },
+  "override_agent_id": "agent_TEST_ONLY",
+  "override_agent_version": 7
+}

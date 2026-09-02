@@ -1,0 +1,1 @@
+{"event":"call_ended","call":{"call_id":"call_fx_001","agent_id":"agent_TEST_ONLY","agent_version":7,"call_status":"ended","start_timestamp":1788341400000,"end_timestamp":1788341442000,"disconnection_reason":"agent_hangup","direction":"outbound","call_type":"phone_call","metadata":{"attempt_id":"42","order_number":"TEST_1501"}}}

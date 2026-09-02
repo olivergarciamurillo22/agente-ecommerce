@@ -270,7 +270,11 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     secret: false,
     description: "Versión del agente que usan las llamadas (override_agent_version): número publicado, o 'latest_published'. SIN fijar, cada llamada usa la última versión GUARDADA — una edición del dashboard cambia producción (incidente [password 1], 02-09). Fijarla es requisito del preflight.",
     requiredFor: ["retell-pilot"],
-    validate: (v) => (/^\d+$/.test(v) || v === "latest_published" ? null : `número de versión o "latest_published" (vale "${v}")`),
+    // Hardening 03-09: SOLO número de versión publicada. "latest_published" y
+    // los tags de entorno se MUEVEN (alguien publica/mueve el tag y las
+    // llamadas cambian sin tocar el .env); con un número, "qué versión dijo
+    // esto" tiene una única respuesta. Es lo que exige retell.ts antes de marcar.
+    validate: (v) => (/^\d+$/.test(v) ? null : `número de versión PUBLICADA (vale "${v}"; ni "latest_published" ni tags: se mueven solos)`),
   },
   {
     name: "CALLS_PILOT_MODE",

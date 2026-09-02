@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { normalizePhone } from "./orders/normalize";
 import path from "node:path";
 import fs from "node:fs";
 
@@ -3870,17 +3871,28 @@ export function getCallQueueSummary(startOfDayS: number): CallQueueSummary {
 
 // --- DNC (no volver a llamar) ---
 
+/** DNC se compara SIEMPRE en forma canónica: "+34 600 11 22 33", "34600112233"
+ *  y "600112233" son el mismo teléfono. Sin esto, un alta manual con
+ *  espacios no bloquearía la llamada al mismo número guardado en dígitos. */
+function dncCanonical(phone: string): string {
+  return normalizePhone(phone ?? "");
+}
+
 export function addDncPhone(phone: string, source: string, opts: { reason?: string; orderId?: number; providerCallId?: string } = {}): void {
+  const canon = dncCanonical(phone);
+  if (!canon) return;
   ctx()
     .db.prepare(
       `INSERT INTO call_dnc (phone, source, reason, order_id, provider_call_id) VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(phone) DO NOTHING`
     )
-    .run(phone, source, opts.reason ?? null, opts.orderId ?? null, opts.providerCallId ?? null);
+    .run(canon, source, opts.reason ?? null, opts.orderId ?? null, opts.providerCallId ?? null);
 }
 
 export function isDncPhone(phone: string): boolean {
-  return Boolean(ctx().db.prepare("SELECT 1 FROM call_dnc WHERE phone = ?").get(phone));
+  const canon = dncCanonical(phone);
+  if (!canon) return false;
+  return Boolean(ctx().db.prepare("SELECT 1 FROM call_dnc WHERE phone = ? OR phone = ?").get(canon, phone));
 }
 
 // --- Inbox de eventos del proveedor de voz ---

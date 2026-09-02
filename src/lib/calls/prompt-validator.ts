@@ -18,19 +18,9 @@
  *  Copia CONSCIENTE de las claves de buildCallVariables (payload.ts); el
  *  test de contrato verifica que ambas listas coinciden, así que si alguien
  *  añade una variable allí sin tocarla aquí, la suite lo dice. */
-export const ALLOWED_PROMPT_VARIABLES = [
-  "nombre_cliente",
-  "producto",
-  "unidades",
-  "importe_total",
-  "direccion",
-  "localidad",
-  "codigo_postal",
-  "telefono",
-  "fecha_pedido",
-  "numero_pedido",
-  "current_datetime",
-] as const;
+import { RETELL_CALL_VARIABLE_KEYS } from "./payload";
+
+export const ALLOWED_PROMPT_VARIABLES = RETELL_CALL_VARIABLE_KEYS;
 
 export interface PromptIssue {
   kind:

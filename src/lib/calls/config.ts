@@ -16,6 +16,7 @@
 // ============================================================
 
 import { getSetting, setSetting } from "../db";
+import { normalizePhone } from "../orders/normalize";
 
 /** Clave en settings (minúsculas) + fallback env (mayúsculas) + default. */
 function cfg(key: string, envName: string, def: string): string {
@@ -40,9 +41,13 @@ export function callsDailyCap(): number {
 
 /** Teléfonos permitidos (dígitos internacionales). Vacío = sin allowlist. */
 export function callsAllowlist(): string[] {
+  // Forma canónica (normalizePhone): "+34 600 11 22 33", "34600112233" y
+  // "600 11 22 33" son el MISMO teléfono. Antes solo se quitaban símbolos,
+  // así que un móvil apuntado sin el 34 nunca coincidía (fail-closed, pero
+  // desconcertante: "está en la lista y no llama").
   return cfg("calls_allowlist", "CALLS_ALLOWLIST", "")
     .split(",")
-    .map((t) => t.replace(/[^\d]/g, ""))
+    .map((t) => normalizePhone(t))
     .filter(Boolean);
 }
 
@@ -82,7 +87,7 @@ export function callAllowedByAllowlist(phoneDigits: string): boolean {
     // documentado de "sin restricción", con kill switch y cap delante.
     return !callsPilotMode();
   }
-  return lista.includes(phoneDigits.replace(/[^\d]/g, ""));
+  return lista.includes(normalizePhone(phoneDigits));
 }
 
 /** Minutos sin respuesta al WhatsApp antes de entrar en la cola de llamadas. */
@@ -157,4 +162,22 @@ export function getCallConfigView(): CallConfigView {
     retellFromNumber: (process.env.RETELL_FROM_NUMBER ?? "").trim() ? "configured" : "missing",
     retellAgentId: (process.env.RETELL_AGENT_ID ?? "").trim() ? "configured" : "missing",
   };
+}
+
+
+/**
+ * Bloqueo GLOBAL de creación de llamadas, persistido en settings. Lo activan
+ * fallos que no se arreglan reintentando (401/402, deriva de versión del
+ * agente) y solo lo quita un humano (npm run retell:doctor -- --unblock).
+ */
+export const CALLS_BLOCKED_KEY = "calls_blocked_reason";
+export function callsBlockedReason(): string | null {
+  const v = (getSetting(CALLS_BLOCKED_KEY) ?? "").trim();
+  return v ? v : null;
+}
+export function setCallsBlocked(reason: string): void {
+  setSetting(CALLS_BLOCKED_KEY, reason.slice(0, 300));
+}
+export function clearCallsBlocked(): void {
+  setSetting(CALLS_BLOCKED_KEY, "");
 }

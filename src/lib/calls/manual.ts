@@ -13,11 +13,14 @@ import {
   transitionCallAttempt,
 } from "../db";
 import { isConfirmationEligible } from "../orders/eligibility";
+import { externalActionsLocked } from "../safety";
 import { logIntegrationEvent } from "../system/repo";
 import { defaultHolidayCalendar } from "./calendar";
 import { callsDailyCap } from "./config";
 import { buildCallPayload } from "./payload";
-import { ProviderRequestError, type CallProvider } from "./provider";
+import { type CallProvider } from "./provider";
+import { callsBlockedReason } from "./config";
+import { handleProviderCreateError, noteAgentVersionDrift } from "./scheduler";
 import { retellProvider } from "./retell";
 import { insideCallWindow, madridDate, madridParts } from "./schedule";
 
@@ -42,6 +45,12 @@ export async function manualDialOrder(
   const order = getOrderById(orderId);
   if (!order) return { ok: false, error: "pedido no encontrado" };
 
+  // KILL SWITCH GLOBAL (P0 hardening 03-09): el botón manual tampoco puede
+  // saltarse EMERGENCY_STOP ni el modo safe.
+  if (externalActionsLocked()) {
+    return { ok: false, error: "EMERGENCY_STOP activo o modo safe: no se puede llamar" };
+  }
+
   const elig = isConfirmationEligible(order);
   if (!elig.eligible) {
     return {
@@ -52,6 +61,11 @@ export async function manualDialOrder(
 
   if (isDncPhone(order.phone)) {
     return { ok: false, error: "este teléfono está en la lista NO LLAMAR" };
+  }
+
+  const bloqueo = callsBlockedReason();
+  if (bloqueo) {
+    return { ok: false, error: `llamadas bloqueadas: ${bloqueo} (retell:doctor --unblock cuando esté resuelto)` };
   }
 
   if (getActiveCallAttemptForOrder(order.id)) {
@@ -118,6 +132,7 @@ export async function manualDialOrder(
       agent_version: accepted.agentVersion ?? null,
       started_at: nowS,
     });
+    noteAgentVersionDrift(accepted.requestedAgentVersion ?? null, accepted.agentVersion ?? null, order.shopify_order_number);
 
     logIntegrationEvent(
       "system",
@@ -129,23 +144,20 @@ export async function manualDialOrder(
 
     return { ok: true, providerCallId: accepted.providerCallId };
   } catch (err) {
-    const msg = err instanceof ProviderRequestError ? err.message : String(err);
-
-    transitionCallAttempt(attemptId, ["dialing"], "completed", {
-      result: "fallo_tecnico",
-      retry_consumed: 0,
-      reason: `manual_provider_failed: ${msg.slice(0, 200)}`,
-      ended_at: nowS,
-    });
-
-    logIntegrationEvent(
-      "system",
-      "manual_call_failed",
-      "warning",
-      `falló llamada MANUAL: ${msg.slice(0, 200)}`,
-      order.shopify_order_number
-    );
-
-    return { ok: false, error: `Retell rechazó la llamada: ${msg.slice(0, 200)}` };
+    const msg = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    const attempt = getActiveCallAttemptForOrder(order.id);
+    // Misma política que el orquestador: ambiguo → revisión manual (nunca
+    // segunda llamada); 401/402 → bloqueo global; 429 → fallo técnico.
+    const r = attempt
+      ? handleProviderCreateError(attempt, order, err, now, defaultHolidayCalendar, { manual: true })
+      : { retried: false, kind: "unknown" };
+    logIntegrationEvent("system", "manual_call_failed", "warning", `falló llamada MANUAL (${r.kind}): ${msg}`, order.shopify_order_number);
+    return {
+      ok: false,
+      error:
+        r.kind === "ambiguous"
+          ? `Retell no confirmó ni rechazó la llamada (${msg}). NO vuelvas a pulsar: comprueba en el dashboard de Retell si salió (attempt_id=${attemptId}).`
+          : `Retell rechazó la llamada (${r.kind}): ${msg}`,
+    };
   }
 }
