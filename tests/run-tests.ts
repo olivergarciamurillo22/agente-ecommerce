@@ -9239,6 +9239,71 @@ async function main(): Promise<void> {
     });
   });
 
+  await test("CALLS HEALTH · bloqueo global y EMERGENCY_STOP se ven (critical / warning), y el pin solo cuenta si es numérico", async () => {
+    const H = await import("../src/lib/system/health-integrations");
+    const cfg = await import("../src/lib/calls/config");
+    db.setSetting("ai_calls_enabled", "0");
+    db.setSetting("calls_shadow_mode", "1");
+    db.setSetting("calls_allowlist", "");
+    try {
+      cfg.setCallsBlocked("auth: Retell HTTP 401");
+      const h = H.getCallsHealth();
+      assert.equal(h.status, "critical", "bloqueo global = crítico aunque el kill switch esté cerrado (bloquea también las manuales)");
+      assert.equal(h.blockedReason, "auth: Retell HTTP 401");
+      assert.match(h.message, /BLOQUEADAS/);
+      assert.match(h.message, /--unblock/);
+      cfg.clearCallsBlocked();
+      assert.equal(H.getCallsHealth().blockedReason, null);
+      // EMERGENCY_STOP con las llamadas encendidas: aviso, no verde.
+      await withEnv({ EMERGENCY_STOP: "1", CALLS_PILOT_MODE: "0" }, () => {
+        db.setSetting("ai_calls_enabled", "1");
+        db.setSetting("calls_allowlist", "34600000001");
+        const h2 = H.getCallsHealth();
+        assert.equal(h2.killSwitchActive, true);
+        assert.equal(h2.status, "warning");
+        assert.match(h2.message, /EMERGENCY_STOP/);
+        db.setSetting("ai_calls_enabled", "0");
+      });
+      // Contadores de observabilidad: una deriva registrada cuenta.
+      const { logIntegrationEvent } = await import("../src/lib/system/repo");
+      const antes = H.getCallsHealth().driftEvents24h;
+      logIntegrationEvent("system", "call_agent_version_drift", "critical", "prueba de contador", "0");
+      assert.equal(H.getCallsHealth().driftEvents24h, antes + 1);
+      // Pin: "latest_published" NO es un pin.
+      await withEnv({ RETELL_AGENT_VERSION: "latest_published" }, () => assert.equal(H.getCallsHealth().agentVersionPinned, false));
+      await withEnv({ RETELL_AGENT_VERSION: "7" }, () => assert.equal(H.getCallsHealth().agentVersionPinned, true));
+      await withEnv({ RETELL_AGENT_VERSION: "" }, () => assert.equal(H.getCallsHealth().agentVersionPinned, false));
+    } finally {
+      cfg.clearCallsBlocked();
+      db.setSetting("ai_calls_enabled", "0");
+      db.setSetting("calls_allowlist", "");
+    }
+  });
+
+  await test("API · cuerpos malformados devuelven 400 con motivo, nunca 500 (mode, messages, image)", async () => {
+    const conv = db.getOrCreateConversation("34600000777", "Cuerpo Roto");
+    const ctx = { params: Promise.resolve({ conversationId: String(conv.id) }) };
+    const { POST: postMode } = await import("../src/app/api/mode/[conversationId]/route");
+    const { POST: postMsg } = await import("../src/app/api/messages/[conversationId]/route");
+    const { POST: postImg } = await import("../src/app/api/messages/[conversationId]/image/route");
+    const mk = (body: string, type = "application/json") =>
+      new Request("http://localhost/x", { method: "POST", body, headers: { "content-type": type } }) as unknown as import("next/server").NextRequest;
+    for (const cuerpo of ["{no es json", "", "\u0000", "[1,2", "{\"mode\": "]) {
+      const r1 = await postMode(mk(cuerpo), ctx);
+      assert.equal(r1.status, 400, `mode: "${cuerpo.slice(0, 10)}" → 400`);
+      const r2 = await postMsg(mk(cuerpo), ctx);
+      assert.equal(r2.status, 400, `messages: "${cuerpo.slice(0, 10)}" → 400`);
+    }
+    // JSON válido pero sin la forma esperada: tampoco revienta.
+    assert.equal((await postMode(mk("null"), ctx)).status, 400);
+    assert.equal((await postMsg(mk("null"), ctx)).status, 400);
+    assert.equal((await postMsg(mk("{\"content\": 42}"), ctx)).status, 400);
+    // Imagen: un cuerpo que no es multipart → 400, no 500.
+    const r3 = await postImg(mk("esto no es multipart", "text/plain"), ctx);
+    assert.equal(r3.status, 400);
+    assert.equal(db.getMessages(conv.id, 10).length, 0, "ningún mensaje se coló con cuerpos rotos");
+  });
+
   await test("DROPI · diagnóstico de vendor: caza exactamente el fallo real del 23-08", () => {
     const diag = require("../src/lib/suppliers/dropi/diagnostics") as typeof import("../src/lib/suppliers/dropi/diagnostics");
     // El caso real: vendor "Casamable" cuando la app exige "Dropi PRO".

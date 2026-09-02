@@ -67,6 +67,8 @@ interface AutomationCalls {
   agentVersionPinned: boolean;
   configuredAgentVersion: string | null;
   lastCallAgentVersion: string | null;
+  blockedReason?: string | null;
+  killSwitchActive?: boolean;
   blockers: string[];
 }
 
@@ -231,6 +233,15 @@ export default function AgentPanel({ onNavigate }: { onNavigate: (v: DockView) =
                 <IdentityFact label="Versión">
                   {automation?.configuredAgentVersion ?? <span className="text-amber-600">SIN FIJAR</span>}
                 </IdentityFact>
+                {automation?.blockedReason || automation?.killSwitchActive ? (
+                  <IdentityFact label="Bloqueo">
+                    <span className="text-red-700">
+                      {automation.killSwitchActive ? "EMERGENCY_STOP activo" : null}
+                      {automation.killSwitchActive && automation.blockedReason ? " · " : null}
+                      {automation.blockedReason ? `bloqueadas: ${automation.blockedReason}` : null}
+                    </span>
+                  </IdentityFact>
+                ) : null}
                 <IdentityFact label="Llamadas hoy">
                   {formatInt(calls.summary.completedToday)}/{formatInt(calls.config.dailyCap)}
                 </IdentityFact>

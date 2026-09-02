@@ -111,7 +111,7 @@ const externos = [
   "Webhooks de Shopify suscritos y firmando bien (npm run shopify:webhooks -- --ensure, en el NAS)",
   "Backfill con scope read_all_orders verificado y coverage completo (en el NAS)",
   "Dropea responde con la API key real (npm run dropea:doctor, en el NAS)",
-  "Retell con saldo y prompt validado (npm run calls:validate-prompt + panel de Retell)",
+  "Retell: npm run retell:doctor en el NAS (contrato, pin numérico, deriva, bloqueo) + saldo a mano en el dashboard",
   "Plantilla de Meta aprobada en la WABA real (las plantillas no se transfieren entre WABAs)",
   "Backups del NAS recientes y legibles (pestaña Sistema → Backups)",
 ];
@@ -136,6 +136,62 @@ for (const c of localChecks) {
     console.log("✗");
     console.log(`      → ${motivo}`);
   }
+}
+
+// ── RETELL (§116): dos preguntas distintas, dos respuestas distintas ──
+//   RETELL_MANUAL_READY → ¿puede Pedro pulsar "Llamar ahora" con garantías?
+//   RETELL_AUTO_READY   → ¿pueden salir llamadas SOLAS? NO, por diseño: el
+//                         piloto es manual hasta que Pedro lo decida con
+//                         transcripciones reales delante. Este script jamás
+//                         lo pondrá en verde.
+function retellReadiness(): { manual: string; auto: string; detalle: string[] } {
+  const code = `
+    require("./scripts/env-loader");
+    const { agentVersionPinIssue, retellAgentVersion, retellFromNumber } = require("./src/lib/calls/retell");
+    const { validatePromptPlaceholders } = require("./src/lib/calls/prompt-validator");
+    const fs = require("node:fs");
+    const prompt = fs.readFileSync("config/retell/casamable-agent-prompt.md", "utf8");
+    const v = validatePromptPlaceholders(prompt);
+    console.log(JSON.stringify({
+      promptOk: v.ok,
+      promptIssues: v.issues.length,
+      pinIssue: agentVersionPinIssue(retellAgentVersion()),
+      hasKey: Boolean((process.env.RETELL_API_KEY ?? "").trim()),
+      hasAgent: Boolean((process.env.RETELL_AGENT_ID ?? "").trim()),
+      hasFrom: Boolean(retellFromNumber()),
+    }));
+  `;
+  const r = spawnSync("npx", ["tsx", "-e", code], { encoding: "utf8", env: process.env, timeout: 120_000 });
+  const linea = (r.stdout ?? "").trim().split("\n").filter((l) => l.startsWith("{")).pop() ?? "";
+  let j: { promptOk: boolean; promptIssues: number; pinIssue: string | null; hasKey: boolean; hasAgent: boolean; hasFrom: boolean } | null = null;
+  try {
+    j = JSON.parse(linea);
+  } catch {
+    j = null;
+  }
+  if (!j) return { manual: "UNKNOWN (no se pudo evaluar)", auto: "NO — por diseño (piloto manual)", detalle: [(r.stderr ?? "").trim().slice(0, 200)] };
+  const detalle: string[] = [];
+  detalle.push(`${j.promptOk ? "✓" : "✗"} prompt versionado validado${j.promptOk ? "" : ` (${j.promptIssues} problema/s)`}`);
+  detalle.push(`${j.pinIssue ? "○" : "✓"} versión del agente fijada (número)${j.pinIssue ? ` — ${j.pinIssue}` : ""}`);
+  detalle.push(`${j.hasAgent ? "✓" : "○"} RETELL_AGENT_ID`);
+  detalle.push(`${j.hasFrom ? "✓" : "○"} RETELL_FROM_NUMBER`);
+  detalle.push(`${j.hasKey ? "✓" : "○"} RETELL_API_KEY (aquí: ${j.hasKey ? "presente" : "AUSENTE → se valida en el NAS con npm run retell:doctor"})`);
+  const localOk = j.promptOk;
+  const externosPendientes = !j.hasKey || Boolean(j.pinIssue) || !j.hasAgent || !j.hasFrom;
+  const manual = !localOk
+    ? "NO — el prompt versionado no valida"
+    : externosPendientes
+      ? "LOCAL OK — PENDING EXTERNAL (credenciales/pin en el .env del NAS + retell:doctor + 1 llamada real al móvil de Pedro)"
+      : "LOCAL OK — falta la llamada real al móvil de Pedro (RETELL-FIRST-REAL-CALL.md)";
+  return { manual, auto: "NO — por diseño (piloto manual; ver RETELL-ENABLE-AUTO-CALLS.md)", detalle };
+}
+
+console.log("\n── RETELL (piloto MANUAL; lo automático no se enciende desde aquí) ──");
+{
+  const rr = retellReadiness();
+  for (const d of rr.detalle) console.log(`  ${d}`);
+  console.log(`  RETELL_MANUAL_READY : ${rr.manual}`);
+  console.log(`  RETELL_AUTO_READY   : ${rr.auto}`);
 }
 
 console.log("\n── EXTERNO (solo verificable contra sistemas reales; aquí NO se finge) ──");

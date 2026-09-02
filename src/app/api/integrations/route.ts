@@ -57,6 +57,10 @@ export interface AutomationCalls {
   agentVersionPinned: boolean;
   configuredAgentVersion: string | null;
   lastCallAgentVersion: string | null;
+  /** Bloqueo global de llamadas (auth/billing/deriva): null si no lo hay. */
+  blockedReason: string | null;
+  /** EMERGENCY_STOP / safe mode activo: apaga las llamadas por encima de todo. */
+  killSwitchActive: boolean;
   /** Frases completas en español; vacío cuando ready. */
   blockers: string[];
 }
@@ -99,14 +103,22 @@ function buildCallsAutomation(): AutomationCalls {
       blockers.push("Prompt no validado: el guion de Lucía no pasa la validación de variables (config/retell/casamable-agent-prompt.md).");
     }
     if (!h.agentVersionPinned) {
-      blockers.push("Versión del agente sin fijar (RETELL_AGENT_VERSION): cada llamada usaría la última versión guardada en Retell.");
+      blockers.push("Versión del agente sin fijar como NÚMERO (RETELL_AGENT_VERSION): sin pin numérico no sale ninguna llamada.");
+    }
+    if (h.blockedReason) {
+      blockers.push(`Llamadas BLOQUEADAS por el sistema: ${h.blockedReason}. Revisar y desbloquear con npm run retell:doctor -- --unblock.`);
+    }
+    if (h.killSwitchActive) {
+      blockers.push("EMERGENCY_STOP / modo seguro activo: no sale ninguna llamada, ni manual, hasta levantarlo.");
     }
     return {
-      ready: h.promptValidated && h.agentVersionPinned,
+      ready: h.promptValidated && h.agentVersionPinned && !h.blockedReason && !h.killSwitchActive,
       promptValidated: h.promptValidated,
       agentVersionPinned: h.agentVersionPinned,
       configuredAgentVersion: h.configuredAgentVersion,
       lastCallAgentVersion: h.lastCallAgentVersion,
+      blockedReason: h.blockedReason,
+      killSwitchActive: h.killSwitchActive,
       blockers,
     };
   } catch (err) {
@@ -116,6 +128,8 @@ function buildCallsAutomation(): AutomationCalls {
       agentVersionPinned: false,
       configuredAgentVersion: null,
       lastCallAgentVersion: null,
+      blockedReason: null,
+      killSwitchActive: false,
       blockers: [`No se pudo leer el estado de las llamadas: ${err instanceof Error ? err.message : "error desconocido"}`],
     };
   }

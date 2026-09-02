@@ -442,8 +442,29 @@ export interface CallsHealth {
   configuredAgentVersion: string | null;
   /** La versión que usó la ÚLTIMA llamada real (auditoría). */
   lastCallAgentVersion: string | null;
+  /** Bloqueo GLOBAL (hardening 03-09): auth/billing del proveedor o deriva de
+   *  versión. Mientras exista, NO sale ninguna llamada, ni manual. */
+  blockedReason: string | null;
+  /** EMERGENCY_STOP / safe mode: apaga las llamadas por encima del kill switch propio. */
+  killSwitchActive: boolean;
+  /** Contadores de observabilidad (24 h): derivas, respuestas ambiguas del
+   *  proveedor (posible llamada creada sin confirmar) y bloqueos. */
+  driftEvents24h: number;
+  ambiguousEvents24h: number;
+  blockedEvents24h: number;
   status: HealthStatus;
   message: string;
+}
+
+function countCallEvents24h(db: ReturnType<typeof systemDbHandle>, eventType: string): number {
+  try {
+    const r = db
+      .prepare("SELECT COUNT(*) AS n FROM integration_events WHERE event_type = ? AND created_at >= unixepoch() - 86400")
+      .get(eventType) as { n: number };
+    return r.n;
+  } catch {
+    return 0;
+  }
 }
 
 function callsPromptValidated(): boolean {
@@ -482,14 +503,29 @@ export function getCallsHealth(): CallsHealth {
     consecutiveFailures: 0,
     paymentStatus: "unknown_manual_check_required",
     promptValidated: callsPromptValidated(),
-    agentVersionPinned: Boolean((process.env.RETELL_AGENT_VERSION ?? "").trim()),
+    // Pin = NÚMERO de versión publicada. "latest_published" o un tag se
+    // mueven solos: no cuentan como fijado (hardening 03-09).
+    agentVersionPinned: /^\d+$/.test((process.env.RETELL_AGENT_VERSION ?? "").trim()),
     configuredAgentVersion: (process.env.RETELL_AGENT_VERSION ?? "").trim() || null,
     lastCallAgentVersion: lastCallAgentVersion(),
+    blockedReason: null,
+    killSwitchActive: false,
+    driftEvents24h: 0,
+    ambiguousEvents24h: 0,
+    blockedEvents24h: 0,
     status: "unknown",
     message: "",
   };
   try {
     const db = systemDbHandle();
+    base.blockedReason =
+      ((db.prepare("SELECT value FROM settings WHERE key = 'calls_blocked_reason'").get() as { value: string } | undefined)?.value ?? "").trim() || null;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const safety = require("../safety") as typeof import("../safety");
+    base.killSwitchActive = safety.externalActionsLocked();
+    base.driftEvents24h = countCallEvents24h(db, "call_agent_version_drift");
+    base.ambiguousEvents24h = countCallEvents24h(db, "call_provider_ambiguous");
+    base.blockedEvents24h = countCallEvents24h(db, "call_provider_blocked");
     const cfgRow = (k: string) =>
       (db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined)?.value;
     base.enabled = (cfgRow("ai_calls_enabled") ?? process.env.AI_CALLS_ENABLED ?? "0") === "1";
@@ -522,11 +558,20 @@ export function getCallsHealth(): CallsHealth {
       .get() as { n: number };
     base.consecutiveFailures = racha.n;
 
-    if (!base.enabled) {
+    if (base.blockedReason) {
+      // Bloqueo global: lo pone el propio sistema (401/402 del proveedor o
+      // deriva de versión) y solo lo quita un humano tras revisar.
+      base.status = "critical";
+      base.message = `llamadas BLOQUEADAS (ni manuales): ${base.blockedReason} — revisar y desbloquear con npm run retell:doctor -- --unblock`;
+    } else if (!base.enabled) {
       base.status = "healthy";
       base.message = base.shadowMode
         ? "apagadas (kill switch cerrado) · shadow ON: simula sin llamar"
         : "apagadas (kill switch cerrado)";
+      if (base.killSwitchActive) base.message += " · EMERGENCY_STOP activo";
+    } else if (base.killSwitchActive) {
+      base.status = "warning";
+      base.message = "encendidas, pero EMERGENCY_STOP/safe mode está activo: NO sale ninguna llamada (ni manual) hasta levantarlo";
     } else if (!base.shadowMode && !(process.env.RETELL_API_KEY ?? "").trim()) {
       // Operador difícil: encender el kill switch sin credencial dejaba el
       // panel en verde mientras ninguna llamada podía salir.

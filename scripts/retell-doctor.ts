@@ -1,22 +1,46 @@
 // ============================================================
-// Doctor de Retell — SOLO LECTURA. Ninguna llamada se marca.
+// Doctor de Retell — SOLO LECTURA (salvo --unblock). Ninguna llamada se marca.
 //
-//   npm run retell:doctor
+//   npm run retell:doctor                 (contrato local + estado + en vivo si hay key)
+//   npm run retell:doctor -- --unblock    (levanta el bloqueo global tras REVISAR)
+//   npm run retell:doctor -- --json       (además, una línea JSON al final)
 //
-// Comprueba: API key, agente, política de versión (RETELL_AGENT_VERSION),
-// número saliente, prompt del LLM EN VIVO contra el validador y contra la
-// fuente versionada (config/retell/casamable-agent-prompt.md), tools
-// disponibles y webhook. Nunca imprime la API key.
+// Tres bloques, tres verdades distintas (hardening 03-09):
+//   CONTRATO  → lo que se puede probar SIN red: 11 variables, prompt
+//               versionado, golden fixture de create-phone-call, pin numérico.
+//   ESTADO    → lo que dice la base local: bloqueo global, kill switch,
+//               allowlist, DNC, revisiones pendientes, eventos críticos.
+//   EN VIVO   → lo que solo se sabe con RETELL_API_KEY: agente, versión
+//               publicada, prompt real, tools, número, webhook. Sin key NO se
+//               finge: queda UNVERIFIED_EXTERNAL.
+//
+// Códigos de salida: 0 = contrato OK y en vivo OK · 2 = contrato OK, en vivo
+// sin verificar (falta la key aquí) · 1 = contrato o en vivo con fallos.
+// Nunca imprime la API key.
 // ============================================================
 
 import "./env-loader";
 import fs from "node:fs";
+import path from "node:path";
 
 const API = "https://api.retellai.com";
+const ARGS = new Set(process.argv.slice(2));
+const UNBLOCK = ARGS.has("--unblock");
+const JSON_OUT = ARGS.has("--json");
 
-async function get(path: string, key: string): Promise<{ ok: boolean; status: number; json: unknown }> {
+interface Verdict {
+  contract: "OK" | "FAIL";
+  contractIssues: string[];
+  live: "OK" | "FAIL" | "UNVERIFIED_EXTERNAL";
+  liveIssues: string[];
+  blockedReason: string | null;
+  killSwitchActive: boolean;
+  autoCalls: "OFF";
+}
+
+async function get(p: string, key: string): Promise<{ ok: boolean; status: number; json: unknown }> {
   try {
-    const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
+    const res = await fetch(`${API}${p}`, { headers: { Authorization: `Bearer ${key}` }, signal: AbortSignal.timeout(15_000) });
     const json = await res.json().catch(() => null);
     return { ok: res.ok, status: res.status, json };
   } catch (err) {
@@ -24,104 +48,246 @@ async function get(path: string, key: string): Promise<{ ok: boolean; status: nu
   }
 }
 
+const ok = (b: boolean) => (b ? "●" : "○");
+
 async function main(): Promise<void> {
   const { validatePromptPlaceholders, ALLOWED_PROMPT_VARIABLES } = await import("../src/lib/calls/prompt-validator");
-  const { retellAgentVersion } = await import("../src/lib/calls/retell");
+  const { retellAgentVersion, agentVersionPinIssue, buildCreatePhoneCallBody, retellFromNumber } = await import("../src/lib/calls/retell");
+  const { RETELL_CALL_VARIABLE_KEYS, validateRetellCallVariables } = await import("../src/lib/calls/payload");
+
+  const verdict: Verdict = {
+    contract: "OK",
+    contractIssues: [],
+    live: "UNVERIFIED_EXTERNAL",
+    liveIssues: [],
+    blockedReason: null,
+    killSwitchActive: false,
+    autoCalls: "OFF",
+  };
+  const contractFail = (m: string) => {
+    verdict.contract = "FAIL";
+    verdict.contractIssues.push(m);
+  };
 
   console.log("\n════════ RETELL · doctor (solo lectura, sin llamadas) ════════\n");
 
   const key = (process.env.RETELL_API_KEY ?? "").trim();
   const agentId = (process.env.RETELL_AGENT_ID ?? "").trim();
-  const fromNumber = (process.env.RETELL_FROM_NUMBER ?? "").trim();
+  const fromNumber = retellFromNumber();
   const version = retellAgentVersion();
+  const pinIssue = agentVersionPinIssue(version);
 
+  // ------------------------------------------------------------------
   console.log("1. CONFIGURACIÓN");
   console.log(`   API key        : ${key ? "configurada (no se muestra)" : "FALTA (RETELL_API_KEY)"}`);
   console.log(`   Agent ID       : ${agentId || "FALTA (RETELL_AGENT_ID)"}`);
   console.log(`   From number    : ${fromNumber || "FALTA (RETELL_FROM_NUMBER)"}`);
-  console.log(
-    `   Versión fijada : ${version ? version : "◐ SIN FIJAR — las llamadas usan la última versión GUARDADA (incluye ediciones accidentales del dashboard). Fija RETELL_AGENT_VERSION."}`
-  );
+  console.log(`   Versión fijada : ${pinIssue ? `○ ${pinIssue} — SIN pin numérico NO sale ninguna llamada` : `● ${version} (número de versión publicada)`}`);
 
-  // Prompt versionado local: SIEMPRE se valida, con o sin credenciales.
-  console.log("\n2. PROMPT VERSIONADO (config/retell/casamable-agent-prompt.md)");
+  // ------------------------------------------------------------------
+  console.log("\n2. CONTRATO LOCAL (sin red)");
+  const nVars = RETELL_CALL_VARIABLE_KEYS.length;
+  console.log(`   ${ok(nVars === 11)} variables dinámicas: ${nVars} (${[...RETELL_CALL_VARIABLE_KEYS].join(", ")})`);
+  if (nVars !== 11) contractFail(`el contrato declara ${nVars} variables, no 11`);
+  const mismas = [...ALLOWED_PROMPT_VARIABLES].sort().join(",") === [...RETELL_CALL_VARIABLE_KEYS].sort().join(",");
+  console.log(`   ${ok(mismas)} el validador del prompt usa EXACTAMENTE esas variables`);
+  if (!mismas) contractFail("prompt-validator y payload declaran variables distintas");
+
   let promptLocal = "";
   try {
     promptLocal = fs.readFileSync("config/retell/casamable-agent-prompt.md", "utf8");
     const v = validatePromptPlaceholders(promptLocal);
-    console.log(`   ${v.ok ? "●" : "○"} validador: ${v.ok ? "OK" : `${v.issues.length} problema(s)`}`);
+    console.log(`   ${ok(v.ok)} prompt versionado (config/retell/casamable-agent-prompt.md): ${v.ok ? "OK" : `${v.issues.length} problema(s)`} · variables usadas ${v.used.length}/${ALLOWED_PROMPT_VARIABLES.length}`);
     for (const i of v.issues) console.log(`     ✗ [${i.kind}] ${i.detail}`);
-    console.log(`   Variables usadas: ${v.used.length}/${ALLOWED_PROMPT_VARIABLES.length}`);
+    if (!v.ok) contractFail("el prompt versionado no valida");
   } catch {
     console.log("   ○ no existe el fichero del prompt versionado");
+    contractFail("falta config/retell/casamable-agent-prompt.md");
   }
 
-  if (!key) {
-    console.log("\n◐ REAL CREDENTIAL VALIDATION PENDING — sin RETELL_API_KEY no se puede consultar el agente en vivo.");
-    console.log("  Ejecuta este doctor donde esté la key (el NAS la tiene).\n");
-    process.exit(1);
+  // Golden fixture: el cuerpo EXACTO de create-phone-call que los tests fijan.
+  const fixturePath = path.join("tests", "fixtures", "retell", "create-phone-call.expected.json");
+  try {
+    const fx = JSON.parse(fs.readFileSync(fixturePath, "utf8")) as Record<string, unknown>;
+    const vars = fx.retell_llm_dynamic_variables as Record<string, string>;
+    const issues = validateRetellCallVariables(vars);
+    const prevAgent = process.env.RETELL_AGENT_ID;
+    if (typeof fx.override_agent_id === "string") process.env.RETELL_AGENT_ID = fx.override_agent_id;
+    const body = buildCreatePhoneCallBody(
+      { toNumber: String(fx.to_number), fromNumber: String(fx.from_number), dynamicVariables: vars, metadata: (fx.metadata as Record<string, string>) ?? {} },
+      String(fx.override_agent_version)
+    );
+    if (prevAgent === undefined) delete process.env.RETELL_AGENT_ID;
+    else process.env.RETELL_AGENT_ID = prevAgent;
+    const keysOk = Object.keys(body).sort().join(",") === Object.keys(fx).sort().join(",");
+    const versionNum = typeof body.override_agent_version === "number" && Number.isInteger(body.override_agent_version);
+    console.log(`   ${ok(keysOk && versionNum && issues.length === 0)} golden fixture create-phone-call: campos ${keysOk ? "iguales" : "DISTINTOS"} · override_agent_version ${versionNum ? "numérico" : "NO numérico"} · variables ${issues.length === 0 ? "seguras" : issues.join("; ")}`);
+    if (!keysOk) contractFail("el cuerpo de create-phone-call ya no coincide con el golden fixture");
+    if (!versionNum) contractFail("override_agent_version no es un entero");
+    if (issues.length) contractFail("el fixture de variables no pasa el preflight");
+  } catch (err) {
+    console.log(`   ○ no se pudo comprobar el golden fixture: ${err instanceof Error ? err.message : "error"}`);
+    contractFail("golden fixture ilegible");
   }
+  console.log(`   ${ok(!pinIssue)} pin numérico de versión${pinIssue ? ` — ${pinIssue}` : ""}`);
+  if (pinIssue) verdict.liveIssues.push(pinIssue);
 
-  console.log("\n3. AGENTE EN VIVO");
-  if (!agentId) {
-    console.log("   ○ sin RETELL_AGENT_ID\n");
-    process.exit(1);
-  }
-  const agent = await get(`/get-agent/${agentId}`, key);
-  if (!agent.ok) {
-    console.log(`   ○ no se pudo leer el agente (HTTP ${agent.status}): ${JSON.stringify(agent.json).slice(0, 150)}\n`);
-    process.exit(1);
-  }
-  const a = agent.json as Record<string, unknown>;
-  console.log(`   ● ${String(a.agent_name ?? agentId)}`);
-  console.log(`   Versión actual : ${String(a.version ?? "?")} · publicada: ${a.is_published === true ? "sí" : "NO (draft)"}`);
-  console.log(`   Voz            : ${String(a.voice_id ?? "?")} · idioma: ${String(a.language ?? "?")}`);
-  if (version && String(a.version) !== version && version !== "latest_published") {
-    console.log(`   ◐ la versión fijada (${version}) NO es la actual del dashboard (${String(a.version)}): las llamadas usarán la ${version} — comprueba que es la buena`);
-  }
-
-  // El prompt vive en el LLM del response engine.
-  const engine = (a.response_engine ?? {}) as Record<string, unknown>;
-  const llmId = typeof engine.llm_id === "string" ? engine.llm_id : null;
-  console.log("\n4. PROMPT EN VIVO Y TOOLS");
-  if (!llmId) {
-    console.log(`   ◐ el response engine no es retell-llm (${String(engine.type ?? "?")}): no se puede auditar el prompt por API`);
-  } else {
-    const llm = await get(`/get-retell-llm/${llmId}`, key);
-    if (!llm.ok) {
-      console.log(`   ○ no se pudo leer el LLM (HTTP ${llm.status})`);
-    } else {
-      const l = llm.json as Record<string, unknown>;
-      const promptVivo = String(l.general_prompt ?? "");
-      const v = validatePromptPlaceholders(promptVivo);
-      console.log(`   ${v.ok ? "●" : "○"} prompt EN VIVO: ${v.ok ? "válido" : `${v.issues.length} problema(s) — ESTO es lo que oye el cliente`}`);
-      for (const i of v.issues) console.log(`     ✗ [${i.kind}] ${i.detail}`);
-      if (promptLocal && promptVivo.trim() !== promptLocal.trim()) {
-        console.log("   ◐ el prompt en vivo NO coincide con la fuente versionada del repo: sincronizar (pegar el del repo y publicar versión)");
+  // ------------------------------------------------------------------
+  console.log("\n3. ESTADO LOCAL (base de datos)");
+  try {
+    const cfg = await import("../src/lib/calls/config");
+    const safety = await import("../src/lib/safety");
+    const { systemDbHandle } = await import("../src/lib/db");
+    const { logIntegrationEvent } = await import("../src/lib/system/repo");
+    const db = systemDbHandle();
+    verdict.killSwitchActive = safety.externalActionsLocked();
+    verdict.blockedReason = cfg.callsBlockedReason();
+    console.log(`   ${ok(!verdict.killSwitchActive)} EMERGENCY_STOP / safe mode: ${verdict.killSwitchActive ? "ACTIVO — no sale ninguna llamada, ni manual" : "levantado"}`);
+    console.log(`   kill switch propio: ai_calls_enabled=${cfg.aiCallsEnabled() ? "1" : "0"} · shadow=${cfg.callsShadowMode() ? "1" : "0"} · piloto=${cfg.callsPilotMode() ? "1 (allowlist obligatoria)" : "0 (PRODUCCIÓN de llamadas)"} · allowlist=${cfg.callsAllowlist().length} número(s) · tope diario=${cfg.callsDailyCap()}`);
+    const dnc = (db.prepare("SELECT COUNT(*) AS n FROM call_dnc").get() as { n: number }).n;
+    const review = (db.prepare("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'manual_review'").get() as { n: number }).n;
+    const inFlight = (db.prepare("SELECT COUNT(*) AS n FROM call_attempts WHERE state IN ('dialing','in_flight')").get() as { n: number }).n;
+    console.log(`   DNC: ${dnc} teléfono(s) · intentos en revisión manual: ${review} · en curso: ${inFlight}`);
+    if (verdict.blockedReason) {
+      console.log(`   ○ LLAMADAS BLOQUEADAS por el sistema: ${verdict.blockedReason}`);
+      if (UNBLOCK) {
+        cfg.clearCallsBlocked();
+        logIntegrationEvent("system", "call_unblocked_manual", "info", `bloqueo de llamadas levantado a mano (retell:doctor --unblock). Motivo previo: ${verdict.blockedReason}`.slice(0, 300));
+        console.log("   ● bloqueo LEVANTADO (--unblock). Queda registrado en eventos. Si el motivo era deriva de versión: fija RETELL_AGENT_VERSION al número correcto ANTES de la siguiente llamada.");
+        verdict.blockedReason = null;
+      } else {
+        console.log("   → revisar el motivo (eventos críticos abajo) y, solo entonces: npm run retell:doctor -- --unblock");
       }
-      const tools = (Array.isArray(l.general_tools) ? l.general_tools : []) as Array<Record<string, unknown>>;
-      console.log(`   Tools (${tools.length}):`);
-      for (const t of tools) console.log(`     · ${String(t.name ?? t.type ?? "?")} (${String(t.type ?? "?")})`);
-      const nombres = new Set(tools.map((t) => String(t.name ?? "")));
-      for (const esperada of ["extraer_datos_llamada", "finalizarllamada"]) {
-        if (![...nombres].some((n) => n.replace(/[_\s]/g, "").toLowerCase() === esperada.replace(/[_\s]/g, ""))) {
-          console.log(`     ◐ el prompt menciona "${esperada}" y el agente no tiene una tool con ese nombre`);
+    } else {
+      console.log("   ● sin bloqueo global");
+      if (UNBLOCK) console.log("   (--unblock: no había nada que levantar)");
+    }
+    const eventos = db
+      .prepare(
+        `SELECT event_type, severity, order_ref, message, created_at FROM integration_events
+          WHERE event_type IN ('call_agent_version_drift','call_provider_blocked','call_provider_ambiguous','call_unblocked_manual')
+            AND created_at >= unixepoch() - 7*86400
+          ORDER BY id DESC LIMIT 8`
+      )
+      .all() as Array<{ event_type: string; severity: string; order_ref: string | null; message: string; created_at: number }>;
+    console.log(`   eventos críticos de llamadas (7 días): ${eventos.length}`);
+    for (const e of eventos) {
+      console.log(`     · ${new Date(e.created_at * 1000).toISOString()} [${e.severity}] ${e.event_type}${e.order_ref ? ` #${e.order_ref}` : ""}: ${e.message.slice(0, 140)}`);
+    }
+  } catch (err) {
+    console.log(`   ◐ sin acceso a la base local (${err instanceof Error ? err.message.slice(0, 80) : "error"}): este bloque solo tiene sentido donde corre el agente`);
+  }
+
+  // ------------------------------------------------------------------
+  console.log("\n4. EN VIVO (Retell)");
+  if (!key) {
+    console.log("   ◐ UNVERIFIED_EXTERNAL — sin RETELL_API_KEY no se puede consultar el agente. Ejecuta este doctor donde esté la key (el NAS).");
+  } else if (!agentId) {
+    console.log("   ○ sin RETELL_AGENT_ID");
+    verdict.live = "FAIL";
+    verdict.liveIssues.push("falta RETELL_AGENT_ID");
+  } else {
+    const agent = await get(`/get-agent/${agentId}`, key);
+    if (!agent.ok) {
+      console.log(`   ○ no se pudo leer el agente (HTTP ${agent.status}): ${JSON.stringify(agent.json).slice(0, 150)}`);
+      verdict.live = "FAIL";
+      verdict.liveIssues.push(`get-agent HTTP ${agent.status}`);
+    } else {
+      verdict.live = "OK";
+      const a = agent.json as Record<string, unknown>;
+      console.log(`   ● ${String(a.agent_name ?? agentId)}`);
+      console.log(`   Versión actual : ${String(a.version ?? "?")} · publicada: ${a.is_published === true ? "sí" : "NO (draft)"}`);
+      console.log(`   Voz            : ${String(a.voice_id ?? "?")} · idioma: ${String(a.language ?? "?")}`);
+      if (!pinIssue && String(a.version) !== version) {
+        console.log(`   ◐ la versión fijada (${version}) NO es la actual del dashboard (${String(a.version)}): las llamadas usarán la ${version} — es lo esperado si la ${String(a.version)} es un draft en curso`);
+      }
+      // ¿Existe la versión fijada como PUBLICADA? (list agent versions)
+      if (!pinIssue) {
+        const versions = await get(`/get-agent-versions/${agentId}`, key);
+        if (versions.ok && Array.isArray(versions.json)) {
+          const fila = (versions.json as Array<Record<string, unknown>>).find((v) => String(v.version) === version);
+          if (!fila) {
+            console.log(`   ○ la versión ${version} NO aparece entre las versiones del agente: la llamada fallaría o derivaría`);
+            verdict.live = "FAIL";
+            verdict.liveIssues.push(`la versión fijada ${version} no existe en Retell`);
+          } else {
+            console.log(`   ${ok(fila.is_published === true)} versión ${version}: ${fila.is_published === true ? "PUBLICADA (inmutable)" : "NO publicada — publica esa versión o fija otra"}`);
+            if (fila.is_published !== true) verdict.liveIssues.push(`la versión ${version} no está publicada`);
+          }
+        } else {
+          console.log(`   ◐ no se pudieron listar las versiones (HTTP ${versions.status}): comprobar a mano en el dashboard que la ${version} está publicada`);
         }
+      }
+
+      const engine = (a.response_engine ?? {}) as Record<string, unknown>;
+      const llmId = typeof engine.llm_id === "string" ? engine.llm_id : null;
+      console.log("\n   PROMPT EN VIVO Y TOOLS");
+      if (!llmId) {
+        console.log(`   ◐ el response engine no es retell-llm (${String(engine.type ?? "?")}): no se puede auditar el prompt por API`);
+      } else {
+        const llm = await get(`/get-retell-llm/${llmId}`, key);
+        if (!llm.ok) {
+          console.log(`   ○ no se pudo leer el LLM (HTTP ${llm.status})`);
+          verdict.liveIssues.push(`get-retell-llm HTTP ${llm.status}`);
+        } else {
+          const l = llm.json as Record<string, unknown>;
+          const promptVivo = String(l.general_prompt ?? "");
+          const v = validatePromptPlaceholders(promptVivo);
+          console.log(`   ${ok(v.ok)} prompt EN VIVO: ${v.ok ? "válido" : `${v.issues.length} problema(s) — ESTO es lo que oye el cliente`}`);
+          for (const i of v.issues) console.log(`     ✗ [${i.kind}] ${i.detail}`);
+          if (!v.ok) {
+            verdict.live = "FAIL";
+            verdict.liveIssues.push("el prompt en vivo no valida");
+          }
+          if (promptLocal && promptVivo.trim() !== promptLocal.trim()) {
+            console.log("   ◐ el prompt en vivo NO coincide con la fuente versionada del repo: sincronizar (pegar el del repo y publicar versión)");
+            verdict.liveIssues.push("prompt en vivo ≠ prompt versionado");
+          }
+          const tools = (Array.isArray(l.general_tools) ? l.general_tools : []) as Array<Record<string, unknown>>;
+          console.log(`   Tools (${tools.length}):`);
+          for (const t of tools) console.log(`     · ${String(t.name ?? t.type ?? "?")} (${String(t.type ?? "?")})`);
+          const nombres = new Set(tools.map((t) => String(t.name ?? "")));
+          for (const esperada of ["extraer_datos_llamada", "finalizarllamada"]) {
+            if (![...nombres].some((n) => n.replace(/[_\s]/g, "").toLowerCase() === esperada.replace(/[_\s]/g, ""))) {
+              console.log(`     ◐ el prompt menciona "${esperada}" y el agente no tiene una tool con ese nombre`);
+            }
+          }
+        }
+      }
+
+      console.log("\n   NÚMERO SALIENTE Y WEBHOOK");
+      const numbers = await get(`/list-phone-numbers`, key);
+      if (numbers.ok && Array.isArray(numbers.json)) {
+        const propio = (numbers.json as Array<Record<string, unknown>>).find((n) => String(n.phone_number ?? "") === fromNumber);
+        console.log(`   ${ok(Boolean(propio))} ${fromNumber || "(sin from number)"} ${propio ? "existe en la cuenta" : "NO está entre los números de la cuenta"}`);
+        if (!propio) {
+          verdict.live = "FAIL";
+          verdict.liveIssues.push("RETELL_FROM_NUMBER no está en la cuenta");
+        }
+      } else {
+        console.log(`   ◐ no se pudieron listar los números (HTTP ${numbers.status})`);
+      }
+      const webhook = typeof a.webhook_url === "string" ? a.webhook_url : "";
+      console.log(`   Webhook agente : ${webhook || "(no configurado a nivel de agente: se usa el de la cuenta)"}`);
+      if (webhook && !/\/api\/webhooks\/retell\/call-events$/.test(webhook)) {
+        console.log("   ◐ el webhook del agente NO apunta a /api/webhooks/retell/call-events");
+        verdict.liveIssues.push("webhook del agente no apunta al endpoint del agente");
       }
     }
   }
 
-  console.log("\n5. NÚMERO SALIENTE Y WEBHOOK");
-  const numbers = await get(`/list-phone-numbers`, key);
-  if (numbers.ok && Array.isArray(numbers.json)) {
-    const propio = (numbers.json as Array<Record<string, unknown>>).find((n) => String(n.phone_number ?? "") === fromNumber);
-    console.log(`   ${propio ? "●" : "○"} ${fromNumber || "(sin from number)"} ${propio ? "existe en la cuenta" : "NO está entre los números de la cuenta"}`);
-  } else {
-    console.log(`   ◐ no se pudieron listar los números (HTTP ${numbers.status})`);
-  }
-  console.log(`   Webhook agente : ${String((a.webhook_url as string) ?? "(no configurado a nivel de agente)")}`);
+  // ------------------------------------------------------------------
+  console.log("\n════════ VEREDICTO ════════");
+  console.log(`  RETELL_CONTRACT : ${verdict.contract}${verdict.contractIssues.length ? ` — ${verdict.contractIssues.join(" · ")}` : ""}`);
+  console.log(`  RETELL_LIVE     : ${verdict.live}${verdict.liveIssues.length ? ` — ${verdict.liveIssues.join(" · ")}` : ""}`);
+  console.log(`  CALLS_BLOCKED   : ${verdict.blockedReason ?? "none"}${verdict.killSwitchActive ? " · EMERGENCY_STOP activo" : ""}`);
+  console.log("  AUTO_CALLS      : OFF (piloto manual: este doctor no lo enciende; ver RETELL-ENABLE-AUTO-CALLS.md)");
+  console.log("  Recuerda: esto NO sustituye la llamada de prueba real al móvil de Pedro (RETELL-FIRST-REAL-CALL.md).\n");
+  if (JSON_OUT) console.log(JSON.stringify(verdict));
 
-  console.log("\n● Doctor completado. Recuerda: esto NO sustituye la llamada de prueba al número autorizado.\n");
+  if (verdict.contract === "FAIL" || verdict.live === "FAIL") process.exit(1);
+  if (verdict.live === "UNVERIFIED_EXTERNAL") process.exit(2);
+  process.exit(0);
 }
 
 main().catch((err) => {

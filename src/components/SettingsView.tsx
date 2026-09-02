@@ -58,6 +58,8 @@ interface AutomationCalls {
   agentVersionPinned: boolean;
   configuredAgentVersion: string | null;
   lastCallAgentVersion: string | null;
+  blockedReason?: string | null;
+  killSwitchActive?: boolean;
   blockers: string[];
 }
 
@@ -606,11 +608,22 @@ function CallsSection() {
         <InfoRow label="Versión del agente">
           <span>
             {automation?.configuredAgentVersion ?? <span className="text-amber-600 font-semibold">SIN FIJAR</span>}
+            {automation && automation.configuredAgentVersion && !automation.agentVersionPinned ? (
+              <span className="text-amber-600"> · no es un número: no sale ninguna llamada</span>
+            ) : null}
             {automation?.lastCallAgentVersion ? (
               <span className="text-brand-muted"> · última llamada: {automation.lastCallAgentVersion}</span>
             ) : null}
           </span>
         </InfoRow>
+        {automation?.blockedReason || automation?.killSwitchActive ? (
+          <InfoRow label="Bloqueo">
+            <span className="text-red-700">
+              {automation.killSwitchActive ? "EMERGENCY_STOP activo: no sale ninguna llamada. " : null}
+              {automation.blockedReason ? `Bloqueadas por el sistema: ${automation.blockedReason} (desbloquear con retell:doctor --unblock tras revisar)` : null}
+            </span>
+          </InfoRow>
+        ) : null}
       </Card>
 
       {/* Contadores del día */}
