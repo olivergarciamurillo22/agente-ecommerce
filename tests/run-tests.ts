@@ -11422,81 +11422,149 @@ async function main(): Promise<void> {
       }
     });
 
-    await test("PREFLIGHT · whatsapp:templates:doctor --check-only NO toca la DB (ni migra ni cachea)", () => {
-      // Contrato de despliegue (02-09): el doctor con --check-only es el
-      // ÚNICO preflight autorizado contra el volumen de producción, porque
-      // el camino CON escritura llama a setSetting → ctx() → build() y eso
-      // MIGRARÍA el esquema 15→17 con el contenedor viejo todavía en pie.
-      // Si alguien añade un getSetting/setSetting antes del gate de
-      // --check-only, este test cae y el runbook deja de ser válido.
-      const os = require("node:os") as typeof import("node:os");
-      const { execSync } = require("node:child_process") as typeof import("node:child_process");
-      const Database = require("better-sqlite3") as typeof import("better-sqlite3");
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-preflight-"));
-      const dataDir = path.join(dir, "data");
-      fs.mkdirSync(dataDir);
-      const dbFile = path.join(dataDir, "messages.db");
+    // ── CONTRATO DEL PREFLIGHT ──
+    // `--check-only` es el ÚNICO comando autorizado contra el volumen de
+    // producción antes de desplegar. El camino CON escritura llama
+    // setSetting → ctx() → build(), y build() MIGRA el esquema: un preflight
+    // que abriese la DB subiría 15→17 con el contenedor viejo en marcha.
+    // El ensayo del 02-09 demostró que la rama SIN credenciales lo hacía.
+    // Estos tests fijan el contrato en las cuatro rutas posibles.
+    const doctorProbe = (
+      titulo: string,
+      opts: { env: Record<string, string>; checkOnly: boolean; esperaFalloDeSalida: boolean }
+    ) =>
+      test(titulo, () => {
+        const os = require("node:os") as typeof import("node:os");
+        const { execSync } = require("node:child_process") as typeof import("node:child_process");
+        const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), "doctor-preflight-"));
+        const dataDir = path.join(dir, "data");
+        fs.mkdirSync(dataDir);
+        const dbFile = path.join(dataDir, "messages.db");
 
-      // Fixture: una DB "de producción" en esquema 15 con un centinela.
-      const fixture = new Database(dbFile);
-      fixture.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
-      fixture.prepare("INSERT INTO settings (key,value) VALUES ('centinela','intacto')").run();
-      fixture.pragma("user_version = 15");
-      fixture.close();
+        // Fixture: DB "de producción" en esquema 15 con un centinela.
+        const fixture = new Database(dbFile);
+        fixture.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);");
+        fixture.prepare("INSERT INTO settings (key,value) VALUES ('centinela','intacto')").run();
+        fixture.pragma("user_version = 15");
+        fixture.close();
 
-      // Stub de red: ninguna llamada real a Meta; cualquier otro host revienta.
-      const stub = path.join(dir, "meta-stub.mjs");
-      fs.writeFileSync(
-        stub,
-        [
-          'const T = { data: [{ name: "confirmacion_pedido_cod", status: "APPROVED", language: "es",',
-          '  components: [ { type: "BODY", text: "Hola {{1}} {{2}} {{3}} {{4}}" },',
-          '    { type: "BUTTONS", buttons: [{type:"QUICK_REPLY"},{type:"QUICK_REPLY"},{type:"QUICK_REPLY"}] } ] }] };',
-          'globalThis.fetch = async (u) => {',
-          '  if (!String(u).includes("graph.facebook.com")) throw new Error("red no permitida en el test");',
-          '  return new Response(JSON.stringify(T), { status: 200, headers: { "content-type": "application/json" } });',
-          '};',
-        ].join("\n")
-      );
+        let salioConFallo = false;
+        try {
+          execSync(
+            `npx tsx ${path.join(process.cwd(), "scripts/whatsapp-templates-doctor.ts")}${opts.checkOnly ? " -- --check-only" : ""}`,
+            { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, DATA_DIR: dataDir, ...opts.env } }
+          );
+        } catch {
+          salioConFallo = true;
+        }
 
-      try {
-        execSync(`npx tsx ${path.join(process.cwd(), "scripts/whatsapp-templates-doctor.ts")} -- --check-only`, {
-          cwd: process.cwd(),
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            DATA_DIR: dataDir,
-            META_WHATSAPP_BUSINESS_ACCOUNT_ID: "WABA_FALSA_DE_TEST",
-            META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
-            NODE_OPTIONS: `--import ${stub}`,
-          },
-        });
-      } catch {
-        // Sale con código 1 si algún mapping no cuadra contra el stub: da igual.
-        // Lo que se prueba aquí es el efecto sobre la DB, no el veredicto.
-      }
+        const after = new Database(dbFile, { readonly: true });
+        try {
+          if (opts.esperaFalloDeSalida) assert.ok(salioConFallo, "sin verificación posible, el doctor sale con error");
+          assert.equal(after.pragma("user_version", { simple: true }), 15, "el esquema NO se migra");
+          assert.equal(
+            (after.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table'").get() as { c: number }).c,
+            1,
+            "build() NO corre: la DB sigue con su única tabla"
+          );
+          assert.equal(
+            (after.prepare("SELECT COUNT(*) c FROM settings WHERE key LIKE 'wa_tpl_verified:%'").get() as { c: number }).c,
+            0,
+            "no se cachea nada"
+          );
+          assert.equal(
+            (after.prepare("SELECT value FROM settings WHERE key='centinela'").get() as { value: string }).value,
+            "intacto"
+          );
+          // La prueba más dura: el fichero ni se abrió (SQLite deja -wal/-shm al abrir en WAL).
+          assert.equal(
+            fs.readdirSync(dataDir).filter((f) => f.endsWith("-wal") || f.endsWith("-shm")).length,
+            0,
+            "la base de datos ni siquiera se abre"
+          );
+        } finally {
+          after.close();
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      });
 
-      const after = new Database(dbFile, { readonly: true });
-      try {
-        assert.equal(after.pragma("user_version", { simple: true }), 15, "--check-only NO migra el esquema");
-        assert.equal(
-          (after.prepare("SELECT COUNT(*) c FROM sqlite_master WHERE type='table'").get() as { c: number }).c,
-          1,
-          "--check-only NO ejecuta build(): la DB sigue con su única tabla"
-        );
-        assert.equal(
-          (after.prepare("SELECT COUNT(*) c FROM settings WHERE key LIKE 'wa_tpl_verified:%'").get() as { c: number }).c,
-          0,
-          "--check-only NO cachea verificaciones"
-        );
-        assert.equal(
-          (after.prepare("SELECT value FROM settings WHERE key='centinela'").get() as { value: string }).value,
-          "intacto"
-        );
-      } finally {
-        after.close();
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
+    /** Stub de red: ninguna llamada real a Meta. `modo` decide qué contesta. */
+    const metaStub = (dir: string, modo: "approved" | "error"): string => {
+      const f = path.join(dir, `meta-stub-${modo}.mjs`);
+      const cuerpo =
+        modo === "approved"
+          ? [
+              'const T = { data: [{ name: "confirmacion_pedido_cod", status: "APPROVED", language: "es",',
+              '  components: [ { type: "BODY", text: "Hola {{1}} {{2}} {{3}} {{4}}" },',
+              '    { type: "BUTTONS", buttons: [{type:"QUICK_REPLY"},{type:"QUICK_REPLY"},{type:"QUICK_REPLY"}] } ] }] };',
+              'globalThis.fetch = async (u) => {',
+              '  if (!String(u).includes("graph.facebook.com")) throw new Error("red no permitida en el test");',
+              '  return new Response(JSON.stringify(T), { status: 200, headers: { "content-type": "application/json" } });',
+              "};",
+            ]
+          : [
+              'globalThis.fetch = async (u) => {',
+              '  if (!String(u).includes("graph.facebook.com")) throw new Error("red no permitida en el test");',
+              '  return new Response(JSON.stringify({ error: { message: "fallo simulado de Meta" } }), { status: 500, headers: { "content-type": "application/json" } });',
+              "};",
+            ];
+      fs.writeFileSync(f, cuerpo.join("\n"));
+      return f;
+    };
+    const stubDir = fs.mkdtempSync(path.join((require("node:os") as typeof import("node:os")).tmpdir(), "doctor-stubs-"));
+    const CREDS = {
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: "WABA_FALSA_DE_TEST",
+      META_WHATSAPP_ACCESS_TOKEN: "token-de-prueba-jamas-real",
+    };
+    const SIN_CREDS = {
+      META_WHATSAPP_BUSINESS_ACCOUNT_ID: "",
+      META_WHATSAPP_ACCESS_TOKEN: "",
+      META_ADS_ACCESS_TOKEN: "",
+    };
+
+    // A · con credenciales y Meta respondiendo: consulta Meta, no toca la DB.
+    await doctorProbe("PREFLIGHT · whatsapp:templates:doctor --check-only NO toca la DB (ni migra ni cachea)", {
+      env: { ...CREDS, NODE_OPTIONS: `--import ${metaStub(stubDir, "approved")}` },
+      checkOnly: true,
+      esperaFalloDeSalida: false,
+    });
+
+    // B · sin credenciales: el caso que rompía el contrato (ensayo 02-09).
+    await doctorProbe("PREFLIGHT · --check-only SIN credenciales NO toca la DB (no consulta la caché)", {
+      env: SIN_CREDS,
+      checkOnly: true,
+      esperaFalloDeSalida: true,
+    });
+
+    // C · con credenciales pero Meta caída: el error tampoco puede abrir la DB.
+    await doctorProbe("PREFLIGHT · --check-only con Meta devolviendo error NO toca la DB", {
+      env: { ...CREDS, NODE_OPTIONS: `--import ${metaStub(stubDir, "error")}` },
+      checkOnly: true,
+      esperaFalloDeSalida: true,
+    });
+
+    // D · doctor NORMAL sin credenciales: sin nada que verificar, tampoco hay
+    // motivo para abrir la DB. Sale gratis al retirar getTemplateReadiness.
+    await doctorProbe("PREFLIGHT · doctor NORMAL sin credenciales tampoco toca la DB", {
+      env: SIN_CREDS,
+      checkOnly: false,
+      esperaFalloDeSalida: true,
+    });
+
+    await test("PREFLIGHT · el doctor no importa getTemplateReadiness (leerla abriría la DB)", () => {
+      const doc = src("scripts/whatsapp-templates-doctor.ts");
+      const imp = /const \{([^}]*)\} = await import\(\s*"\.\.\/src\/lib\/whatsapp\/templates"/.exec(doc);
+      assert.ok(imp, "el import dinámico del catálogo sigue ahí");
+      assert.ok(!imp![1].includes("getTemplateReadiness"), "getTemplateReadiness fuera: solo la usaba la rama sin credenciales");
+      // Llamadas reales, no menciones en comentarios (los comentarios del
+      // script explican precisamente por qué NO se llama a getSetting).
+      const sinComentarios = doc.replace(/\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+      assert.ok(!/getSetting\s*\(|systemDbHandle\s*\(/.test(sinComentarios), "el script no lee settings ni el handle crudo");
+      // storeVerifiedTemplate SÍ debe seguir, pero solo tras el gate de --check-only.
+      const escritura = doc.indexOf("storeVerifiedTemplate(");
+      const gate = doc.indexOf('if (!hasFlag("check-only"))');
+      assert.ok(gate > 0 && escritura > gate, "la única escritura vive detrás del gate de --check-only");
     });
 
     await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {

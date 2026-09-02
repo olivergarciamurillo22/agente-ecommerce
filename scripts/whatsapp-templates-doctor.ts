@@ -68,7 +68,11 @@ async function fetchTemplates(token: string, wabaId: string, version: string): P
 }
 
 async function main(): Promise<void> {
-  const { loadProviderMappings, getTemplateSpec, storeVerifiedTemplate, getTemplateReadiness } = await import(
+  // OJO: nada de lo que se importe aquí puede tocar la DB en el camino de
+  // --check-only. loadProviderMappings/getTemplateSpec leen el JSON de config;
+  // storeVerifiedTemplate SÍ escribe, y por eso vive tras el gate de abajo.
+  // getTemplateReadiness se retiró a propósito (ver el bloque sin credenciales).
+  const { loadProviderMappings, getTemplateSpec, storeVerifiedTemplate } = await import(
     "../src/lib/whatsapp/templates"
   );
 
@@ -90,11 +94,12 @@ async function main(): Promise<void> {
     if (!wabaId) console.log("  - META_WHATSAPP_BUSINESS_ACCOUNT_ID (el id de la WABA, no es secreto)");
     if (!token) console.log("  - META_WHATSAPP_ACCESS_TOKEN (o META_ADS_ACCESS_TOKEN con whatsapp_business_management)");
     console.log("  Ejecuta este doctor DONDE estén (el NAS las tiene): el resultado se cachea y desbloquea el envío.\n");
-    for (const m of mappings) {
-      const r = getTemplateReadiness(m.logicalKey);
-      console.log(`  ${r.ready ? "●" : "○"} ${m.logicalKey}: ${r.ready ? "VERIFICADA (caché previa)" : (r.blocker ?? "")}`);
-    }
-    console.log();
+    // NO se consulta la caché de settings a propósito. Leerla abriría la base
+    // de datos (getSetting → ctx → build) y build() MIGRA el esquema: un
+    // preflight con --check-only contra el volumen de producción habría subido
+    // 15→17 con el contenedor viejo todavía en marcha. Saber si había caché
+    // previa no vale ese riesgo — sin credenciales no hay nada que verificar.
+    console.log("  (no se consulta la caché local: --check-only nunca abre la base de datos)\n");
     process.exit(1);
   }
 
