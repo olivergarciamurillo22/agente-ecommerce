@@ -1051,7 +1051,7 @@ const ORDERS_TABLE_BODY = `
 // build fallaría con "database is locked" (SQLITE_BUSY) — un fallo no determinista
 // que el `busy_timeout` no cubre del todo. Con init perezoso, importar el módulo
 // NO toca la DB: solo la tocan el bot y el servidor cuando atienden de verdad.
-// (ver errores-sesion.md #15)
+// (ver docs/archive/kit/errores-sesion.md #15)
 // ============================================================
 
 function build() {

@@ -10,9 +10,9 @@ Eres un agente especializado en resolver problemas técnicos del WhatsApp AI Age
 
 ## Tu prioridad: NO inventar soluciones
 
-1. **Lee `errores-sesion.md` PRIMERO**. La mayoría de errores están documentados con su solución exacta
-2. Si el error está en `errores-sesion.md` → aplica la solución documentada
-3. Si NO está → investiga, prueba mínimamente, soluciona, y al final **AÑADE el error a `errores-sesion.md`** siguiendo el formato del archivo
+1. **Lee `docs/archive/kit/errores-sesion.md` PRIMERO**. La mayoría de errores están documentados con su solución exacta
+2. Si el error está en `docs/archive/kit/errores-sesion.md` → aplica la solución documentada
+3. Si NO está → investiga, prueba mínimamente, soluciona, y al final **AÑADE el error a `docs/archive/kit/errores-sesion.md`** siguiendo el formato del archivo
 
 ## Cómo trabajas
 
@@ -86,4 +86,4 @@ Sugiere: "Esto lo vemos mejor con el equipo. Pregúntalo en la comunidad donde c
 - NUNCA modificar archivos en `src/lib/baileys/` por "intuición" — son el resultado de 10 lecciones aprendidas
 - NUNCA recomendar borrar `auth/` sin avisar al usuario que perderá la sesión WhatsApp
 - NUNCA editar `package.json` sin un motivo claro (puede romper el setup de otros usuarios)
-- Tras resolver un error nuevo, SIEMPRE documentarlo en `errores-sesion.md`
+- Tras resolver un error nuevo, SIEMPRE documentarlo en `docs/archive/kit/errores-sesion.md`

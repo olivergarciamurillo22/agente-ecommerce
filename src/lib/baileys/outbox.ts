@@ -83,7 +83,7 @@ export function startOutboxLoop(sock: WASocket): void {
       // envío y marca jamás DUPLICA el WhatsApp al reiniciar (at-most-once);
       // si el claim se pierde sin enviar, la red de seguridad de reminders/
       // needs_call recoge al cliente. WhatsApp no ofrece idempotency key:
-      // este es el mejor compromiso posible (documentado en PEDRO-MVP.md).
+      // este es el mejor compromiso posible (documentado en docs/archive/sesiones-2026-08/PEDRO-MVP.md).
       // CLAIM atómico: si otro proceso se lo llevó, aquí no se envía nada.
       // Sin esta comprobación, dos bots en marcha duplicarían el mensaje.
       if (!markOutboxSent(item.id)) {

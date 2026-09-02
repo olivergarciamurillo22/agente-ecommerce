@@ -11,7 +11,7 @@ import path from "node:path";
 // ESE filtro, los fijamos aquí y cargamos el guardrail DESPUÉS con un import
 // dinámico: `guardrails.ts` los lee al cargarse, y los `import` estáticos de
 // ES modules se evalúan antes que cualquier línea de código (el mismo bug de
-// hoisting que documenta errores-sesion.md). No toca tu .env.local.
+// hoisting que documenta docs/archive/kit/errores-sesion.md). No toca tu .env.local.
 process.env.ALLOWED_PRICES = process.env.ALLOWED_PRICES || "77,497,997";
 process.env.ALLOWED_HOSTS = process.env.ALLOWED_HOSTS || "tuweb.com";
 

@@ -179,7 +179,7 @@ Si el usuario prefiere otra plataforma Git, el flujo es idéntico. Adapta los co
 
 ### Si el build falla
 
-Pide al usuario que copie el log y consulta `errores-sesion.md`. Los errores típicos:
+Pide al usuario que copie el log y consulta `docs/archive/kit/errores-sesion.md`. Los errores típicos:
 - `better-sqlite3 build error` → faltó python3/gcc en nixpacks. Pero el `nixpacks.toml` ya los declara — extraño
 - `Node version mismatch` → el VPS tiene Node viejo. Revisa que el `.nvmrc` está en el repo
 - `npm ERR! Cannot find module 'tsx'` → tsx está en devDependencies en vez de dependencies (no debería pasar, pero verifica)

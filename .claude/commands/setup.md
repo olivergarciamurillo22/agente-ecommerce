@@ -36,10 +36,10 @@ Solo ahora di al usuario:
 ## Fase B · Instalación
 
 1. Ejecuta `npm install` en la raíz del proyecto. Muestra al usuario "Instalando dependencias (1-2 minutos)..."
-   - **Si `npm install` falla con `ERR_INVALID_ARG_TYPE` / "The 'from' argument..." o el stack menciona `reify`/`rollback`**: es un `node_modules` corrupto de un intento previo, NO un problema de dependencias. Borra `node_modules` con el comando portable `node -e "require('fs').rmSync('node_modules',{recursive:true,force:true})"` (funciona igual en Mac y Windows; el `package-lock.json` queda intacto) y vuelve a ejecutar `npm install`. Ver `errores-sesion.md` #13
-2. **Validación**: ejecuta `npm run typecheck`. Si falla, NO continúes — pide al usuario el error literal y consulta `errores-sesion.md`
+   - **Si `npm install` falla con `ERR_INVALID_ARG_TYPE` / "The 'from' argument..." o el stack menciona `reify`/`rollback`**: es un `node_modules` corrupto de un intento previo, NO un problema de dependencias. Borra `node_modules` con el comando portable `node -e "require('fs').rmSync('node_modules',{recursive:true,force:true})"` (funciona igual en Mac y Windows; el `package-lock.json` queda intacto) y vuelve a ejecutar `npm install`. Ver `docs/archive/kit/errores-sesion.md` #13
+2. **Validación**: ejecuta `npm run typecheck`. Si falla, NO continúes — pide al usuario el error literal y consulta `docs/archive/kit/errores-sesion.md`
 3. **Específico Windows**: si `better-sqlite3` falla compilando, guía al usuario a instalar **Visual Studio Build Tools** (link: `https://visualstudio.microsoft.com/visual-cpp-build-tools/`). Después de instalarlo, ejecuta `npm rebuild better-sqlite3`
-4. **Compila el panel**: ejecuta `npm run build`. El comando `start:all` usa `next start` (modo producción), que necesita un build previo. Muestra "Compilando el panel (~1 minuto)...". El kit ya está blindado contra el `database is locked` que daba este build — `src/lib/db.ts` usa init perezoso, así que el build no abre la base de datos (ver `errores-sesion.md` #15). Si alguien lo rompiera reintroduciendo I/O de DB a nivel de módulo, volvería el error
+4. **Compila el panel**: ejecuta `npm run build`. El comando `start:all` usa `next start` (modo producción), que necesita un build previo. Muestra "Compilando el panel (~1 minuto)...". El kit ya está blindado contra el `database is locked` que daba este build — `src/lib/db.ts` usa init perezoso, así que el build no abre la base de datos (ver `docs/archive/kit/errores-sesion.md` #15). Si alguien lo rompiera reintroduciendo I/O de DB a nivel de módulo, volvería el error
 
 ## Fase C · Configuración OpenRouter
 
@@ -98,7 +98,7 @@ Solo ahora di al usuario:
 
 3. **Si el agente conecta pero responde a medias o no responde** y en el log del bot ves `402` o respuestas vacías: es falta de saldo en OpenRouter. Que el usuario cargue unos 5 € en `openrouter.ai/credits` (la comprobación de saldo de la Fase C ya debería haberlo avisado)
 
-4. **Si el agente conecta pero NO responde al "hola"** (y en el log del bot no aparece `[bot] ← mensaje`): el kit ya soporta el formato `@lid` de WhatsApp (2025+) tanto al recibir como al responder desde el panel. Si aun así fallara, verifica que `src/lib/baileys/handler.ts` acepta `@lid` y que existe la columna `jid` en la tabla `conversations`. Ver `errores-sesion.md` #14. Recuerda: para probar hay que escribir desde OTRO móvil (los mensajes del propio número vinculado se ignoran a propósito)
+4. **Si el agente conecta pero NO responde al "hola"** (y en el log del bot no aparece `[bot] ← mensaje`): el kit ya soporta el formato `@lid` de WhatsApp (2025+) tanto al recibir como al responder desde el panel. Si aun así fallara, verifica que `src/lib/baileys/handler.ts` acepta `@lid` y que existe la columna `jid` en la tabla `conversations`. Ver `docs/archive/kit/errores-sesion.md` #14. Recuerda: para probar hay que escribir desde OTRO móvil (los mensajes del propio número vinculado se ignoran a propósito)
 
 ## Cierre
 
