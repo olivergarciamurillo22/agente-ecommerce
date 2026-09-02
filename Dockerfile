@@ -44,8 +44,12 @@ ENV NODE_ENV=production \
 # tzdata: sin ella TZ se ignora y las fechas locales de SQLite
 # (contadores "hoy" del panel) y la ventana horaria se desviarían.
 # curl: lo usa el HEALTHCHECK.
+# procps (ps): lo necesita `concurrently --kill-others` para tumbar al
+# proceso hermano cuando uno muere. Sin `ps`, el arranque moría con
+# "spawn ps ENOENT" y el log tapaba la causa real (visto en el ensayo
+# Docker del 03-09).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tzdata curl ca-certificates \
+    && apt-get install -y --no-install-recommends tzdata curl ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
 # Todo lo necesario para servir y para ejecutar el bot con tsx.
