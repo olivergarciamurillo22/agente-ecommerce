@@ -11908,7 +11908,10 @@ async function main(): Promise<void> {
 
     await test("campañas: la economía declara COBERTURA y el cubo 'Sin atribución' jamás se reparte", async () => {
       const { upsertMetaAdsDaily } = await import("../src/lib/meta-ads/repo");
-      const dia = new Date().toISOString().slice(0, 10);
+      // Día de NEGOCIO (Europe/Madrid), como lo mapea getCampaignEconomics.
+      // Con la fecha UTC este test fallaba entre las 00:00 y las 02:00 CEST
+      // (flake real, cazado el 03-09 a la 01:00).
+      const dia = (await import("../src/lib/time")).businessDay();
       upsertMetaAdsDaily({
         day: dia, level: "campaign", entityId: "120210000000000001", entityName: "Ultras Septiembre",
         spend: 50, impressions: 1000, reach: 900, clicks: 40, ctr: 4, cpc: 1.25, cpm: 50, actionsJson: null, currency: "EUR",
