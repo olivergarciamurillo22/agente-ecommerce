@@ -40,8 +40,14 @@ En Shopify, *fulfilled* = despachado, no entregado ni cobrado. En COD, la entreg
 
 Si Shopify escribiera `delivered`, el bloqueo de estados terminales impediría después que Dropea lo corrigiera a `refused`, y los rehusados desaparecerían del panel. Este error es silencioso y caro.
 
-### El agente de llamadas no existe todavía
-La tasa de respuesta al WhatsApp de confirmación es del **54 %**. El 46 % restante queda sin atender. No asumas que hay un canal de voz.
+### Llamadas (Retell): existen, pero MANUAL-ONLY
+La tasa de respuesta al WhatsApp ronda el 54 %; el resto escala a `needs_call`.
+Retell (agente "Lucía") está montado pero el scheduler **no marca solo**: la
+llamada la dispara Pedro (botón "Llamar ahora"). Las llamadas usan la versión
+fijada en `RETELL_AGENT_VERSION` (jamás el draft del dashboard — incidente
+"[password 1]" del 02-09) y el prompt vigente vive VERSIONADO en
+`config/retell/casamable-agent-prompt.md` (validador: `calls:validate-prompt`).
+No actives automatismo de llamadas: exige el piloto de `REAL-PILOT-02-09.md`.
 
 ---
 
@@ -94,11 +100,12 @@ Cualquier endpoint que reciba webhooks **debe** implementar las tres, cada una c
 
 `orders/updated` es el webhook más ruidoso de Shopify (salta con cualquier cambio de tag, nota o dirección), así que su espejo es una **lista explícita y acordada de campos**, nunca "sincronizar lo que parezca".
 
-**Lista acordada del espejo (24-08-2026) — un solo campo:**
+**Lista acordada del espejo — dos entradas:**
 
-| Campo | Origen | Condición |
-|---|---|---|
-| `supplier_external_order_id` | tag `dropea_id:NNNNNNN` | solo si está `NULL` |
+| Campo(s) | Origen | Condición | Acordado |
+|---|---|---|---|
+| `supplier_external_order_id` | tag `dropea_id:NNNNNNN` | solo si está `NULL` | 24-08 |
+| `marketing_*`, `landing_site`, `referring_site`, `shopify_source_name` | atribución del payload | latch COALESCE: solo rellena huecos | 02-09 |
 
 Es un **latch de un solo sentido**: el `UPDATE` lleva `WHERE supplier_external_order_id IS NULL`, así que el ruido de `orders/updated` no puede corromper nada y **no hace falta la protección de orden cronológico** en este campo (el primero que traiga el tag gana; los demás no pueden cambiarlo). Ampliar esta lista es una decisión aparte, no el efecto colateral de un refactor.
 
@@ -156,6 +163,28 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 ---
 
 ## 10. Cómo trabajar aquí
+
+**Reglas de sesión (03-09-2026) — leer antes que nada:**
+
+1. **Fuente de verdad**: `docs/README.md` indexa lo vigente;
+   `docs/ESTADO-PRODUCCION.md` manda sobre cualquier otro documento.
+   **Nunca trabajar desde `docs/archive/`** (histórico, puede contradecir
+   la realidad).
+2. **Dropi NO tiene API pública.** No implementar clientes/writes de Dropi
+   sin evidencia nueva de Pedro. Dropea es read-only (`external_app`);
+   Beeping está detrás de gates fail-closed; Meta Ads es solo lectura.
+3. **Retell**: versión fijada (`RETELL_AGENT_VERSION`), prompt versionado
+   en `config/retell/`. No tocar scheduler/DB si el problema es de
+   prompt/versión.
+4. **Credenciales**: `npm run env:doctor` antes de pedir nada; jamás leer
+   `.env.local` ni pedir secretos por chat.
+5. **Agentes**: máximo 1-2 subagentes y solo para trabajo realmente
+   paralelo; una limpieza o un fix acotado se hace en directo.
+6. **NAS**: jamás se edita, jamás se despliega desde una sesión. El deploy
+   es de Pedro, fuera de 10:00–21:00.
+7. **En validación real**: primero evidencia de producción, luego código.
+   Solo P0/P1 (y P2 observado por Pedro). Test rojo → fix mínimo → verde.
+8. El esquema (v17) no sube sin bug funcional real.
 
 - **Credenciales:** antes de pedirle nada a Óliver, ejecuta
   `npm run env:doctor -- --profile <perfil>` y dile EXACTAMENTE qué variable
@@ -260,7 +289,7 @@ CONTEXTO-2026-08-25 §7. No mergear sin su orden.
 | `baileys/` | Cliente WhatsApp Web, handler entrante (serializado por teléfono), loop del outbox |
 | `calls/` | Orquestador Retell E7: franjas, calendario, payload, resultados, DNC |
 | `system/` | Control Center: salud, métricas (fail-closed), alertas, economía, leases, retención, taxonomía de errores, postura de seguridad |
-| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v9) · safety gates |
+| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v17, incrementales, jamás renumerar) · safety gates + rampa de rollout |
 
 **Versión de la API de Shopify:** `SHOPIFY_API_VERSION`, default **`2026-07`**
 (en `shopify/admin.ts`, `backfill.ts` y `reconcile.ts`).
