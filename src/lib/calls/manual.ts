@@ -1,5 +1,10 @@
 // ============================================================
-// Llamada MANUAL de confirmación.
+// Llamada MANUAL de confirmación ("Llamar ahora" del panel).
+//
+// TODA la política de "¿puede salir esta llamada?" vive en ./gates.ts y es
+// la misma que promete la interfaz. Antes este camino comprobaba solo una
+// parte y se saltaba el kill switch propio, el modo sombra y la allowlist
+// del piloto (incidente P3 del 03-09).
 // ============================================================
 
 import {
@@ -12,14 +17,11 @@ import {
   isDncPhone,
   transitionCallAttempt,
 } from "../db";
-import { isConfirmationEligible } from "../orders/eligibility";
-import { externalActionsLocked } from "../safety";
 import { logIntegrationEvent } from "../system/repo";
 import { defaultHolidayCalendar } from "./calendar";
-import { callsDailyCap } from "./config";
+import { checkManualCallGates } from "./gates";
 import { buildCallPayload } from "./payload";
 import { type CallProvider } from "./provider";
-import { callsBlockedReason } from "./config";
 import { handleProviderCreateError, noteAgentVersionDrift } from "./scheduler";
 import { retellProvider } from "./retell";
 import { insideCallWindow, madridDate, madridParts } from "./schedule";
@@ -45,39 +47,10 @@ export async function manualDialOrder(
   const order = getOrderById(orderId);
   if (!order) return { ok: false, error: "pedido no encontrado" };
 
-  // KILL SWITCH GLOBAL (P0 hardening 03-09): el botón manual tampoco puede
-  // saltarse EMERGENCY_STOP ni el modo safe.
-  if (externalActionsLocked()) {
-    return { ok: false, error: "EMERGENCY_STOP activo o modo safe: no se puede llamar" };
-  }
-
-  const elig = isConfirmationEligible(order);
-  if (!elig.eligible) {
-    return {
-      ok: false,
-      error: `pedido no elegible para llamada: ${elig.detail ?? elig.reason ?? "estado no permitido"}`,
-    };
-  }
-
-  if (isDncPhone(order.phone)) {
-    return { ok: false, error: "este teléfono está en la lista NO LLAMAR" };
-  }
-
-  const bloqueo = callsBlockedReason();
-  if (bloqueo) {
-    return { ok: false, error: `llamadas bloqueadas: ${bloqueo} (retell:doctor --unblock cuando esté resuelto)` };
-  }
-
-  if (getActiveCallAttemptForOrder(order.id)) {
-    return { ok: false, error: "este pedido ya tiene una llamada activa o pendiente" };
-  }
-
-  if (!insideCallWindow(now, defaultHolidayCalendar)) {
-    return { ok: false, error: "fuera de la franja permitida de llamadas" };
-  }
-
-  if (countCallsStartedSince(startOfMadridDay(now)) >= callsDailyCap()) {
-    return { ok: false, error: `tope diario de llamadas (${callsDailyCap()}) alcanzado` };
+  // TODAS las puertas, en un solo sitio y en el mismo orden para todos.
+  const gate = checkManualCallGates(order, now, defaultHolidayCalendar);
+  if (!gate.allowed) {
+    return { ok: false, error: gate.reason ?? "no se puede llamar ahora" };
   }
 
   const payload = buildCallPayload(order, now);

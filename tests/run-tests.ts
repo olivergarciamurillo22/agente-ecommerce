@@ -6685,6 +6685,116 @@ async function main(): Promise<void> {
     cfgMod.clearCallsBlocked(); resetCallCfg();
   });
 
+  await test("CALLS · gates del botón manual: la matriz completa de la política (P3)", async () => {
+    // Incidente 03-09: "Llamar ahora" se saltaba el kill switch propio, el
+    // modo sombra y la allowlist del piloto. Aquí se fija cada puerta.
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const gates = await import("../src/lib/calls/gates");
+    const tel = "34600119001";
+    const o = mkCallable("gate-1", "9001", tel, 30);
+    const base = () => {
+      db.setSetting("ai_calls_enabled", "1");
+      db.setSetting("calls_shadow_mode", "0");
+      db.setSetting("calls_daily_cap", "500");
+      db.setSetting("calls_allowlist", tel);
+      db.setSetting("calls_pilot_mode", "1");
+    };
+    const veredicto = () => gates.checkManualCallGates(db.getOrderById(o.id)!, enFranja, noHoliday);
+    try {
+      base();
+      assert.equal(veredicto().allowed, true, "piloto + allowlisted + en franja → ALLOW");
+
+      // EMERGENCY_STOP manda por encima de todo.
+      await withEnv({ EMERGENCY_STOP: "1" }, () => {
+        assert.equal(veredicto().code, "emergency_stop");
+      });
+
+      // Kill switch propio apagado.
+      base(); db.setSetting("ai_calls_enabled", "0");
+      assert.equal(veredicto().code, "kill_switch_off", "con las llamadas apagadas NO se llama ni a mano");
+
+      // Modo sombra: se simula, no se marca.
+      base(); db.setSetting("calls_shadow_mode", "1");
+      assert.equal(veredicto().code, "shadow_mode");
+
+      // Piloto con la lista vacía = NADIE.
+      base(); db.setSetting("calls_allowlist", "");
+      assert.equal(veredicto().code, "pilot_allowlist_empty");
+
+      // Piloto con lista rellena pero este teléfono fuera.
+      base(); db.setSetting("calls_allowlist", "34600119999");
+      assert.equal(veredicto().code, "pilot_not_allowlisted");
+
+      // Fuera del piloto NO se introduce restricción extra: lista vacía pasa.
+      base(); db.setSetting("calls_pilot_mode", "0"); db.setSetting("calls_allowlist", "");
+      assert.equal(veredicto().allowed, true, "producción de llamadas: sin lista no se restringe");
+
+      // DNC.
+      base(); db.addDncPhone(tel, "test", { reason: "prueba de gate" });
+      assert.equal(veredicto().code, "dnc");
+      db.systemDbHandle().prepare("DELETE FROM call_dnc").run();
+
+      // Fuera de horario.
+      base();
+      const domingo = new Date("2026-09-06T11:00:00.000Z");
+      assert.equal(gates.checkManualCallGates(db.getOrderById(o.id)!, domingo, noHoliday).code, "outside_window");
+
+      // Tope diario.
+      base(); db.setSetting("calls_daily_cap", "1");
+      const yaLlamados = db.countCallsStartedSince(0);
+      if (yaLlamados >= 1) assert.equal(veredicto().code, "daily_cap");
+
+      // Bloqueo global del proveedor.
+      base(); cfgMod.setCallsBlocked("auth: 401 de prueba");
+      assert.equal(veredicto().code, "calls_blocked");
+      cfgMod.clearCallsBlocked();
+    } finally {
+      cfgMod.clearCallsBlocked();
+      db.systemDbHandle().prepare("DELETE FROM call_dnc").run();
+      db.setSetting("calls_pilot_mode", "");
+      resetCallCfg();
+    }
+  });
+
+  await test("CALLS · el botón manual OBEDECE los gates de verdad (no solo el veredicto)", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const tel = "34600119010";
+    const o = mkCallable("gate-2", "9010", tel, 30);
+    const intentar = async () => {
+      const { provider, created } = mkProvider();
+      const r = await manualMod.manualDialOrder(o.id, enFranja, provider);
+      return { r, created };
+    };
+    try {
+      // Apagadas: ni una llamada, y el motivo se ve en el panel.
+      db.setSetting("ai_calls_enabled", "0"); db.setSetting("calls_shadow_mode", "0"); db.setSetting("calls_allowlist", tel); db.setSetting("calls_daily_cap", "500");
+      let x = await intentar();
+      assert.equal(x.r.ok, false); assert.equal(x.created.length, 0, "kill switch off → CERO llamadas");
+      assert.match(x.r.error ?? "", /apagadas/);
+
+      // Sombra: tampoco.
+      db.setSetting("ai_calls_enabled", "1"); db.setSetting("calls_shadow_mode", "1");
+      x = await intentar();
+      assert.equal(x.created.length, 0, "modo sombra → CERO llamadas reales");
+      assert.match(x.r.error ?? "", /sombra/);
+
+      // Piloto sin la lista: tampoco.
+      db.setSetting("calls_shadow_mode", "0"); db.setSetting("calls_pilot_mode", "1"); db.setSetting("calls_allowlist", "");
+      x = await intentar();
+      assert.equal(x.created.length, 0, "piloto sin allowlist → CERO llamadas");
+
+      // Con todo en su sitio, SÍ sale y no queda ningún intento colgado.
+      db.setSetting("calls_allowlist", tel);
+      x = await intentar();
+      assert.equal(x.r.ok, true, x.r.error ?? "");
+      assert.equal(x.created.length, 1, "con la política cumplida, la llamada sale");
+    } finally {
+      db.setSetting("calls_pilot_mode", "");
+      cfgMod.clearCallsBlocked();
+      resetCallCfg();
+    }
+  });
+
   await test("RETELL · KILL SWITCH (P0): con EMERGENCY_STOP=1 ni el orquestador ni el botón manual crean llamadas", async () => {
     resetCallCfg(); cfgMod.clearCallsBlocked();
     const tel = "34600117500";
