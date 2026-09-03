@@ -43,8 +43,9 @@ function agentId(): string {
  * llamadas por API usan la ÚLTIMA versión GUARDADA del agente — una edición
  * accidental del dashboard cambia las llamadas reales al instante. Con
  * RETELL_AGENT_VERSION fijada, cada llamada lleva override_agent_version
- * (contrato oficial: número de versión, o "latest_published" / tag de
- * entorno — NUNCA el draft). Sin fijar, se avisa en salud y en el doctor.
+ * (contrato oficial: NÚMERO de versión publicada; "latest_published" y los
+ * tags los admite la API pero aquí se rechazan porque se mueven solos).
+ * Sin fijar, no sale ninguna llamada y se avisa en salud y en el doctor.
  */
 export function retellAgentVersion(): string {
   return (process.env.RETELL_AGENT_VERSION ?? "").trim();

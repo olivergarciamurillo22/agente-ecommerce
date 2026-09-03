@@ -13,6 +13,19 @@
 # no toca esos datos.
 # ============================================================
 
+# IDENTIDAD FIJA DEL PROYECTO (P7, 03-09-2026).
+#
+# Por defecto Compose nombra el proyecto según el DIRECTORIO desde el que se
+# ejecuta. En el NAS, producción corre bajo el proyecto `repo-v3c`; hacer
+# `docker compose up -d` desde una copia del repo en otra carpeta habría
+# creado un proyecto DISTINTO y levantado un SEGUNDO bot sobre la MISMA
+# base SQLite: dos schedulers, dos envíos, estado corrompido.
+#
+# Declarándolo aquí, la identidad viaja con el fichero: da igual el
+# directorio, siempre es el mismo proyecto y `up -d` REEMPLAZA el contenedor
+# en marcha en vez de duplicarlo. No hace falta acordarse de `-p`.
+name: repo-v3c
+
 services:
   casamable-agent:
     build:

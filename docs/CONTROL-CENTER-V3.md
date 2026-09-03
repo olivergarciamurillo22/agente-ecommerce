@@ -78,7 +78,8 @@ inspeccionaba variables ni prompt antes de marcar.
 **18-20. Payload y versión.** Las 11 variables verificadas en
 `payload.ts` → `retell_llm_dynamic_variables` (contrato oficial).
 `RETELL_AGENT_VERSION` → `override_agent_version` (número publicado o
-`latest_published`; verificado en docs.retellai.com — jamás draft), y la
+un NÚMERO de versión publicada — nunca `latest_published` ni un tag, que
+se mueven solos; verificado en docs.retellai.com), y la
 versión que Retell usó DE VERDAD se persiste por intento (v16) y se ve en
 salud.
 

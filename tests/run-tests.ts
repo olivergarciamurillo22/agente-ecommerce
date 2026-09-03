@@ -6184,6 +6184,7 @@ async function main(): Promise<void> {
   const manualMod = await import("../src/lib/calls/manual");
   const resultsMod = await import("../src/lib/calls/results");
   const retellMod = await import("../src/lib/calls/retell");
+  const analysisMod = await import("../src/lib/calls/analysis");
   const RETELL_ENV = { RETELL_API_KEY: "retell-key-test", RETELL_FROM_NUMBER: "+34950835615", RETELL_AGENT_ID: "agent_TEST_ONLY", RETELL_AGENT_VERSION: "7" };
   const fixture = (name: string) => fs.readFileSync(path.join(process.cwd(), "tests/fixtures/retell", name), "utf8");
   const firmar = (body: string, key = "retell-key-test", ts = Date.now()) => `v=${ts},d=${crypto.createHmac("sha256", key).update(body + String(ts)).digest("hex")}`;
@@ -6793,6 +6794,76 @@ async function main(): Promise<void> {
       cfgMod.clearCallsBlocked();
       resetCallCfg();
     }
+  });
+
+  await test("RETELL live REAL (03-09): contrato PLANO sin datos_corregidos, CP con cero, teléfono vacío ignorado y DNC", async () => {
+    // Forma EXACTA observada en producción el 03-09 con la V19 publicada.
+    // No hay contenedor `datos_corregidos`: el contrato real es plano.
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const tel = "34600117777";
+    const { order, attempt } = await dialOne("rt-real-1", "9002", tel);
+    const analisisReal = {
+      resultado_llamada: "confirmado_con_correccion",
+      codigo_postal_corregido: "04007",
+      telefono_alternativo: "",
+      pidio_no_llamar: true,
+    };
+    // El normalizador lee el contrato real sin ayuda de alias raros.
+    const norm = analysisMod.normalizeRetellAnalysis(analisisReal);
+    assert.equal(norm.resultado, "confirmado_con_correccion");
+    assert.equal(norm.codigoPostalCorregido, "04007", "el cero inicial del CP se conserva");
+    assert.equal(norm.telefonoAlternativo, null, "un teléfono alternativo VACÍO no es una corrección");
+    assert.equal(norm.pidioNoLlamar, true);
+
+    calls.applyCallAnalysis(attempt, analyzedEvent(attempt.provider_call_id!, analisisReal), enFranja, noHoliday);
+    const o = db.getOrderById(order.id)!;
+    assert.equal(db.getCallAttempt(attempt.id)!.result, "confirmado_con_correccion");
+    assert.equal(o.postal_code, "04007", "CP corregido tal cual");
+    assert.equal(o.phone, tel, "el teléfono bueno NO se pisa con la cadena vacía");
+    assert.ok(o.confirmed_at, "el pedido queda confirmado");
+    assert.equal(db.isDncPhone(tel), true, "pidio_no_llamar aunque confirme → DNC");
+    resetCallCfg();
+  });
+
+  await test("RETELL live REAL: el mismo call_analyzed 10 veces = UN solo efecto de negocio", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const { POST } = await import("../src/app/api/webhooks/retell/call-events/route");
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const tel = "34600117778";
+    const { order, attempt } = await dialOne("rt-real-2", "9003", tel);
+    const callId = attempt.provider_call_id!;
+    const cuerpo = JSON.stringify({
+      event: "call_analyzed",
+      call: {
+        call_id: callId,
+        end_timestamp: enFranja.getTime(),
+        call_status: "ended",
+        call_analysis: { custom_analysis_data: { resultado_llamada: "confirmado", pidio_no_llamar: false } },
+      },
+    });
+    await withEnv(RETELL_ENV, async () => {
+      let aceptados = 0;
+      let duplicados = 0;
+      for (let i = 0; i < 10; i++) {
+        const res = await POST(new Request("http://localhost/x", {
+          method: "POST",
+          body: cuerpo,
+          headers: { "x-retell-signature": wh.signRetellWebhookForTests(cuerpo, "retell-key-test") },
+        }) as unknown as import("next/server").NextRequest);
+        assert.equal(res.status, 200, "los 10 reintentos se ACEPTAN (ACK)");
+        const j = (await res.json()) as { duplicate?: boolean };
+        if (j.duplicate) duplicados++; else aceptados++;
+      }
+      assert.equal(aceptados, 1, "solo el primero entra en el inbox");
+      assert.equal(duplicados, 9, "los otros 9 se reconocen como duplicados");
+      calls.processCallEvents(enFranja, noHoliday);
+      calls.processCallEvents(enFranja, noHoliday);
+      const o = db.getOrderById(order.id)!;
+      assert.equal(o.status, "confirmed");
+      const intentos = db.systemDbHandle().prepare("SELECT COUNT(*) c FROM call_attempts WHERE order_id = ?").get(order.id) as { c: number };
+      assert.equal(intentos.c, 1, "ni un intento de más");
+    });
+    resetCallCfg();
   });
 
   await test("RETELL · KILL SWITCH (P0): con EMERGENCY_STOP=1 ni el orquestador ni el botón manual crean llamadas", async () => {

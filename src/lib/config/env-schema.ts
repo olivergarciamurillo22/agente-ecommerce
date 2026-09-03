@@ -268,7 +268,7 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     name: "RETELL_AGENT_VERSION",
     category: "RETELL_CALLS",
     secret: false,
-    description: "Versión del agente que usan las llamadas (override_agent_version): número publicado, o 'latest_published'. SIN fijar, cada llamada usa la última versión GUARDADA — una edición del dashboard cambia producción (incidente [password 1], 02-09). Fijarla es requisito del preflight.",
+    description: "Versión del agente que usan las llamadas (override_agent_version): SOLO un número de versión publicada, p. ej. 19",
     requiredFor: ["retell-pilot"],
     // Hardening 03-09: SOLO número de versión publicada. "latest_published" y
     // los tags de entorno se MUEVEN (alguien publica/mueve el tag y las

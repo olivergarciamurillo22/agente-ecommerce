@@ -54,7 +54,8 @@
     "beeping:sync": "tsx scripts/beeping-sync.ts",
     "meta-ads:doctor": "tsx scripts/meta-ads-doctor.ts",
     "meta-ads:sync": "tsx scripts/meta-ads-sync.ts",
-    "retell:pilot": "tsx scripts/retell-pilot.ts"
+    "retell:pilot": "tsx scripts/retell-pilot.ts",
+    "deploy:guard": "tsx scripts/deploy-guard.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

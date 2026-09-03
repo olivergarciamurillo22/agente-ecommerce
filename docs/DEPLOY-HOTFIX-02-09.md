@@ -45,7 +45,7 @@ aditiva e idempotente).
 ## PASO 3 · Una línea nueva en el `.env` del NAS
 
 ```
-RETELL_AGENT_VERSION=latest_published
+RETELL_AGENT_VERSION=19   # SOLO un número de versión publicada (ver docs/retell/PRODUCTION-VALIDATION.md)
 ```
 
 (Mejor aún: el NÚMERO de la versión publicada del agente, se ve en el
