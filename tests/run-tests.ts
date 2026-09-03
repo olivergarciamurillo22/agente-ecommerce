@@ -6428,6 +6428,128 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("RETELL · firma: el algoritmo coincide EXACTAMENTE con el del SDK oficial (vector fijo)", async () => {
+    // Vector generado con `retell-sdk@5.64.0` (symmetric.sign, WebCrypto).
+    // Si algún día nuestra implementación se desvía del proveedor, esto se
+    // pone rojo aquí y no en producción con las firmas reales.
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const BODY = '{"event":"call_analyzed","call":{"call_id":"call_fixture_001"}}';
+    const KEY = "key_de_prueba_no_real";
+    const TS = 1788000000000;
+    const DIGEST_SDK = "011048b0476d729612b23ac86f40d78fea08d1e53b57b311b906d025a0dfe0da";
+    assert.equal(wh.signRetellWebhookForTests(BODY, KEY, TS), `v=${TS},d=${DIGEST_SDK}`, "mismo digest que el SDK oficial");
+    assert.equal(wh.verifyRetellWebhookSignature(BODY, `v=${TS},d=${DIGEST_SDK}`, KEY, TS).valid, true);
+    // El SDK convierte el timestamp a NÚMERO antes de concatenar, así que
+    // "0<ts>" produce el mismo digest y lo da por bueno. Se replica tal cual:
+    // en un verificador de firmas, parecerse al proveedor importa más que
+    // ser más listo que él (comprobado contra symmetric.verify del SDK).
+    assert.equal(wh.verifyRetellWebhookSignature(BODY, `v=0${TS},d=${DIGEST_SDK}`, KEY, TS).valid, true);
+  });
+
+  await test("RETELL · firma: se verifica el cuerpo EXACTO (re-serializar o cambiar 1 byte invalida)", async () => {
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const KEY = "retell-key-test";
+    // Con espacios y saltos: al reserializar cambian los bytes (que es lo que
+    // manda Retell de verdad: JSON con su propio formato).
+    const original = '{\n  "event": "call_analyzed",\n  "call": { "call_id": "call_x", "agent_version": 19 }\n}';
+    const ahora = Date.now();
+    const firma = wh.signRetellWebhookForTests(original, KEY, ahora);
+    assert.equal(wh.verifyRetellWebhookSignature(original, firma, KEY, ahora).valid, true, "bytes exactos → PASS");
+    // Mismo JSON, distinta serialización (claves reordenadas / espacios).
+    const reserializado = JSON.stringify(JSON.parse(original));
+    assert.notEqual(reserializado, original, "el fixture debe cambiar de bytes al reserializar");
+    assert.equal(wh.verifyRetellWebhookSignature(reserializado, firma, KEY, ahora).valid, false, "re-serializado → FAIL");
+    const unByte = original.replace("call_x", "call_y");
+    assert.equal(wh.verifyRetellWebhookSignature(unByte, firma, KEY, ahora).valid, false, "1 byte distinto → FAIL");
+  });
+
+  await test("RETELL · firma: cada rechazo dice POR QUÉ, y el digest_mismatch apunta a la key con 'webhook badge'", async () => {
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const BODY = '{"event":"call_ended","call":{"call_id":"c1"}}';
+    const KEY = "clave-correcta";
+    const ahora = Date.now();
+    const buena = wh.signRetellWebhookForTests(BODY, KEY, ahora);
+    const casos: Array<[string, string | null, string, string]> = [
+      ["sin clave configurada", buena, "", "no_key"],
+      ["sin cabecera", null, KEY, "no_signature"],
+      ["cabecera malformada", "no-es-una-firma", KEY, "malformed_header"],
+      ["digest corto", `v=${ahora},d=abc`, KEY, "bad_digest_format"],
+    ];
+    for (const [nombre, header, key, motivo] of casos) {
+      const r = wh.verifyRetellWebhookSignature(BODY, header, key, ahora);
+      assert.equal(r.valid, false, nombre);
+      assert.equal(r.reason, motivo, nombre);
+    }
+    // Caducada.
+    const vieja = wh.signRetellWebhookForTests(BODY, KEY, ahora - 10 * 60_000);
+    assert.equal(wh.verifyRetellWebhookSignature(BODY, vieja, KEY, ahora).reason, "timestamp_out_of_window");
+    // EL CASO REAL DEL 03-09: forma perfecta, clave distinta → digest_mismatch.
+    // Es la huella de "esta no es la API key con distintivo webhook".
+    const otraKey = wh.signRetellWebhookForTests(BODY, "clave-de-otra-api-key", ahora);
+    assert.equal(wh.verifyRetellWebhookSignature(BODY, otraKey, KEY, ahora).reason, "digest_mismatch");
+  });
+
+  await test("RETELL · firma: el diagnóstico describe la forma y NUNCA filtra el digest ni la clave", async () => {
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const KEY = "clave-secretisima";
+    const BODY = "{}";
+    const ts = Date.now();
+    const firma = wh.signRetellWebhookForTests(BODY, KEY, ts);
+    const digest = firma.split("d=")[1];
+    const d = wh.describeRetellSignature(firma);
+    assert.equal(d.present, true);
+    assert.equal(d.startsWithV, true);
+    assert.equal(d.timestampPresent, true);
+    assert.equal(d.digestPresent, true);
+    assert.equal(d.digestLength, 64);
+    assert.equal(d.digestCharset, "hex");
+    assert.equal(d.commaCount, 1);
+    assert.equal(d.trimWouldChange, false);
+    const serializado = JSON.stringify(d);
+    assert.ok(!serializado.includes(digest), "el digest NO puede aparecer en el diagnóstico");
+    assert.ok(!serializado.includes(KEY), "la clave NO puede aparecer en el diagnóstico");
+    // Cabecera con espacios: se detecta en vez de aceptarse en silencio.
+    assert.equal(wh.describeRetellSignature(` ${firma} `).trimWouldChange, true);
+    assert.equal(wh.verifyRetellWebhookSignature(BODY, ` ${firma} `, KEY, ts).valid, false, "no somos más permisivos que el proveedor");
+    assert.equal(wh.describeRetellSignature(null).present, false);
+  });
+
+  await test("RETELL · webhook: sin firma 401, firma inválida 401, y la primera firma REAL deja evidencia", async () => {
+    const { POST, RETELL_WEBHOOK_VERIFIED_KEY } = await import("../src/app/api/webhooks/retell/call-events/route");
+    const wh = await import("../src/lib/calls/retell-webhook");
+    db.systemDbHandle().prepare("DELETE FROM settings WHERE key = ?").run(RETELL_WEBHOOK_VERIFIED_KEY);
+    const body = JSON.stringify({ event: "call_started", call: { call_id: "call_evidencia_1", start_timestamp: Date.now() } });
+    const post = (b: string, sig: string | null) =>
+      POST(new Request("http://localhost/api/webhooks/retell/call-events", { method: "POST", body: b, headers: sig ? { "x-retell-signature": sig } : {} }) as unknown as import("next/server").NextRequest);
+    await withEnv(RETELL_ENV, async () => {
+      assert.equal((await post(body, null)).status, 401, "sin firma → 401");
+      assert.equal((await post(body, "v=1,d=" + "0".repeat(64))).status, 401, "firma inválida → 401");
+      assert.equal(db.getSetting(RETELL_WEBHOOK_VERIFIED_KEY), null, "un rechazo NO deja evidencia de verificación");
+      const buena = wh.signRetellWebhookForTests(body, "retell-key-test");
+      assert.equal((await post(body, buena)).status, 200, "firma real válida → 200");
+      const marca = db.getSetting(RETELL_WEBHOOK_VERIFIED_KEY);
+      assert.ok(marca && Number(marca) > 0, "queda constancia de la primera firma verificada");
+      // Y no se sobreescribe en cada webhook posterior.
+      await post(body, wh.signRetellWebhookForTests(body, "retell-key-test"));
+      assert.equal(db.getSetting(RETELL_WEBHOOK_VERIFIED_KEY), marca, "la marca es la de la PRIMERA vez");
+    });
+  });
+
+  await test("RETELL · firma: 100 verificaciones seguidas, 0 flakes (válidas e inválidas alternas)", async () => {
+    const wh = await import("../src/lib/calls/retell-webhook");
+    const KEY = "clave-estres";
+    let ok = 0;
+    let ko = 0;
+    for (let i = 0; i < 100; i++) {
+      const body = JSON.stringify({ event: "call_analyzed", call: { call_id: `c${i}` }, n: i });
+      const ts = Date.now() - (i % 7) * 1000;
+      if (wh.verifyRetellWebhookSignature(body, wh.signRetellWebhookForTests(body, KEY, ts), KEY, ts).valid) ok++;
+      if (!wh.verifyRetellWebhookSignature(body, wh.signRetellWebhookForTests(body, "otra-clave", ts), KEY, ts).valid) ko++;
+    }
+    assert.equal(ok, 100, "las 100 firmas legítimas verifican");
+    assert.equal(ko, 100, "las 100 firmas de otra clave se rechazan");
+  });
+
   await test("RETELL · webhook end-to-end con fixtures: firma sobre RAW body, 10 reintentos del mismo webhook = 1 efecto, orden alterado sin regresión", async () => {
     resetCallCfg(); cfgMod.clearCallsBlocked();
     const { POST } = await import("../src/app/api/webhooks/retell/call-events/route");
@@ -7868,7 +7990,7 @@ async function main(): Promise<void> {
     for (const f of [
       "src/lib/shopify/hmac.ts",
       "src/lib/suppliers/dropea/webhook.ts",
-      "src/lib/calls/retell.ts",
+      "src/lib/calls/retell-webhook.ts",
     ]) {
       const src = fs.readFileSync(path.join(process.cwd(), f), "utf8");
       assert.ok(src.includes("timingSafeEqual"), `${f} debe comparar en tiempo constante`);

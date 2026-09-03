@@ -5,9 +5,9 @@
 //     Authorization: Bearer <RETELL_API_KEY>
 //     body: { from_number, to_number, retell_llm_dynamic_variables,
 //             metadata, override_agent_id? }  → 201 { call_id, ... }
-//   Webhook: header X-Retell-Signature = "v={ts_ms},d={hex}", donde
-//     d = HMAC-SHA256(raw_body + ts, api_key). Verificación en tiempo
-//     constante + frescura del timestamp (5 min).
+//   Webhook: la verificación vive en ./retell-webhook.ts, alineada con la
+//     fuente del SDK oficial. OJO: solo la API key con "webhook badge"
+//     firma los webhooks salientes (causa del incidente del 03-09).
 //   Eventos: call_started | call_ended | call_analyzed, con { event, call }
 //     y call.call_analysis.custom_analysis_data para el análisis.
 //   Política 03-09: override_agent_version SIEMPRE numérico (pin);
@@ -15,8 +15,8 @@
 //   firma SOLO en formato oficial con timestamp (sin fallback replayable).
 // ============================================================
 
-import crypto from "node:crypto";
 import { validateRetellCallVariables } from "./payload";
+import { verifyRetellWebhookSignature } from "./retell-webhook";
 import {
   ProviderRequestError,
   type CallProvider,
@@ -27,7 +27,6 @@ import {
 } from "./provider";
 
 const API_BASE = "https://api.retellai.com";
-const SIGNATURE_MAX_AGE_MS = 5 * 60_000;
 
 function apiKey(): string {
   return (process.env.RETELL_API_KEY ?? "").trim();
@@ -85,13 +84,6 @@ export function buildCreatePhoneCallBody(req: OutboundCallRequest, version: stri
   if (agentId()) body.override_agent_id = agentId();
   body.override_agent_version = Number(version);
   return body;
-}
-
-function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  if (ba.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ba, bb);
 }
 
 export const retellProvider: CallProvider = {
@@ -158,20 +150,13 @@ export const retellProvider: CallProvider = {
   },
 
   verifyWebhook(rawBody: string, signatureHeader: string | null, nowMs = Date.now()): boolean {
-    const key = apiKey();
-    if (!key || !signatureHeader) return false;
+    return verifyRetellWebhookSignature(rawBody, signatureHeader, apiKey(), nowMs).valid;
+  },
 
-    // Formato oficial y ÚNICO (docs "Secure webhook", 03-09-2026):
-    //   X-Retell-Signature: v={ts_ms},d={HMAC-SHA256(raw_body + ts_ms, api_key)}
-    // con ventana de 5 minutos. El antiguo fallback "HMAC del cuerpo sin
-    // timestamp" se retiró: Retell no lo envía y, sin timestamp, una firma
-    // capturada valdría para siempre (replay).
-    const m = /^v=(\d+),d=([0-9a-f]+)$/i.exec(signatureHeader.trim());
-    if (!m) return false;
-    const ts = Number(m[1]);
-    if (!Number.isFinite(ts) || Math.abs(nowMs - ts) > SIGNATURE_MAX_AGE_MS) return false;
-    const esperado = crypto.createHmac("sha256", key).update(rawBody + m[1]).digest("hex");
-    return safeEqual(esperado, m[2].toLowerCase());
+  /** Igual que `verifyWebhook` pero diciendo POR QUÉ falla (la ruta lo
+   *  registra sin filtrar nada: ver `describeRetellSignature`). */
+  verifyWebhookDetailed(rawBody: string, signatureHeader: string | null, nowMs = Date.now()) {
+    return verifyRetellWebhookSignature(rawBody, signatureHeader, apiKey(), nowMs);
   },
 
   parseEvent(rawBody: string): ParsedCallEvent | null {

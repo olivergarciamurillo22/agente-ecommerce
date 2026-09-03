@@ -98,6 +98,8 @@ export interface CallProvider {
   createOutboundCall(req: OutboundCallRequest): Promise<OutboundCallAccepted>;
   /** Verifica la firma del webhook sobre el RAW body. */
   verifyWebhook(rawBody: string, signatureHeader: string | null, nowMs?: number): boolean;
+  /** Igual, pero devolviendo el motivo del rechazo (diagnóstico sin PII). */
+  verifyWebhookDetailed?(rawBody: string, signatureHeader: string | null, nowMs?: number): { valid: boolean; reason: string | null };
   /** Parsea un evento entrante. null = forma desconocida (no reventar). */
   parseEvent(rawBody: string): ParsedCallEvent | null;
 }

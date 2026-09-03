@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { insertCallEvent } from "@/lib/db";
+import { getSetting, insertCallEvent, setSetting } from "@/lib/db";
 import { retellProvider } from "@/lib/calls/retell";
+import { describeRetellSignature } from "@/lib/calls/retell-webhook";
 import { logIntegrationEvent } from "@/lib/system/repo";
 
 // Webhook de eventos de llamada de Retell (call_started / call_ended /
@@ -11,13 +12,40 @@ import { logIntegrationEvent } from "@/lib/system/repo";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+/** Marca de que una firma REAL de Retell ha validado alguna vez aquí. Es la
+ *  única evidencia honesta de que la API key configurada es la que lleva el
+ *  "webhook badge"; el doctor la lee para no cantar victoria sin pruebas. */
+export const RETELL_WEBHOOK_VERIFIED_KEY = "retell_webhook_signature_verified_at";
+
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  // RAW body: se verifica EXACTAMENTE lo recibido, antes de cualquier parseo.
   const rawBody = await req.text();
   const signature = req.headers.get("x-retell-signature");
 
-  if (!retellProvider.verifyWebhook(rawBody, signature)) {
-    logIntegrationEvent("system", "call_webhook_bad_signature", "warning", "webhook de Retell rechazado por firma inválida");
+  const check = retellProvider.verifyWebhookDetailed!(rawBody, signature);
+  if (!check.valid) {
+    // Diagnóstico sin filtrar nada: forma de la cabecera, jamás el digest.
+    const forma = describeRetellSignature(signature);
+    logIntegrationEvent(
+      "system",
+      "call_webhook_bad_signature",
+      "warning",
+      `webhook de Retell rechazado (${check.reason}): ${JSON.stringify(forma)}` +
+        (check.reason === "digest_mismatch"
+          ? " — si la forma es correcta, la RETELL_API_KEY configurada no es la que lleva el distintivo 'webhook' en el panel de Retell: solo esa firma los webhooks"
+          : "")
+    );
     return NextResponse.json({ ok: false, error: "firma inválida" }, { status: 401 });
+  }
+
+  // Primera firma real validada: se deja constancia (una sola vez).
+  try {
+    if (!getSetting(RETELL_WEBHOOK_VERIFIED_KEY)) {
+      setSetting(RETELL_WEBHOOK_VERIFIED_KEY, String(Math.floor(Date.now() / 1000)));
+      logIntegrationEvent("system", "call_webhook_signature_verified", "info", "primera firma REAL de Retell verificada correctamente");
+    }
+  } catch {
+    /* la marca es informativa: nunca puede tumbar el webhook */
   }
 
   const event = retellProvider.parseEvent(rawBody);
