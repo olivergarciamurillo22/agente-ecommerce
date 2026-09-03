@@ -6428,6 +6428,72 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("WATCHDOG · causa raíz: arranca con CUALQUIER proveedor, no solo dentro de Baileys", () => {
+    // Incidente 03-09 (~6 días sin latido): startWatchdog() se llamaba SOLO
+    // desde el `connection: open` de Baileys. Producción pasó a cloud_api,
+    // donde Baileys NO se arranca, así que el watchdog no arrancaba nunca.
+    const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+    const bot = leer("scripts/start-bot.ts");
+    assert.match(bot, /startWatchdog\(\)/, "start-bot arranca el watchdog");
+    const iCloud = bot.indexOf("cloud_api");
+    const iWatch = bot.indexOf("startWatchdog()");
+    assert.ok(iWatch > iCloud, "el arranque va FUERA de la rama de proveedor");
+    // Y no puede volver a colgar del ciclo de vida de Baileys.
+    const cli = leer("src/lib/baileys/client.ts");
+    assert.ok(!/stopWatchdog/.test(cli), "una desconexión de Baileys NO para el watchdog");
+    assert.match(cli, /detachWatchdogSocket/, "solo suelta su socket");
+    // El socket es opcional en la firma.
+    const wd = leer("src/lib/watchdog.ts");
+    assert.match(wd, /export function startWatchdog\(sock: WASocket \| null = null\)/, "socket opcional");
+    assert.match(wd, /sendWhatsAppMessage/, "sin socket, los avisos se encolan por el chokepoint");
+  });
+
+  await test("WATCHDOG · latido: arranca → late; parado → la salud lo detecta; rearranque → vuelve a latir", async () => {
+    const repo = await import("../src/lib/system/repo");
+    const health = await import("../src/lib/system/health-core");
+    const wd = await import("../src/lib/watchdog");
+    const watchdogEnSalud = () => health.getSchedulersHealth().find((x) => x.name === "watchdog") ?? null;
+    const h = db.systemDbHandle();
+    // Reloj falso: el latido se escribe en service_health con `now()` real,
+    // así que se manipula la fila directamente para simular el paso del tiempo.
+    h.prepare("DELETE FROM service_health WHERE service = 'scheduler:watchdog'").run();
+    assert.equal(repo.getServiceHealth("scheduler:watchdog"), null, "de partida, sin latido");
+
+    // 1 · Arranque → late (el propio startWatchdog no late hasta el primer
+    //     tick, así que se comprueba el mecanismo de latido directamente).
+    repo.heartbeat("scheduler:watchdog");
+    const primero = repo.getServiceHealth("scheduler:watchdog");
+    assert.ok(primero && primero.status === "healthy", "tras arrancar, hay latido sano");
+
+    // 2 · Silencio prolongado → la salud lo marca (intervalo esperado: 300 s).
+    const hace6dias = Math.floor(Date.now() / 1000) - 6 * 86400;
+    h.prepare("UPDATE service_health SET last_success_at = ?, last_checked_at = ? WHERE service = 'scheduler:watchdog'")
+      .run(hace6dias, hace6dias);
+    const tras6dias = repo.getServiceHealth("scheduler:watchdog")!;
+    assert.ok(Math.floor(Date.now() / 1000) - (tras6dias.last_success_at ?? 0) > 300, "6 días sin latir supera con creces el intervalo");
+    const enSalud = watchdogEnSalud();
+    assert.ok(enSalud, "el watchdog aparece en la salud de schedulers");
+    assert.notEqual(enSalud!.status, "healthy", "6 días sin latir NO puede salir sano");
+
+    // 3 · Rearranque → vuelve a latir. Se usa recordServiceCheck porque
+    //     heartbeat() se auto-limita a un latido por minuto (en memoria) y
+    //     aquí acabamos de latir hace milisegundos.
+    repo.recordServiceCheck("scheduler:watchdog", { status: "healthy", ok: true });
+    const reiniciado = repo.getServiceHealth("scheduler:watchdog")!;
+    assert.ok((reiniciado.last_success_at ?? 0) > (tras6dias.last_success_at ?? 0), "el latido se recupera al rearrancar");
+
+    // 4 · El temporizador se puede arrancar y parar sin Baileys.
+    assert.equal(wd.isWatchdogRunning(), false, "de partida parado");
+    wd.startWatchdog();
+    assert.equal(wd.isWatchdogRunning(), true, "arranca sin socket de Baileys");
+    wd.startWatchdog(); // idempotente
+    assert.equal(wd.isWatchdogRunning(), true);
+    wd.detachWatchdogSocket();
+    assert.equal(wd.isWatchdogRunning(), true, "soltar el socket NO para el watchdog");
+    wd.stopWatchdog();
+    assert.equal(wd.isWatchdogRunning(), false, "stop sí lo para");
+  });
+
   await test("RETELL · firma: el algoritmo coincide EXACTAMENTE con el del SDK oficial (vector fijo)", async () => {
     // Vector generado con `retell-sdk@5.64.0` (symmetric.sign, WebCrypto).
     // Si algún día nuestra implementación se desvía del proveedor, esto se

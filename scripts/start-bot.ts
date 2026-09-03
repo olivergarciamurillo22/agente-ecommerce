@@ -8,6 +8,7 @@ import "./env-loader";
 import pino from "pino";
 import { start, watchRestartFlag } from "../src/lib/baileys/client";
 import { startOrderScheduler } from "../src/lib/orders/scheduler";
+import { startWatchdog } from "../src/lib/watchdog";
 import { startTrackingScheduler } from "../src/lib/tracking/scheduler";
 import { startReconcileScheduler } from "../src/lib/shopify/reconcile";
 import { whatsappProviderName } from "../src/lib/whatsapp/provider";
@@ -101,6 +102,9 @@ async function main(): Promise<void> {
     }
     // Scheduler de confirmaciones COD: corre aunque WhatsApp aún no esté
     // vinculado (los envíos esperan a que haya conexión; el estado es SQLite).
+    // Watchdog: independiente del proveedor de WhatsApp. Antes solo arrancaba
+    // dentro de Baileys y con cloud_api se quedaba muerto (incidente 03-09).
+    startWatchdog();
     startOrderScheduler();
     // Polling de estado de envíos. Con SUPPLIER_SYNC_ENABLED=0 (por defecto)
     // no consulta nada: es la red de seguridad de los webhooks de proveedor.

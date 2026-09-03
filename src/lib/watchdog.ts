@@ -1,8 +1,7 @@
 // ============================================================
 // Watchdog · el sistema que audita al agente y avisa por WhatsApp.
 //
-// Vive en el MISMO proceso del bot (usa su conexión para enviar los avisos al
-// número del dueño, ALERT_WHATSAPP). Tres niveles:
+// Vive en el MISMO proceso del bot. Tres niveles:
 //   1. Vigilante en tiempo real: detecta bot mudo (leads sin respuesta) y saldo
 //      bajo de OpenRouter, y avisa al instante (con anti-spam de 30 min).
 //   2. Auditor diario con IA: una vez al día lee las conversaciones y manda un
@@ -13,6 +12,14 @@
 // TODO es best-effort: nunca debe romper el bot. Si no hay ALERT_WHATSAPP, corre
 // igual pero solo registra en el log (no envía). Para el caso "el contenedor
 // entero se cae" (donde WhatsApp no puede avisar) está /api/health + ping externo.
+//
+// INDEPENDIENTE DEL PROVEEDOR (incidente 03-09): hasta hoy solo arrancaba
+// desde el `connection: open` de Baileys y recibía su socket. Al pasar
+// producción a `cloud_api`, Baileys dejó de arrancar y el watchdog se quedó
+// SIN ARRANCAR ~6 días — sin latido, sin vigilancia de bot mudo y sin
+// auditoría diaria, con el panel marcándolo en rojo. Ahora arranca desde
+// start-bot.ts con cualquier proveedor y el socket de Baileys es OPCIONAL:
+// si no lo hay, los avisos salen por el chokepoint de encolado normal.
 // ============================================================
 
 import type { WASocket } from "@whiskeysockets/baileys";
@@ -72,13 +79,29 @@ async function sendAlert(text: string): Promise<boolean> {
     logger.warn(`[SAFE MODE] aviso del watchdog RETENIDO (gates cerrados): ${text.slice(0, 90)}`);
     return false;
   }
-  if (!currentSock) return false;
+  // Con Baileys vivo se usa su socket (entrega inmediata, sin pasar por el
+  // outbox). Sin él —el caso de cloud_api— se ENCOLA por el chokepoint
+  // normal, que revalida gates y entrega con el proveedor que toque.
+  if (currentSock) {
+    try {
+      await currentSock.sendMessage(ALERT_JID, { text });
+      logger.info("[watchdog] aviso enviado al dueño");
+      return true;
+    } catch (err) {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[watchdog] no pude enviar el aviso");
+      return false;
+    }
+  }
   try {
-    await currentSock.sendMessage(ALERT_JID, { text });
-    logger.info("[watchdog] aviso enviado al dueño");
-    return true;
+    // Import perezoso: watchdog lo cargan también procesos sin WhatsApp.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { sendWhatsAppMessage } = require("./whatsapp") as typeof import("./whatsapp");
+    const encolado = sendWhatsAppMessage(alertPhone, text, { name: "Alertas Casamable" });
+    if (encolado) logger.info("[watchdog] aviso ENCOLADO para el dueño (proveedor sin socket directo)");
+    else logger.warn("[watchdog] aviso NO encolado: los gates lo retuvieron");
+    return encolado;
   } catch (err) {
-    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[watchdog] no pude enviar el aviso");
+    logger.warn({ err: err instanceof Error ? err.message : String(err) }, "[watchdog] no pude encolar el aviso");
     return false;
   }
 }
@@ -247,8 +270,11 @@ async function tick(): Promise<void> {
 }
 
 /** Arranca el watchdog con el socket actual (se llama al conectar). */
-export function startWatchdog(sock: WASocket): void {
-  currentSock = sock;
+export function startWatchdog(sock: WASocket | null = null): void {
+  // El socket es opcional: con cloud_api no existe y el watchdog debe correr
+  // igual (latido, vigilancia y auditoría). Si Baileys conecta más tarde,
+  // vuelve a llamar con su socket y se engancha sin reiniciar el temporizador.
+  if (sock) currentSock = sock;
   if (timer) return; // ya estaba corriendo
   logger.info(`[watchdog] activo${ALERT_JID ? "" : " (sin ALERT_WHATSAPP: solo registra en el log)"}`);
   timer = setInterval(() => {
@@ -259,11 +285,22 @@ export function startWatchdog(sock: WASocket): void {
   }, TICK_MS);
 }
 
-/** Para el watchdog (se llama al desconectar). */
+/** Para el watchdog por completo (apagado del proceso). */
 export function stopWatchdog(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;
   }
   currentSock = null;
+}
+
+/** Baileys se ha desconectado: se suelta SU socket, pero el watchdog sigue
+ *  latiendo (los avisos pasan a encolarse por el chokepoint). */
+export function detachWatchdogSocket(): void {
+  currentSock = null;
+}
+
+/** ¿Está el temporizador vivo? Lo usan los tests y el readiness de runtime. */
+export function isWatchdogRunning(): boolean {
+  return timer !== null;
 }

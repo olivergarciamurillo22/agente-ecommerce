@@ -13,7 +13,7 @@ import fs from "node:fs";
 import { setConnectionState, getConnectionState } from "../db";
 import { handleIncomingMessages } from "./handler";
 import { startOutboxLoop, stopOutboxLoop } from "./outbox";
-import { startWatchdog, stopWatchdog } from "../watchdog";
+import { detachWatchdogSocket, startWatchdog } from "../watchdog";
 
 const AUTH_DIR = path.resolve(process.cwd(), "auth");
 const DATA_DIR = path.resolve(process.cwd(), "data");
@@ -144,7 +144,9 @@ export async function start(): Promise<void> {
           : undefined;
 
       stopOutboxLoop();
-      stopWatchdog();
+      // El watchdog NO se para: es independiente del proveedor. Solo deja de
+      // usar este socket (los avisos pasan a encolarse).
+      detachWatchdogSocket();
 
       if (code === DisconnectReason.loggedOut) {
         // 401: logout desde el móvil (desvincular el dispositivo, o pasar el
