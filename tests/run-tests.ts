@@ -6825,7 +6825,7 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
-  await test("RETELL live REAL: el mismo call_analyzed 10 veces = UN solo efecto de negocio", async () => {
+  await test("RETELL live REAL: el mismo call_analyzed 100 veces = UN solo efecto de negocio", async () => {
     resetCallCfg(); cfgMod.clearCallsBlocked();
     const { POST } = await import("../src/app/api/webhooks/retell/call-events/route");
     const wh = await import("../src/lib/calls/retell-webhook");
@@ -6844,18 +6844,18 @@ async function main(): Promise<void> {
     await withEnv(RETELL_ENV, async () => {
       let aceptados = 0;
       let duplicados = 0;
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 100; i++) {
         const res = await POST(new Request("http://localhost/x", {
           method: "POST",
           body: cuerpo,
           headers: { "x-retell-signature": wh.signRetellWebhookForTests(cuerpo, "retell-key-test") },
         }) as unknown as import("next/server").NextRequest);
-        assert.equal(res.status, 200, "los 10 reintentos se ACEPTAN (ACK)");
+        assert.equal(res.status, 200, "los 100 reintentos se ACEPTAN (ACK)");
         const j = (await res.json()) as { duplicate?: boolean };
         if (j.duplicate) duplicados++; else aceptados++;
       }
       assert.equal(aceptados, 1, "solo el primero entra en el inbox");
-      assert.equal(duplicados, 9, "los otros 9 se reconocen como duplicados");
+      assert.equal(duplicados, 99, "los otros 99 se reconocen como duplicados");
       calls.processCallEvents(enFranja, noHoliday);
       calls.processCallEvents(enFranja, noHoliday);
       const o = db.getOrderById(order.id)!;
@@ -6864,6 +6864,31 @@ async function main(): Promise<void> {
       assert.equal(intentos.c, 1, "ni un intento de más");
     });
     resetCallCfg();
+  });
+
+  await test("CALLS · gates manuales: 100 evaluaciones seguidas dan SIEMPRE el mismo veredicto (0 flakes)", async () => {
+    resetCallCfg(); cfgMod.clearCallsBlocked();
+    const gates = await import("../src/lib/calls/gates");
+    const tel = "34600119100";
+    const o = mkCallable("gate-stress", "9100", tel, 30);
+    try {
+      // Configuración que DEBE permitir.
+      db.setSetting("ai_calls_enabled", "1"); db.setSetting("calls_shadow_mode", "0");
+      db.setSetting("calls_daily_cap", "500"); db.setSetting("calls_allowlist", tel); db.setSetting("calls_pilot_mode", "1");
+      const permitidos = new Set<string>();
+      for (let i = 0; i < 100; i++) permitidos.add(JSON.stringify(gates.checkManualCallGates(db.getOrderById(o.id)!, enFranja, noHoliday)));
+      assert.equal(permitidos.size, 1, "el veredicto de ALLOW es estable");
+      assert.equal(JSON.parse([...permitidos][0]).allowed, true);
+      // Configuración que DEBE bloquear.
+      db.setSetting("calls_allowlist", "");
+      const bloqueados = new Set<string>();
+      for (let i = 0; i < 100; i++) bloqueados.add(JSON.stringify(gates.checkManualCallGates(db.getOrderById(o.id)!, enFranja, noHoliday)));
+      assert.equal(bloqueados.size, 1, "el veredicto de BLOCK es estable");
+      assert.equal(JSON.parse([...bloqueados][0]).code, "pilot_allowlist_empty");
+    } finally {
+      db.setSetting("calls_pilot_mode", "");
+      resetCallCfg();
+    }
   });
 
   await test("OPS · retell:doctor audita la VERSIÓN FIJADA y separa API auth de firma real de webhook", () => {
