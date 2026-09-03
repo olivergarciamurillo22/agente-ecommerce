@@ -10,7 +10,7 @@
 // globals.css. Nada de colores sueltos por los componentes.
 // ============================================================
 
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 
 // --- Formateadores compartidos ---
 
@@ -203,16 +203,25 @@ export function MetricCell({ label, value, support, status, onClick, active }: {
 
 // --- Navegación secundaria ---
 
-/** Pestañas con indicador inferior. Distintas de los filtros a propósito. */
+/** Pestañas con indicador inferior. Distintas de los filtros a propósito.
+ *  En móvil la fila no cabe entera: la pestaña activa se trae SOLA a la
+ *  vista, para que nadie tenga que adivinar dónde está ni descubrir por
+ *  accidente que la fila se desplaza. */
 export function TabBar<T extends string>({ tabs, value, onChange, label, counts }: { tabs: Array<{ id: T; label: string }>; value: T; onChange: (t: T) => void; label: string; counts?: Partial<Record<T, number | undefined>> }) {
+  const activeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    // `nearest` no mueve la página, solo el carril de pestañas.
+    activeRef.current?.scrollIntoView({ inline: "nearest", block: "nearest", behavior: "smooth" });
+  }, [value]);
   return (
-    <div role="tablist" aria-label={label} className="flex gap-6 overflow-x-auto border-b border-brand-border [scrollbar-width:none]">
+    <div role="tablist" aria-label={label} className="flex gap-5 md:gap-6 overflow-x-auto border-b border-brand-border no-scrollbar">
       {tabs.map((t) => {
         const active = t.id === value;
         const n = counts?.[t.id];
         return (
           <button
             key={t.id}
+            ref={active ? activeRef : undefined}
             type="button"
             role="tab"
             aria-selected={active}

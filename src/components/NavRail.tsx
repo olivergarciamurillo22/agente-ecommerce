@@ -240,7 +240,7 @@ export default function NavRail({
       {/* ── Móvil: 4 áreas de operación + Más, con label SIEMPRE visible ── */}
       <nav
         aria-label="Navegación principal"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 grid grid-cols-5 border-t border-brand-border bg-brand-surface/95 backdrop-blur pb-[max(env(safe-area-inset-bottom),4px)]"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 h-[var(--mobile-nav-h)] grid grid-cols-5 border-t border-brand-border bg-brand-surface/95 backdrop-blur pb-[max(env(safe-area-inset-bottom),4px)]"
       >
         {MOBILE_PRIMARY.map((id) => {
           const it = NAV_ITEMS.find((i) => i.id === id)!;

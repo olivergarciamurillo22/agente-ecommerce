@@ -568,7 +568,7 @@ export default function OrdersPanel() {
     : [];
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-6 py-5 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-6 py-5 pb-8">
       <PageHeader title="Pedidos" description="Confirmar, corregir y liberar pedidos contra reembolso." />
 
       {/* KPIs — una sola superficie agrupada con divisiones finas (§40.2, §39) */}
@@ -619,7 +619,7 @@ export default function OrdersPanel() {
           )}
           <span className="ml-auto text-[13px] text-brand-tertiary tabular-nums">{visible.length} pedidos</span>
         </div>
-        <div className="flex items-center gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 [scrollbar-width:none]" role="group" aria-label="Filtrar por estado">
+        <div className="flex items-center gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 no-scrollbar" role="group" aria-label="Filtrar por estado">
           {FILTERS.filter((f) => f.primary).map((f) => (
             <Chip key={f.key} active={filter === f.key} onClick={() => setFilter(f.key)} count={f.key === "all" ? undefined : countBy(f.key)}>
               {f.label}

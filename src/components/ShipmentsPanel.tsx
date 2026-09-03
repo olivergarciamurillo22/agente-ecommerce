@@ -239,7 +239,7 @@ export default function ShipmentsPanel() {
   const activeTab = TABS.find((t) => t.id === tab) ?? TABS[0];
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
       <div className="max-w-[1280px] space-y-5">
         {/* ── Cabecera: corte de Beeping + sync manual ── */}
         <section>
@@ -308,13 +308,13 @@ export default function ShipmentsPanel() {
 
           {/* ── Filtros ── */}
           {!data ? (
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
               {Array.from({ length: 6 }).map((_, i) => (
                 <Skeleton key={i} className="h-8 w-24 shrink-0" />
               ))}
             </div>
           ) : (
-            <div className="flex gap-2 overflow-x-auto pb-1">
+            <div className="flex gap-2 overflow-x-auto pb-1 no-scrollbar">
               {TABS.map((t) => (
                 <Chip key={t.id} active={tab === t.id} onClick={() => setTab(t.id)} count={tabCount(data, t.id)}>
                   {t.label}

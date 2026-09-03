@@ -245,7 +245,7 @@ export default function CodCalculatorPanel() {
     light.light === "green" ? "text-emerald-600" : light.light === "amber" ? "text-amber-600" : light.light === "red" ? "text-red-600" : "text-brand-muted";
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
       <div className="max-w-[1280px] space-y-6">
         {/* Cabecera + modelo */}
         <div>
