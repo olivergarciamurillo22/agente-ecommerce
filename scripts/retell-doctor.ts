@@ -28,8 +28,20 @@ const ARGS = new Set(process.argv.slice(2));
 const UNBLOCK = ARGS.has("--unblock");
 const JSON_OUT = ARGS.has("--json");
 
+/** Los 12 resultados que el backend entiende (results.ts). */
+const CALL_RESULTS_ESPERADOS = [
+  "confirmado", "confirmado_con_correccion", "cancelado", "no_reconoce_pedido",
+  "numero_equivocado", "no_volver_a_llamar", "incidencia_precio", "no_disponible",
+  "rellamar", "no_contesta", "buzon_de_voz", "fallo_tecnico",
+];
+
 interface Verdict {
   contract: "OK" | "FAIL";
+  /** ¿La API key sirve para la API (crear llamadas)? */
+  apiAuth: "PASS" | "FAIL" | "UNKNOWN";
+  /** ¿Ha validado alguna firma REAL de webhook? Solo la key con distintivo
+   *  "webhook" firma los webhooks: que la API funcione NO lo demuestra. */
+  realWebhookSignature: "PASS" | "UNVERIFIED_EXTERNAL";
   contractIssues: string[];
   live: "OK" | "FAIL" | "UNVERIFIED_EXTERNAL";
   liveIssues: string[];
@@ -57,6 +69,8 @@ async function main(): Promise<void> {
 
   const verdict: Verdict = {
     contract: "OK",
+    apiAuth: "UNKNOWN",
+    realWebhookSignature: "UNVERIFIED_EXTERNAL",
     contractIssues: [],
     live: "UNVERIFIED_EXTERNAL",
     liveIssues: [],
@@ -165,6 +179,13 @@ async function main(): Promise<void> {
     const review = (db.prepare("SELECT COUNT(*) AS n FROM call_attempts WHERE state = 'manual_review'").get() as { n: number }).n;
     const inFlight = (db.prepare("SELECT COUNT(*) AS n FROM call_attempts WHERE state IN ('dialing','in_flight')").get() as { n: number }).n;
     console.log(`   DNC: ${dnc} teléfono(s) · intentos en revisión manual: ${review} · en curso: ${inFlight}`);
+    const marcaFirma = (db.prepare("SELECT value FROM settings WHERE key = 'retell_webhook_signature_verified_at'").get() as { value: string } | undefined)?.value;
+    if (marcaFirma) {
+      verdict.realWebhookSignature = "PASS";
+      console.log(`   ● firma REAL de webhook verificada el ${new Date(Number(marcaFirma) * 1000).toISOString()}`);
+    } else {
+      console.log("   ◐ ninguna firma REAL de webhook ha validado todavía (UNVERIFIED_EXTERNAL)");
+    }
     if (verdict.blockedReason) {
       console.log(`   ○ LLAMADAS BLOQUEADAS por el sistema: ${verdict.blockedReason}`);
       if (UNBLOCK) {
@@ -204,19 +225,43 @@ async function main(): Promise<void> {
     verdict.live = "FAIL";
     verdict.liveIssues.push("falta RETELL_AGENT_ID");
   } else {
-    const agent = await get(`/get-agent/${agentId}`, key);
+    // La API key SÍ sirve para la API (crear llamadas). Es una cosa DISTINTA
+    // de que sirva para verificar webhooks: eso solo lo puede decir una firma
+    // real (§6 del contrato: la key con distintivo "webhook").
+    const agentActual = await get(`/get-agent/${agentId}`, key);
+    verdict.apiAuth = agentActual.status === 401 || agentActual.status === 403 ? "FAIL" : agentActual.ok ? "PASS" : "UNKNOWN";
+
+    // SE AUDITA LA VERSIÓN FIJADA, no el borrador. Sin pin numérico no hay
+    // nada que auditar: mirar el draft y cantar PASS sería mentir, porque las
+    // llamadas NO usan el draft.
+    const agent = pinIssue ? agentActual : await get(`/get-agent/${agentId}?version=${encodeURIComponent(version)}`, key);
     if (!agent.ok) {
-      console.log(`   ○ no se pudo leer el agente (HTTP ${agent.status}): ${JSON.stringify(agent.json).slice(0, 150)}`);
+      console.log(`   ○ no se pudo leer el agente${pinIssue ? "" : ` en su versión ${version}`} (HTTP ${agent.status}): ${JSON.stringify(agent.json).slice(0, 150)}`);
       verdict.live = "FAIL";
       verdict.liveIssues.push(`get-agent HTTP ${agent.status}`);
+    } else if (pinIssue) {
+      console.log("   ○ sin pin numérico solo se puede mirar el BORRADOR, y las llamadas no usan el borrador: no se declara PASS.");
+      verdict.live = "FAIL";
+      verdict.liveIssues.push("sin RETELL_AGENT_VERSION numérica no hay versión que auditar");
     } else {
       verdict.live = "OK";
       const a = agent.json as Record<string, unknown>;
+      console.log(`   Auditando la versión FIJADA: ${version}`);
+      if (String(a.version ?? "") !== version) {
+        console.log(`   ○ Retell devolvió la versión ${String(a.version ?? "?")} al pedir la ${version}`);
+        verdict.live = "FAIL";
+        verdict.liveIssues.push(`get-agent?version=${version} devolvió ${String(a.version ?? "?")}`);
+      }
       console.log(`   ● ${String(a.agent_name ?? agentId)}`);
-      console.log(`   Versión actual : ${String(a.version ?? "?")} · publicada: ${a.is_published === true ? "sí" : "NO (draft)"}`);
+      console.log(`   Versión        : ${String(a.version ?? "?")} · publicada: ${a.is_published === true ? "sí" : "NO (borrador)"}`);
+      if (a.is_published !== true) {
+        verdict.live = "FAIL";
+        verdict.liveIssues.push(`la versión ${version} NO está publicada (es un borrador y puede cambiar bajo los pies)`);
+      }
       console.log(`   Voz            : ${String(a.voice_id ?? "?")} · idioma: ${String(a.language ?? "?")}`);
-      if (!pinIssue && String(a.version) !== version) {
-        console.log(`   ◐ la versión fijada (${version}) NO es la actual del dashboard (${String(a.version)}): las llamadas usarán la ${version} — es lo esperado si la ${String(a.version)} es un draft en curso`);
+      const actual = agentActual.ok ? String((agentActual.json as Record<string, unknown>).version ?? "?") : "?";
+      if (actual !== version) {
+        console.log(`   · el borrador del dashboard va por la ${actual}; las llamadas usan la ${version} (esperado si hay cambios sin publicar)`);
       }
       // ¿Existe la versión fijada como PUBLICADA? (list agent versions)
       if (!pinIssue) {
@@ -272,6 +317,43 @@ async function main(): Promise<void> {
         }
       }
 
+      // ── Análisis post-llamada de ESTA versión, contra el contrato REAL ──
+      console.log("\n   ANÁLISIS POST-LLAMADA (de la versión fijada)");
+      const pca = (Array.isArray(a.post_call_analysis_data) ? a.post_call_analysis_data : []) as Array<Record<string, unknown>>;
+      if (pca.length === 0) {
+        console.log("   ○ la versión no declara post_call_analysis_data: sin análisis no llega ningún resultado");
+        verdict.live = "FAIL";
+        verdict.liveIssues.push("sin post_call_analysis_data en la versión fijada");
+      } else {
+        const nombres = new Set(pca.map((c) => String(c.name ?? "")));
+        console.log(`   campos: ${[...nombres].join(", ")}`);
+        // Resultado: el selector con los 12 enums del backend (o su alias real).
+        const campoResultado = pca.find((c) => c.name === "resultado_llamada" || c.name === "resultado");
+        if (!campoResultado) {
+          console.log("   ○ falta el campo del resultado (resultado_llamada / resultado)");
+          verdict.live = "FAIL";
+          verdict.liveIssues.push("la versión fijada no declara el campo del resultado");
+        } else {
+          const opciones = (Array.isArray(campoResultado.choices) ? campoResultado.choices : []).map(String);
+          const faltan = CALL_RESULTS_ESPERADOS.filter((r) => !opciones.includes(r));
+          const sobran = opciones.filter((o) => !CALL_RESULTS_ESPERADOS.includes(o));
+          console.log(`   ${ok(faltan.length === 0 && sobran.length === 0)} ${String(campoResultado.name)}: ${opciones.length} opciones` +
+            (faltan.length ? ` · FALTAN: ${faltan.join(", ")}` : "") + (sobran.length ? ` · SOBRAN: ${sobran.join(", ")}` : ""));
+          if (faltan.length) verdict.liveIssues.push(`el selector de resultado no ofrece: ${faltan.join(", ")}`);
+          if (sobran.length) verdict.liveIssues.push(`el selector de resultado ofrece valores que el backend no entiende: ${sobran.join(", ")}`);
+        }
+        // Campos PLANOS del contrato real (datos_corregidos NO se exige).
+        for (const campo of ["direccion_corregida", "localidad_corregida", "codigo_postal_corregido", "telefono_alternativo", "pidio_no_llamar", "momento_rellamada"]) {
+          if (!nombres.has(campo)) {
+            console.log(`   ◐ no declara "${campo}": ese dato nunca llegará`);
+            verdict.liveIssues.push(`falta el campo ${campo} en el análisis`);
+          }
+        }
+        if (nombres.has("datos_corregidos")) {
+          console.log("   · declara datos_corregidos (contenedor): el backend lo acepta, pero el contrato preferido es PLANO");
+        }
+      }
+
       console.log("\n   NÚMERO SALIENTE Y WEBHOOK");
       const numbers = await get(`/list-phone-numbers`, key);
       if (numbers.ok && Array.isArray(numbers.json)) {
@@ -297,9 +379,11 @@ async function main(): Promise<void> {
   console.log("\n════════ VEREDICTO ════════");
   console.log(`  RETELL_CONTRACT : ${verdict.contract}${verdict.contractIssues.length ? ` — ${verdict.contractIssues.join(" · ")}` : ""}`);
   console.log(`  RETELL_LIVE     : ${verdict.live}${verdict.liveIssues.length ? ` — ${verdict.liveIssues.join(" · ")}` : ""}`);
+  console.log(`  RETELL_API_AUTH : ${verdict.apiAuth}${verdict.apiAuth === "PASS" ? " (la key sirve para CREAR llamadas)" : ""}`);
+  console.log(`  RETELL_REAL_WEBHOOK_SIGNATURE : ${verdict.realWebhookSignature}${verdict.realWebhookSignature === "UNVERIFIED_EXTERNAL" ? " (ninguna firma REAL ha validado: comprueba que RETELL_API_KEY es la que lleva el distintivo 'webhook')" : ""}`);
   console.log(`  CALLS_BLOCKED   : ${verdict.blockedReason ?? "none"}${verdict.killSwitchActive ? " · EMERGENCY_STOP activo" : ""}`);
-  console.log("  AUTO_CALLS      : OFF (piloto manual: este doctor no lo enciende; ver RETELL-ENABLE-AUTO-CALLS.md)");
-  console.log("  Recuerda: esto NO sustituye la llamada de prueba real al móvil de Pedro (RETELL-FIRST-REAL-CALL.md).\n");
+  console.log("  AUTO_CALLS      : OFF (piloto manual: este doctor no lo enciende)");
+  console.log("  Recuerda: esto NO sustituye la llamada de prueba real al móvil de Pedro (docs/retell/PRODUCTION-VALIDATION.md).\n");
   if (JSON_OUT) console.log(JSON.stringify(verdict));
 
   if (verdict.contract === "FAIL" || verdict.live === "FAIL") process.exit(1);

@@ -6866,6 +6866,38 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("OPS · retell:doctor audita la VERSIÓN FIJADA y separa API auth de firma real de webhook", () => {
+    const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+    const doc = leer("scripts/retell-doctor.ts");
+    // Auditar el borrador y cantar PASS sería mentir: las llamadas usan la
+    // versión fijada, no el draft.
+    assert.match(doc, /get-agent\/\$\{agentId\}\?version=/, "pide EXPLÍCITAMENTE la versión fijada");
+    assert.match(doc, /sin RETELL_AGENT_VERSION numérica no hay versión que auditar/, "sin pin no declara PASS");
+    assert.match(doc, /NO está publicada/, "una versión sin publicar es un fallo");
+    // Post-call analysis contra los 12 enums del backend.
+    assert.match(doc, /post_call_analysis_data/, "audita el análisis post-llamada de esa versión");
+    assert.match(doc, /CALL_RESULTS_ESPERADOS/, "compara el selector con los enums del backend");
+    const esperados = /const CALL_RESULTS_ESPERADOS = \[([\s\S]*?)\];/.exec(doc)![1];
+    for (const r of CALL_RESULTS) assert.ok(esperados.includes(`"${r}"`), `el doctor espera el resultado ${r}`);
+    // Campos PLANOS del contrato real; datos_corregidos NO se exige.
+    for (const campo of ["direccion_corregida", "localidad_corregida", "codigo_postal_corregido", "telefono_alternativo", "pidio_no_llamar", "momento_rellamada"]) {
+      assert.ok(doc.includes(`"${campo}"`), `el doctor comprueba el campo plano ${campo}`);
+    }
+    assert.ok(!/verdict\.liveIssues\.push\([^)]*datos_corregidos/.test(doc), "NO se exige el contenedor datos_corregidos");
+    // Los dos veredictos son cosas distintas.
+    assert.match(doc, /RETELL_API_AUTH/, "la key sirve para la API…");
+    assert.match(doc, /RETELL_REAL_WEBHOOK_SIGNATURE/, "…es distinto de que sirva para firmar webhooks");
+    assert.match(doc, /UNVERIFIED_EXTERNAL/, "sin firma real, no se declara verificado");
+    // La documentación citada tiene que EXISTIR y estar versionada.
+    for (const m of doc.matchAll(/docs\/[a-zA-Z0-9/_-]+\.md/g)) {
+      assert.ok(fs.existsSync(path.join(process.cwd(), m[0])), `retell:doctor cita ${m[0]} y debe existir`);
+    }
+    const rd = leer("scripts/readiness.ts");
+    for (const m of rd.matchAll(/docs\/[a-zA-Z0-9/_-]+\.md/g)) {
+      assert.ok(fs.existsSync(path.join(process.cwd(), m[0])), `readiness cita ${m[0]} y debe existir`);
+    }
+  });
+
   await test("OPS · retell:reconcile-call SOLO LEE de Retell y nunca crea una segunda llamada", () => {
     const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
     const sc = leer("scripts/retell-reconcile-call.ts");

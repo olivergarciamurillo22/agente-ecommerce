@@ -182,8 +182,8 @@ function retellReadiness(): { manual: string; auto: string; detalle: string[] } 
     ? "NO — el prompt versionado no valida"
     : externosPendientes
       ? "LOCAL OK — PENDING EXTERNAL (credenciales/pin en el .env del NAS + retell:doctor + 1 llamada real al móvil de Pedro)"
-      : "LOCAL OK — falta la llamada real al móvil de Pedro (RETELL-FIRST-REAL-CALL.md)";
-  return { manual, auto: "NO — por diseño (piloto manual; ver RETELL-ENABLE-AUTO-CALLS.md)", detalle };
+      : "LOCAL OK — falta la llamada real al móvil de Pedro (docs/retell/PRODUCTION-VALIDATION.md)";
+  return { manual, auto: "NO — por diseño (piloto manual; ver docs/retell/PRODUCTION-VALIDATION.md)", detalle };
 }
 
 console.log("\n── RETELL (piloto MANUAL; lo automático no se enciende desde aquí) ──");
