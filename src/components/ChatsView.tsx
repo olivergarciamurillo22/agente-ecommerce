@@ -17,6 +17,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ConversationItem } from "./Dashboard";
 import ConversationPanel from "./ConversationPanel";
+import SafetyBanner from "./SafetyBanner";
 import Avatar from "./Avatar";
 import {
   Card,
@@ -451,13 +452,19 @@ export default function ChatsView({
         <ChatList conversations={conversations} selectedId={selectedId} onSelect={handleSelect} />
       </div>
       {mobileChatOpen && selected && (
-        <div className="md:hidden fixed inset-0 z-[45] bg-brand-bg">
-          <ConversationPanel
-            conversation={selected}
-            onRefresh={onRefresh}
-            onBack={() => setMobileChatOpen(false)}
-            onOpenContext={() => setMobileContextOpen(true)}
-          />
+        <div className="md:hidden fixed inset-0 z-[45] flex flex-col bg-brand-bg">
+          {/* La barra de entorno viaja con el chat: a pantalla completa tapaba
+              el "Modo seguro / Entorno de prueba", y desde el móvil se puede
+              escribir. Quien escribe tiene que saber si eso sale de verdad. */}
+          <SafetyBanner />
+          <div className="flex-1 min-h-0">
+            <ConversationPanel
+              conversation={selected}
+              onRefresh={onRefresh}
+              onBack={() => setMobileChatOpen(false)}
+              onOpenContext={() => setMobileContextOpen(true)}
+            />
+          </div>
         </div>
       )}
 
