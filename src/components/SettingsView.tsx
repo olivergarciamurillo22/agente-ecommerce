@@ -741,7 +741,7 @@ function CallsSection() {
 /** Envoltorio de scroll con el mismo ritmo que el resto de vistas. */
 function ScrollPane({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
       <div className={wide ? "max-w-[1280px]" : "max-w-[880px]"}>{children}</div>
     </div>
   );
@@ -753,7 +753,7 @@ export default function SettingsView() {
   return (
     <div className="h-full flex flex-col md:flex-row">
       {/* Móvil: chips horizontales */}
-      <div className="md:hidden shrink-0 flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto">
+      <div className="md:hidden shrink-0 flex items-center gap-2 px-4 pt-4 pb-3 overflow-x-auto no-scrollbar">
         {SECTIONS.map((s) => (
           <Chip key={s.id} active={section === s.id} onClick={() => setSection(s.id)}>
             {s.label}

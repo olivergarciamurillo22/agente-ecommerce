@@ -64,7 +64,23 @@
   --shadow-float: 0 12px 32px rgba(0, 0, 0, 0.10), 0 2px 6px rgba(0, 0, 0, 0.05);
   --duration-fast: 160ms;
   --duration-base: 220ms;
+
+  /* Conversaciones: paleta de WhatsApp real (modo claro). Vive aquí y NO en
+     la paleta `brand-*` porque es una cita literal de otra aplicación: el
+     chat tiene que parecerse a WhatsApp, el resto del panel no. */
+  --color-chat-wallpaper: #efe7de;
+  --color-chat-in: #ffffff;          /* burbuja entrante */
+  --color-chat-out: #d9fdd3;         /* burbuja saliente (verde WhatsApp) */
+  --color-chat-meta: #667781;        /* hora y metadatos dentro de la burbuja */
+  --color-chat-header: #f0f2f5;      /* cabecera y barra de escribir */
+  --color-chat-send: #00a884;        /* botón de enviar */
 }
+
+/* Alto REAL de la barra de navegación móvil (56 px + safe-area del iPhone).
+   Lo usan la propia barra y el hueco que le reserva el shell: una sola
+   fuente de verdad para que no vuelva a tapar el contenido de ninguna
+   pantalla — el bug que dejaba el cuadro de escribir del chat debajo. */
+:root { --mobile-nav-h: calc(56px + max(env(safe-area-inset-bottom), 4px)); }
 
 html, body { height: 100%; }
 
@@ -85,6 +101,12 @@ body {
 ::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.12); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.22); }
 
+/* Carriles que se desplazan a lo horizontal (pestañas, filtros): se
+   desplazan, pero SIN barra de scroll a la vista — en móvil aparecía una
+   barra gris bajo las pestañas que parecía un fallo de pintado. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
 /* Latido del punto de estado crítico */
 @keyframes brand-pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
@@ -100,6 +122,42 @@ body {
 
 /* Sin grano: `brand-grain` se mantiene como clase inerte por compatibilidad */
 .brand-grain::before { content: none; }
+
+/* ============================================================
+   Conversaciones con aspecto de WhatsApp real
+   ============================================================ */
+
+/* Fondo del hilo: el beige de WhatsApp con un patrón MUY tenue (SVG en
+   línea, sin peticiones de red ni imágenes externas). */
+.chat-wallpaper {
+  background-color: var(--color-chat-wallpaper);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='84' height='84' viewBox='0 0 84 84'%3E%3Cg fill='none' stroke='%23000' stroke-opacity='0.035' stroke-width='1.4' stroke-linecap='round'%3E%3Cpath d='M12 16c3-4 7-4 10 0M60 26c3-4 7-4 10 0'/%3E%3Ccircle cx='68' cy='60' r='4'/%3E%3Ccircle cx='20' cy='52' r='3'/%3E%3Cpath d='M38 40l6 6M44 40l-6 6'/%3E%3Cpath d='M28 74h8M52 12h8'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* Colita de la burbuja (el triangulito de WhatsApp). */
+.chat-bubble { position: relative; }
+.chat-bubble-in::after,
+.chat-bubble-out::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 13px;
+}
+.chat-bubble-in::after {
+  left: -8px;
+  background: var(--color-chat-in);
+  clip-path: polygon(100% 0, 100% 100%, 0 0);
+}
+.chat-bubble-out::after {
+  right: -8px;
+  background: var(--color-chat-out);
+  clip-path: polygon(0 0, 0 100%, 100% 0);
+}
+
+/* La hora se sienta en la última línea del texto, como en WhatsApp: se
+   reserva el hueco con un espaciador y la hora se posiciona encima. */
+.chat-time-spacer { display: inline-block; width: 58px; }
 
 @media (prefers-reduced-motion: reduce) {
   .brand-pulse, .anim-slide-right, .anim-slide-up { animation: none; }

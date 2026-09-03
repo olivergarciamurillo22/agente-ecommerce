@@ -166,38 +166,31 @@ function ChatList({
               <li key={c.id}>
                 <button
                   onClick={() => onSelect(c.id)}
-                  className={`w-full text-left px-4 py-3.5 border-b border-brand-border/40 transition-colors duration-150 flex gap-3 items-start relative focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
+                  className={`relative flex w-full min-h-[76px] items-center gap-3 border-b border-brand-border/40 px-4 py-3 text-left transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
                     isSelected ? "bg-brand-surface-2" : "hover:bg-brand-surface"
                   }`}
                 >
-                  {isSelected && <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-brand-gold rounded-r" />}
-                  <Avatar label={label} size={40} />
+                  {isSelected && <span className="absolute left-0 top-0 bottom-0 w-[3px] rounded-r bg-brand-gold" />}
+                  <Avatar label={label} size={48} />
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center justify-between gap-2 mb-0.5">
-                      <div
-                        className={`text-sm truncate ${
-                          recent ? "font-bold text-brand-text" : "font-medium text-brand-text/90"
-                        }`}
-                      >
+                    <div className="mb-1 flex items-baseline justify-between gap-2">
+                      <div className={`truncate text-[15px] ${recent ? "font-semibold text-brand-text" : "font-medium text-brand-text/90"}`}>
                         {label}
                       </div>
-                      <span className="flex items-center gap-1.5 shrink-0">
-                        {recent ? <span className="h-1.5 w-1.5 rounded-full bg-brand-gold" aria-hidden /> : null}
-                        <span className="text-[10px] text-brand-muted/80">{shortAgo(c.last_message_at)}</span>
+                      <span className={`shrink-0 text-[12px] ${recent ? "font-medium text-wa-green" : "text-brand-muted/80"}`}>
+                        {shortAgo(c.last_message_at)}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-1.5">
                       <span
-                        className={`text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded font-bold shrink-0 ${
-                          c.mode === "AI" ? "bg-brand-surface-2 text-brand-text" : "bg-emerald-500/15 text-emerald-600"
+                        className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                          c.mode === "AI" ? "bg-brand-surface-2 text-brand-muted" : "bg-emerald-500/15 text-emerald-700"
                         }`}
                       >
                         {c.mode === "AI" ? "IA" : "TÚ"}
                       </span>
                       {c.last_message_preview ? (
-                        <div className={`text-xs truncate ${recent ? "text-brand-text/80" : "text-brand-muted"}`}>
-                          {c.last_message_preview}
-                        </div>
+                        <div className="truncate text-[13px] text-brand-muted">{c.last_message_preview}</div>
                       ) : null}
                     </div>
                   </div>
@@ -440,41 +433,39 @@ export default function ChatsView({
       {/* ── md+: lista | chat (| contexto en lg+) ── */}
       <div className="hidden md:grid h-full md:grid-cols-[280px_1fr] lg:grid-cols-[300px_1fr_320px]">
         <ChatList conversations={conversations} selectedId={selectedId} onSelect={onSelect} />
-        <ConversationPanel conversation={selected} onRefresh={onRefresh} />
+        <ConversationPanel
+          conversation={selected}
+          onRefresh={onRefresh}
+          onOpenContext={() => setMobileContextOpen(true)}
+        />
         <div className="hidden lg:block min-h-0 border-l border-brand-border bg-brand-bg/60">
           {contexto}
         </div>
       </div>
 
-      {/* ── móvil: drill-down ── */}
+      {/* ── Móvil: la lista ocupa la pantalla y el chat se abre ENCIMA de
+             todo (como al abrir un chat en WhatsApp). Antes el chat vivía
+             debajo de la cabecera + banner + pestañas + una barra de volver:
+             cinco franjas antes del primer mensaje. ── */}
       <div className="md:hidden h-full">
-        {!mobileChatOpen || !selected ? (
-          <div className="h-full grid grid-rows-1">
-            <ChatList conversations={conversations} selectedId={selectedId} onSelect={handleSelect} />
-          </div>
-        ) : (
-          <div className="h-full flex flex-col">
-            <div className="shrink-0 flex items-center justify-between gap-2 px-3 py-2 border-b border-brand-border bg-brand-surface/70 backdrop-blur">
-              <button
-                type="button"
-                onClick={() => setMobileChatOpen(false)}
-                className="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-sm text-brand-text hover:bg-brand-surface-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
-              >
-                ← Conversaciones
-              </button>
-              <GhostButton className={smallBtn} onClick={() => setMobileContextOpen(true)}>
-                Pedido
-              </GhostButton>
-            </div>
-            <div className="flex-1 min-h-0 grid grid-rows-1">
-              <ConversationPanel conversation={selected} onRefresh={onRefresh} />
-            </div>
-          </div>
-        )}
-        <ModalShell open={mobileContextOpen} onClose={() => setMobileContextOpen(false)}>
-          <div className="max-h-[70vh] overflow-y-auto -mx-1 px-1">{contexto}</div>
-        </ModalShell>
+        <ChatList conversations={conversations} selectedId={selectedId} onSelect={handleSelect} />
       </div>
+      {mobileChatOpen && selected && (
+        <div className="md:hidden fixed inset-0 z-[45] bg-brand-bg">
+          <ConversationPanel
+            conversation={selected}
+            onRefresh={onRefresh}
+            onBack={() => setMobileChatOpen(false)}
+            onOpenContext={() => setMobileContextOpen(true)}
+          />
+        </div>
+      )}
+
+      {/* La ficha del pedido es la misma en móvil y en tablet (en lg+ ya es
+          una columna fija y este modal no se usa). */}
+      <ModalShell open={mobileContextOpen} onClose={() => setMobileContextOpen(false)}>
+        <div className="max-h-[70vh] overflow-y-auto -mx-1 px-1">{contexto}</div>
+      </ModalShell>
     </div>
   );
 }

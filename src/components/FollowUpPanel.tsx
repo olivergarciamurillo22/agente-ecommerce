@@ -221,7 +221,7 @@ export default function FollowUpPanel({ onNavigate }: { onNavigate: (v: DockView
   };
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 md:py-7 pb-24 md:pb-10">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 md:py-7 pb-10">
       <div className="space-y-6">
         <PageHeader
           title="Seguimiento"
@@ -256,7 +256,7 @@ export default function FollowUpPanel({ onNavigate }: { onNavigate: (v: DockView
                 ) : null}
                 <span className="ml-auto text-[13px] text-brand-tertiary tabular-nums">{visible.length} de {total}</span>
               </div>
-              <div className="flex gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 [scrollbar-width:none]" role="group" aria-label="Filtrar por estado">
+              <div className="flex gap-1 overflow-x-auto -mx-4 px-4 md:mx-0 md:px-0 no-scrollbar" role="group" aria-label="Filtrar por estado">
                 <Chip active={bucket === "all"} onClick={() => setBucket("all")} count={total}>Todos</Chip>
                 {BUCKETS.map((b) => (
                   <Chip key={b.id} active={bucket === b.id} onClick={() => setBucket(b.id)} count={counts[b.id]}>

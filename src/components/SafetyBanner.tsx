@@ -116,7 +116,9 @@ export default function SafetyBanner() {
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        className="ml-auto shrink-0 font-medium text-brand-text underline-offset-4 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded-sm"
+        /* El área de toque ocupa TODO el alto de la barra (36 px): el texto
+           solo medía 20 px y en el móvil había que afinar mucho. */
+        className="ml-auto shrink-0 h-9 -mr-2 px-2 font-medium text-brand-text underline-offset-4 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 rounded-sm"
       >
         Ver estado
       </button>

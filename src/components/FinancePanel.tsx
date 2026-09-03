@@ -474,7 +474,7 @@ export default function FinancePanel() {
   });
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
       <div className="max-w-[1280px] space-y-7">
         {/* ── Cabecera: título + presets ── */}
         <section>

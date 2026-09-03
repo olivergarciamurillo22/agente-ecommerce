@@ -120,7 +120,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
   const ex = data?.extras;
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
       <div className="max-w-[1280px] space-y-8">
         {/* ── Saludo + estado del sistema (§6, bloque 1) ── */}
         <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
@@ -236,11 +236,14 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
               <Skeleton className="h-40" />
             ) : (
               <Card className="divide-y divide-brand-border">
+                {/* En móvil el motivo se lee entero (dos líneas): cortarlo a
+                    media frase dejaba avisos como "sin credencial: ejecuta
+                    npm ru…" sin forma de terminar de leerlos. */}
                 {flow.map((f) => (
-                  <div key={f.id} className="flex items-center gap-3 px-5 h-12">
+                  <div key={f.id} className="flex items-center gap-3 px-5 py-3 md:py-0 md:h-12">
                     <StatusDot status={healthToUi(f.status)} pulse={f.status === "critical"} />
                     <span className="text-[14px] text-brand-text w-20 sm:w-24 shrink-0">{f.id === "calls" ? "Llamadas" : f.label}</span>
-                    <span className="min-w-0 flex-1 text-[13px] text-brand-muted truncate" title={f.message}>{f.message || "—"}</span>
+                    <span className="min-w-0 flex-1 text-[13px] text-brand-muted line-clamp-2 md:truncate" title={f.message}>{f.message || "—"}</span>
                   </div>
                 ))}
                 {!systemOk && (

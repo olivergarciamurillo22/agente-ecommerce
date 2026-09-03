@@ -224,7 +224,11 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
         systemStatus={systemStatus}
         systemLabel={systemStatus === "ok" ? "Sistema operativo" : systemStatus === "warn" ? "Con avisos" : systemStatus === "error" ? "Atención requerida" : "Sistema"}
       />
-      <div className="flex-1 min-w-0 flex flex-col">
+      {/* El hueco de la barra móvil se reserva AQUÍ, una sola vez: la barra es
+          `fixed` y antes tapaba el final de cada pantalla (el cuadro de
+          escribir del chat quedaba debajo y no se podía responder desde el
+          móvil). Ninguna pantalla necesita ya saber que la barra existe. */}
+      <div className="flex-1 min-w-0 flex flex-col pb-[var(--mobile-nav-h)] md:pb-0">
         <DashboardHeader
           phone={phone}
           provider={provider}

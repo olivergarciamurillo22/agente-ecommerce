@@ -94,7 +94,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
   const closeDetail = useCallback(() => setDetail(null), []);
 
   return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-24 md:pb-8">
+    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
       <div className="space-y-6">
         {/* ── Título ── */}
         <header className="flex flex-col items-start gap-3 md:flex-row md:items-end md:justify-between">
