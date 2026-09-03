@@ -1,6 +1,18 @@
-// Diagnóstico de errores comunes del kit.
-// Ejecutar con: npm run doctor
-// Cross-platform.
+// ============================================================
+// Diagnóstico de la MÁQUINA DE DESARROLLO (Mac de Óliver).
+//
+//   npm run doctor
+//
+// Comprueba lo propio de un entorno de desarrollo: .env.local,
+// node_modules, que TypeScript compila… Nada de eso existe dentro del
+// contenedor de producción, donde la configuración vive en .env y no hay
+// dependencias de desarrollo.
+//
+// P5 (03-09-2026): ejecutado en producción, este comando pintaba rojos
+// falsos ("falta .env.local") y por eso dejó de creerse. Ahora detecta el
+// contexto y redirige al comando correcto en vez de mentir.
+// El estado de producción se mira con: npm run readiness:runtime
+// ============================================================
 
 import "./env-loader";
 import fs from "node:fs";
@@ -16,6 +28,30 @@ const COLORS = {
   dim: "\x1b[2m",
   bold: "\x1b[1m",
 };
+
+/** ¿Estamos DENTRO del contenedor de producción y no en el Mac? */
+function esRuntimeDeProduccion(): boolean {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const path = require("node:path") as typeof import("node:path");
+  const hayEnvLocal = fs.existsSync(path.resolve(process.cwd(), ".env.local"));
+  const modoProduccion = process.env.NODE_ENV === "production" || (process.env.APP_MODE ?? "") === "production";
+  // En el contenedor no hay .env.local (la configuración es .env) y no
+  // existe la carpeta de tests: es la huella inequívoca del runtime.
+  const hayTests = fs.existsSync(path.resolve(process.cwd(), "tests"));
+  return modoProduccion && !hayEnvLocal && !hayTests;
+}
+
+if (esRuntimeDeProduccion()) {
+  console.log("\n  Este diagnóstico es para la máquina de DESARROLLO, no para producción.");
+  console.log("  Aquí no hay .env.local ni dependencias de desarrollo: sus comprobaciones");
+  console.log("  darían rojos falsos.\n");
+  console.log("  Usa en su lugar:");
+  console.log("    npm run readiness:runtime          estado real del sistema");
+  console.log("    npm run db:health                  esquema e integridad");
+  console.log("    npm run whatsapp:templates:doctor  plantillas contra Meta");
+  console.log("    npm run retell:doctor              llamadas\n");
+  process.exit(2);
+}
 
 const issues: string[] = [];
 

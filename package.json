@@ -43,6 +43,7 @@
     "local:reset": "tsx scripts/local-reset.ts",
     "casamable:simulate": "tsx scripts/casamable-simulate.ts",
     "readiness": "tsx scripts/readiness.ts",
+    "readiness:runtime": "tsx scripts/readiness-runtime.ts",
     "deploy:precheck": "tsx scripts/deploy-precheck.ts",
     "calls:mode": "tsx scripts/calls-mode.ts",
     "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts",
@@ -55,7 +56,8 @@
     "meta-ads:doctor": "tsx scripts/meta-ads-doctor.ts",
     "meta-ads:sync": "tsx scripts/meta-ads-sync.ts",
     "retell:pilot": "tsx scripts/retell-pilot.ts",
-    "deploy:guard": "tsx scripts/deploy-guard.ts"
+    "deploy:guard": "tsx scripts/deploy-guard.ts",
+    "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

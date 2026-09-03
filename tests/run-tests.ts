@@ -6866,6 +6866,73 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("OPS · retell:reconcile-call SOLO LEE de Retell y nunca crea una segunda llamada", () => {
+    const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+    const sc = leer("scripts/retell-reconcile-call.ts");
+    assert.match(sc, /\/v2\/get-call\//, "consulta el estado con GET get-call");
+    assert.ok(!/create-phone-call|createOutboundCall|manualDialOrder|dialDueAttempts/.test(sc), "ni una función que cree llamadas");
+    assert.ok(!/method:\s*["']POST["']/.test(sc), "ninguna escritura hacia Retell");
+    assert.match(sc, /DRY RUN/, "dry run por defecto");
+    assert.match(sc, /flag\("apply"\)/, "aplicar exige --apply explícito");
+    // El dry run no puede escribir en la base bajo ningún concepto.
+    const antesDeAplicar = sc.slice(0, sc.indexOf("if (!aplicar)"));
+    assert.ok(!/applyCallAnalysis|setSetting|addDncPhone|transitionCallAttempt/.test(antesDeAplicar), "el dry run no aplica nada");
+  });
+
+  await test("OPS · readiness de RUNTIME separado del de release: sin tsc, sin suite, sin exigir secretos vacíos", () => {
+    const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+    const runtime = leer("scripts/readiness-runtime.ts");
+    assert.ok(!/typecheck|npm test|spawnSync|casamable:simulate/.test(runtime), "el readiness de runtime NO ejecuta tooling de desarrollo");
+    assert.ok(!/git status|porcelain/.test(runtime), "no exige un árbol de git limpio");
+    for (const check of ["APP_MODE", "EMERGENCY_STOP", "Esquema", "Scheduler", "Plantilla de confirmación", "Bloqueo global de llamadas", "Versión del agente", "Firma real de webhooks Retell"]) {
+      assert.ok(runtime.includes(check), `el readiness de runtime comprueba: ${check}`);
+    }
+    assert.match(runtime, /RUNTIME READY WITH WARNINGS/, "puede devolver AVISO sin ser un fallo");
+    // Y el de release sigue siendo el de release.
+    const release = leer("scripts/readiness.ts");
+    assert.match(release, /typecheck/, "el de release sí compila");
+    // El doctor legacy no puede mentir en producción.
+    const doctor = leer("scripts/doctor.ts");
+    assert.match(doctor, /esRuntimeDeProduccion/, "el doctor detecta el contexto");
+    assert.match(doctor, /readiness:runtime/, "y redirige al comando correcto");
+    const pkg = JSON.parse(leer("package.json")) as { scripts: Record<string, string> };
+    for (const s of ["readiness", "readiness:runtime", "deploy:guard", "retell:reconcile-call"]) {
+      assert.ok(pkg.scripts[s], `el comando ${s} existe de verdad en package.json`);
+    }
+  });
+
+  await test("OPS · la identidad del proyecto de Compose viaja con el fichero (no depende del directorio)", () => {
+    const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+    const compose = leer("docker-compose.yml");
+    assert.match(compose, /^name: repo-v3c$/m, "el proyecto se llama SIEMPRE repo-v3c");
+    // Y la guarda compara montajes, no nombres.
+    const guard = leer("scripts/deploy-guard.ts");
+    assert.match(guard, /\.Mounts/, "la guarda mira los montajes REALES");
+    assert.match(guard, /process\.exit\(1\)/, "y bloquea con código de error si hay dos");
+    // Solo puede EJECUTAR verbos de lectura (los `docker stop` que imprime
+    // son una sugerencia para el operador, no una acción suya).
+    const verbos = [...guard.matchAll(/docker\(\[\s*"([a-z]+)"/g)].map((m) => m[1]);
+    assert.ok(verbos.length > 0, "la guarda invoca docker");
+    for (const v of verbos) assert.ok(["ps", "inspect"].includes(v), `la guarda solo lee; encontrado 'docker ${v}'`);
+    // La documentación operativa está VERSIONADA y sus comandos existen.
+    for (const d of ["docs/deploy/NAS-PRODUCTION.md", "docs/deploy/ROLLBACK.md", "docs/retell/PRODUCTION-VALIDATION.md"]) {
+      assert.ok(fs.existsSync(path.join(process.cwd(), d)), `${d} existe y está versionado`);
+    }
+    const nas = leer("docs/deploy/NAS-PRODUCTION.md");
+    // Puede NOMBRAR artifacts/ para explicar que no se usa; lo que no puede
+    // es apuntar a un fichero de ahí dentro (no viaja con el código).
+    assert.ok(!/artifacts\/[A-Za-z0-9]/.test(nas), "la operativa no apunta a ficheros de artifacts/ (está en .gitignore)");
+    const pkg = JSON.parse(leer("package.json")) as { scripts: Record<string, string> };
+    for (const m of nas.matchAll(/npm run ([a-z:-]+)/g)) {
+      assert.ok(pkg.scripts[m[1]], `NAS-PRODUCTION.md cita 'npm run ${m[1]}' y debe existir`);
+    }
+    const rollback = leer("docs/deploy/ROLLBACK.md");
+    assert.ok(!/down -v/.test(rollback.replace(/\*\*Nunca\*\* `docker compose down -v`\./g, "")), "el rollback jamás propone down -v");
+    for (const m of rollback.matchAll(/npm run ([a-z:-]+)/g)) {
+      assert.ok(pkg.scripts[m[1]], `ROLLBACK.md cita 'npm run ${m[1]}' y debe existir`);
+    }
+  });
+
   await test("RETELL · KILL SWITCH (P0): con EMERGENCY_STOP=1 ni el orquestador ni el botón manual crean llamadas", async () => {
     resetCallCfg(); cfgMod.clearCallsBlocked();
     const tel = "34600117500";
