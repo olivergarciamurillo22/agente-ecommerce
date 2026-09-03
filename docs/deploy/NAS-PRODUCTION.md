@@ -28,9 +28,11 @@ contenedor en marcha desde cualquier carpeta. No hace falta acordarse de
 
 ```bash
 # 1 · ¿Hay UN solo bot sobre los datos de producción?
-docker exec casamable-agent npm run deploy:guard
-#    (o desde el host, con Docker a mano:)
-#    npm run deploy:guard -- --data-dir /volume1/docker/CasamableAgent/data
+#     SE EJECUTA EN EL NAS, NO dentro del contenedor: necesita ver Docker
+#     (dentro no hay socket y el comando sale con "no se pudo hablar con
+#     Docker", que es honesto pero no responde a la pregunta).
+cd <carpeta del repo en el NAS>
+npm run deploy:guard -- --data-dir /volume1/docker/CasamableAgent/data
 ```
 
 Si dice **PELIGRO**, hay dos contenedores compartiendo la base: para uno y
