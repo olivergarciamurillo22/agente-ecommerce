@@ -13257,6 +13257,36 @@ async function main(): Promise<void> {
     });
   }
 
+  // ============ Compositor, conversor y lint de Landing ============
+  {
+    const { composeLanding } = await import("../src/lib/landing/composer");
+    const { convertLanding } = await import("../src/lib/landing/converter");
+    const { lintLiquidDir, lintLiquidFile } = await import("../src/lib/landing/lint");
+    const candidate = {
+      id: 77, sourceUrl:"https://example.test/p",sourceDomain:"example.test",fetchedAt:1,name:"Producto de prueba",category:null,
+      unitCostEur:5,sourceCurrency:"EUR",sourceCost:5,weightGrams:300,lengthCm:10,widthCm:8,heightCm:4,
+      variants:null,specs:null,claims:["Acero inoxidable"],state:"nuevo" as const,manualNote:null,scoring:null,reasons:[],createdAt:1,updatedAt:1,
+    };
+    await test("Landing · HTML autocontenido respeta unidades, breakpoints y secciones", () => {
+      const html=composeLanding(candidate);assert.doesNotMatch(html,/\drem\b|font-size\s*:\s*clamp/i);
+      const points=[...html.matchAll(/@media[^\{]*?(\d+)px/g)].map(m=>Number(m[1]));assert.deepEqual([...new Set(points)].sort(),[750,990]);
+      assert.ok(html.includes("--title:40px")&&html.includes("--title:64px"));
+      assert.equal((html.match(/<section\b[^>]*data-bloque=/g)??[]).length,(html.match(/<section\b/g)??[]).length);
+    });
+    await test("Landing · sin variantes no emite el bloque variantes",()=>assert.doesNotMatch(composeLanding(candidate),/data-bloque="variantes"/));
+    await test("Landing · el conversor produce N Liquid para N bloques y pasan lint",()=>{
+      const html=composeLanding(candidate),dir=fs.mkdtempSync(path.join(tmpDir,"landing-"));const files=convertLanding(html,dir);
+      assert.equal(files.filter(f=>f.endsWith(".liquid")).length,(html.match(/data-bloque=/g)??[]).length);
+      assert.deepEqual(lintLiquidDir(dir),[]);
+      for(const f of files.filter(f=>f.endsWith(".liquid"))){const s=fs.readFileSync(f,"utf8");assert.match(s,/:where\(h1,h2/);assert.doesNotMatch(s,/\drem\b/)}
+    });
+    await test("Landing · range inexacto y name de 26 caracteres fallan",()=>{
+      const dir=fs.mkdtempSync(path.join(tmpDir,"lint-")),[file]=convertLanding(composeLanding(candidate),dir).filter(f=>f.endsWith(".liquid"));
+      let s=fs.readFileSync(file,"utf8").replace('"max": 120','"max": 119');fs.writeFileSync(file,s);assert.ok(lintLiquidFile(file).some(x=>x.rule==="ranges_division_exacta"));
+      s=fs.readFileSync(file,"utf8").replace('"name": "iconos"','"name": "12345678901234567890123456"');fs.writeFileSync(file,s);assert.ok(lintLiquidFile(file).some(x=>x.rule==="nombres_25"));
+    });
+  }
+
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
   if (failures.length > 0) {
