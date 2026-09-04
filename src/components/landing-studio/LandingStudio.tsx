@@ -83,7 +83,20 @@ export default function LandingStudio() {
     setLoadingCandidates(true);
     setLoadError(null);
     const result = await hunterGet<{ candidates: SavedCandidate[] }>("candidates");
-    if (result.ok) setCandidates(result.candidates);
+    if (result.ok) {
+      setCandidates(result.candidates);
+      const pendingId = window.sessionStorage.getItem("casamable.landing-studio.pending-candidate");
+      const pending = result.candidates.find((candidate) => candidate.id === pendingId);
+      if (pending) {
+        const next = createLandingBlueprint(pending);
+        setProjects((prev) => prev.some((p) => p.blueprint.candidateId === pending.id) ? prev : [...prev, { blueprint: next, versions: [] }]);
+        setProjectId((current) => current || next.id);
+        setSelectedSectionId(next.sections[0]?.id ?? "");
+        setTab("viability");
+        setNotice("Proyecto creado desde la ficha del candidato.");
+        window.sessionStorage.removeItem("casamable.landing-studio.pending-candidate");
+      }
+    }
     else setLoadError(result.error);
     setLoadingCandidates(false);
   }, []);

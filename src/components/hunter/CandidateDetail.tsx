@@ -116,12 +116,14 @@ export default function CandidateDetail({
   onChanged,
   compareIds,
   onToggleCompare,
+  onGenerateLanding,
 }: {
   target: DetailTarget | null;
   onClose: () => void;
   onChanged: (candidate: WinningProductCandidate) => void;
   compareIds: string[];
   onToggleCompare: (id: string) => void;
+  onGenerateLanding: (candidate: WinningProductCandidate) => void;
 }) {
   const [candidate, setCandidate] = useState<WinningProductCandidate | null>(null);
   const [loading, setLoading] = useState(false);
@@ -337,6 +339,7 @@ export default function CandidateDetail({
                 }
               />
               <FactRow label="Precio detectado" value={formatPrice(candidate.detectedPrice)} muted={!candidate.detectedPrice} />
+              {!unsaved ? <PrimaryButton className="mt-3 w-full" onClick={() => onGenerateLanding(candidate)}>Generar landing</PrimaryButton> : null}
             </DrawerSection>
 
             {/* ── Winner Score ── */}

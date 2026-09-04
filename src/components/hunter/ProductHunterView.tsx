@@ -92,6 +92,12 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
   const openResult = useCallback((r: AdLibraryResult) => setDetail({ id: r.id, initial: r }), []);
   const openCandidate = useCallback((c: WinningProductCandidate) => setDetail({ id: c.id, initial: c }), []);
   const closeDetail = useCallback(() => setDetail(null), []);
+  const generateLanding = useCallback((candidate: WinningProductCandidate) => {
+    window.sessionStorage.setItem("casamable.landing-studio.pending-candidate", candidate.id);
+    setDetail(null);
+    setTab("studio");
+    window.history.replaceState(null, "", "#landing-studio");
+  }, []);
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
@@ -217,7 +223,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
         )}
       </div>
 
-      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />
+      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} onGenerateLanding={generateLanding} />
     </div>
   );
 }
