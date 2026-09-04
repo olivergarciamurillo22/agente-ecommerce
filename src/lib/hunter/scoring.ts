@@ -24,14 +24,18 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 
 export function shippingTier(f: CandidateFacts): { tier: "hasta_1kg" | "hasta_4kg"; eur: number } | null {
   if ([f.weightGrams, f.lengthCm, f.widthCm, f.heightCm].some((v) => v === null || !Number.isFinite(v))) return null;
-  if ((f.weightGrams as number) <= 1000) return { tier: "hasta_1kg", eur: 4.08 };
-  if ((f.weightGrams as number) <= 4000) return { tier: "hasta_4kg", eur: 6.5 };
+  // Beeping tarifa por el mayor entre peso real y volumétrico (divisor 6.000 cm³/kg).
+  const volumetricGrams = ((f.lengthCm as number) * (f.widthCm as number) * (f.heightCm as number) / 6000) * 1000;
+  const chargeableGrams = Math.max(f.weightGrams as number, volumetricGrams);
+  if (chargeableGrams <= 1000) return { tier: "hasta_1kg", eur: 4.08 };
+  if (chargeableGrams <= 4000) return { tier: "hasta_4kg", eur: 6.5 };
   return null;
 }
 
 export function proposePrice(cost: number): number {
   const target = cost * 3;
-  const allowed = [29.9, 34.9, 39.9, 44.9, 49.9, 59.9, 69.9, 79.9, 89.9, 99.9, 119.9, 149.9];
+  // 36,90 € es el PVP de referencia validado con el organizador real de Casamable.
+  const allowed = [36.9, 39.9, 44.9, 49.9, 59.9, 69.9, 79.9, 89.9, 99.9, 119.9, 149.9];
   return allowed.find((p) => p >= target && p >= cost * 2.5) ?? Math.ceil(target / 10) * 10 - 0.1;
 }
 

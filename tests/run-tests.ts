@@ -13255,6 +13255,20 @@ async function main(): Promise<void> {
       assert.deepEqual(new Set(one.reasons.map(r => r.factor)), new Set(["margen_unitario","cpa_maximo","tramo_envio","variantes","ticket","recompra"]));
       assert.equal(one.reasons.reduce((s,r)=>s+r.points,0), one.score);
     });
+    await test("Hunter · organizador real conserva los economics medidos en ambos bultos", () => {
+      const fixture = JSON.parse(fs.readFileSync(path.join(process.cwd(), "tests/fixtures/hunter-organizador.json"), "utf8"));
+      const compressed = hunterScore.scoreCandidate(fixture)!;
+      const folded = hunterScore.scoreCandidate({ ...fixture, lengthCm: 51, widthCm: 41, heightCm: 11 })!;
+      assert.equal(compressed.shippingTier, "hasta_1kg"); assert.equal(compressed.shippingEur, 4.08);
+      assert.equal(folded.shippingTier, "hasta_4kg"); assert.equal(folded.shippingEur, 6.5);
+      assert.ok(Math.abs(compressed.unitMarginEur - 12.02) <= 0.15, "margen escenario A");
+      assert.ok(Math.abs(folded.unitMarginEur - 9.14) <= 0.4, "margen escenario B");
+      assert.ok(Math.abs(compressed.maxCpaEur - compressed.unitMarginEur) <= 0.01, "CPA máximo A");
+      assert.ok(Math.abs(folded.maxCpaEur - folded.unitMarginEur) <= 0.01, "CPA máximo B");
+      const missing = { ...fixture, lengthCm: null };
+      assert.equal(hunterScore.scoreCandidate(missing), null);
+      assert.equal(hunterScore.missingScoreReasons(missing)[0].detail, "faltan medidas del paquete de venta");
+    });
     await test("Hunter · limpia tres títulos spam reales", () => {
       const titles = [
         "🔥 2024 New Hot Sale Electric Nail Clipper Free Shipping",
