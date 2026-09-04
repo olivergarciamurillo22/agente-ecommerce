@@ -13296,12 +13296,23 @@ async function main(): Promise<void> {
       const html=composeLanding(candidate),dir=fs.mkdtempSync(path.join(tmpDir,"landing-"));const files=convertLanding(html,dir);
       assert.equal(files.filter(f=>f.endsWith(".liquid")).length,(html.match(/data-bloque=/g)??[]).length);
       assert.deepEqual(lintLiquidDir(dir),[]);
-      for(const f of files.filter(f=>f.endsWith(".liquid"))){const s=fs.readFileSync(f,"utf8");assert.match(s,/:where\(h1,h2/);assert.doesNotMatch(s,/\drem\b/)}
+      for(const f of files.filter(f=>f.endsWith(".liquid"))){const s=fs.readFileSync(f,"utf8");assert.doesNotMatch(s,/:where\(h1,h2/);assert.doesNotMatch(s,/\drem\b/);assert.match(s,/#shopify-section-\{\{ section\.id \}\}/)}
     });
     await test("Landing · range inexacto y name de 26 caracteres fallan",()=>{
       const dir=fs.mkdtempSync(path.join(tmpDir,"lint-")),[file]=convertLanding(composeLanding(candidate),dir).filter(f=>f.endsWith(".liquid"));
       let s=fs.readFileSync(file,"utf8").replace('"max": 120','"max": 119');fs.writeFileSync(file,s);assert.ok(lintLiquidFile(file).some(x=>x.rule==="ranges_division_exacta"));
       s=fs.readFileSync(file,"utf8").replace('"name": "iconos"','"name": "12345678901234567890123456"');fs.writeFileSync(file,s);assert.ok(lintLiquidFile(file).some(x=>x.rule==="nombres_25"));
+    });
+    await test("Landing · el ID de sección gana a selectores típicos de Dawn",()=>{
+      const dir=fs.mkdtempSync(path.join(tmpDir,"dawn-")),[file]=convertLanding(composeLanding(candidate),dir).filter(f=>f.endsWith(".liquid"));
+      const generated=fs.readFileSync(file,"utf8");
+      for(const dawn of ["h2", ".h2", ".customer a", "summary", "details > *"]) {
+        const dawnIds=(dawn.match(/#/g)??[]).length;
+        assert.ok(dawnIds < 1, `${dawn} no alcanza la especificidad del ID generado`);
+      }
+      assert.doesNotMatch(generated,/:where\(/);
+      const broken=generated.replace("#shopify-section-{{ section.id }} .iconos",".iconos");fs.writeFileSync(file,broken);
+      assert.ok(lintLiquidFile(file).some(x=>x.rule==="todos_los_selectores_scopeados_por_id"));
     });
   }
 
