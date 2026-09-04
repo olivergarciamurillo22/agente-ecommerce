@@ -69,7 +69,12 @@ async function withEnv(
 }
 
 let passed = 0;
+let skipped = 0;
 const failures: Array<{ name: string; err: unknown }> = [];
+
+async function skip(name:string,reason:string):Promise<void>{skipped++;console.log(`  ↷ OMITIDO · ${name} · ${reason}`);}
+
+const npxFromIsolatedDir=(()=>{try{const{spawnSync}=require("node:child_process") as typeof import("node:child_process");const bin=process.platform==="win32"?"npx.cmd":"npx";const probe=spawnSync(bin,["--offline","--no-install","tsx","--version"],{cwd:tmpDir,encoding:"utf8",timeout:10_000});return probe.status===0}catch{return false}})();
 
 async function test(name: string, fn: () => void | Promise<void>): Promise<void> {
   try {
@@ -9958,7 +9963,7 @@ async function main(): Promise<void> {
     assert.equal(out, ".env.local");
   });
 
-  await test("ENV · env:init nunca sobrescribe un .env.local existente", () => {
+  if(!npxFromIsolatedDir)await skip("ENV · env:init nunca sobrescribe un .env.local existente","npx/tsx no está resoluble sin registry desde el fixture aislado");else await test("ENV · env:init nunca sobrescribe un .env.local existente", () => {
     // Se prueba la LÓGICA en un directorio temporal, no el .env.local real.
     const os = require("node:os") as typeof import("node:os");
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "envinit-"));
@@ -12721,8 +12726,9 @@ async function main(): Promise<void> {
     const doctorProbe = (
       titulo: string,
       opts: { env: Record<string, string>; checkOnly: boolean; esperaFalloDeSalida: boolean }
-    ) =>
-      test(titulo, () => {
+    ) => !npxFromIsolatedDir
+      ? skip(titulo,"npx/tsx no está resoluble sin registry")
+      : test(titulo, () => {
         const os = require("node:os") as typeof import("node:os");
         const { execSync } = require("node:child_process") as typeof import("node:child_process");
         const Database = require("better-sqlite3") as typeof import("better-sqlite3");
@@ -13356,7 +13362,7 @@ async function main(): Promise<void> {
   }
 
   // ============ Resumen ============
-  console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);
+  console.log(`\n${passed} tests OK, ${skipped} omitidos, ${failures.length} fallos\n`);
   if (failures.length > 0) {
     process.exit(1);
   }
