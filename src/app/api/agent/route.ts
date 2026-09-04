@@ -44,6 +44,7 @@ const RECOMENDACION: Record<ActionType, string> = {
   ADDRESS_CORRECTION: "Verifica la dirección por WhatsApp antes de liberar a Beeping.",
   SUPPLIER_ERROR: "Revisa el error del proveedor en la ficha y decide si va a mano.",
   TRACKING_INCIDENT: "Mira el estado con el transportista y decide si avisas al cliente.",
+  CANCEL_HELP:"Abre la conversación y atiende personalmente lo que necesita tras la cancelación.",
 };
 
 /** Mismo formato enmascarado que usa el Action Center: nombre de pila + últimos 4. */

@@ -82,6 +82,7 @@ const ATTENTION_META: Record<string, { label: string; urgency: AttentionItem["ur
   CANCEL_REQUEST: { label: "cliente(s) piden cancelar", urgency: "urgent", target: "actions" },
   POSSIBLE_DUPLICATE: { label: "posible(s) duplicado(s)", urgency: "urgent", target: "actions" },
   TRACKING_INCIDENT: { label: "incidencia(s) de envío", urgency: "today", target: "actions" },
+  CANCEL_HELP: { label: "petición(es) de ayuda tras cancelar", urgency: "urgent", target: "actions" },
   SUPPLIER_ERROR: { label: "error(es) de proveedor", urgency: "today", target: "actions" },
   ADDRESS_CORRECTION: { label: "direccion(es) por revisar", urgency: "today", target: "actions" },
   NEEDS_CALL: { label: "pendiente(s) de llamada", urgency: "later", target: "actions" },

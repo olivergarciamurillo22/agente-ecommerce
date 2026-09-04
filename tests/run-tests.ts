@@ -12910,15 +12910,10 @@ async function main(): Promise<void> {
       );
     });
 
-    await test("WHATSAPP · mapping DESHABILITADO es fail-closed: ni con caché previa se considera listo", async () => {
-      // order_cancelled_ack → pedido_cancelado: la WABA tiene un botón
-      // "Necesito ayuda" sin handler, y NO existe sender productivo (búsqueda
-      // 03-09: cero usos en src/ y scripts/). Apagado a propósito.
+    await test("WHATSAPP · ayuda tras cancelar pasa a HUMAN, crea trabajo y permite el mapping", async () => {
       const tpl = await import("../src/lib/whatsapp/templates");
       const mapping = tpl.loadProviderMappings().find((m) => m.logicalKey === "order_cancelled_ack")!;
-      assert.equal(mapping.enabled, false, "declarado explícitamente en el catálogo");
-
-      // Se le planta una caché de verificación PERFECTA a propósito.
+      assert.equal(mapping.enabled, true);
       tpl.storeVerifiedTemplate("order_cancelled_ack", {
         provider: "pedido_cancelado",
         language: "en",
@@ -12930,19 +12925,12 @@ async function main(): Promise<void> {
         verifiedAt: Math.floor(Date.now() / 1000),
       });
       const r = tpl.getTemplateReadiness("order_cancelled_ack");
-      assert.equal(r.ready, false, "sigue sin estar listo pese a la caché APPROVED");
-      assert.equal(r.blocker, "TEMPLATE_MAPPING_DISABLED");
-      // Y el envío no se puede construir.
-      assert.throws(
-        () => tpl.buildApprovedTemplateMessage("order_cancelled_ack", { nombre: "x", numero_pedido: "#1" }),
-        /no lista|DESHABILITADO/i,
-        "no hay forma de enviarlo por accidente"
-      );
-      // Cero senders en el código: si algún día aparece uno, este test lo caza.
-      const usos = ["src", "scripts"].flatMap((d) =>
-        execSyncSafe(`grep -rl "order_cancelled_ack" ${d} 2>/dev/null || true`).split("\n").filter(Boolean)
-      );
-      assert.deepEqual(usos, [], "ningún fichero de src/ o scripts/ referencia este mapping");
+      assert.equal(r.ready,true);const built=tpl.buildApprovedTemplateMessage("order_cancelled_ack",{nombre:"Ana",numero_pedido:"#88901",order_id:"1"});assert.deepEqual(built.buttonPayloads,["cancel_help:1"]);
+      const tel="34600118901",conversation=db.getOrCreateConversation(tel,"Ana"),order=mkOrder("wa-cancel-help","88901",tel);
+      db.systemDbHandle().prepare("UPDATE orders SET status='cancelled',closure_status='cancelled' WHERE id=?").run(order.id);
+      const conf=await import("../src/lib/orders/confirmation"),handled=conf.handleOrderButtonReply(tel,`cancel_help:${order.id}`);assert.equal(handled.handled,true);assert.equal(handled.reply,undefined,"el bot no responde");
+      assert.equal(db.getConversationById(conversation.id)?.mode,"HUMAN");
+      const center=(await import("../src/lib/system/action-center")).getActionCenter();const item=center.items.find(x=>x.orderId===order.id&&x.type==="CANCEL_HELP");assert.ok(item);assert.match(item.problem,/pide ayuda tras cancelar/i);
     });
 
     await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {

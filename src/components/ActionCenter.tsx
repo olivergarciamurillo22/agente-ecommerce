@@ -36,6 +36,7 @@ const ETIQUETAS: Record<string, { label: string; cls: string }> = {
   CANCEL_REQUEST: { label: "PIDE CANCELAR", cls: "bg-rose-500/15 text-rose-600 border-rose-500/30" },
   POSSIBLE_DUPLICATE: { label: "POSIBLE DUPLICADO", cls: "bg-amber-500/15 text-amber-600 border-amber-500/30" },
   TRACKING_INCIDENT: { label: "INCIDENCIA ENVÍO", cls: "bg-orange-500/15 text-orange-600 border-orange-500/30" },
+  CANCEL_HELP: { label: "AYUDA TRAS CANCELAR", cls: "bg-orange-500/15 text-orange-600 border-orange-500/30" },
   NEEDS_CALL: { label: "SIN RESPUESTA", cls: "bg-sky-500/15 text-sky-600 border-sky-500/30" },
   ADDRESS_CORRECTION: { label: "DIRECCIÓN NUEVA", cls: "bg-violet-500/15 text-violet-600 border-violet-500/30" },
   SUPPLIER_ERROR: { label: "PROVEEDOR", cls: "bg-zinc-500/15 text-zinc-600 border-zinc-500/30" },

@@ -33,6 +33,9 @@ import {
   markOrderConfirmed,
   markOrderNeedsCorrection,
   markOrderNeedsCall,
+  markCancelledOrderHelpRequested,
+  getConversationIdByPhone,
+  setMode,
   markOrderAwaitingDeliveryNote,
   saveOrderDeliveryNote,
   setOrderCustomerReplied,
@@ -681,6 +684,15 @@ export function handleOrderButtonReply(phone: string, payload: string): OrderRep
         : "Tu solicitud ha quedado registrada para revisión.",
       authorized: order.pilot_authorized === 1,
     };
+  }
+
+  const cancelHelp=/^cancel_help:(\d+)$/.exec(p);
+  if(cancelHelp){
+    const order=getOrderById(Number(cancelHelp[1]));if(!order||order.phone!==phone)return{handled:false};
+    const conversationId=getConversationIdByPhone(phone);if(conversationId===null)return{handled:false};
+    setMode(conversationId,"HUMAN");markCancelledOrderHelpRequested(order.id);
+    logIntegrationEvent("whatsapp","cancelled_order_help_requested","warning","pide_ayuda_tras_cancelar",order.shopify_order_number);
+    return{handled:true,authorized:order.pilot_authorized===1};
   }
 
   // Payload desconocido: no se adivina nada. Visible en logs, sin respuesta.

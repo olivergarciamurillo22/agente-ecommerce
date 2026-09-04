@@ -243,7 +243,13 @@
         "numero_pedido"
       ],
       "draft_body": "Hola {{1}}, te confirmamos que tu pedido {{2}} de Casamable ha sido cancelado correctamente.\n\nNo se realizará ningún envío ni ningún cobro asociado a este pedido.\n\nSi necesitas ayuda, puedes responder a este mensaje.",
-      "buttons": [],
+      "buttons": [
+        {
+          "type": "QUICK_REPLY",
+          "text": "Necesito ayuda",
+          "payload": "cancel_help:{order_id}"
+        }
+      ],
       "fallback": "Plantilla aprobada en Meta"
     }
   ],
@@ -335,8 +341,8 @@
         "nombre",
         "numero_pedido"
       ],
-      "note": "DESHABILITADO a propósito: la WABA tiene un botón 'Necesito ayuda' sin payload declarado ni handler en handleOrderButtonReply, y NO existe ningún sender productivo de este mensaje (búsqueda 03-09: cero usos en src/ y scripts/). Se reactiva cuando exista un consumidor de extremo a extremo que sepa atender ese botón. El idioma 'en' es literal en Meta: NO cambiar a 'es'.",
-      "enabled": false
+      "note": "El botón único Necesito ayuda usa cancel_help:{order_id}; el handler silencia el bot y crea trabajo humano. El idioma 'en' es literal en Meta: NO cambiar a 'es'.",
+      "enabled": true
     },
     {
       "logicalKey": "order_confirmed_ack_out_of_window",

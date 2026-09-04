@@ -2903,6 +2903,11 @@ export function markOrderNeedsCall(id: number): boolean {
   return info.changes > 0;
 }
 
+/** Marca trabajo humano tras una cancelación sin alterar el cierre logístico. */
+export function markCancelledOrderHelpRequested(id:number):boolean {
+  return ctx().db.prepare("UPDATE orders SET last_error='pide_ayuda_tras_cancelar', updated_at=unixepoch() WHERE id=?").run(id).changes>0;
+}
+
 /** Descartar del flujo. Un pedido confirmado no se cancela por aquí. */
 export function markOrderCancelled(id: number): boolean {
   const info = ctx()
