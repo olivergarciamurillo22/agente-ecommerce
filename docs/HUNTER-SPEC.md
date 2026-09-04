@@ -17,10 +17,11 @@ del repositorio prevalecen.
    PVP sugerido se presenta como propuesta configurable, nunca como dato real.
    Margen, CPA máximo y break-even reutilizan el modelo real y sus constantes;
    ante una entrada ausente devuelven `null`.
-4. **Liquid no llevará `!important`.** La skill de conversión lo exige en toda
-   declaración, pero `LANDING-STUDIO.md` ordena que el exportador lo rechace.
-   Prevalece el contrato: el conversor genera CSS correctamente scopeado y el
-   lint incluye la regla `sin_important` en lugar de `important_en_todo`.
+4. **Liquid gana a Dawn mediante un ID, no mediante `!important`.** Todos los
+   selectores empiezan por `#shopify-section-{{ section.id }}`. El lint lo
+   exige con `todos_los_selectores_scopeados_por_id`. Solo se admitiría un
+   `!important` puntual si la misma línea cita la evidencia `DAWN: selector`;
+   la auditoría actual no encontró ninguna excepción necesaria.
 5. **El HTML es una entrada de importación, no el estado del editor.** El
    compositor puede producir un HTML autocontenido y el conversor puede
    trocearlo, pero ningún HTML vuelve a ser la fuente de verdad de un proyecto
@@ -50,6 +51,20 @@ del repositorio prevalecen.
   `nuevo`, sin score y con datos críticos pendientes.
 - La atribución de CPA real por candidato solo se mostrará cuando exista una
   relación verificable entre candidato/producto/campaña. No se inferirá por
-  parecido de nombres.
+   parecido de nombres.
 - Demanda, competencia, saturación y recompra no se obtienen de marketplaces;
   permanecen como evaluación manual explícita.
+
+## Decisiones de la segunda vuelta
+
+- **Esquema 19.** La rama se apoya en Workspace de atención: su migración 18
+  crea `users`, `sessions` y `audit_log`; Hunter crea `product_candidates` y
+  `candidate_events` en la 19. Partir de schema 17 ejecuta ambas en orden.
+- **Peso facturable.** El tramo usa el mayor entre peso real y volumétrico con
+  divisor 6.000. El organizador real fija los dos escenarios de aceptación.
+- **Reparto con Product Intelligence Engine.** PI Engine descubre, agrupa y
+  vigila señales de mercado. Hunter conserva la economía COD auditada y la
+  generación de landing. No se han unido los catálogos hasta decidir un ID
+  canónico; el inventario detallado está en `HUNTER-VS-PI-ENGINE.md`.
+- **Operación owner-only y local.** `/api/hunter` comprueba el rol owner. La
+  generación deja artefactos locales, nunca escribe ni publica en Shopify.
