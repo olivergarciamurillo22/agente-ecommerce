@@ -31,7 +31,7 @@ export function shippingTier(f: CandidateFacts): { tier: "hasta_1kg" | "hasta_4k
 
 export function proposePrice(cost: number): number {
   const target = cost * 3;
-  const allowed = [19.9, 24.9, 29.9, 34.9, 39.9, 44.9, 49.9, 59.9, 69.9, 79.9, 89.9, 99.9, 119.9, 149.9];
+  const allowed = [29.9, 34.9, 39.9, 44.9, 49.9, 59.9, 69.9, 79.9, 89.9, 99.9, 119.9, 149.9];
   return allowed.find((p) => p >= target && p >= cost * 2.5) ?? Math.ceil(target / 10) * 10 - 0.1;
 }
 

@@ -12697,9 +12697,9 @@ async function main(): Promise<void> {
       assert.match(nav, /"Beta"/, "la navegación también lo marca");
     });
 
-    await test("V4.2 la persistencia server-side de Landing Studio NO está integrada (schema sigue en 17)", () => {
+    await test("V4.2 Landing Studio sigue local aunque Hunter usa schema 19", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 18;/, "el workspace de atención usa el schema 18");
+      assert.match(db, /export const SCHEMA_VERSION = 19;/, "workspace usa 18 y Hunter añade 19");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
