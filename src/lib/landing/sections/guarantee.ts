@@ -1,0 +1,2 @@
+import type { ProductCandidate } from "../../hunter/types";
+export function guarantee(c:ProductCandidate):string{const p=c.scoring?.proposedPriceEur;return `<section class="guarantee" data-bloque="garantia"><div class="wrap"><h2 class="guarantee__title">Decide con tranquilidad</h2><p>Confirmamos contigo los datos antes de preparar el envío. Consulta cualquier duda antes de aceptar el pedido.</p><!-- CHECKOUT: configurar variante antes de activar --><button class="btn" type="button">Continuar${p?` — ${p.toFixed(2).replace(".",",")} €`:""}</button></div></section>`;}
