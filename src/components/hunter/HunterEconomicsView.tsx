@@ -10,14 +10,13 @@ async function json(input:RequestInfo,init?:RequestInit){const r=await fetch(inp
 function CandidateEconomicsDetail({candidate,onChange}:{candidate:ProductCandidate;onChange:(c:ProductCandidate)=>void}){
   const [note,setNote]=useState(candidate.manualNote??"");const[price,setPrice]=useState(candidate.salePriceEur?.toString()??"");const[busy,setBusy]=useState(false);const[message,setMessage]=useState<string|null>(null);
   const act=async(body:object)=>{setBusy(true);setMessage(null);try{const d=await json("/api/hunter",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({id:candidate.id,...body})});if(d.candidate)onChange(d.candidate);if(d.result)setMessage(`Landing validada: ${d.result.sectionCount} secciones en ${d.result.sectionsDir}`);}catch(e){setMessage(e instanceof Error?e.message:"Error");}finally{setBusy(false)}};
-  const volume=candidate.lengthCm!=null&&candidate.widthCm!=null&&candidate.heightCm!=null?candidate.lengthCm*candidate.widthCm*candidate.heightCm/6:null;
   const score=candidate.scoring;
   return <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="font-display text-xl font-semibold">{candidate.name??"Producto sin nombre"}</h2><p className="text-xs text-brand-muted break-all">{candidate.sourceUrl}</p></div><PrimaryButton busy={busy} disabled={!score} onClick={()=>void act({op:"generate"})}>Generar landing</PrimaryButton></div>
     <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
       <div><span className="text-brand-muted">Coste puesto</span><strong className="block">{euro(candidate.unitCostEur)}</strong></div>
       <div><span className="text-brand-muted">Paquete de venta</span><strong className="block">{candidate.lengthCm??"—"} × {candidate.widthCm??"—"} × {candidate.heightCm??"—"} cm</strong></div>
       <div><span className="text-brand-muted">Peso real</span><strong className="block">{candidate.weightGrams??"—"} g</strong></div>
-      <div><span className="text-brand-muted">Peso volumétrico</span><strong className="block">{volume==null?"—":`${Math.round(volume)} g`}</strong></div>
+      <div><span className="text-brand-muted">Peso volumétrico</span><strong className="block">No aplicado · divisor sin confirmar</strong></div>
       <div><span className="text-brand-muted">Tramo / envío</span><strong className="block">{score?`${score.shippingTier.replace("_"," ")} · ${euro(score.shippingEur)}`:"—"}</strong></div>
       <div><span className="text-brand-muted">PVP introducido</span><strong className="block">{euro(candidate.salePriceEur)}</strong></div>
       <div><span className="text-brand-muted">Margen por enviado</span><strong className="block">{euro(score?.unitMarginEur)}</strong></div>

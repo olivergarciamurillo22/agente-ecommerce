@@ -22,10 +22,15 @@ export const WEIGHT_REPURCHASE = 5;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-export function shippingTier(f: CandidateFacts): { tier: "hasta_1kg" | "hasta_4kg"; eur: number } | null {
+export function configuredVolumetricDivisor():number|null {
+  const raw=process.env.HUNTER_VOLUMETRIC_DIVISOR;if(!raw)return null;const value=Number(raw);
+  return Number.isFinite(value)&&value>0?value:null;
+}
+
+export function shippingTier(f: CandidateFacts,volumetricDivisor:number|null=configuredVolumetricDivisor()): { tier: "hasta_1kg" | "hasta_4kg"; eur: number } | null {
   if ([f.weightGrams, f.lengthCm, f.widthCm, f.heightCm].some((v) => v === null || !Number.isFinite(v))) return null;
-  // Beeping tarifa por el mayor entre peso real y volumétrico (divisor 6.000 cm³/kg).
-  const volumetricGrams = ((f.lengthCm as number) * (f.widthCm as number) * (f.heightCm as number) / 6000) * 1000;
+  // Beeping no documenta peso volumétrico: solo se aplica con un divisor configurado explícitamente.
+  const volumetricGrams = volumetricDivisor ? ((f.lengthCm as number) * (f.widthCm as number) * (f.heightCm as number) / volumetricDivisor) * 1000 : 0;
   const chargeableGrams = Math.max(f.weightGrams as number, volumetricGrams);
   if (chargeableGrams <= 1000) return { tier: "hasta_1kg", eur: 4.08 };
   if (chargeableGrams <= 4000) return { tier: "hasta_4kg", eur: 6.5 };

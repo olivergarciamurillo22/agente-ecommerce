@@ -13276,6 +13276,12 @@ async function main(): Promise<void> {
       assert.equal(hunterScore.scoreCandidate(missing), null);
       assert.equal(hunterScore.missingScoreReasons(missing)[0].detail, "faltan medidas del paquete de venta");
     });
+    await test("Hunter · peso volumétrico está apagado hasta configurar un divisor confirmado",()=>{
+      const fixture=JSON.parse(fs.readFileSync(path.join(process.cwd(),"tests/fixtures/hunter-organizador.json"),"utf8"));
+      const folded={...fixture,weightGrams:190,lengthCm:51,widthCm:41,heightCm:11};
+      assert.equal(hunterScore.shippingTier(folded)?.tier,"hasta_1kg","por defecto manda el peso real");
+      assert.equal(hunterScore.shippingTier(folded,6000)?.tier,"hasta_4kg","un divisor explícito activa el cálculo");
+    });
     await test("Hunter · limpia tres títulos spam reales", () => {
       const titles = [
         "🔥 2024 New Hot Sale Electric Nail Clipper Free Shipping",

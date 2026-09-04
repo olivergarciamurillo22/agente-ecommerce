@@ -64,6 +64,10 @@ del repositorio prevalecen.
   un PVP del organizador ni explican los 12,02 €/9,14 € como una cuenta
   reproducible. Se retiró el 36,90 € deducido: sin precio introducido por
   Pedro no hay margen, CPA máximo ni score.
+- **Peso volumétrico desactivado.** Ni `BEEPING-INTEGRATION.md` ni
+  `BEEPING-API-CONTRACT.md` dicen que Beeping facture por volumen o indiquen
+  un divisor. Por defecto el tramo usa peso real. Solo se activa con
+  `HUNTER_VOLUMETRIC_DIVISOR` después de confirmarlo con Beeping.
 - **Reparto con Product Intelligence Engine.** PI Engine descubre, agrupa y
   vigila señales de mercado. Hunter conserva la economía COD auditada y la
   generación de landing. No se han unido los catálogos hasta decidir un ID
