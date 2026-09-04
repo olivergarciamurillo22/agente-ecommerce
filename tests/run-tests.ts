@@ -13292,6 +13292,8 @@ async function main(): Promise<void> {
       assert.equal((html.match(/<section\b[^>]*data-bloque=/g)??[]).length,(html.match(/<section\b/g)??[]).length);
     });
     await test("Landing · sin variantes no emite el bloque variantes",()=>assert.doesNotMatch(composeLanding(candidate),/data-bloque="variantes"/));
+    await test("Landing · catálogo obligatorio y puertas de evidencia",()=>{const html=composeLanding(candidate);for(const block of ["hero","garantia","resenas","cta-final","stickybar","footer"])assert.ok(html.includes(`data-bloque="${block}"`),block);assert.doesNotMatch(html,/data-bloque="prueba-dura"|data-bloque="contiene"/);assert.match(html,/scrollY>1\.2\*innerHeight/);assert.match(html,/safe-area-inset-bottom/)});
+    await test("Landing · categorías distintas producen ritmos distintos",()=>{const seq=(html:string)=>[...html.matchAll(/data-bloque="([^"]+)"/g)].map(m=>m[1]);const cuidado=seq(composeLanding({...candidate,category:"cuidado"})),hogar=seq(composeLanding({...candidate,category:"hogar",specs:{material:"poliéster"}}));assert.notDeepEqual(cuidado,hogar);assert.ok(hogar.includes("prueba-dura"));});
     await test("Landing · el conversor produce N Liquid para N bloques y pasan lint",()=>{
       const html=composeLanding(candidate),dir=fs.mkdtempSync(path.join(tmpDir,"landing-"));const files=convertLanding(html,dir);
       assert.equal(files.filter(f=>f.endsWith(".liquid")).length,(html.match(/data-bloque=/g)??[]).length);
