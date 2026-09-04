@@ -60,7 +60,10 @@
     "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts",
     "users:create": "tsx scripts/users-create.ts",
     "hunter:add": "tsx scripts/hunter-add.ts",
-    "hunter:score": "tsx scripts/hunter-score.ts"
+    "hunter:score": "tsx scripts/hunter-score.ts",
+    "landing:build": "tsx scripts/landing-build.ts",
+    "landing:sections": "tsx scripts/landing-sections.ts",
+    "landing:lint": "tsx scripts/landing-lint.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
