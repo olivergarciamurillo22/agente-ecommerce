@@ -11,6 +11,9 @@ import { confirmOrder } from "@/lib/orders/confirmation";
 import { sendDelayNotificationForOrder } from "@/lib/orders/notify-delay";
 import { canOperateOnOrderManually, orderActionAllowed } from "@/lib/safety";
 import { manualDialOrder } from "@/lib/calls/manual";
+import { requireStaff } from "@/lib/auth/guard";
+import { audit } from "@/lib/workspace";
+import { systemDbHandle } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +46,8 @@ const ACTIONS = new Set([
  * se rechaza sin side effects.
  */
 export async function POST(req: NextRequest, { params }: RouteContext): Promise<NextResponse> {
+  const auth = requireStaff(req);
+  if (!auth.ok) return auth.response;
   const { orderId } = await params;
   const id = parseInt(orderId, 10);
   if (Number.isNaN(id)) {
@@ -58,6 +63,9 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
   const action = body.action ?? "";
   if (!ACTIONS.has(action)) {
     return NextResponse.json({ ok: false, error: "acción no permitida" }, { status: 400 });
+  }
+  if (auth.user.role === "agent" && action !== "resend") {
+    return NextResponse.json({ ok: false, error: "No tienes permiso para esta acción" }, { status: 403 });
   }
 
   const order = getOrderById(id);
@@ -147,12 +155,19 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
         { status: 409 }
       );
     }
+    const day = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Madrid" }).format(new Date());
+    const claimed = systemDbHandle().prepare("INSERT OR IGNORE INTO confirmation_resends(order_id,day) VALUES(?,?)").run(id, day);
+    if (claimed.changes === 0) {
+      return NextResponse.json({ ok: false, error: "Ya se reenvió la confirmación de este pedido hoy" }, { status: 429 });
+    }
     if (!resetOrderForResend(id)) {
+      systemDbHandle().prepare("DELETE FROM confirmation_resends WHERE order_id=? AND day=?").run(id, day);
       return NextResponse.json(
         { ok: false, error: `no se puede reenviar un pedido en estado ${order.status}` },
         { status: 409 }
       );
     }
+    audit(auth.user, "resend_confirmation", "order", id, { day });
   } else if (action === "cancel") {
     if (!markOrderCancelled(id)) {
       return NextResponse.json(

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSetting, setSetting } from "../../../lib/db";
+import { requireOwner } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -25,11 +26,13 @@ function effective(): Record<string, string> {
   return out;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const auth = requireOwner(req); if (!auth.ok) return auth.response;
   return NextResponse.json({ settings: effective(), defaults: DEFAULTS });
 }
 
 export async function POST(req: NextRequest) {
+  const auth = requireOwner(req); if (!auth.ok) return auth.response;
   let body: { key?: string; value?: string };
   try {
     body = await req.json();

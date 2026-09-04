@@ -17,7 +17,7 @@ ENV-NAS-PENDIENTE.local.txt
 
 # ── DB y runtime (SQLite + sesión de WhatsApp) ──
 data/
-auth/
+/auth/
 .restart
 
 # ── Backups (nunca a git) ──

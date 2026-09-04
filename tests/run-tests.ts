@@ -6582,7 +6582,8 @@ async function main(): Promise<void> {
   });
 
   await test("RETELL · webhook: sin firma 401, firma inválida 401, y la primera firma REAL deja evidencia", async () => {
-    const { POST, RETELL_WEBHOOK_VERIFIED_KEY } = await import("../src/app/api/webhooks/retell/call-events/route");
+    const { POST } = await import("../src/app/api/webhooks/retell/call-events/route");
+    const { RETELL_WEBHOOK_VERIFIED_KEY } = await import("../src/lib/calls/retell-webhook");
     const wh = await import("../src/lib/calls/retell-webhook");
     db.systemDbHandle().prepare("DELETE FROM settings WHERE key = ?").run(RETELL_WEBHOOK_VERIFIED_KEY);
     const body = JSON.stringify({ event: "call_started", call: { call_id: "call_evidencia_1", start_timestamp: Date.now() } });
@@ -9779,8 +9780,9 @@ async function main(): Promise<void> {
     const { POST: postMode } = await import("../src/app/api/mode/[conversationId]/route");
     const { POST: postMsg } = await import("../src/app/api/messages/[conversationId]/route");
     const { POST: postImg } = await import("../src/app/api/messages/[conversationId]/image/route");
+    process.env.DASHBOARD_PASSWORD = "test-owner-password";
     const mk = (body: string, type = "application/json") =>
-      new Request("http://localhost/x", { method: "POST", body, headers: { "content-type": type } }) as unknown as import("next/server").NextRequest;
+      new Request("http://localhost/x", { method: "POST", body, headers: { "content-type": type, authorization: `Basic ${Buffer.from("owner:test-owner-password").toString("base64")}` } }) as unknown as import("next/server").NextRequest;
     for (const cuerpo of ["{no es json", "", "\u0000", "[1,2", "{\"mode\": "]) {
       const r1 = await postMode(mk(cuerpo), ctx);
       assert.equal(r1.status, 400, `mode: "${cuerpo.slice(0, 10)}" → 400`);
@@ -11358,8 +11360,9 @@ async function main(): Promise<void> {
   });
 
   await test("notify-delay: la acción notify_delay del panel exige replenishmentDate, y usa la MISMA función que el batch", async () => {
+    process.env.DASHBOARD_PASSWORD = "test-owner-password";
     const actionMod = await import("../src/app/api/orders/[orderId]/action/route");
-    const fakeReq = (body: unknown) => ({ json: async () => body }) as unknown as Parameters<typeof actionMod.POST>[0];
+    const fakeReq = (body: unknown) => ({ json: async () => body, headers: new Headers({ authorization: `Basic ${Buffer.from("owner:test-owner-password").toString("base64")}` }) }) as unknown as Parameters<typeof actionMod.POST>[0];
 
     const o = mkConfirmedOrder({ product_summary: "1x Ultras Panel" });
     const resSinFecha = await actionMod.POST(fakeReq({ action: "notify_delay" }), {
@@ -12696,7 +12699,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 la persistencia server-side de Landing Studio NO está integrada (schema sigue en 17)", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 17;/, "el esquema no sube sin un bug funcional real");
+      assert.match(db, /export const SCHEMA_VERSION = 18;/, "el workspace de atención usa el schema 18");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13161,6 +13164,48 @@ async function main(): Promise<void> {
       assert.ok(!/overflow-x-scroll/.test(code), "sin scroll horizontal forzado en móvil");
     });
   }
+
+  // ============ WORKSPACE DE ATENCIÓN · roles, privacidad y auditoría ============
+  console.log("\n— Workspace de atención —");
+  await test("schema 18 crea users, sessions, audit_log y límites de reenvío de forma idempotente", () => {
+    const raw = db.systemDbHandle();
+    db.migrateWorkspaceAuth(raw);
+    db.migrateWorkspaceAuth(raw);
+    for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
+      assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
+    }
+    assert.equal(raw.pragma("user_version", { simple: true }), 18);
+  });
+
+  await test("la ficha del agente se construye por lista blanca y no filtra PII/proveedor/marketing", async () => {
+    const { safeOrder } = await import("../src/lib/workspace");
+    const order = db.listOrders(undefined, 1)[0];
+    if (!order) return;
+    const json = JSON.stringify(safeOrder(order));
+    for (const forbidden of ["email", "raw_payload", "supplier_", "beeping_", "marketing_", "landing_site", "referring_site"]) {
+      assert.ok(!json.includes(forbidden), `sin ${forbidden}`);
+    }
+  });
+
+  await test("contraseñas scrypt: verifican la correcta y rechazan otra", async () => {
+    const passwords = await import("../src/lib/auth/password");
+    const hash = await passwords.hashPassword("contraseña-segura-123");
+    assert.match(hash, /^scrypt\$/);
+    assert.equal(await passwords.verifyPassword("contraseña-segura-123", hash), true);
+    assert.equal(await passwords.verifyPassword("otra-contraseña-123", hash), false);
+  });
+
+  await test("PUBLIC_PREFIXES conserva webhooks y health sin cambios", () => {
+    const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
+    assert.match(proxy, /const PUBLIC_PREFIXES = \["\/api\/webhooks\/", "\/api\/health"\]/);
+  });
+
+  await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
+    for (const file of ["src/app/api/system/route.ts", "src/app/api/settings/route.ts", "src/app/api/calls/route.ts"]) {
+      assert.match(fs.readFileSync(path.join(process.cwd(), file), "utf8"), /requireOwner\(req\)/, file);
+    }
+    assert.match(fs.readFileSync(path.join(process.cwd(), "src/app/api/orders/[orderId]/action/route.ts"), "utf8"), /auth\.user\.role === "agent"/);
+  });
 
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);

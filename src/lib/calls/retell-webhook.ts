@@ -28,6 +28,8 @@
 
 import crypto from "node:crypto";
 
+export const RETELL_WEBHOOK_VERIFIED_KEY = "retell_webhook_signature_verified_at";
+
 export const RETELL_SIGNATURE_MAX_AGE_MS = 5 * 60_000;
 const SHA_256_HEX_LENGTH = 64;
 /** Igual que el SDK: cabecera COMPLETA, sin espacios alrededor. */

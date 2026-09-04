@@ -1,5 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { setMode, type ConversationMode } from "@/lib/db";
+import { requireStaff } from "@/lib/auth/guard";
+import { audit } from "@/lib/workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -32,7 +34,10 @@ export async function POST(
       { status: 400 }
     );
   }
+  const auth = requireStaff(req);
+  if (!auth.ok) return auth.response;
 
   setMode(id, mode as ConversationMode);
+  audit(auth.user, mode === "HUMAN" ? "take_over" : "return_to_bot", "conversation", id);
   return NextResponse.json({ ok: true });
 }
