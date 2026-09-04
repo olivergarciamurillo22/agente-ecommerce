@@ -13294,6 +13294,7 @@ async function main(): Promise<void> {
     const { composeLanding } = await import("../src/lib/landing/composer");
     const { convertLanding } = await import("../src/lib/landing/converter");
     const { lintLiquidDir, lintLiquidFile } = await import("../src/lib/landing/lint");
+    const { runLandingPipeline } = await import("../src/lib/landing/e2e");
     const candidate = {
       id: 77, sourceUrl:"https://example.test/p",sourceDomain:"example.test",fetchedAt:1,name:"Producto de prueba",category:null,
       unitCostEur:5,sourceCurrency:"EUR",sourceCost:5,weightGrams:300,lengthCm:10,widthCm:8,heightCm:4,
@@ -13308,6 +13309,7 @@ async function main(): Promise<void> {
     await test("Landing · sin variantes no emite el bloque variantes",()=>assert.doesNotMatch(composeLanding(candidate),/data-bloque="variantes"/));
     await test("Landing · catálogo obligatorio y puertas de evidencia",()=>{const html=composeLanding(candidate);for(const block of ["hero","garantia","resenas","cta-final","stickybar","footer"])assert.ok(html.includes(`data-bloque="${block}"`),block);assert.doesNotMatch(html,/data-bloque="prueba-dura"|data-bloque="contiene"/);assert.match(html,/scrollY>1\.2\*innerHeight/);assert.match(html,/safe-area-inset-bottom/)});
     await test("Landing · categorías distintas producen ritmos distintos",()=>{const seq=(html:string)=>[...html.matchAll(/data-bloque="([^"]+)"/g)].map(m=>m[1]);const cuidado=seq(composeLanding({...candidate,category:"cuidado"})),hogar=seq(composeLanding({...candidate,category:"hogar",specs:{material:"poliéster"}}));assert.notDeepEqual(cuidado,hogar);assert.ok(hogar.includes("prueba-dura"));});
+    await test("Landing · pipeline E2E encadena HTML, secciones y lint",()=>{const out=fs.mkdtempSync(path.join(tmpDir,"landing-e2e-"));const result=runLandingPipeline(candidate,out);assert.ok(fs.existsSync(result.htmlFile));assert.equal(result.sectionCount,result.generatedFiles.filter(f=>f.endsWith(".liquid")).length);assert.ok(result.lintRuleCount>=10);assert.deepEqual(lintLiquidDir(result.sectionsDir),[]);});
     await test("Landing · el conversor produce N Liquid para N bloques y pasan lint",()=>{
       const html=composeLanding(candidate),dir=fs.mkdtempSync(path.join(tmpDir,"landing-"));const files=convertLanding(html,dir);
       assert.equal(files.filter(f=>f.endsWith(".liquid")).length,(html.match(/data-bloque=/g)??[]).length);

@@ -63,7 +63,8 @@
     "hunter:score": "tsx scripts/hunter-score.ts",
     "landing:build": "tsx scripts/landing-build.ts",
     "landing:sections": "tsx scripts/landing-sections.ts",
-    "landing:lint": "tsx scripts/landing-lint.ts"
+    "landing:lint": "tsx scripts/landing-lint.ts",
+    "landing:e2e": "tsx scripts/landing-e2e.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
