@@ -16,8 +16,9 @@ import { hunterGet, InlineNotice, MAX_COMPARE, Pill } from "./hunter-shared";
 import PipelineBoard from "./PipelineBoard";
 import SearchView from "./SearchView";
 import LandingStudio from "../landing-studio/LandingStudio";
+import HunterEconomicsView from "./HunterEconomicsView";
 
-type HunterTab = "search" | "saved" | "compare" | "studio";
+type HunterTab = "search" | "saved" | "compare" | "economics" | "studio";
 
 interface Notice {
   tone: "ok" | "error" | "info";
@@ -151,6 +152,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       { id: "search", label: "Buscar" },
                       { id: "saved", label: "Guardados" },
                       { id: "compare", label: "Comparar" },
+                      { id: "economics", label: "Economics" },
                       { id: "studio", label: "Landing Studio" },
                     ]
                   : [
@@ -158,6 +160,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       // comparar: enseñar esas pestañas sería prometer un
                       // descubrimiento que no puede ocurrir.
                       { id: "search", label: "Estado" },
+                      { id: "economics", label: "Economics" },
                       { id: "studio", label: "Landing Studio" },
                     ]
               }
@@ -177,6 +180,8 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
 
             {tab === "studio" ? (
               <LandingStudio />
+            ) : tab === "economics" ? (
+              <HunterEconomicsView />
             ) : !availability.available ? (
               <Card>
                 <EmptyState

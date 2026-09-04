@@ -13224,6 +13224,12 @@ async function main(): Promise<void> {
     }
     assert.match(fs.readFileSync(path.join(process.cwd(), "src/app/api/orders/[orderId]/action/route.ts"), "utf8"), /auth\.user\.role === "agent"/);
   });
+  await test("Hunter local es owner-only y generar landing usa el pipeline E2E", () => {
+    const route=fs.readFileSync(path.join(process.cwd(),"src/app/api/hunter/route.ts"),"utf8");
+    const view=fs.readFileSync(path.join(process.cwd(),"src/components/hunter/HunterEconomicsView.tsx"),"utf8");
+    assert.match(route,/requireOwner\(req\)/);assert.match(route,/runLandingPipeline\(/);
+    assert.match(view,/Peso volumétrico/);assert.match(view,/CPA máximo/);assert.match(view,/Generar landing/);
+  });
   // ============ Winning Hunter ============
   {
     const hunterScore = await import("../src/lib/hunter/scoring");
