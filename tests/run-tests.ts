@@ -13177,6 +13177,24 @@ async function main(): Promise<void> {
     assert.equal(raw.pragma("user_version", { simple: true }), 19);
   });
 
+  await test("schema 17 migra a workspace 18 y Hunter 19 sin perder tablas", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const fixture = new Database(":memory:");
+    fixture.pragma("foreign_keys = ON");
+    fixture.pragma("user_version = 17");
+    db.migrateWorkspaceAuth(fixture);
+    fixture.pragma("user_version = 18");
+    db.migrateProductCandidates(fixture);
+    fixture.pragma("user_version = 19");
+    db.migrateWorkspaceAuth(fixture);
+    db.migrateProductCandidates(fixture);
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events"]) {
+      assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
+    }
+    assert.equal(fixture.pragma("user_version", { simple: true }), 19);
+    fixture.close();
+  });
+
   await test("la ficha del agente se construye por lista blanca y no filtra PII/proveedor/marketing", async () => {
     const { safeOrder } = await import("../src/lib/workspace");
     const order = db.listOrders(undefined, 1)[0];
