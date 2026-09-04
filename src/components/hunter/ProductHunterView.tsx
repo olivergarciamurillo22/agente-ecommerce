@@ -16,8 +16,9 @@ import { hunterGet, InlineNotice, MAX_COMPARE, Pill } from "./hunter-shared";
 import PipelineBoard from "./PipelineBoard";
 import SearchView from "./SearchView";
 import LandingStudio from "../landing-studio/LandingStudio";
+import HunterEconomicsView from "./HunterEconomicsView";
 
-type HunterTab = "search" | "saved" | "compare" | "studio";
+type HunterTab = "search" | "saved" | "compare" | "economics" | "studio";
 
 interface Notice {
   tone: "ok" | "error" | "info";
@@ -92,6 +93,12 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
   const openResult = useCallback((r: AdLibraryResult) => setDetail({ id: r.id, initial: r }), []);
   const openCandidate = useCallback((c: WinningProductCandidate) => setDetail({ id: c.id, initial: c }), []);
   const closeDetail = useCallback(() => setDetail(null), []);
+  const generateLanding = useCallback((candidate: WinningProductCandidate) => {
+    window.sessionStorage.setItem("casamable.landing-studio.pending-candidate", candidate.id);
+    setDetail(null);
+    setTab("studio");
+    window.history.replaceState(null, "", "#landing-studio");
+  }, []);
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
@@ -145,6 +152,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       { id: "search", label: "Buscar" },
                       { id: "saved", label: "Guardados" },
                       { id: "compare", label: "Comparar" },
+                      { id: "economics", label: "Economics" },
                       { id: "studio", label: "Landing Studio" },
                     ]
                   : [
@@ -152,6 +160,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       // comparar: enseñar esas pestañas sería prometer un
                       // descubrimiento que no puede ocurrir.
                       { id: "search", label: "Estado" },
+                      { id: "economics", label: "Economics" },
                       { id: "studio", label: "Landing Studio" },
                     ]
               }
@@ -171,6 +180,8 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
 
             {tab === "studio" ? (
               <LandingStudio />
+            ) : tab === "economics" ? (
+              <HunterEconomicsView />
             ) : !availability.available ? (
               <Card>
                 <EmptyState
@@ -217,7 +228,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
         )}
       </div>
 
-      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />
+      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} onGenerateLanding={generateLanding} />
     </div>
   );
 }

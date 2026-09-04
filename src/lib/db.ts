@@ -848,6 +848,59 @@ export function migrateWorkspaceAuth(db: Database.Database): void {
   `);
 }
 
+/** Migración 19: candidatos del Hunter y auditoría inmutable de sus cambios. */
+export function migrateProductCandidates(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS product_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_url TEXT NOT NULL UNIQUE,
+      source_domain TEXT NOT NULL,
+      fetched_at INTEGER,
+      nombre_limpio TEXT,
+      categoria TEXT,
+      coste_unitario_eur REAL,
+      moneda_origen TEXT,
+      coste_origen REAL,
+      peso_gramos REAL,
+      largo_cm REAL,
+      ancho_cm REAL,
+      alto_cm REAL,
+      variantes_json TEXT,
+      specs_json TEXT,
+      claims_json TEXT,
+      pvp_propuesto_eur REAL,
+      tramo_envio TEXT,
+      envio_eur REAL,
+      margen_unitario_eur REAL,
+      cpa_maximo_eur REAL,
+      break_even_entrega_pct REAL,
+      score REAL,
+      veredicto TEXT,
+      motivos_json TEXT,
+      estado TEXT NOT NULL DEFAULT 'nuevo'
+        CHECK(estado IN ('nuevo','descartado','en_prueba','ganador')),
+      nota_manual TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_candidates_score
+      ON product_candidates(score DESC, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS candidate_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER NOT NULL REFERENCES product_candidates(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      previous_state TEXT,
+      next_state TEXT,
+      previous_score REAL,
+      next_score REAL,
+      details_json TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_candidate_events_candidate
+      ON candidate_events(candidate_id, created_at DESC);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1487,6 +1540,7 @@ function build() {
   migrateCallAgentVersion(db);
   migrateOrderAttribution(db);
   migrateWorkspaceAuth(db);
+  migrateProductCandidates(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1656,7 +1710,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
