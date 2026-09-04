@@ -7,6 +7,7 @@ import {
 } from "@/lib/db";
 import { getCallConfigView, setCallConfig, PANEL_EDITABLE_KEYS, type PanelCallKey } from "@/lib/calls/config";
 import { madridDate, madridParts } from "@/lib/calls/schedule";
+import { requireOwner } from "@/lib/auth/guard";
 
 // Estado y controles del orquestador de llamadas para el panel.
 // READ + configuración operativa (kill switch, shadow, cap, allowlist).
@@ -19,7 +20,8 @@ function mask(phone: string): string {
   return d.length > 4 ? `···${d.slice(-4)}` : "···";
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req); if (!auth.ok) return auth.response;
   const now = new Date();
   const p = madridParts(now);
   const startDay = Math.floor(madridDate(p.year, p.month, p.day, 0, 0).getTime() / 1000);
@@ -69,6 +71,7 @@ export async function GET(): Promise<NextResponse> {
 }
 
 export async function POST(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req); if (!auth.ok) return auth.response;
   try {
     const body = (await req.json()) as Record<string, unknown>;
     const key = String(body.key ?? "");

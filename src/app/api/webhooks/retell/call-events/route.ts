@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { getSetting, insertCallEvent, setSetting } from "@/lib/db";
 import { retellProvider } from "@/lib/calls/retell";
-import { describeRetellSignature } from "@/lib/calls/retell-webhook";
+import { describeRetellSignature, RETELL_WEBHOOK_VERIFIED_KEY } from "@/lib/calls/retell-webhook";
 import { logIntegrationEvent } from "@/lib/system/repo";
 
 // Webhook de eventos de llamada de Retell (call_started / call_ended /
@@ -15,8 +15,6 @@ export const dynamic = "force-dynamic";
 /** Marca de que una firma REAL de Retell ha validado alguna vez aquí. Es la
  *  única evidencia honesta de que la API key configurada es la que lleva el
  *  "webhook badge"; el doctor la lee para no cantar victoria sin pruebas. */
-export const RETELL_WEBHOOK_VERIFIED_KEY = "retell_webhook_signature_verified_at";
-
 export async function POST(req: NextRequest): Promise<NextResponse> {
   // RAW body: se verifica EXACTAMENTE lo recibido, antes de cualquier parseo.
   const rawBody = await req.text();

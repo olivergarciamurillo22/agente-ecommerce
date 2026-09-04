@@ -57,7 +57,8 @@
     "meta-ads:sync": "tsx scripts/meta-ads-sync.ts",
     "retell:pilot": "tsx scripts/retell-pilot.ts",
     "deploy:guard": "tsx scripts/deploy-guard.ts",
-    "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts"
+    "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts",
+    "users:create": "tsx scripts/users-create.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

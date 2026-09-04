@@ -797,6 +797,57 @@ export function migrateOrderAttribution(db: Database.Database): void {
   }
 }
 
+/** Migración 18: identidad, sesiones y auditoría. Solo crea tablas/índices. */
+export function migrateWorkspaceAuth(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('owner','agent')),
+      password_hash TEXT NOT NULL,
+      active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0,1)),
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires_at);
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      user_name TEXT NOT NULL,
+      action TEXT NOT NULL,
+      subject_type TEXT NOT NULL,
+      subject_id TEXT NOT NULL,
+      detail TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_audit_user_date ON audit_log(user_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_date ON audit_log(created_at);
+    CREATE TABLE IF NOT EXISTS work_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+      order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+      reason TEXT NOT NULL,
+      owner_only INTEGER NOT NULL DEFAULT 0 CHECK(owner_only IN (0,1)),
+      resolved_at INTEGER,
+      resolution_note TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(conversation_id, order_id, reason, owner_only, resolved_at)
+    );
+    CREATE TABLE IF NOT EXISTS confirmation_resends (
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      day TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      PRIMARY KEY(order_id, day)
+    );
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1435,6 +1486,7 @@ function build() {
   migrateCodScenarios(db);
   migrateCallAgentVersion(db);
   migrateOrderAttribution(db);
+  migrateWorkspaceAuth(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1604,7 +1656,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 17;
+export const SCHEMA_VERSION = 18;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
