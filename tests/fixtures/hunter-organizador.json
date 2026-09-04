@@ -5,6 +5,7 @@
   "name": "Organizador de Ropa Compresible",
   "category": "hogar",
   "unitCostEur": 3.29,
+  "salePriceEur": null,
   "sourceCurrency": "EUR",
   "sourceCost": 3.29,
   "weightGrams": 190,

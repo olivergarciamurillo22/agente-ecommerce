@@ -41,7 +41,7 @@ export function extractProductFacts(sourceUrl:string,html:string,fetchedAt=Math.
   const shell=body.trim().length<80;
   const normalizedUrl=new URL(sourceUrl).toString().slice(0,2048),domain=new URL(sourceUrl).hostname.toLowerCase().slice(0,253);
   return { suspiciousInstruction,shell,facts:{ sourceUrl:normalizedUrl,sourceDomain:domain,fetchedAt,
-    name:shell?null:(cleanMarketplaceTitle(title)?.slice(0,160)??null),category:null,unitCostEur:shell?null:num(priceRaw),
+    name:shell?null:(cleanMarketplaceTitle(title)?.slice(0,160)??null),category:null,unitCostEur:shell?null:num(priceRaw),salePriceEur:null,
     sourceCurrency:priceRaw?"EUR":null,sourceCost:shell?null:num(priceRaw),weightGrams:weight?round(num(weight[1])!*(weight[2].toLowerCase()==="kg"?1000:1)):null,
     lengthCm:dims?num(dims[1]):null,widthCm:dims?num(dims[2]):null,heightCm:dims?num(dims[3]):null,
     variants:null,specs:null,claims:null }};

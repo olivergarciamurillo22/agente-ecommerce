@@ -8,6 +8,8 @@ export interface CandidateFacts {
   name: string | null;
   category: string | null;
   unitCostEur: number | null;
+  /** Precio real decidido por Pedro. Nunca se deduce del coste. */
+  salePriceEur?: number | null;
   sourceCurrency: string | null;
   sourceCost: number | null;
   weightGrams: number | null;

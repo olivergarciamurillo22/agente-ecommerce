@@ -32,13 +32,6 @@ export function shippingTier(f: CandidateFacts): { tier: "hasta_1kg" | "hasta_4k
   return null;
 }
 
-export function proposePrice(cost: number): number {
-  const target = cost * 3;
-  // 36,90 € es el PVP de referencia validado con el organizador real de Casamable.
-  const allowed = [36.9, 39.9, 44.9, 49.9, 59.9, 69.9, 79.9, 89.9, 99.9, 119.9, 149.9];
-  return allowed.find((p) => p >= target && p >= cost * 2.5) ?? Math.ceil(target / 10) * 10 - 0.1;
-}
-
 function verdictOf(score: number): Verdict {
   if (score >= 80) return "prioritario";
   if (score >= 60) return "probar";
@@ -48,8 +41,8 @@ function verdictOf(score: number): Verdict {
 
 export function scoreCandidate(f: CandidateFacts, manualNote: string | null = null): CandidateScore | null {
   const shipment = shippingTier(f);
-  if (!shipment || f.unitCostEur === null) return null;
-  const price = proposePrice(f.unitCostEur);
+  if (!shipment || f.unitCostEur === null || f.salePriceEur == null || !Number.isFinite(f.salePriceEur) || f.salePriceEur <= 0) return null;
+  const price = f.salePriceEur;
   const inputs = {
     salePrice: price, productCost: f.unitCostEur, vatRate: 0, rawCPA: 0,
     shippingRate: BASE_SHIPPING_RATE, deliveryRate: BASE_DELIVERY_RATE,
@@ -81,5 +74,7 @@ export function missingScoreReasons(f: CandidateFacts): ScoreReason[] {
   if ([f.weightGrams, f.lengthCm, f.widthCm, f.heightCm].some((v) => v === null))
     return [{ factor: "medidas", points: 0, detail: "faltan medidas del paquete de venta" }];
   if (f.unitCostEur === null) return [{ factor: "coste", points: 0, detail: "falta el coste unitario" }];
+  if (f.salePriceEur == null || !Number.isFinite(f.salePriceEur) || f.salePriceEur <= 0)
+    return [{ factor: "precio_venta", points: 0, detail: "falta el precio de venta" }];
   return [{ factor: "tramo_envio", points: 0, detail: "el paquete queda fuera de los tramos configurados" }];
 }

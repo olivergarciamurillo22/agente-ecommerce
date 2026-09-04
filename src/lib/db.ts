@@ -859,6 +859,7 @@ export function migrateProductCandidates(db: Database.Database): void {
       nombre_limpio TEXT,
       categoria TEXT,
       coste_unitario_eur REAL,
+      pvp_entrada_eur REAL,
       moneda_origen TEXT,
       coste_origen REAL,
       peso_gramos REAL,

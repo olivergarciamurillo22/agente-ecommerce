@@ -13244,7 +13244,7 @@ async function main(): Promise<void> {
     const db = await import("../src/lib/db");
     const base = {
       sourceUrl: "https://example.test/producto-uno", sourceDomain: "example.test", fetchedAt: 1,
-      name: "Cortauñas eléctrico", category: "cuidado", unitCostEur: 5,
+      name: "Cortauñas eléctrico", category: "cuidado", unitCostEur: 5, salePriceEur: 39.9,
       sourceCurrency: "EUR", sourceCost: 5, weightGrams: 400,
       lengthCm: 14, widthCm: 8, heightCm: 5, variants: ["blanco"], specs: null, claims: null,
     };
@@ -13267,16 +13267,11 @@ async function main(): Promise<void> {
       assert.deepEqual(new Set(one.reasons.map(r => r.factor)), new Set(["margen_unitario","cpa_maximo","tramo_envio","variantes","ticket","recompra"]));
       assert.equal(one.reasons.reduce((s,r)=>s+r.points,0), one.score);
     });
-    await test("Hunter · organizador real conserva los economics medidos en ambos bultos", () => {
+    await test("Hunter · el organizador real no inventa un PVP para cuadrar economics", () => {
       const fixture = JSON.parse(fs.readFileSync(path.join(process.cwd(), "tests/fixtures/hunter-organizador.json"), "utf8"));
-      const compressed = hunterScore.scoreCandidate(fixture)!;
-      const folded = hunterScore.scoreCandidate({ ...fixture, lengthCm: 51, widthCm: 41, heightCm: 11 })!;
-      assert.equal(compressed.shippingTier, "hasta_1kg"); assert.equal(compressed.shippingEur, 4.08);
-      assert.equal(folded.shippingTier, "hasta_4kg"); assert.equal(folded.shippingEur, 6.5);
-      assert.ok(Math.abs(compressed.unitMarginEur - 12.02) <= 0.15, "margen escenario A");
-      assert.ok(Math.abs(folded.unitMarginEur - 9.14) <= 0.4, "margen escenario B");
-      assert.ok(Math.abs(compressed.maxCpaEur - compressed.unitMarginEur) <= 0.01, "CPA máximo A");
-      assert.ok(Math.abs(folded.maxCpaEur - folded.unitMarginEur) <= 0.01, "CPA máximo B");
+      assert.equal(hunterScore.scoreCandidate(fixture),null);
+      assert.equal(hunterScore.missingScoreReasons(fixture)[0].detail,"falta el precio de venta");
+      const explicit=hunterScore.scoreCandidate({...fixture,salePriceEur:39.9});assert.ok(explicit);assert.equal(explicit.proposedPriceEur,39.9);
       const missing = { ...fixture, lengthCm: null };
       assert.equal(hunterScore.scoreCandidate(missing), null);
       assert.equal(hunterScore.missingScoreReasons(missing)[0].detail, "faltan medidas del paquete de venta");

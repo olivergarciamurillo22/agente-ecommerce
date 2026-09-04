@@ -22,6 +22,7 @@ function fromRow(row: Row): ProductCandidate {
     id: Number(row.id), sourceUrl: String(row.source_url), sourceDomain: String(row.source_domain),
     fetchedAt: row.fetched_at === null ? null : Number(row.fetched_at), name: row.nombre_limpio as string | null,
     category: row.categoria as string | null, unitCostEur: row.coste_unitario_eur as number | null,
+    salePriceEur: row.pvp_entrada_eur as number | null,
     sourceCurrency: row.moneda_origen as string | null, sourceCost: row.coste_origen as number | null,
     weightGrams: row.peso_gramos as number | null, lengthCm: row.largo_cm as number | null,
     widthCm: row.ancho_cm as number | null, heightCm: row.alto_cm as number | null,
@@ -37,15 +38,15 @@ export class HunterRepository {
 
   upsert(f: CandidateFacts): ProductCandidate {
     this.db.prepare(`INSERT INTO product_candidates
-      (source_url,source_domain,fetched_at,nombre_limpio,categoria,coste_unitario_eur,moneda_origen,coste_origen,
+      (source_url,source_domain,fetched_at,nombre_limpio,categoria,coste_unitario_eur,pvp_entrada_eur,moneda_origen,coste_origen,
        peso_gramos,largo_cm,ancho_cm,alto_cm,variantes_json,specs_json,claims_json)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(source_url) DO UPDATE SET source_domain=excluded.source_domain,fetched_at=excluded.fetched_at,
-       nombre_limpio=excluded.nombre_limpio,categoria=excluded.categoria,coste_unitario_eur=excluded.coste_unitario_eur,
+       nombre_limpio=excluded.nombre_limpio,categoria=excluded.categoria,coste_unitario_eur=excluded.coste_unitario_eur,pvp_entrada_eur=excluded.pvp_entrada_eur,
        moneda_origen=excluded.moneda_origen,coste_origen=excluded.coste_origen,peso_gramos=excluded.peso_gramos,
        largo_cm=excluded.largo_cm,ancho_cm=excluded.ancho_cm,alto_cm=excluded.alto_cm,
        variantes_json=excluded.variantes_json,specs_json=excluded.specs_json,claims_json=excluded.claims_json,
-       updated_at=unixepoch()`).run(f.sourceUrl,f.sourceDomain,f.fetchedAt,f.name,f.category,f.unitCostEur,
+       updated_at=unixepoch()`).run(f.sourceUrl,f.sourceDomain,f.fetchedAt,f.name,f.category,f.unitCostEur,f.salePriceEur??null,
        f.sourceCurrency,f.sourceCost,f.weightGrams,f.lengthCm,f.widthCm,f.heightCm,
        f.variants ? JSON.stringify(f.variants) : null,f.specs ? JSON.stringify(f.specs) : null,
        f.claims ? JSON.stringify(f.claims) : null);
@@ -73,6 +74,12 @@ export class HunterRepository {
     const before=this.byId(id); if(!before) throw new Error(`No existe el candidato ${id}`);
     this.db.prepare("UPDATE product_candidates SET estado=?,nota_manual=COALESCE(?,nota_manual),updated_at=unixepoch() WHERE id=?").run(state,note,id);
     this.event(id,"estado",before.state,state,before.scoring?.score??null,before.scoring?.score??null,{ note }); return this.byId(id)!;
+  }
+  setSalePrice(id:number,salePriceEur:number):ProductCandidate {
+    const before=this.byId(id);if(!before)throw new Error(`No existe el candidato ${id}`);
+    if(!Number.isFinite(salePriceEur)||salePriceEur<=0)throw new Error("El precio de venta debe ser mayor que cero");
+    this.db.prepare("UPDATE product_candidates SET pvp_entrada_eur=?,score=NULL,motivos_json=NULL,updated_at=unixepoch() WHERE id=?").run(salePriceEur,id);
+    this.event(id,"precio_venta",before.state,before.state,before.scoring?.score??null,null,{salePriceEur});return this.score(id);
   }
   private event(id:number,type:string,prev:CandidateState|null,next:CandidateState|null,prevScore:number|null,nextScore:number|null,details:unknown){
     this.db.prepare(`INSERT INTO candidate_events(candidate_id,event_type,previous_state,next_state,previous_score,next_score,details_json) VALUES(?,?,?,?,?,?,?)`).run(id,type,prev,next,prevScore,nextScore,JSON.stringify(details));

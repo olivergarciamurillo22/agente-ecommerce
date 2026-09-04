@@ -60,8 +60,10 @@ del repositorio prevalecen.
 - **Esquema 19.** La rama se apoya en Workspace de atención: su migración 18
   crea `users`, `sessions` y `audit_log`; Hunter crea `product_candidates` y
   `candidate_events` en la 19. Partir de schema 17 ejecuta ambas en orden.
-- **Peso facturable.** El tramo usa el mayor entre peso real y volumétrico con
-  divisor 6.000. El organizador real fija los dos escenarios de aceptación.
+- **PVP obligatorio.** `FINANCE-MODEL.md` y `BUSINESS-METRICS.md` no contienen
+  un PVP del organizador ni explican los 12,02 €/9,14 € como una cuenta
+  reproducible. Se retiró el 36,90 € deducido: sin precio introducido por
+  Pedro no hay margen, CPA máximo ni score.
 - **Reparto con Product Intelligence Engine.** PI Engine descubre, agrupa y
   vigila señales de mercado. Hunter conserva la economía COD auditada y la
   generación de landing. No se han unido los catálogos hasta decidir un ID
