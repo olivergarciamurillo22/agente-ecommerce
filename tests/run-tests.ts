@@ -13296,10 +13296,53 @@ async function main(): Promise<void> {
       assert.equal("score" in estimate.viability, false);
     });
 
+    await test("Hunter predictivo · scraping publico conserva URL y aisla 403/captcha", async () => {
+      await withEnv({ HUNTER_PREDICTIVE_SEARCH_SOURCE: "scraping_publico", HUNTER_PREDICTIVE_PUBLIC_RESULT_LIMIT: "10" }, async () => {
+        const { PublicScrapingSearchProvider, PUBLIC_SEARCH_USER_AGENT } = await import("../src/lib/hunter/predictive/scraping-publico");
+        const calls: Array<{ url: string; userAgent: string | null }> = [];
+        const mockFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input); calls.push({ url, userAgent: new Headers(init?.headers).get("user-agent") });
+          if (url.includes("1688.com")) return new Response("bloqueado", { status: 403 });
+          if (url.includes("alibaba.com")) return new Response("<html><body>captcha security verification</body></html>", { status: 200 });
+          return new Response(`<html><body><a href="https://www.aliexpress.com/item/1001.html">Oferta EUR 3.50 · 100 units</a></body></html>`, { status: 200 });
+        }) as typeof fetch;
+        const provider = new PublicScrapingSearchProvider(mockFetch);
+        const evidence = await provider.search({ query: "organizador", kind: "wholesale" });
+        assert.equal(evidence.length, 1);
+        assert.equal(evidence[0].sourceUrl, "https://www.aliexpress.com/item/1001.html");
+        assert.equal(evidence[0].priceEur, 3.5);
+        assert.ok(calls.every((call) => call.userAgent === PUBLIC_SEARCH_USER_AGENT));
+        assert.deepEqual(provider.sourceStatuses().map((s) => [s.source, s.status, s.reason]), [
+          ["aliexpress", "disponible", null], ["1688", "no_disponible", "HTTP 403"], ["alibaba", "no_disponible", "captcha detectado"],
+        ]);
+      });
+    });
+
+    await test("Hunter predictivo · una sola fuente da confianza baja; tres fallos cierran la busqueda", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const { PublicScrapingSearchProvider } = await import("../src/lib/hunter/predictive/scraping-publico");
+      await withEnv({ HUNTER_PREDICTIVE_SEARCH_SOURCE: "scraping_publico" }, async () => {
+        const oneFetch = (async (input: string | URL | Request) => String(input).includes("aliexpress.com")
+          ? new Response(`<html><body><a href="https://www.aliexpress.com/item/2002.html">EUR 4.25 · 500 units</a></body></html>`)
+          : new Response("denegado", { status: 403 })) as typeof fetch;
+        const one = await estimatePredictiveCandidate("producto", null, new PublicScrapingSearchProvider(oneFetch), 1000);
+        assert.equal(one.wholesale.at500?.probable, 4.25);
+        assert.equal(one.wholesale.at500?.confidence, "baja");
+        assert.equal(one.searchAvailable, true);
+
+        const failedFetch = (async () => new Response("denegado", { status: 403 })) as typeof fetch;
+        const failed = await estimatePredictiveCandidate("producto", null, new PublicScrapingSearchProvider(failedFetch), 1000);
+        assert.equal(failed.searchAvailable, false);
+        assert.equal(failed.wholesale.at100, null);
+        assert.equal(failed.wholesale.at500, null);
+        assert.equal(failed.viability.verdict, null);
+      });
+    });
+
     await test("Hunter predictivo · promocionar conserva estimado y nunca produce score de decision", async () => {
       const { PredictiveRepository } = await import("../src/lib/hunter/predictive/repository");
       const source = { kind: "retail" as const, sourceUrl: "https://competidor.test/producto-predictivo", sourceDomain: "competidor.test", title: "Producto", priceEur: 39, quantity: null, weightGrams: 400, observedAt: 1 };
-      const priceRange = { min: 39, max: 42, probable: 40.5, sources: [source, { ...source, sourceUrl: "https://otro.test/p", sourceDomain: "otro.test", priceEur: 42 }], consultedAt: 1, expiresAt: 2 };
+      const priceRange = { min: 39, max: 42, probable: 40.5, sources: [source, { ...source, sourceUrl: "https://otro.test/p", sourceDomain: "otro.test", priceEur: 42 }], consultedAt: 1, expiresAt: 2, confidence: "media" as const };
       const repo = new PredictiveRepository();
       const saved = repo.save({ productQuery: "Producto predictivo", competitorUrl: source.sourceUrl, searchAvailable: true, searchMechanism: "test", wholesale: { at100: priceRange, at500: priceRange, reason: null }, retail: { unit: priceRange, tiers: { unit: priceRange, pack2Reference: "estimado", pack4Reference: "estimado" }, reason: null }, viability: { verdict: "investigar", worstContributionEur: 1, bestContributionEur: 10, logisticsEur: 6.48, shippingTier: "hasta_1kg", reason: null }, consultedAt: 1, expiresAt: 2 });
       const promoted = repo.promote(saved.id!);

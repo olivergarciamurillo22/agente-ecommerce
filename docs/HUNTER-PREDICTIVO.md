@@ -7,10 +7,10 @@ medidas y PVP confirmados antes de puntuar o justificar gasto.
 
 ## Busqueda y fuentes
 
-La aplicacion no dispone por si sola de un buscador web. Usa un adaptador HTTP
-configurable mediante `HUNTER_PREDICTIVE_SEARCH_API_URL` y, opcionalmente,
-`HUNTER_PREDICTIVE_SEARCH_API_TOKEN`. Sin ese servicio declara y persiste
-`sin_acceso_a_busqueda: true`; no genera cifras.
+Hay dos proveedores opt-in mediante `HUNTER_PREDICTIVE_SEARCH_SOURCE`: `api`
+usa `HUNTER_PREDICTIVE_SEARCH_API_URL` y `scraping_publico` consulta las
+paginas publicas de resultados de AliExpress, 1688 y Alibaba. El valor por
+defecto es `off`: declara y persiste `sin_acceso_a_busqueda: true`.
 
 El endpoint recibe `POST` con `query`, `competitorUrl` y `kind` (`wholesale` o
 `retail`) y devuelve `{ "results": [...] }`. Cada resultado debe incluir URL
@@ -20,9 +20,23 @@ contenido remoto se valida como datos; nunca se ejecuta ni se interpreta como
 instrucciones. Meta Ad Library no se considera disponible sin un proveedor que
 la exponga explicitamente en este contrato.
 
-Se exigen al menos dos dominios distintos para formar un rango. Los rangos
-guardan minimo, maximo, media probable, fuentes y fecha. Caducan a los 30 dias,
-porque precios y disponibilidad mayorista cambian rapidamente.
+Se exige al menos una fuente real para formar un rango; con una sola la
+confianza queda marcada como baja. Los rangos guardan minimo, maximo, media
+probable, fuentes y fecha. Caducan a los 30 dias, porque precios y
+disponibilidad mayorista cambian rapidamente.
+
+En `scraping_publico`, cada sitio se consulta con el User-Agent identificable
+`Casamable-Hunter-Predictivo/1.0`, timeout de 7 segundos y como maximo un
+reintento ante red, 429 o 5xx. Un 403, login, captcha, HTML vacio o ausencia de
+precios EUR se registra como `no_disponible` con el motivo y no bloquea las
+otras fuentes. Se leen como maximo 10 resultados por sitio (configurable entre
+1 y 20). No se falsean cabeceras de navegador ni se intenta sortear bloqueos.
+
+La media probable pondera cada fuente por igual: primero obtiene la media de
+sus resultados y despues calcula la media entre fuentes disponibles. Una sola
+fuente implica confianza `baja`; dos o tres, `media`. Nunca se declara
+confianza alta. Cada observacion conserva la URL exacta. Solo se aceptan
+precios mostrados en EUR: no se inventa un cambio de divisa para 1688.
 
 ## Viabilidad preliminar
 

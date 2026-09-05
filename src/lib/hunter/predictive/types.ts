@@ -1,5 +1,14 @@
 export type PredictiveVerdict = "descartar" | "investigar" | "candidato_fuerte";
 export type EvidenceKind = "wholesale" | "retail";
+export type EstimateConfidence = "baja" | "media";
+export type PublicSourceName = "aliexpress" | "1688" | "alibaba";
+
+export interface PublicSourceStatus {
+  source: PublicSourceName;
+  status: "disponible" | "no_disponible";
+  reason: string | null;
+  resultCount: number;
+}
 
 export interface SearchEvidence {
   kind: EvidenceKind;
@@ -19,12 +28,14 @@ export interface PriceRange {
   sources: SearchEvidence[];
   consultedAt: number;
   expiresAt: number;
+  confidence: EstimateConfidence;
 }
 
 export interface WholesaleEstimate {
   at100: PriceRange | null;
   at500: PriceRange | null;
   reason: string | null;
+  sourceStatuses?: PublicSourceStatus[];
 }
 
 export interface RetailEstimate {
@@ -66,4 +77,5 @@ export interface PredictiveSearchProvider {
   readonly available: boolean;
   readonly mechanism: string | null;
   search(request: PredictiveSearchRequest): Promise<SearchEvidence[]>;
+  sourceStatuses?(): PublicSourceStatus[];
 }
