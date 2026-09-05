@@ -30,6 +30,7 @@ const STAFF_PATTERNS: RegExp[] = [
   /^\/api\/workspace\/action$/, //     corregir dirección, nota, resolver, escalar
   /^\/api\/mode\/[^/]+$/, //           IA → HUMANO
   /^\/api\/messages\/[^/]+$/, //       responder (NO .../image: sin guard propio)
+  /^\/api\/media\/[^/]+$/, //          ver media entrante (handler con requireStaff)
   /^\/api\/orders\/[^/]+\/action$/, // el handler limita al agente a `resend`
 ];
 

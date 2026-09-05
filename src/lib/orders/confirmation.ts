@@ -21,6 +21,7 @@ import {
   clearSelectedOrderContext,
   getActiveOrdersByPhone,
   getNeedsCallOrdersByPhone,
+  getRecentConfirmedOrdersByPhone,
   getOrderById,
   getConversationOrderContext,
   markOrderPossibleDuplicate,
@@ -28,7 +29,6 @@ import {
   requestOrderCancellation,
   requestConfirmedOrderCancellation,
   resetConversationPrompt,
-  setPendingCancelContext,
   setSelectedOrderContext,
   markOrderConfirmed,
   markOrderAddressNeedsAttention,
@@ -45,8 +45,6 @@ import {
 import { tagOrderConfirmed } from "../shopify/admin";
 import { orderActionAllowed } from "../safety";
 import {
-  buildCancelConfirmPrompt,
-  buildCancelMultiPrompt,
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
   MSG_CANCEL_RECEIVED,
@@ -58,19 +56,19 @@ import {
   MSG_NOTE_SAVED,
   MSG_CLARIFY,
   MSG_WILL_CALL,
+  MSG_HUMAN_ATTENTION,
   buildDisambiguationMessage,
 } from "./messages";
 import {
   claimsSingleOrder,
   findPossibleDuplicates,
-  isCancelIntent,
-  isExplicitCancelConfirmation,
   matchOrderByProduct,
   saysBoth,
 } from "./multi-order";
 import { logIntegrationEvent } from "../system/repo";
 import { assessOrderShippingAddress } from "./address-assessment";
 import { escalateOrderToHuman } from "./attention";
+import { classifyFreeTextIntent } from "./free-text-intent";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -367,7 +365,15 @@ function loadValidContext(phone: string, active: OrderRow[]): LoadedContext {
  */
 function executeCancellation(phone: string, orders: OrderRow[]): OrderReplyResult {
   for (const o of orders) {
-    requestOrderCancellation(o.id);
+    if (o.status === "confirmed") requestConfirmedOrderCancellation(o.id);
+    else requestOrderCancellation(o.id);
+    escalateOrderToHuman({
+      order: o,
+      reason: "Posible cancelación",
+      eventType: "possible_cancellation_free_text",
+      severity: "critical",
+      eventMessage: "posible cancelación detectada en texto libre; requiere atención humana urgente",
+    });
     logger.info(`[ORDER] #${o.shopify_order_number} -> cancelación solicitada por el cliente (needs_call)`);
     logIntegrationEvent(
       "whatsapp",
@@ -386,6 +392,39 @@ function executeCancellation(phone: string, orders: OrderRow[]): OrderReplyResul
   };
 }
 
+function escalateUnknownText(phone: string, orders: OrderRow[], reason = "Mensaje libre pendiente"): OrderReplyResult {
+  const possibleCancellation = reason === "Posible cancelación";
+  for (const order of orders) {
+    markOrderNeedsCall(order.id);
+    setOrderCustomerReplied(order.id);
+    escalateOrderToHuman({
+      order,
+      reason,
+      eventType: possibleCancellation ? "possible_cancellation_free_text" : "unrecognized_order_free_text",
+      severity: possibleCancellation ? "critical" : "warning",
+      eventMessage: possibleCancellation
+        ? "posible cancelación ambigua entre varios pedidos; requiere atención humana urgente"
+        : "texto libre fuera de un flujo determinista: derivado a atención humana",
+    });
+  }
+  clearSelectedOrderContext(phone);
+  resetConversationPrompt(phone);
+  return {
+    handled: true,
+    reply: MSG_HUMAN_ATTENTION,
+    authorized: orders.some((order) => order.pilot_authorized === 1),
+  };
+}
+
+/** Audio/imagen/documento en una conversación de pedido nunca queda mudo. */
+export function handleNonTextOrderMessage(phone: string, kind: string): OrderReplyResult {
+  const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+  if (active.length > 0) return escalateUnknownText(phone, active, `${kind} pendiente de revisar`);
+  const confirmed = getRecentConfirmedOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+  if (confirmed.length > 0) return escalateUnknownText(phone, confirmed.slice(0, 1), `${kind} posterior a confirmación`);
+  return { handled: false };
+}
+
 /**
  * Punto de entrada: procesa un mensaje entrante de este teléfono.
  * Devuelve handled=false si el teléfono no tiene pedidos activos (y entonces
@@ -401,6 +440,7 @@ function executeCancellation(phone: string, orders: OrderRow[]): OrderReplyResul
  * cancelar exige SIEMPRE verbo + número de pedido explícitos.
  */
 export function handleOrderReply(phone: string, text: string): OrderReplyResult {
+  const freeTextIntent = classifyFreeTextIntent(text);
   // Solo pedidos sobre los que PODEMOS actuar: en TEST_MODE, los de la
   // allowlist o los autorizados a mano para el piloto. Un pedido no elegible
   // nunca recibió el mensaje inicial, así que su "respuesta" no es tal.
@@ -411,9 +451,18 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
     // petición (nada se cancela solo) para que en Acciones pase de "hay que
     // llamarle" (urgencia 4) a "pide cancelar" (urgencia 1), y se le
     // confirma al cliente que su petición quedó registrada.
-    if (isCancelIntent(text)) {
-      const enManosHumanas = getNeedsCallOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
-      if (enManosHumanas.length > 0) return executeCancellation(phone, enManosHumanas);
+    const enManosHumanas = getNeedsCallOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+    if (freeTextIntent === "CANCELLATION_OR_REJECTION" && enManosHumanas.length > 0) {
+      return executeCancellation(phone, enManosHumanas);
+    }
+    // Una duda, imagen o rechazo justo después de confirmar tampoco puede
+    // caer al silencio: el pedido ya no está en la lista "activa", pero la
+    // conversación sigue siendo claramente de ese pedido.
+    const confirmed = getRecentConfirmedOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
+    if (confirmed.length > 0) {
+      return freeTextIntent === "CANCELLATION_OR_REJECTION"
+        ? executeCancellation(phone, confirmed.slice(0, 1))
+        : escalateUnknownText(phone, confirmed.slice(0, 1), "Mensaje posterior a confirmación");
     }
     return { handled: false };
   }
@@ -424,22 +473,20 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   });
 
   const intent = classifyOrderReply(text);
-  const quiereCancelar = isCancelIntent(text);
+  const quiereCancelar = freeTextIntent === "CANCELLATION_OR_REJECTION";
   const context = loadValidContext(phone, active);
 
   // --- Caso simple: un único pedido activo ---
   if (active.length === 1) {
     const order = active[0];
     if (quiereCancelar) {
-      // Formato explícito (verbo + número) → se registra la petición. Menos
-      // que eso ("no lo quiero", "cancelar") → confirmación primero: una
-      // frase ambigua jamás cancela.
-      if (isExplicitCancelConfirmation(text, order.shopify_order_number)) {
-        return executeCancellation(phone, [order]);
-      }
-      setPendingCancelContext(phone, order.id);
-      return authorized({ handled: true, reply: buildCancelConfirmPrompt(order) }, order);
+      return executeCancellation(phone, [order]);
     }
+    if (
+      intent === "unknown" &&
+      order.status !== "needs_correction" &&
+      order.status !== "awaiting_delivery_note"
+    ) return escalateUnknownText(phone, [order]);
     return authorized(routeToOrder(order, text, intent), order);
   }
 
@@ -486,8 +533,7 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   if (context.selectedOrder) {
     const sel = context.selectedOrder;
     if (quiereCancelar) {
-      setPendingCancelContext(phone, sel.id);
-      return authorized({ handled: true, reply: buildCancelConfirmPrompt(sel) }, sel);
+      return executeCancellation(phone, [sel]);
     }
     resetConversationPrompt(phone);
     const r = authorized(routeToOrder(sel, text, intent), sel);
@@ -502,25 +548,9 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
 
   // 4) Quiere cancelar sin decir cuál: JAMÁS se cancelan todos por una frase.
   if (quiereCancelar) {
-    setPendingCancelContext(phone, null);
-    const veces = recordConversationPrompt(phone, "cancel_multi");
-    if (veces > maxSamePromptRepeats()) {
-      // No entramos en bucle tampoco aquí: a revisión humana.
-      for (const o of active) markOrderNeedsCall(o.id);
-      logIntegrationEvent("whatsapp", "conversation_escalated", "warning",
-        "cancelación multi-pedido sin resolver tras varios intentos: a revisión humana");
-      resetConversationPrompt(phone);
-      return {
-        handled: true,
-        reply: MSG_ESCALATE_TO_HUMAN,
-        authorized: active.some((o) => o.pilot_authorized === 1),
-      };
-    }
-    return {
-      handled: true,
-      reply: buildCancelMultiPrompt(active),
-      authorized: active.some((o) => o.pilot_authorized === 1),
-    };
+    // No se adivina cuál de varios pedidos quiere cancelar: se escalan todos
+    // como contexto, sin solicitar la cancelación automática de ninguno.
+    return escalateUnknownText(phone, active, "Posible cancelación");
   }
 
   // 5) "Solo he pedido uno" + pedidos que parecen el MISMO → duplicado
@@ -572,6 +602,10 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
       return r;
     }
     return authorized({ handled: true, reply: buildOrderActionMenu(byProduct) }, byProduct);
+  }
+
+  if (intent === "unknown") {
+    return escalateUnknownText(phone, active);
   }
 
   // 7) Ambiguo de verdad: selector — pero NUNCA en bucle. A la tercera vez

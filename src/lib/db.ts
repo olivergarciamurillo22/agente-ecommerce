@@ -1761,6 +1761,12 @@ export function insertMessage(
   return ctx().insertMessageTx(conversationId, role, content);
 }
 
+/** Completa un placeholder de media cuando termina su descarga asíncrona. */
+export function updateMessageContent(messageId: number, content: string): boolean {
+  const info = ctx().db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(content.slice(0, 4000), messageId);
+  return info.changes > 0;
+}
+
 export function getMessages(conversationId: number, limit = 50): Message[] {
   return ctx().stmtGetMessages.all(conversationId, limit).reverse();
 }
@@ -2382,6 +2388,19 @@ export function getNeedsCallOrdersByPhone(phone: string): OrderRow[] {
        ORDER BY created_at DESC, id DESC`
     )
     .all(phone) as OrderRow[];
+}
+
+/** Confirmados recientes todavía gestionables: cubre cancelaciones post-confirmación. */
+export function getRecentConfirmedOrdersByPhone(phone: string, maxAgeDays = 30): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE phone = ? AND status = 'confirmed'
+         AND COALESCE(closure_status, 'unknown') NOT IN ('cancelled','delivered','refused')
+         AND COALESCE(confirmed_at, updated_at, created_at) >= unixepoch() - ? * 86400
+       ORDER BY COALESCE(confirmed_at, updated_at, created_at) DESC, id DESC`
+    )
+    .all(phone, maxAgeDays) as OrderRow[];
 }
 
 /**

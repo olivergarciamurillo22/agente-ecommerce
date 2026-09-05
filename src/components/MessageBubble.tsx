@@ -53,6 +53,8 @@ export default function MessageBubble({
 }) {
   const saliente = role !== "user";
   const esIA = role === "assistant";
+  const media = /\[\[media:image:(inbound-[0-9a-f-]+\.(?:jpe?g|png|webp))\]\]/i.exec(content);
+  const text = media ? content.replace(media[0], "").trim() : content;
 
   return (
     <div className={`flex ${saliente ? "justify-end" : "justify-start"} mb-1.5 px-1`}>
@@ -62,7 +64,16 @@ export default function MessageBubble({
         }`}
       >
         <div className="text-[14.5px] leading-[1.35] text-brand-text whitespace-pre-wrap break-words">
-          {content}
+          {media && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={`/api/media/${encodeURIComponent(media[1])}`}
+              alt="Imagen enviada por el cliente"
+              loading="lazy"
+              className="mb-1 max-h-80 w-auto max-w-full rounded-md object-contain"
+            />
+          )}
+          {text}
           {/* Reserva el hueco de la hora en la ÚLTIMA línea del texto */}
           <span className="chat-time-spacer" aria-hidden />
         </div>

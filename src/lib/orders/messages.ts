@@ -122,6 +122,9 @@ export const MSG_CLARIFY =
 export const MSG_WILL_CALL =
   "Sin problema, te llamamos nosotros para confirmarlo por teléfono 👍";
 
+export const MSG_HUMAN_ATTENTION =
+  "He pasado tu mensaje al equipo para que lo revise una persona. Te responderemos por aquí lo antes posible.";
+
 /**
  * Varios pedidos activos del mismo teléfono: pedimos el número de pedido.
  *

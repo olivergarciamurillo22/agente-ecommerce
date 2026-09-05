@@ -44,6 +44,7 @@ process.env.WHATSAPP_WINDOW_ENABLED = "0";
 delete process.env.SHOPIFY_WRITE_ENABLED;
 delete process.env.TEST_PHONE_ALLOWLIST;
 delete process.env.OUTBOX_MAX_AGE_MINUTES;
+process.env.META_WHATSAPP_MEDIA_DOWNLOAD_ENABLED = "0";
 
 /** Aplica variables de entorno solo durante fn() y SIEMPRE las restaura. */
 async function withEnv(
@@ -322,6 +323,7 @@ async function main(): Promise<void> {
     "../src/lib/orders/confirmation"
   );
   const { assessShippingAddress } = await import("../src/lib/orders/address-assessment");
+  const { classifyFreeTextIntent } = await import("../src/lib/orders/free-text-intent");
   const { tagOrderConfirmed } = await import("../src/lib/shopify/admin");
   const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
   const msgs = await import("../src/lib/orders/messages");
@@ -667,14 +669,15 @@ async function main(): Promise<void> {
   });
 
   // ============ 9 · Respuestas ambiguas ============
-  await test("respuesta ambigua → aclaración; segunda ambigua → needs_call", async () => {
+  await test("texto libre no reconocido → HUMAN inmediatamente", async () => {
     mkOrder("910005", "1205", "34600000004");
     await runSchedulerTick(Math.floor(Date.now() / 1000));
     const r1 = handleOrderReply("34600000004", "hola, quién eres?");
-    assert.equal(r1.reply, msgs.MSG_CLARIFY);
-    assert.equal(db.getOrderByShopifyId("910005")!.status, "awaiting_reply");
+    assert.equal(r1.reply, msgs.MSG_HUMAN_ATTENTION);
+    assert.equal(db.getOrderByShopifyId("910005")!.status, "needs_call");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone("34600000004")!)!.mode, "HUMAN");
     const r2 = handleOrderReply("34600000004", "no entiendo nada");
-    assert.equal(r2.reply, msgs.MSG_WILL_CALL);
+    assert.equal(r2.handled, false, "el bot no reinicia el flujo ya tomado por una persona");
     assert.equal(db.getOrderByShopifyId("910005")!.status, "needs_call");
   });
 

@@ -15,6 +15,7 @@
 
 import type { OrderRow } from "../db";
 import { orderLineItems } from "./line-items";
+import { classifyFreeTextIntent } from "./free-text-intent";
 
 /** minúsculas, sin tildes, sin signos — la misma normalización del flujo. */
 export function normalizeText(text: string): string {
@@ -93,12 +94,7 @@ export function claimsSingleOrder(text: string): boolean {
  * siempre una confirmación explícita aparte ("CANCELAR 1097").
  */
 export function isCancelIntent(text: string): boolean {
-  const n = normalizeText(text);
-  return (
-    /\b(cancelar|cancela|cancelalo|cancelala|anular|anula|anulalo|anulala)\b/.test(n) ||
-    /\bno lo quiero\b/.test(n) ||
-    /\bno quiero (el pedido|ninguno|ningun pedido|ninguna)\b/.test(n)
-  );
+  return classifyFreeTextIntent(text) === "CANCELLATION_OR_REJECTION";
 }
 
 /**

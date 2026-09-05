@@ -18,13 +18,14 @@
 
 import crypto from "node:crypto";
 import pino from "pino";
-import { claimWebhookEvent, getOrCreateConversation, insertMessage, setSetting } from "../db";
+import { claimWebhookEvent, getOrCreateConversation, insertMessage, setSetting, updateMessageContent } from "../db";
 import { logIntegrationEvent, recordServiceCheck } from "../system/repo";
 import { sendWhatsAppMessage } from "../whatsapp";
 import { whatsappProviderName } from "./provider";
-import { handleOrderReply, handleOrderButtonReply } from "../orders/confirmation";
+import { handleOrderReply, handleOrderButtonReply, handleNonTextOrderMessage } from "../orders/confirmation";
 import { updateOutboxStatusByProviderMessageId } from "../db";
 import { parseMetaWebhookPayload, type InboundWhatsAppMessage } from "./inbound";
+import { cacheMetaInboundImage, inboundImageMarker, metaInboundMediaEnabled } from "./meta-media";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -113,7 +114,23 @@ function procesarMensaje(m: InboundWhatsAppMessage): void {
   // Audio e imagen también cuentan: para Meta, cualquier entrante abre la
   // ventana, y nuestro registro tiene que decir lo mismo.
   const convo = getOrCreateConversation(m.phone, m.profileName ?? undefined);
-  insertMessage(convo.id, "user", textoParaPanel(m).slice(0, 2000));
+  const panelText = textoParaPanel(m).slice(0, 2000);
+  const storedMessageId = insertMessage(convo.id, "user", panelText);
+
+  // El webhook se confirma sin esperar a la descarga. Cuando termina, la
+  // misma burbuja recibe un marcador local autenticado que el workspace
+  // renderiza como imagen; no hace falta cambiar schema 18.
+  if (m.kind === "image" && m.mediaId && metaInboundMediaEnabled()) {
+    void cacheMetaInboundImage(m.mediaId, m.mimeType ?? null)
+      .then((fileName) => updateMessageContent(storedMessageId, `${panelText}\n${inboundImageMarker(fileName)}`))
+      .catch((err) => {
+        logger.warn(`[META] no se pudo descargar imagen entrante: ${err instanceof Error ? err.message : String(err)}`);
+        logIntegrationEvent("whatsapp", "inbound_image_download_failed", "warning", "imagen entrante no descargable; revisar en WhatsApp");
+      });
+  }
+
+  // Una conversación tomada por una persona nunca vuelve a activar el bot.
+  if (convo.mode === "HUMAN") return;
 
   let resultado;
   if ((m.kind === "button_reply" || m.kind === "list_reply") && m.payload) {
@@ -123,12 +140,10 @@ function procesarMensaje(m: InboundWhatsAppMessage): void {
     // Compatibilidad: el parser de texto de siempre ("1", "todo correcto").
     resultado = handleOrderReply(m.phone, m.text);
   } else {
-    // Audio/imagen/desconocido por Cloud API: fuera del alcance del piloto.
-    // Queda registrado y visible en el panel; no se responde nada (misma
-    // política que un número sin pedidos). El COD no se rompe: el cliente
-    // puede seguir escribiendo texto o pulsando botones.
-    logger.info(`[META] entrante ${m.kind} de ***${m.phone.slice(-4)}: registrado, sin manejo en el piloto`);
-    return;
+    // Media o formato no reconocido relacionado con un pedido: visible y a
+    // HUMAN inmediatamente. Si no hay pedido, sigue siendo un lead normal.
+    resultado = handleNonTextOrderMessage(m.phone, m.kind === "image" ? "Imagen" : m.kind === "audio" ? "Audio" : "Mensaje");
+    logger.info(`[META] entrante ${m.kind} de ***${m.phone.slice(-4)}: registrado${resultado.handled ? " y escalado" : ""}`);
   }
 
   if (resultado.handled && resultado.reply) {

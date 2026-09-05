@@ -10,19 +10,27 @@ export async function GET(req: NextRequest) {
   const rows = systemDbHandle().prepare(`
     SELECT c.id, c.name, c.mode, c.last_message_at, c.phone,
       (SELECT content FROM messages m WHERE m.conversation_id=c.id ORDER BY m.created_at DESC, m.id DESC LIMIT 1) last_message,
+      (SELECT reason FROM work_items w
+        WHERE w.conversation_id=c.id AND w.owner_only=0 AND w.resolved_at IS NULL
+        ORDER BY CASE WHEN w.reason='Posible cancelación' THEN 0 WHEN w.reason='Dirección sospechosa' THEN 1 ELSE 2 END,
+                 w.created_at DESC, w.id DESC LIMIT 1) attention_reason,
       (SELECT id FROM orders o WHERE o.phone=c.phone ORDER BY o.created_at DESC LIMIT 1) order_id,
       (SELECT shopify_order_number FROM orders o WHERE o.phone=c.phone ORDER BY o.created_at DESC LIMIT 1) order_number,
       (SELECT status FROM orders o WHERE o.phone=c.phone ORDER BY o.created_at DESC LIMIT 1) order_status
     FROM conversations c
     WHERE NOT EXISTS (SELECT 1 FROM work_items w WHERE w.conversation_id=c.id AND w.owner_only=0 AND w.resolved_at IS NOT NULL)
-    ORDER BY COALESCE(c.last_message_at,c.created_at) ASC`).all() as Array<{
+    ORDER BY CASE
+      WHEN EXISTS (SELECT 1 FROM work_items w WHERE w.conversation_id=c.id AND w.reason='Posible cancelación' AND w.resolved_at IS NULL) THEN 0
+      WHEN EXISTS (SELECT 1 FROM work_items w WHERE w.conversation_id=c.id AND w.reason='Dirección sospechosa' AND w.resolved_at IS NULL) THEN 1
+      WHEN c.mode='HUMAN' THEN 2 ELSE 3 END,
+      COALESCE(c.last_message_at,c.created_at) ASC`).all() as Array<{
       id:number; name:string|null; mode:string; last_message_at:number|null; phone:string;
-      last_message:string|null; order_id:number|null; order_number:string|null; order_status:string|null;
+      last_message:string|null; attention_reason:string|null; order_id:number|null; order_number:string|null; order_status:string|null;
     }>;
   const items = rows.map((row) => ({
     ...row,
     waitingMinutes: Math.max(0, Math.floor((Date.now() / 1000 - Number(row.last_message_at ?? 0)) / 60)),
-    reason: reasonFor(String(row.order_status ?? "")),
+    reason: row.attention_reason ?? reasonFor(String(row.order_status ?? "")),
   }));
   const selected = Number(req.nextUrl.searchParams.get("conversationId") ?? items[0]?.id ?? 0);
   const item = items.find((candidate) => Number(candidate.id) === selected);
