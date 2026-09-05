@@ -665,15 +665,15 @@ async function main(): Promise<void> {
   });
 
   // ============ 9 · Respuestas ambiguas ============
-  await test("respuesta ambigua → aclaración; segunda ambigua → needs_call", async () => {
+  await test("texto libre no reconocido → HUMAN inmediato, sin respuesta automática", async () => {
     mkOrder("910005", "1205", "34600000004");
     await runSchedulerTick(Math.floor(Date.now() / 1000));
     const r1 = handleOrderReply("34600000004", "hola, quién eres?");
-    assert.equal(r1.reply, msgs.MSG_CLARIFY);
-    assert.equal(db.getOrderByShopifyId("910005")!.status, "awaiting_reply");
-    const r2 = handleOrderReply("34600000004", "no entiendo nada");
-    assert.equal(r2.reply, msgs.MSG_WILL_CALL);
+    assert.equal(r1.handled, true);
+    assert.equal(r1.reply, undefined);
     assert.equal(db.getOrderByShopifyId("910005")!.status, "needs_call");
+    const convoId = db.getConversationIdByPhone("34600000004")!;
+    assert.equal(db.getConversationById(convoId)!.mode, "HUMAN");
   });
 
   // ============ 10 · Recordatorio y needs_call por tiempo ============
@@ -916,6 +916,41 @@ async function main(): Promise<void> {
     const row = db.getOrderByShopifyId("920001")!;
     assert.equal(row.status, "confirmed");
     assert.equal(row.delivery_note, "Llamar antes de subir", "la nota se conserva");
+  });
+
+  await test("BUG WhatsApp · cancelación libre después de confirmar escala a HUMAN con severidad alta", () => {
+    const phone = "34600000415";
+    const order = mkOrder("919915", "12915", phone);
+    db.claimOrderInitialSend(order.id);
+    handleOrderButtonReply(phone, "confirm_order");
+    const text = "tengo q cancelar el pedido, mi hijo me cogió el móvil y pidió sin mi permiso";
+    const result = handleOrderReply(phone, text);
+    assert.equal(result.handled, true);
+    assert.equal(result.reply, undefined, "el detector no inventa respuesta automática");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(phone)!)!.mode, "HUMAN");
+    const event = db.systemDbHandle().prepare("SELECT severity FROM integration_events WHERE event_type='posible_cancelacion_texto_libre' AND order_ref='12915'").get() as { severity: string };
+    assert.equal(event.severity, "critical");
+  });
+
+  await test("BUG WhatsApp · una cancelación escrita como supuesta nota no se archiva como delivery_note", () => {
+    const phone = "34600000416";
+    const order = mkOrder("919916", "12916", phone);
+    db.claimOrderInitialSend(order.id);
+    assert.equal(handleOrderButtonReply(phone, "delivery_note").reply, msgs.MSG_ASK_NOTE);
+    const result = handleOrderReply(phone, "tengo q cancelar el pedido, mi hijo me cogió el móvil y pidió sin mi permiso");
+    const fresh = db.getOrderById(order.id)!;
+    assert.equal(result.reply, undefined);
+    assert.equal(fresh.delivery_note, null);
+    assert.equal(fresh.status, "needs_call");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(phone)!)!.mode, "HUMAN");
+  });
+
+  await test("HOTFIX WhatsApp · el documento conserva causas reales y límites operativos", () => {
+    const doc = fs.readFileSync(path.join(process.cwd(), "docs/deploy/HOTFIX-WHATSAPP-05-09.md"), "utf8");
+    for (const order of ["#35011404", "#35011394"]) assert.ok(doc.includes(order));
+    for (const cause of ["markOrderConfirmed", "buildConfirmationOutbound", "captureNote", "handled:false"]) assert.ok(doc.includes(`\`${cause}\``));
+    assert.match(doc, /no se consultó la base real de producción/i);
+    assert.match(doc, /no dispone de email o push independiente/i);
   });
 
   await test("multipedido + opción 3: la nota JAMÁS va al pedido equivocado", async () => {
@@ -8580,7 +8615,8 @@ async function main(): Promise<void> {
 
     // La automatización terminó: nada más que el bot pueda liar.
     const r4 = handleOrderReply(tel, "1097");
-    assert.equal(r4.handled, false, "sin pedidos activos, el flujo ya no interviene: lo lleva Pedro");
+    assert.equal(r4.handled, true, "el texto libre queda retenido en HUMAN, no vuelve a la automatización");
+    assert.equal(r4.reply, undefined);
 
     // Y el evento para el panel quedó registrado, sin PII.
     const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
@@ -11023,8 +11059,10 @@ async function main(): Promise<void> {
         (sid) => db.getOrderByShopifyId(sid)!.status === "needs_call"
       );
       if (r.handled) {
-        assert.ok(r.reply && r.reply.length > 0, `"${msg}" gestionado siempre lleva respuesta`);
-        respuestas.push(r.reply!);
+        const convoId = db.getConversationIdByPhone(tel);
+        const human = convoId !== null && db.getConversationById(convoId)?.mode === "HUMAN";
+        assert.ok((r.reply && r.reply.length > 0) || human, `"${msg}" responde o queda visible en HUMAN`);
+        if (r.reply) respuestas.push(r.reply);
       } else {
         // El silencio SOLO es legítimo cuando el bot ya se apartó (todo en
         // needs_call = manos humanas). Mientras el bot lleve la

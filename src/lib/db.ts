@@ -2331,6 +2331,17 @@ export function getNeedsCallOrdersByPhone(phone: string): OrderRow[] {
     .all(phone) as OrderRow[];
 }
 
+/** Pedido más reciente que todavía puede requerir atención postventa. */
+export function getLatestCustomerOrderByPhone(phone: string): OrderRow | null {
+  return (
+    (ctx().db.prepare(
+      `SELECT * FROM orders
+       WHERE phone = ? AND status NOT IN ('cancelled','ignored_old','error')
+       ORDER BY created_at DESC, id DESC LIMIT 1`
+    ).get(phone) as OrderRow | undefined) ?? null
+  );
+}
+
 /**
  * Candidatos a duplicado del mismo teléfono para la detección A LA ENTRADA.
  *
