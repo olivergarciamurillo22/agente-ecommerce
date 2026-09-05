@@ -16,3 +16,9 @@ npm run product-intelligence -- auto-hunt anuncios.json
 ```
 
 Sin un JSON, el ciclo se ejecuta de forma segura y devuelve cero hallazgos. El JSON debe ser un array de anuncios con los campos definidos en `src/lib/product-intelligence/types.ts`.
+
+## Integración Hunter end-to-end
+
+El motor existente se conserva como fuente de descubrimiento, agrupación, sesiones, snapshots, API y dashboard. La integración `HUNTER-END-TO-END.md` añade momentum histórico explícito, ruido conservador y economics predictivos estimados sin reconstruir Product Intelligence ni habilitar acciones reales.
+
+La auditoría del 5 de septiembre confirma que el token local de Meta está caducado. La capacidad de la app puede estar aprobada, pero hace falta renovar la credencial antes de obtener el primer dataset real.
