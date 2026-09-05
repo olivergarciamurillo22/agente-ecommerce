@@ -13285,6 +13285,23 @@ async function main(): Promise<void> {
     assert.match(doctor, /failed\.length \? 1 : 0/, "un solo código de salida: cualquier FAIL devuelve 1");
     assert.equal((JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["doctor:v43"], "tsx scripts/doctor-v43.ts");
   });
+
+  await test("F13 trace redacta PII por defecto y exige doble confirmación para mostrarla", async () => {
+    const trace = await import("../src/lib/trace");
+    assert.equal(trace.maskPhone("+34 600 123 456"), "···456");
+    assert.equal(trace.initial("maría garcía"), "M.");
+    const script = fs.readFileSync(path.join(process.cwd(), "scripts/trace.ts"), "utf8");
+    assert.match(script, /--sin-redactar/);
+    assert.match(script, /--confirmo-pii/);
+    const existing = db.listOrders(undefined, 1)[0];
+    assert.ok(existing);
+    const result = trace.buildOrderTrace(existing.shopify_order_number);
+    assert.ok(result);
+    assert.equal(result!.order.phone, trace.maskPhone(existing.phone));
+    assert.equal(result!.order.customer, trace.initial(existing.customer_name));
+    assert.equal(result!.order.location, existing.city);
+    assert.ok(result!.events.every((event) => !event.detail?.includes(existing.phone)), "la salida redactada no contiene el teléfono");
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
