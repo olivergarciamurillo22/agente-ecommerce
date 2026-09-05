@@ -321,6 +321,7 @@ async function main(): Promise<void> {
   const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
+  const { assessShippingAddress } = await import("../src/lib/orders/address-assessment");
   const { tagOrderConfirmed } = await import("../src/lib/shopify/admin");
   const { runSchedulerTick } = await import("../src/lib/orders/scheduler");
   const msgs = await import("../src/lib/orders/messages");
@@ -827,6 +828,51 @@ async function main(): Promise<void> {
     assert.match(basura, /04007/);
     assert.match(basura, /Almería/);
   });
+
+  await test("HOTFIX BUG 1 · validador mínimo acepta direcciones españolas plausibles", () => {
+    for (const address of [
+      "Calle Mayor 5",
+      "Avda. Mediterráneo 12",
+      "Camino del Sol s/n",
+      "Plaza Flores 3 2ºB",
+      "Polígono Industrial La Juaida, nave 7",
+      "Carretera de Níjar km 5",
+      "Urbanización X bloque 2",
+    ]) {
+      assert.equal(assessShippingAddress(address).status, "VALID", address);
+    }
+  });
+
+  await test("HOTFIX BUG 1 · vacío y fixture anonimizado de #35011404 son sospechosos", () => {
+    assert.equal(assessShippingAddress("   ").status, "SUSPICIOUS");
+    assert.equal(assessShippingAddress("Nombre Apellido").status, "SUSPICIOUS");
+  });
+
+  await test("HOTFIX BUG 1 · botón confirm_order con dirección sospechosa no confirma ni permite WA_CONFIRMED", async () => {
+    const tel = "34600034901";
+    const order = mkOrder("hotfix-address-button", "35011404", tel);
+    db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', address_line1='Nombre Apellido', address_line2=NULL WHERE id=?").run(order.id);
+    const result = (await import("../src/lib/orders/confirmation")).handleOrderButtonReply(tel, "confirm_order");
+    assert.equal(result.reply, msgs.MSG_ASK_ADDRESS);
+    const after = db.getOrderById(order.id)!;
+    assert.equal(after.status, "needs_correction");
+    assert.equal(after.shopify_tagged, 0);
+    const convo = db.listConversations().find((c) => c.phone === tel)!;
+    assert.equal(convo.mode, "HUMAN");
+    const work = db.systemDbHandle().prepare("SELECT reason FROM work_items WHERE order_id=? AND resolved_at IS NULL").get(order.id) as { reason: string };
+    assert.equal(work.reason, "Dirección sospechosa");
+  });
+
+  await test("HOTFIX BUG 1 · confirmación por texto libre con dirección vacía queda bloqueada", () => {
+    const tel = "34600034902";
+    const order = mkOrder("hotfix-address-text", "35011405", tel);
+    db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', address_line1=NULL, address_line2=' ' WHERE id=?").run(order.id);
+    const result = handleOrderReply(tel, "todo correcto");
+    assert.equal(result.reply, msgs.MSG_ASK_ADDRESS);
+    assert.equal(db.getOrderById(order.id)!.status, "needs_correction");
+    assert.equal(db.markOrderConfirmed(order.id, true), false, "la guarda dura también bloquea callers directos");
+  });
+
   await test("el nombre del cliente se presenta capitalizado (caso real: 'oliver')", () => {
     const base = mkOrder("950001", "1601", "34600000090");
     const conNombre = (n: string) => ({ ...base, customer_name: n });

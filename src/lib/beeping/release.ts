@@ -17,6 +17,7 @@
 
 import { getOrderById, isActionResolved, type OrderRow } from "../db";
 import { lineItemsFromPayload } from "../orders/line-items";
+import { assessOrderShippingAddress } from "../orders/address-assessment";
 import { emergencyStop } from "../safety";
 import { logIntegrationEvent } from "../system/repo";
 import {
@@ -72,6 +73,10 @@ export function evaluateLocalReleaseGate(order: OrderRow): ReleaseGate {
   }
   if (order.possible_duplicate === 1 && !isActionResolved(order.id, "POSSIBLE_DUPLICATE")) {
     reasons.push("posible duplicado sin resolver en Acciones");
+  }
+  const minimumAddress = assessOrderShippingAddress(order);
+  if (minimumAddress.status === "SUSPICIOUS") {
+    reasons.push(`dirección sospechosa (${minimumAddress.reason}): revisión humana obligatoria`);
   }
   const city = (order.city ?? "").trim();
   if (!(order.address_line1 ?? "").trim() || !city || city === "-" || !(order.postal_code ?? "").trim()) {

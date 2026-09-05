@@ -127,7 +127,20 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
         { status: 409 }
       );
     }
-    confirmOrder(order, "manual");
+    const confirmation = confirmOrder(order, "manual");
+    if (!confirmation.confirmed) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            confirmation.blocker === "suspicious_address"
+              ? "Confirmación bloqueada: la dirección parece incompleta o no direccional. El caso se ha enviado a Atención."
+              : `no se puede confirmar un pedido en estado ${order.status}`,
+          order: vistaDelPedido(id),
+        },
+        { status: 409 }
+      );
+    }
   } else if (action === "call_now") {
     const result = await manualDialOrder(id);
     if (!result.ok) {

@@ -31,6 +31,7 @@ import {
   setPendingCancelContext,
   setSelectedOrderContext,
   markOrderConfirmed,
+  markOrderAddressNeedsAttention,
   markOrderNeedsCorrection,
   markOrderNeedsCall,
   markOrderAwaitingDeliveryNote,
@@ -68,6 +69,8 @@ import {
   saysBoth,
 } from "./multi-order";
 import { logIntegrationEvent } from "../system/repo";
+import { assessOrderShippingAddress } from "./address-assessment";
+import { escalateOrderToHuman } from "./attention";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -165,32 +168,50 @@ export function classifyOrderReply(text: string): OrderReplyIntent {
  * - En TEST_MODE el tag solo sale para teléfonos de la allowlist (los pedidos
  *   de clientes reales jamás se tocan en Shopify durante las pruebas).
  */
-export function confirmOrder(order: OrderRow, via: "reply" | "manual"): void {
+export type ConfirmOrderResult =
+  | { confirmed: true; blocker: null }
+  | { confirmed: false; blocker: "suspicious_address" | "invalid_transition" };
+
+export function confirmOrder(order: OrderRow, via: "reply" | "manual"): ConfirmOrderResult {
+  const address = assessOrderShippingAddress(order);
+  if (address.status === "SUSPICIOUS") {
+    markOrderAddressNeedsAttention(order.id);
+    escalateOrderToHuman({
+      order,
+      reason: "Dirección sospechosa",
+      eventType: "direccion_sospechosa",
+      severity: "warning",
+      eventMessage: `confirmación bloqueada: dirección sospechosa (${address.reason})`,
+    });
+    logger.warn(`[ORDER] #${order.shopify_order_number} confirmación BLOQUEADA: dirección sospechosa (${address.reason})`);
+    return { confirmed: false, blocker: "suspicious_address" };
+  }
   const claimed = markOrderConfirmed(order.id, via === "reply");
   if (!claimed) {
     logger.warn(
       `[ORDER] #${order.shopify_order_number} transición a confirmed RECHAZADA (estado ${order.status}) — sin side effects`
     );
-    return;
+    return { confirmed: false, blocker: "invalid_transition" };
   }
   logger.info(`[ORDER] #${order.shopify_order_number} -> confirmed (${via})`);
   if (!orderActionAllowed(order)) {
     logger.info(
       `[TEST MODE] tag WA_CONFIRMED de #${order.shopify_order_number} omitido: fuera de allowlist y sin autorizar`
     );
-    return;
+    return { confirmed: true, blocker: null };
   }
   void tagOrderConfirmed(order.shopify_order_id).then((ok) => {
     if (ok) setOrderShopifyTagged(order.id);
   });
+  return { confirmed: true, blocker: null };
 }
 
 /** Respuesta 1/2/3/desconocida sobre un pedido en awaiting_reply/reminder_sent. */
 function applyIntent(order: OrderRow, intent: OrderReplyIntent): OrderReplyResult {
   if (intent === "confirm") {
     logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number}`);
-    confirmOrder(order, "reply");
-    return { handled: true, reply: MSG_CONFIRMED };
+    const result = confirmOrder(order, "reply");
+    return { handled: true, reply: result.confirmed ? MSG_CONFIRMED : MSG_ASK_ADDRESS };
   }
   if (intent === "change_address") {
     markOrderNeedsCorrection(order.id);
@@ -220,8 +241,8 @@ function captureAddress(order: OrderRow, rawText: string, intent: OrderReplyInte
   if (intent === "confirm") {
     if (!order.proposed_address) {
       logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number} (tras dudar)`);
-      confirmOrder(order, "reply");
-      return { handled: true, reply: MSG_CONFIRMED };
+      const result = confirmOrder(order, "reply");
+      return { handled: true, reply: result.confirmed ? MSG_CONFIRMED : MSG_ASK_ADDRESS };
     }
     return { handled: true, reply: "¡Gracias! Revisamos la dirección y preparamos tu pedido 👍" };
   }
@@ -247,8 +268,8 @@ function captureNote(order: OrderRow, rawText: string, intent: OrderReplyIntent)
   // Cambió de idea: confirma directamente (la nota queda sin dejar).
   if (intent === "confirm") {
     logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number} (sin nota)`);
-    confirmOrder(order, "reply");
-    return { handled: true, reply: MSG_CONFIRMED };
+    const result = confirmOrder(order, "reply");
+    return { handled: true, reply: result.confirmed ? MSG_CONFIRMED : MSG_ASK_ADDRESS };
   }
   if (intent === "change_address") {
     markOrderNeedsCorrection(order.id);
