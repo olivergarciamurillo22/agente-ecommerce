@@ -30,6 +30,10 @@
     "product-intelligence": "tsx scripts/product-intelligence.ts",
     "backup:product-intelligence": "tsx scripts/backup-product-intelligence.ts",
     "test:product-intelligence": "tsx tests/product-intelligence-tests.ts",
+    "test:hunter-end-to-end": "tsx tests/hunter-end-to-end-tests.ts",
+    "hunter:end-to-end": "tsx scripts/hunter-end-to-end.ts",
+    "hunter:snapshot-refresh": "tsx scripts/hunter-end-to-end.ts --sin-predictivo",
+    "hunter:smoke-real": "tsx scripts/hunter-meta-fields.ts",
     "dropea:doctor": "tsx scripts/dropea-doctor.ts",
     "dropea:mapping:inspect": "tsx scripts/dropea-mapping-inspect.ts"
   },

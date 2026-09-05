@@ -47,7 +47,7 @@ export function writeJsonAtomic<T>(target: string, value: T): void {
 }
 
 export function persistenceHealth(): { healthy: boolean; dataDir: string; files: Array<{ name: string; status: "missing" | "valid" | "corrupt"; bytes: number }> } {
-  const dataDir = intelligenceDataDir(); const names = ["product-intelligence.json", "product-intelligence-state.json", "product-intelligence-creative-cache.json"];
+  const dataDir = intelligenceDataDir(); const names = ["product-intelligence.json", "product-intelligence-state.json", "product-intelligence-creative-cache.json", "hunter-pipeline-runs.json"];
   const files = names.map((name) => { const target = path.join(/* turbopackIgnore: true */ dataDir, name); if (!fs.existsSync(/* turbopackIgnore: true */ target)) return { name, status: "missing" as const, bytes: 0 }; const bytes = fs.statSync(/* turbopackIgnore: true */ target).size; return { name, status: validJson(target) === undefined ? "corrupt" as const : "valid" as const, bytes }; });
   return { healthy: files.every((file) => file.status !== "corrupt"), dataDir, files };
 }

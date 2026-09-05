@@ -6,6 +6,8 @@ import { MetaAdLibraryProvider } from "@/lib/product-intelligence/providers/meta
 import { getProviderHealth, listSignals, listWatchlist, removeWatchlist, saveProviderHealth, setWatchlist } from "@/lib/product-intelligence/state";
 import { autoHuntEnabled, productIntelligenceEnabled } from "@/lib/product-intelligence/config";
 import { redactProductIntelligence } from "@/lib/product-intelligence/redaction";
+import { runHunterPipeline } from "@/lib/product-intelligence/pipeline";
+import { listPipelineRuns } from "@/lib/product-intelligence/pipeline-repository";
 
 export const dynamic = "force-dynamic";
 
@@ -14,12 +16,12 @@ export async function GET() {
   const provider = new MetaAdLibraryProvider();
   const configured = provider.status(); const stored = getProviderHealth();
   const health = stored && stored.configured === configured.configured ? stored : configured;
-  return NextResponse.json({ sessions: listSessions(), provider: health, signals: listSignals(), watchlist: listWatchlist() });
+  return NextResponse.json({ sessions: listSessions(), provider: health, signals: listSignals(), watchlist: listWatchlist(), pipelineRuns: listPipelineRuns() });
 }
 
 export async function POST(request: Request) {
   if (!productIntelligenceEnabled()) return NextResponse.json({ error: "Product Intelligence disabled" }, { status: 503 });
-  const body = await request.json().catch(() => ({})) as { query?: unknown; action?: unknown; productId?: unknown; watchlistStatus?: unknown };
+  const body = await request.json().catch(() => ({})) as { query?: unknown; action?: unknown; productId?: unknown; watchlistStatus?: unknown; country?: unknown; predictive?: unknown };
   if (body.action === "meta-health") {
     const health = await new MetaAdLibraryProvider().healthCheck(); saveProviderHealth(health);
     return NextResponse.json({ provider: health });
@@ -31,6 +33,14 @@ export async function POST(request: Request) {
   const meta = new MetaAdLibraryProvider(body.query === undefined ? { maxPages: 2, maxCalls: 20 } : {});
   const metaStatus = getProviderHealth() ?? meta.status();
   const connected = metaStatus.code === "META_CONNECTED" && metaStatus.researchAvailable;
+  if (body.action === "end-to-end") {
+    if (typeof body.query !== "string" || !body.query.trim()) return NextResponse.json({ error: "La búsqueda no es válida" }, { status: 400 });
+    if (!connected) return NextResponse.json({ error: "Meta provider no está conectado", provider: metaStatus }, { status: 409 });
+    try {
+      const run = await runHunterPipeline({ query: body.query, country: typeof body.country === "string" ? body.country as "ES" | "PT" | "IT" | "FR" | "DE" | "EU" : "ES", predictive: body.predictive !== false, provider: meta });
+      return NextResponse.json({ run }, { status: 201 });
+    } catch (error) { return NextResponse.json({ error: "Hunter end-to-end falló de forma segura", detail: redactProductIntelligence(error) }, { status: 503 }); }
+  }
   if (body.action === "RESUME" && typeof body.productId === "string") {
     if (!connected) return NextResponse.json({ error: "Meta provider waiting for authorization" }, { status: 409 });
     const stored = getSession(body.productId); if (!stored) return NextResponse.json({ error: "Session not found" }, { status: 404 });
