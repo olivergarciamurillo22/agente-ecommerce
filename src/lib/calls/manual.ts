@@ -25,6 +25,7 @@ import { type CallProvider } from "./provider";
 import { handleProviderCreateError, noteAgentVersionDrift } from "./scheduler";
 import { retellProvider } from "./retell";
 import { insideCallWindow, madridDate, madridParts } from "./schedule";
+import { guardRealClient } from "../real-client-guard";
 
 export interface ManualCallResult {
   ok: boolean;
@@ -46,6 +47,8 @@ export async function manualDialOrder(
 ): Promise<ManualCallResult> {
   const order = getOrderById(orderId);
   if (!order) return { ok: false, error: "pedido no encontrado" };
+  const antiReal = guardRealClient(order.phone, "manual");
+  if (!antiReal.allowed) return { ok: false, error: `anti_cliente_real: ${antiReal.reason}` };
 
   // TODAS las puertas, en un solo sitio y en el mismo orden para todos.
   const gate = checkManualCallGates(order, now, defaultHolidayCalendar);

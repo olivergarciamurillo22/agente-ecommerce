@@ -1646,7 +1646,7 @@ async function main(): Promise<void> {
     });
   });
 
-  await test("tras autorizar, ESE pedido recibe mensaje, reminder y tag", async () => {
+  await test("F15: autorizar pedido no salta la frontera estricta de TEST_MODE", async () => {
     const o = db.getOrderByShopifyId("960003")!;
     assert.equal(db.authorizeOrderForPilot(o.id), true);
     await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600111222" }, async () => {
@@ -1656,7 +1656,7 @@ async function main(): Promise<void> {
       assert.equal(
         safety.canSendRealWhatsApp("34777000111", { orderAuthorized: true }),
         true,
-        "el gate deja pasar SOLO con la marca del pedido"
+        "la política anterior permite la marca, pero la frontera final aún debe bloquear"
       );
       assert.equal(
         safety.canSendRealWhatsApp("34777000111"),
@@ -1667,21 +1667,9 @@ async function main(): Promise<void> {
       const T = Math.floor(Date.now() / 1000);
       await runSchedulerTick(T);
       const enviado = db.getOrderById(o.id)!;
-      assert.equal(enviado.status, "awaiting_reply", "ya se le envió el inicial");
+      assert.equal(enviado.status, "pending_send", "la frontera final impide contactar fuera de allowlist");
       const items = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111");
-      assert.equal(items.length, 1);
-      assert.equal(items[0].authorized, 1, "el mensaje viaja marcado como autorizado");
-
-      // Recordatorio: también permitido para este pedido.
-      await runSchedulerTick(T + 61);
-      assert.equal(db.getOrderById(o.id)!.status, "reminder_sent");
-
-      // Y su respuesta se procesa y se le contesta.
-      const r = handleOrderReply("34777000111", "1");
-      assert.equal(r.handled, true);
-      assert.equal(r.reply, msgs.MSG_CONFIRMED);
-      assert.equal(r.authorized, true, "la respuesta hereda la autorización");
-      assert.equal(db.getOrderById(o.id)!.status, "confirmed");
+      assert.equal(items.length, 0, "ni autorización puntual ni rampa crean un mensaje real");
     });
   });
 
@@ -1697,8 +1685,11 @@ async function main(): Promise<void> {
       assert.equal(db.getOrderById(otro.id)!.status, "pending_send", "no se le envía nada");
       const despues = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111").length;
       assert.equal(despues, antes, "ni un mensaje nuevo para el pedido sin autorizar");
-      // Y su respuesta tampoco se procesa (no hay pedido elegible activo):
-      assert.equal(handleOrderReply("34777000111", "1").handled, false);
+      // Una entrada espontánea fuera de allowlist ni se procesa ni genera respuesta.
+      const result = handleOrderReply("34777000111", "1");
+      assert.equal(result.handled, false);
+      const final = db.getPendingOutbox(900).filter((x) => x.phone === "34777000111").length;
+      assert.equal(final, despues, "el handler tampoco consigue encolar hacia el cliente real");
     });
   });
 
@@ -13320,6 +13311,25 @@ async function main(): Promise<void> {
       assert.equal(event.event_type, "synthetic_order_created");
     });
     await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000001" }, () => assert.throws(() => fixture.createSyntheticOrder("+34 611 111 111"), /allowlist/i));
+  });
+
+  await test("F15 anti-cliente-real bloquea manual, scheduler y scripts sin env de bypass", async () => {
+    const guard = await import("../src/lib/real-client-guard");
+    await withEnv({ TEST_MODE: "1", EMERGENCY_STOP: "0", TEST_PHONE_ALLOWLIST: "34600000001", ANTI_REAL_CLIENT_BYPASS: "1" }, () => {
+      for (const origin of ["manual", "scheduler", "script"] as const) {
+        const verdict = guard.guardRealClient("34611111111", origin);
+        assert.equal(verdict.allowed, false, origin);
+        assert.match(verdict.reason ?? "", /TEST_PHONE_ALLOWLIST/);
+      }
+      assert.equal(guard.guardRealClient("34600000001", "script").allowed, true);
+    });
+    await withEnv({ TEST_MODE: "0", EMERGENCY_STOP: "1", TEST_PHONE_ALLOWLIST: "34600000001" }, () => {
+      assert.equal(guard.guardRealClient("34600000001", "manual").allowed, false);
+    });
+    for (const caller of ["src/lib/whatsapp.ts", "src/lib/calls/manual.ts", "src/lib/calls/scheduler.ts", "src/lib/calls/retell.ts"]) {
+      assert.match(fs.readFileSync(path.join(process.cwd(), caller), "utf8"), /RealClientAllowed|guardRealClient/, caller);
+    }
+    assert.ok(!fs.readFileSync(path.join(process.cwd(), "src/lib/real-client-guard.ts"), "utf8").includes("ANTI_REAL_CLIENT_BYPASS"));
   });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 

@@ -17,6 +17,7 @@
 
 import { validateRetellCallVariables } from "./payload";
 import { verifyRetellWebhookSignature } from "./retell-webhook";
+import { assertRealClientAllowed } from "../real-client-guard";
 import {
   ProviderRequestError,
   type CallProvider,
@@ -95,6 +96,7 @@ export const retellProvider: CallProvider = {
   },
 
   async createOutboundCall(req: OutboundCallRequest): Promise<OutboundCallAccepted> {
+    assertRealClientAllowed(req.toNumber, "provider");
     if (!this.isConfigured()) {
       throw new ProviderRequestError("Retell no configurado (RETELL_API_KEY / RETELL_FROM_NUMBER)", null, "config");
     }

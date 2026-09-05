@@ -25,6 +25,7 @@ import { canSendRealWhatsApp, logBlockedSend } from "./safety";
 import { whatsappProviderName } from "./whatsapp/provider";
 import { metaCloudConfigured } from "./whatsapp/meta-cloud";
 import type { InteractiveSpec } from "./whatsapp/interactive";
+import { guardRealClient } from "./real-client-guard";
 
 /**
  * ¿Está WhatsApp operativo ahora mismo?
@@ -54,6 +55,7 @@ export interface SendOptions {
  */
 export function sendWhatsAppMessage(phone: string, text: string, opts: SendOptions = {}): boolean {
   const authorized = opts.orderAuthorized === true;
+  if (!guardRealClient(phone, "provider").allowed) return false;
   if (!canSendRealWhatsApp(phone, { orderAuthorized: authorized })) {
     logBlockedSend(`send-${phone}-${text.slice(0, 24)}`, phone, text);
     return false;
@@ -81,6 +83,7 @@ export function sendWhatsAppMessage(phone: string, text: string, opts: SendOptio
  */
 export function sendWhatsAppInteractive(phone: string, spec: InteractiveSpec, opts: SendOptions = {}): boolean {
   const authorized = opts.orderAuthorized === true;
+  if (!guardRealClient(phone, "provider").allowed) return false;
   if (!canSendRealWhatsApp(phone, { orderAuthorized: authorized })) {
     logBlockedSend(`send-${phone}-${spec.fallbackText.slice(0, 24)}`, phone, spec.fallbackText);
     return false;

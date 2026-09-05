@@ -35,6 +35,7 @@ import {
   touchOrder,
 } from "../db";
 import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
+import { guardRealClient } from "../real-client-guard";
 import { whatsappProviderName } from "../whatsapp/provider";
 import { buildConfirmationOutbound, firstName } from "../whatsapp/interactive";
 import { buildApprovedTemplateMessage, TemplateNotReadyError } from "../whatsapp/templates";
@@ -225,7 +226,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
       const message = interactive ? interactive.fallbackText : buildConfirmationMessage(order);
       const autorizado = order.pilot_authorized === 1;
-      if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
+      if (!guardRealClient(order.phone, "scheduler").allowed || !canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         // Simulación (safe mode / flags cerrados): NO transicionar estado.
         logBlockedSend(`sim-init-${order.id}`, order.phone, message);
         continue;
@@ -298,7 +299,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
           continue; // sin claim: cuando la plantilla esté verificada, saldrá
         }
       }
-      if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
+      if (!guardRealClient(order.phone, "scheduler").allowed || !canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         logBlockedSend(`sim-rem-${order.id}`, order.phone, message);
         continue;
       }
