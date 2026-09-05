@@ -68,6 +68,7 @@ import {
   saysBoth,
 } from "./multi-order";
 import { logIntegrationEvent } from "../system/repo";
+import { assessOrderAddress } from "./address-quality";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -188,6 +189,19 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): void {
 /** Respuesta 1/2/3/desconocida sobre un pedido en awaiting_reply/reminder_sent. */
 function applyIntent(order: OrderRow, intent: OrderReplyIntent): OrderReplyResult {
   if (intent === "confirm") {
+    const address = assessOrderAddress(order.address_line1);
+    if (address.suspicious) {
+      markOrderNeedsCorrection(order.id);
+      logIntegrationEvent(
+        "whatsapp",
+        "direccion_sospechosa",
+        "warning",
+        `confirmación automática bloqueada: ${address.reason}`,
+        order.shopify_order_number
+      );
+      logger.warn(`[ORDER] #${order.shopify_order_number} -> needs_correction (dirección sospechosa: ${address.reason})`);
+      return { handled: true, reply: MSG_ASK_ADDRESS };
+    }
     logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number}`);
     confirmOrder(order, "reply");
     return { handled: true, reply: MSG_CONFIRMED };
@@ -219,9 +233,7 @@ function captureAddress(order: OrderRow, rawText: string, intent: OrderReplyInte
   // todo estaba bien. Con dirección ya propuesta, es un simple asentimiento.
   if (intent === "confirm") {
     if (!order.proposed_address) {
-      logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number} (tras dudar)`);
-      confirmOrder(order, "reply");
-      return { handled: true, reply: MSG_CONFIRMED };
+      return applyIntent(order, intent);
     }
     return { handled: true, reply: "¡Gracias! Revisamos la dirección y preparamos tu pedido 👍" };
   }

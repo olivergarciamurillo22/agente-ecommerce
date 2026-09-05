@@ -318,7 +318,7 @@ async function main(): Promise<void> {
 
   const investigateSkipped = await import("../src/lib/shopify/investigate-skipped-backfill");
   const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
-  const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
+  const { handleOrderReply, handleOrderButtonReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
   const { tagOrderConfirmed } = await import("../src/lib/shopify/admin");
@@ -848,6 +848,40 @@ async function main(): Promise<void> {
       assert.equal(classifyOrderReply(t), "delivery_note", `"${t}"`);
     for (const t of ["creo que sí pero la dirección no sé", "mañana os digo", "quién eres"])
       assert.equal(classifyOrderReply(t), "unknown", `"${t}"`);
+  });
+
+  await test("BUG WhatsApp · una dirección sospechosa no confirma y abre corrección", async () => {
+    const { assessOrderAddress } = await import("../src/lib/orders/address-quality");
+    assert.deepEqual(assessOrderAddress("Nombre Apellido"), { suspicious: true, reason: "parece_nombre" }, "fixture anonimizado del patrón real de #35011404");
+    assert.equal(assessOrderAddress("").suspicious, true);
+    assert.equal(assessOrderAddress("Calle Alcalá 123").suspicious, false);
+
+    for (const [suffix, address] of [["1", "Nombre Apellido"], ["2", ""]] as const) {
+      const phone = `3460000040${suffix}`;
+      const created = mkOrder(`91990${suffix}`, `1290${suffix}`, phone);
+      db.systemDbHandle().prepare("UPDATE orders SET address_line1=? WHERE id=?").run(address, created.id);
+      db.claimOrderInitialSend(created.id);
+      const result = handleOrderReply(phone, "1");
+      const order = db.getOrderById(created.id)!;
+      assert.equal(result.reply, msgs.MSG_ASK_ADDRESS);
+      assert.equal(order.status, "needs_correction");
+      assert.equal(order.confirmed_at, null);
+      assert.equal(order.shopify_tagged, 0);
+      const event = db.systemDbHandle().prepare("SELECT severity FROM integration_events WHERE event_type='direccion_sospechosa' AND order_ref=?").get(order.shopify_order_number) as { severity: string };
+      assert.equal(event.severity, "warning");
+    }
+  });
+
+  await test("BUG WhatsApp · dirección real confirma por texto y por botón sin fricción", () => {
+    for (const [suffix, useButton] of [["3", false], ["4", true]] as const) {
+      const phone = `3460000040${suffix}`;
+      const created = mkOrder(`91990${suffix}`, `1290${suffix}`, phone);
+      db.systemDbHandle().prepare("UPDATE orders SET address_line1='Calle Alcalá 123' WHERE id=?").run(created.id);
+      db.claimOrderInitialSend(created.id);
+      const result = useButton ? handleOrderButtonReply(phone, "confirm_order") : handleOrderReply(phone, "todo correcto");
+      assert.equal(result.reply, msgs.MSG_CONFIRMED);
+      assert.equal(db.getOrderById(created.id)!.status, "confirmed");
+    }
   });
 
   // ============ 14 · Casamable: opción 3 (nota para el repartidor) ============
