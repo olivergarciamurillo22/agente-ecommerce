@@ -2,6 +2,12 @@
 
 Este procedimiento complementa `NAS-PRODUCTION.md`. Se ejecuta en el NAS, fuera de la ventana 10:00–21:00, y mantiene cerradas las llamadas automáticas, la rampa y las escrituras Shopify salvo decisión posterior de Pedro.
 
+## Vía recomendada: verificación automatizada
+
+Desde la raíz del repositorio en el NAS, define `V43_BACKUP_ROOT` con una ruta de rescate confirmada por Pedro y ejecuta `bash scripts/nas-verify-v43.sh`. El script sustituye la secuencia manual de las secciones siguientes: se detiene en el primer fallo y cubre doble bot, backups, integridad, build, recreación, doctor y smoke HTTP.
+
+La automatización **no** significa «ejecutar y olvidar»: el operador debe leer cada línea, conservar la salida y comprobar el detalle del doctor. Las secciones manuales siguientes siguen siendo la referencia para diagnosticar o reanudar un paso fallido.
+
 ## 1. Identidad y doble bot
 
 ```bash

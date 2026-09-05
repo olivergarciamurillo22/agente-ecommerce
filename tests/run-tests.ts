@@ -13331,6 +13331,16 @@ async function main(): Promise<void> {
     }
     assert.ok(!fs.readFileSync(path.join(process.cwd(), "src/lib/real-client-guard.ts"), "utf8").includes("ANTI_REAL_CLIENT_BYPASS"));
   });
+
+  await test("F17 script NAS encadena guardia, backups, deploy, doctor y smoke fail-fast", () => {
+    const script = fs.readFileSync(path.join(process.cwd(), "scripts/nas-verify-v43.sh"), "utf8");
+    assert.match(script, /set -euo pipefail/);
+    const ordered = ["deploy:guard", "npm run backup", "db:health -- --full", "cp -a \"\$AUTH_DIR\"", "compose -p \"\$PROJECT\" build", "up -d --no-build --force-recreate", "npm run doctor:v43", "expect_http 307", "expect_http 200 GET \"\$BASE_URL\/api\/health\"", "expect_http 200 GET \"\$BASE_URL\/login\"", "expect_http 401"];
+    let cursor = -1;
+    for (const token of ordered) { const next = script.indexOf(token); assert.ok(next > cursor, `${token} aparece en orden`); cursor = next; }
+    assert.match(script, /CONFIRMAR CON PEDRO/);
+    assert.match(script, /V43_BACKUP_ROOT:\?/);
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
