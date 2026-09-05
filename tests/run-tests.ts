@@ -1339,6 +1339,40 @@ async function main(): Promise<void> {
     assert.equal(db.listOrders().filter((o) => o.shopify_order_id === "940001").length, 1);
   });
 
+  // Tras confirmar, el pedido sale de la lista "activa". Lo que llegue después
+  // se trata distinto según se entienda o no, y esa frontera es fácil de
+  // romper sin querer: si CUALQUIER mensaje posterior escalara, cada cliente
+  // que pulsa dos veces acabaría en la bandeja de personas — justo la bandeja
+  // que hay que mantener limpia para que sirva de algo.
+  await test("TRAS CONFIRMAR · un '1' repetido es INERTE; una duda de verdad sí llega a una persona", () => {
+    const inerte = mkOrder("940050", "1550", "34600000077");
+    db.claimOrderInitialSend(inerte.id);
+    assert.equal(handleOrderReply("34600000077", "1").handled, true, "la primera confirma");
+    assert.equal(db.getOrderByShopifyId("940050")!.status, "confirmed");
+    // Segunda pulsación: reconocida, ya aplicada, no hay nada que hacer.
+    assert.equal(handleOrderReply("34600000077", "1").handled, false, "el segundo '1' no molesta a nadie");
+    assert.equal(db.getOrderByShopifyId("940050")!.status, "confirmed", "y no reabre el pedido");
+
+    const duda = mkOrder("940051", "1551", "34600000078");
+    db.claimOrderInitialSend(duda.id);
+    handleOrderReply("34600000078", "1");
+    assert.equal(db.getOrderByShopifyId("940051")!.status, "confirmed");
+    // Texto que NO sabemos interpretar tras confirmar: eso sí es para una persona.
+    const r = handleOrderReply("34600000078", "oye y esto cuándo me llega?");
+    assert.equal(r.handled, true, "no se queda mudo");
+    assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
+    // El pedido SIGUE confirmado: una pregunta no des-confirma nada. Lo que
+    // cambia es que la conversación pasa a una persona, con su tarea abierta.
+    assert.equal(db.getOrderByShopifyId("940051")!.status, "confirmed", "preguntar no des-confirma");
+    const convId = db.getConversationIdByPhone("34600000078")!;
+    assert.equal(db.getConversationById(convId)!.mode, "HUMAN", "lo atiende una persona");
+    const tareas = db
+      .systemDbHandle()
+      .prepare("SELECT COUNT(*) n FROM work_items WHERE conversation_id=? AND resolved_at IS NULL")
+      .get(convId) as { n: number };
+    assert.ok(tareas.n > 0, "y queda una tarea abierta en la bandeja");
+  });
+
   await test("doble '1' → una confirmación y UN solo intento de tag", async () => {
     const o = mkOrder("940002", "1502", "34600000060");
     db.claimOrderInitialSend(o.id); // awaiting_reply sin pasar por el scheduler
@@ -8585,12 +8619,15 @@ async function main(): Promise<void> {
     assert.match(r1.reply ?? "", /Limpiador/, "el selector enseña el PRODUCTO, no solo números");
     assert.match(r1.reply ?? "", /Si solo hiciste uno/, "se le abre la puerta a decir que hay un duplicado");
 
-    // "Pues ahora mismo no sé cuál es" → segunda (y última) vez del selector.
+    // "Pues ahora mismo no sé cuál es" → no lo entendemos: en vez de repetir
+    // el selector (el bot real lo repitió CINCO veces), lo ve una persona.
     const r2 = handleOrderReply(tel, "Pues ahora mismo no sé cuál es");
-    assert.match(r2.reply ?? "", /2096/);
+    assert.equal(r2.reply, msgs.MSG_HUMAN_ATTENTION, "no se repite el selector: se deriva");
 
     // "Yo solo he pedido el limpiador ultrasonido" → AQUÍ se resuelve: los
     // dos pedidos son idénticos → duplicado probable → revisión humana.
+    // Llega DESPUÉS de haber derivado, y aun así se marca: es la pista que
+    // resuelve el caso y no se puede perder por haber escalado antes.
     const r3 = handleOrderReply(tel, "Yo solo he pedido el limpiador ultrasonido");
     assert.match(r3.reply ?? "", /duplicado/i, "se le explica lo que pasa, no se le piden más números");
     assert.doesNotMatch(r3.reply ?? "", /Dime el número/, "NO es el selector otra vez");
@@ -8615,20 +8652,21 @@ async function main(): Promise<void> {
     mkMulti("922096", "3096", tel);
     mkMulti("922097", "3097", tel);
 
+    // Con DOS pedidos no se adivina cuál quiere anular: los dos pasan a una
+    // persona con el contexto, y NINGUNO queda marcado para cancelar. Antes se
+    // preguntaba "¿ambos o solo uno?"; hacer que el cliente resuelva por chat
+    // qué pedido interno anular era pedirle demasiado, y equivocarse cuesta.
     const r1 = handleOrderReply(tel, "No quiero ninguno, anular pedido");
-    assert.match(r1.reply ?? "", /ambos o solo uno/i, "pregunta cuáles, no repite el selector 1/2/3");
-    assert.match(r1.reply ?? "", /AMBOS/);
-    // NADA cancelado todavía.
-    assert.equal(db.getOrderByShopifyId("922096")!.cancellation_requested_at, null);
-
-    const r2 = handleOrderReply(tel, "AMBOS");
-    assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.equal(r1.reply, msgs.MSG_HUMAN_ATTENTION, "responde siempre, y deriva");
     for (const id of ["922096", "922097"]) {
       const o = db.getOrderByShopifyId(id)!;
       assert.equal(o.status, "needs_call", "a revisión: la cancelación real la decide Pedro");
-      assert.ok(o.cancellation_requested_at, "petición estampada");
+      assert.equal(o.cancellation_requested_at, null, "NO se adivina cuál: ninguno se marca");
+      assert.notEqual(o.status, "cancelled", "y desde luego nada se cancela solo");
       assert.equal(o.closure_status, "unknown", "NADA se toca en Shopify ni en el eje de cierre");
     }
+    // Y el bot ya no reabre el flujo: lo siguiente es cosa de la persona.
+    assert.equal(handleOrderReply(tel, "AMBOS").handled, false);
   });
 
   await test("CANCELAR · 'cancelar 4096' cancela SOLO ese; el otro sigue su curso", () => {
@@ -8643,18 +8681,23 @@ async function main(): Promise<void> {
     assert.equal(db.getOrderByShopifyId("923097")!.cancellation_requested_at, null);
   });
 
-  await test("CANCELAR · con UN pedido: frase ambigua pide confirmación explícita, dos pasos", () => {
+  await test("CANCELAR · con UN pedido: la petición se registra y la ve una persona, sin cancelar nada", () => {
     const tel = "34600000094";
     mkMulti("924001", "4201", tel);
 
+    // Con UN solo pedido no hay ambigüedad sobre CUÁL: pedirle al cliente que
+    // repita "CANCELAR 4201" era hacerle adivinar un formato. Se registra la
+    // petición y pasa a manos humanas — pero seguir cancelado, no se cancela.
     const r1 = handleOrderReply(tel, "no lo quiero, quiero cancelar");
-    assert.match(r1.reply ?? "", /CANCELAR 4201/, "exige el formato explícito");
-    assert.equal(db.getOrderByShopifyId("924001")!.cancellation_requested_at, null, "una frase ambigua NO cancela");
-    assert.equal(db.getOrderByShopifyId("924001")!.status, "awaiting_reply");
+    assert.equal(r1.reply, msgs.MSG_CANCEL_RECEIVED);
+    assert.ok(db.getOrderByShopifyId("924001")!.cancellation_requested_at, "la petición queda anotada");
+    assert.equal(db.getOrderByShopifyId("924001")!.status, "needs_call", "lo decide una persona");
+    assert.notEqual(db.getOrderByShopifyId("924001")!.status, "cancelled", "NADA se cancela solo");
+    assert.ok(!/ya está cancelado|queda cancelado/i.test(r1.reply ?? ""), "y no miente diciendo que canceló");
 
+    // Repetirlo con el formato explícito no duplica ni cambia el desenlace.
     const r2 = handleOrderReply(tel, "CANCELAR 4201");
     assert.equal(r2.reply, msgs.MSG_CANCEL_RECEIVED);
-    assert.ok(db.getOrderByShopifyId("924001")!.cancellation_requested_at);
     assert.equal(db.getOrderByShopifyId("924001")!.status, "needs_call");
   });
 
@@ -8679,11 +8722,15 @@ async function main(): Promise<void> {
     mkMulti("926001", "4401", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
     mkMulti("926002", "4402", tel, { product_summary: "Espejo Retrovisor Panorámico" });
 
-    const r1 = handleOrderReply(tel, "hola buenas");
+    // El selector sigue vivo donde de verdad hace falta: intención RECONOCIDA
+    // pero ambigua sobre CUÁL pedido ("todo correcto" con dos abiertos). El
+    // texto que no entendemos ya no llega aquí — escala a la primera —, así
+    // que el bucle solo puede darse por este camino, y aquí se corta igual.
+    const r1 = handleOrderReply(tel, "todo correcto");
     assert.match(r1.reply ?? "", /4401/, "primer selector");
-    const r2 = handleOrderReply(tel, "sigo sin saberlo");
+    const r2 = handleOrderReply(tel, "todo correcto");
     assert.match(r2.reply ?? "", /4401/, "segundo selector (último permitido)");
-    const r3 = handleOrderReply(tel, "esto no hay quien lo entienda");
+    const r3 = handleOrderReply(tel, "todo correcto");
     assert.equal(r3.reply, msgs.MSG_ESCALATE_TO_HUMAN, "el tercero YA NO es el selector");
     for (const id of ["926001", "926002"]) {
       assert.equal(db.getOrderByShopifyId(id)!.status, "needs_call");
@@ -8725,14 +8772,18 @@ async function main(): Promise<void> {
     assert.match(r.reply ?? "", /4603/, "el selector ya incluye el pedido nuevo");
   });
 
-  await test("SIN DUPLICADO · 'solo pedí uno' con productos DISTINTOS no marca nada: pide concretar", () => {
+  await test("SIN DUPLICADO · 'solo pedí uno' con productos DISTINTOS no marca nada: lo mira una persona", () => {
     const tel = "34600000099";
     mkMulti("929001", "4701", tel, { product_summary: "Cortaúñas Eléctrico 3 en 1" });
     mkMulti("929002", "4702", tel, { product_summary: "Espejo Retrovisor Panorámico", total_price: "19.99" });
 
+    // Lo que protege este test es que NO se invente un duplicado cuando los
+    // productos son distintos. Antes se le pedía concretar; ahora, como no
+    // sabemos qué quiere decir, lo ve una persona. Lo que no cambia: no se
+    // marca nada.
     const r = handleOrderReply(tel, "solo he pedido uno");
-    assert.match(r.reply ?? "", /4701/, "productos distintos: no es un duplicado, se pide concretar");
-    assert.equal(db.getOrderByShopifyId("929001")!.possible_duplicate, 0);
+    assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION, "responde siempre, y deriva");
+    assert.equal(db.getOrderByShopifyId("929001")!.possible_duplicate, 0, "productos distintos: NO es un duplicado");
     assert.equal(db.getOrderByShopifyId("929002")!.possible_duplicate, 0);
   });
 
@@ -9418,17 +9469,21 @@ async function main(): Promise<void> {
       );
       const r = metaHook.processMetaWebhook(rawAudio, firmaMeta(rawAudio));
       assert.equal(r.status, 200);
-      assert.equal(db.getOrderByShopifyId("971002")!.status, "awaiting_reply", "el pedido no se toca");
+      // Desde el 05-09 una nota de voz NO se queda muda: no podemos oírla, así
+      // que el pedido pasa a manos humanas en vez de seguir el flujo a ciegas.
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "needs_call", "el audio lo revisa una persona");
       // Registrado en la conversación (y por tanto abre la ventana de 24 h).
       assert.equal(metaProv.isWithinSessionWindow(tel), true, "una nota de voz también abre la ventana");
+      assert.notEqual(db.getOrderByShopifyId("971002")!.status, "cancelled", "pero nada se cancela por un audio");
 
-      // El cliente sigue por texto y todo funciona.
+      // Y una vez que hay una persona detrás, el bot NO reabre el flujo solo:
+      // un "1" posterior no confirma a espaldas de quien está atendiendo.
       const rawTxt = metaInboundBody(
         { from: tel, id: "wamid.audio2", timestamp: "1756100131", type: "text", text: { body: "1" } },
         tel
       );
       metaHook.processMetaWebhook(rawTxt, firmaMeta(rawTxt));
-      assert.equal(db.getOrderByShopifyId("971002")!.status, "confirmed");
+      assert.equal(db.getOrderByShopifyId("971002")!.status, "needs_call");
     });
   });
 
@@ -12625,15 +12680,23 @@ async function main(): Promise<void> {
       const tel = "34600995503";
       const o = mkOrder("995103", "95103", tel);
       db.systemDbHandle().prepare("UPDATE orders SET status='awaiting_reply', whatsapp_sent_at=unixepoch() WHERE id=?").run(o.id);
-      // Paso 1: la frase ambigua JAMÁS cancela — el bot pide confirmación.
+      // Paso 1: la frase REGISTRA la solicitud y la pasa a una persona, pero
+      // NO cancela nada (la decisión final sigue siendo humana). Antes el bot
+      // pedía confirmación en dos pasos; desde el 05-09 una petición de
+      // cancelar no se queda esperando a que el cliente acierte el formato.
       const paso1 = handleOrderReply(tel, "quiero cancelar");
       assert.equal(paso1.handled, true);
-      assert.equal(db.getOrderById(o.id)!.cancellation_requested_at, null, "una frase suelta no marca nada todavía");
+      assert.ok(
+        db.getOrderById(o.id)!.cancellation_requested_at !== null,
+        "la petición queda registrada desde la primera frase"
+      );
+      assert.notEqual(db.getOrderById(o.id)!.status, "cancelled", "pero NADA se cancela solo");
       assert.ok(!/ya está cancelado|queda cancelado/i.test(paso1.reply ?? ""), "y desde luego no afirma que canceló");
-      // Paso 2: el formato explícito registra la SOLICITUD (decisión humana después).
+      // Paso 2: el formato explícito es idempotente, no duplica ni miente.
       const paso2 = handleOrderReply(tel, "CANCELAR 95103");
       assert.equal(paso2.handled, true);
       const tras = db.getOrderById(o.id)!;
+      assert.notEqual(tras.status, "cancelled", "sigue sin cancelarse solo");
       assert.ok(tras.cancellation_requested_at !== null, "cancellation_requested: la decisión final sigue siendo humana");
       const respuesta = paso2.reply ?? "";
       assert.ok(!/ya está cancelado|cancelado ✅|queda cancelado/i.test(respuesta), "JAMÁS afirmar una cancelación que no ocurrió");

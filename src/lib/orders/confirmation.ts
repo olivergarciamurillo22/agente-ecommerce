@@ -392,6 +392,47 @@ function executeCancellation(phone: string, orders: OrderRow[]): OrderReplyResul
   };
 }
 
+/**
+ * "Solo he pedido uno" + pedidos que parecen el MISMO → duplicado probable.
+ * No se obliga al cliente a manejar números internos: se marca todo para
+ * revisión y se le tranquiliza. Nada se cancela solo.
+ *
+ * Vive aparte porque hay que poder llegar aquí TAMBIÉN cuando el pedido ya
+ * está en manos humanas: en la conversación real que originó esto, la pista
+ * ("yo solo he pedido el limpiador") llegó en el TERCER mensaje, después de
+ * que la conversación se hubiera derivado. Es el dato más útil que da el
+ * cliente en todo el hilo — perderlo por haber escalado antes sería tirar
+ * justo la información que resuelve el caso.
+ *
+ * Devuelve `null` si el mensaje no es una reclamación de pedido único o si
+ * los pedidos no se parecen entre sí (productos distintos NO son duplicado).
+ */
+function handleDuplicateClaim(phone: string, text: string, orders: OrderRow[]): OrderReplyResult | null {
+  if (!claimsSingleOrder(text)) return null;
+  const grupos = findPossibleDuplicates(orders);
+  if (grupos.length === 0) return null;
+  for (const grupo of grupos) {
+    for (const o of grupo) {
+      markOrderPossibleDuplicate(o.id);
+      markOrderNeedsCall(o.id);
+      logIntegrationEvent(
+        "whatsapp",
+        "duplicate_suspected",
+        "warning",
+        "el cliente dice que solo hizo un pedido y hay dos idénticos: marcados para revisión",
+        o.shopify_order_number
+      );
+    }
+  }
+  clearSelectedOrderContext(phone);
+  resetConversationPrompt(phone);
+  return {
+    handled: true,
+    reply: buildDuplicateReviewMessage(grupos[0]),
+    authorized: orders.some((o) => o.pilot_authorized === 1),
+  };
+}
+
 function escalateUnknownText(phone: string, orders: OrderRow[], reason = "Mensaje libre pendiente"): OrderReplyResult {
   const possibleCancellation = reason === "Posible cancelación";
   for (const order of orders) {
@@ -455,14 +496,26 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
     if (freeTextIntent === "CANCELLATION_OR_REJECTION" && enManosHumanas.length > 0) {
       return executeCancellation(phone, enManosHumanas);
     }
+    // "Solo he pedido uno" sigue valiendo aunque ya haya una persona detrás:
+    // marcar el duplicado cambia la urgencia en Acciones y explica el caso.
+    const duplicadoTardio = handleDuplicateClaim(phone, text, enManosHumanas);
+    if (duplicadoTardio) return duplicadoTardio;
     // Una duda, imagen o rechazo justo después de confirmar tampoco puede
     // caer al silencio: el pedido ya no está en la lista "activa", pero la
     // conversación sigue siendo claramente de ese pedido.
     const confirmed = getRecentConfirmedOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
     if (confirmed.length > 0) {
-      return freeTextIntent === "CANCELLATION_OR_REJECTION"
-        ? executeCancellation(phone, confirmed.slice(0, 1))
-        : escalateUnknownText(phone, confirmed.slice(0, 1), "Mensaje posterior a confirmación");
+      if (freeTextIntent === "CANCELLATION_OR_REJECTION") {
+        return executeCancellation(phone, confirmed.slice(0, 1));
+      }
+      // Solo escala el texto que de verdad no sabemos interpretar. Un "1"
+      // repetido (el cliente que pulsa dos veces, o el botón que reenvía) NO
+      // es una duda: el pedido ya está confirmado y su segunda pulsación es
+      // INERTE. Escalarlo llenaría la bandeja de personas con confirmaciones
+      // duplicadas — y esa bandeja es justo lo que hay que mantener limpio.
+      if (classifyOrderReply(text) === "unknown") {
+        return escalateUnknownText(phone, confirmed.slice(0, 1), "Mensaje posterior a confirmación");
+      }
     }
     return { handled: false };
   }
@@ -556,31 +609,8 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   // 5) "Solo he pedido uno" + pedidos que parecen el MISMO → duplicado
   //    probable. No se obliga al cliente a manejar números internos: se
   //    marca todo para revisión y se le tranquiliza. Nada se cancela solo.
-  if (claimsSingleOrder(text)) {
-    const grupos = findPossibleDuplicates(active);
-    if (grupos.length > 0) {
-      for (const grupo of grupos) {
-        for (const o of grupo) {
-          markOrderPossibleDuplicate(o.id);
-          markOrderNeedsCall(o.id);
-          logIntegrationEvent(
-            "whatsapp",
-            "duplicate_suspected",
-            "warning",
-            "el cliente dice que solo hizo un pedido y hay dos idénticos: marcados para revisión",
-            o.shopify_order_number
-          );
-        }
-      }
-      clearSelectedOrderContext(phone);
-      resetConversationPrompt(phone);
-      return {
-        handled: true,
-        reply: buildDuplicateReviewMessage(grupos[0]),
-        authorized: active.some((o) => o.pilot_authorized === 1),
-      };
-    }
-  }
+  const duplicado = handleDuplicateClaim(phone, text, active);
+  if (duplicado) return duplicado;
 
   // 6) Menciona un producto que identifica UN pedido sin ambigüedad
   //    ("el cortauñas" cuando solo un pedido lo lleva). Si los dos venden lo
