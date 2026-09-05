@@ -184,7 +184,7 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
    es de Pedro, fuera de 10:00–21:00.
 7. **En validación real**: primero evidencia de producción, luego código.
    Solo P0/P1 (y P2 observado por Pedro). Test rojo → fix mínimo → verde.
-8. El esquema (v17) no sube sin bug funcional real.
+8. El esquema (v18) no sube sin bug funcional real.
 
 - **Credenciales:** antes de pedirle nada a Óliver, ejecuta
   `npm run env:doctor -- --profile <perfil>` y dile EXACTAMENTE qué variable
@@ -203,22 +203,47 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 
 ## 11. Estado actual (actualizar al mergear)
 
-**⚠️ PRODUCCIÓN (NAS) CORRE `feat/casamable-control-center-v2` @ `67f05c7`
-(esquema 15, cloud_api, TEST_MODE=1).** La rama de trabajo actual es
-**`feat/control-center-v3-operational-polish`** (esquema 16): cierra los
-P0 del 02-09 — WhatsApp 132001 (mapping lógico→plantilla real de la WABA
-con verificación obligatoria vía `whatsapp:templates:doctor`), tracking
-gate-antes-del-claim + fail-closed de datos, cadena de exclusión de
-Shopify, Retell (preflight de variables `unsafe_dynamic_variable`,
-`RETELL_AGENT_VERSION` fijable, prompt versionado en
-`config/retell/casamable-agent-prompt.md` + validador ampliado,
-`retell:doctor`, `calls:simulate`) — y el rediseño v3 (nav rail con
-labels, marca Casamable, header provider-aware, ⌘K, rampa
-`whatsapp_rollout_percent` en settings). **Guía de despliegue:
-`docs/DEPLOY-HOTFIX-02-09.md`; informe: `docs/CONTROL-CENTER-V3.md`.**
-La confirmación inicial queda BLOQUEADA (con motivo visible) hasta correr
-el doctor de plantillas donde estén las credenciales de la WABA (el NAS).
-Llamadas siguen MANUAL-ONLY.
+**⚠️ PRODUCCIÓN (NAS) SIGUE EN `feat/casamable-control-center-v2` @
+`67f05c7` (esquema 15, cloud_api, TEST_MODE=1). NADA DE LO DE ABAJO ESTÁ
+DESPLEGADO.**
+
+**Candidato: `release/casamable-v4.2` @ `7fd8014` (esquema 18).** Acumula, en
+este orden:
+
+1. **Hotfix de producción Retell/ops (`114a458`)** — firma de webhooks
+   alineada con el SDK oficial (`calls/retell-webhook.ts`), watchdog
+   desacoplado del ciclo de vida de Baileys, `manualDialOrder` pasando por
+   los mismos gates (`calls/gates.ts`), `readiness:runtime`, `deploy:guard`,
+   `retell:reconcile-call` y `name: repo-v3c` en el compose.
+2. **Integración móvil/WhatsApp (`92cfd3e`)** — chat con aspecto real de
+   WhatsApp y solapamiento de la nav resuelto en el shell.
+3. **Espacio de atención al cliente (`7fd8014`)** — `/trabajo` con roles
+   `owner`/`agent`, auditoría y esquema 18.
+
+**Guía de despliegue: `docs/deploy/PEDRO-WORKSPACE-05-09.md`.** Lleva un
+**paso nuevo obligatorio**: `npm run users:create` en el NAS. Sin usuarios
+nadie entra al panel.
+
+**El modelo de acceso está en `docs/WORKSPACE-ACCESO.md` — léelo antes de
+tocar `src/proxy.ts`.** Regla que costó un bug bloqueante: **el proxy decide
+quién LLEGA al handler; el handler decide QUÉ puede hacer cada rol.** No
+dupliques la política de rol en el proxy: cuando las dos capas opinan, se
+contradicen (un agente no podía responder a un cliente). La lista STAFF es de
+**patrones exactos, no prefijos** — un `/api/messages/` abriría también
+`/api/messages/{id}/image`, que no tiene guard propio.
+
+Y una consecuencia que se olvida: **abrir una ruta a staff no basta con el
+permiso, hay que mirar la RESPUESTA**. `/api/orders/{id}/action` devolvía la
+fila entera del pedido (email, `raw_payload`, `marketing_*`) a un agente; se
+proyecta con `safeOrder()`.
+
+`DASHBOARD_PASSWORD` **sigue abriendo el panel como propietario aunque haya
+usuarios**, y de forma anónima en la auditoría. Decisión de Pedro pendiente.
+
+La confirmación inicial sigue BLOQUEADA hasta correr el doctor de plantillas
+donde estén las credenciales de la WABA (el NAS), y los webhooks reales de
+Retell se seguirán rechazando hasta que `RETELL_API_KEY` sea la que lleva el
+distintivo *webhook*. Llamadas: MANUAL-ONLY.
 
 **Estado anterior (26-08, ya contenido en la rama):** merge `73884b1`
 (esquema 11, 493 tests) — hardening ⊂ main ⊂ closure. Guías de aquel
@@ -289,7 +314,8 @@ CONTEXTO-2026-08-25 §7. No mergear sin su orden.
 | `baileys/` | Cliente WhatsApp Web, handler entrante (serializado por teléfono), loop del outbox |
 | `calls/` | Orquestador Retell E7: franjas, calendario, payload, resultados, DNC |
 | `system/` | Control Center: salud, métricas (fail-closed), alertas, economía, leases, retención, taxonomía de errores, postura de seguridad |
-| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v17, incrementales, jamás renumerar) · safety gates + rampa de rollout |
+| `auth/` + `workspace.ts` + `proxy.ts` | Sesiones, contraseñas scrypt y guards de rol (`requireOwner`/`requireStaff`) · proyección `safeOrder()` y auditoría del espacio de atención · clasificación PÚBLICA/STAFF/PROPIETARIO. Contrato en `docs/WORKSPACE-ACCESO.md` |
+| `time.ts`, `db.ts`, `safety.ts` | Política horaria Europe/Madrid · esquema+migraciones (v18, incrementales, jamás renumerar) · safety gates + rampa de rollout |
 
 **Versión de la API de Shopify:** `SHOPIFY_API_VERSION`, default **`2026-07`**
 (en `shopify/admin.ts`, `backfill.ts` y `reconcile.ts`).
