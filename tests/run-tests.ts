@@ -13373,6 +13373,14 @@ async function main(): Promise<void> {
     assert.match(audit, /no cambia ningún valor/i);
     assert.match(audit, /No se encontraron precios, porcentajes de conversión, márgenes, probabilidades ni costes inventados/);
   });
+  await test("F21 resumen añade F17-F20 y abre la continuación con todas las decisiones numéricas", () => {
+    const summary = fs.readFileSync(path.join(process.cwd(), "docs/deploy/RESUMEN-v4.3.md"), "utf8");
+    const continuation = summary.slice(summary.indexOf("## Continuación F17–F20"));
+    assert.ok(continuation.indexOf("### Primero: números que Pedro debe revisar") < continuation.indexOf("### Resultado de las fases"));
+    for (const phase of ["F17", "F18", "F19", "F20"]) assert.match(continuation, new RegExp(`\\| ${phase} \\| COMPLETA \\|`));
+    assert.equal((continuation.match(/^\|[^\n]+\|[^\n]+\|[^\n]+\|$/gm) ?? []).length, 35, "27 decisiones + cabeceras y 4 fases");
+    assert.match(continuation, /No hubo despliegue, llamadas, mensajes, escrituras externas, cambios de schema ni cambios de dependencias/);
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {

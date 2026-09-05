@@ -71,3 +71,58 @@ El ensayo aislado medido en este host tardó **47,6 ms**. Dentro de la suite var
 ## Validación de build
 
 El build de producción con Next.js 16.3.1 y webpack compiló correctamente, ejecutó TypeScript, generó 11 páginas estáticas y enumeró todas las rutas dinámicas. El intento Turbopack no pudo resolver `next/package.json` porque este worktree reutiliza `node_modules` del checkout padre; no se instaló una segunda copia ni se alteraron dependencias para ocultar esa limitación del entorno.
+
+---
+
+## Continuación F17–F20
+
+### Primero: números que Pedro debe revisar
+
+Detalle y contexto completo en `docs/deploy/NUMEROS-SIN-FUENTE-v4.3.md`. Ningún valor fue modificado.
+
+| Área | Valor actual | Decisión pendiente |
+|---|---:|---|
+| Primer recordatorio | 30 min | Confirmar/cambiar |
+| Escalado a llamada | 120 min | Confirmar/cambiar |
+| Selección de pedido | 45 min | Resolver contradicción con “media hora” |
+| Selector repetido | 2 veces | Confirmar/cambiar |
+| Duplicados | 48 h | Confirmar/cambiar |
+| Pedidos visibles en selector | 5 | Confirmar/cambiar |
+| Campaña de retrasos | 3 s entre envíos | Validar contra límites reales |
+| Corte de campaña | 3 fallos | Confirmar/cambiar |
+| Tope de llamadas | 30/día | Confirmar presupuesto/capacidad |
+| Activación de llamada | 15 min | Confirmar/cambiar |
+| Contactos por pedido | 5 | Confirmar política |
+| Primer reintento de llamada | 120 min | Ratificar decisión del 24-08 |
+| Horario de llamadas | 09–13 y 17–20, lun–sáb | Validar marco legal vigente |
+| Fallos técnicos de llamada | 3 | Confirmar/cambiar |
+| Llamada atascada | 10 min | Confirmar con latencia Retell |
+| Espera de análisis | 30 min | Confirmar con SLA Retell |
+| Fallback WhatsApp→llamada | 60 min | Confirmar interacción con escalado |
+| Rellamada aceptable | −5 min / +30 días | Confirmar tolerancia/horizonte |
+| Poll de pedidos | mín. 3 s; default 20 s | Ratificar en NAS |
+| Backoff de tag Shopify | 10 min | Confirmar contra SLA/rate limit |
+| Lote de pedidos | 20 acciones; scan 500 | Medir backlog y ratificar |
+| Longitud de atribución | 250 caracteres | Ratificar para analítica |
+| Texto de pedido | 300 / 500 caracteres | Ratificar truncamientos |
+| Colas de llamadas | scan 500; due 500 | Medir backlog y ratificar |
+| Poll de llamadas | mín. 15 s; default 60 s | Ratificar con SLA |
+| Timeout de Retell | 15 s | Confirmar con SLA oficial |
+| Búsqueda de hueco | 60 días | Mantener o documentar horizonte |
+
+### Resultado de las fases
+
+| Fase | Estado | Resultado |
+|---|---|---|
+| F17 | COMPLETA | `scripts/nas-verify-v43.sh` automatiza guardia, backups externos, build/recreate, doctor y smoke HTTP en orden fail-fast; exige `V43_BACKUP_ROOT` y conserva las confirmaciones humanas. |
+| F18 | COMPLETA | `doctor:v43 -- --resumen` conserva PASS/WARN/FAIL, silencia detalle superfluo y muestra la salida íntegra de cada bloque FAIL. |
+| F19 | COMPLETA | `MERGE-NOTAS-v4.3.md` compara solo con `origin/release/casamable-v4.2`, conserva los scripts base e inventaría los diez comandos añadidos. No se inspeccionó `feat/landing-ultima-milla`. |
+| F20 | COMPLETA | Auditoría cerrada a pedidos, llamadas y configuración: 18 decisiones de negocio y 9 límites técnicos pendientes; ningún precio, margen, conversión, probabilidad o coste inventado. |
+
+### Validación de esta continuación
+
+- F17: 685 pruebas OK, 5 omitidas, 0 fallos; typecheck limpio; shell validado con `bash -n`.
+- F18: 686 pruebas OK, 5 omitidas, 0 fallos; typecheck limpio.
+- F19: 687 pruebas OK, 5 omitidas, 0 fallos; typecheck limpio.
+- F20: 688 pruebas OK, 5 omitidas, 0 fallos; typecheck limpio.
+- No hubo despliegue, llamadas, mensajes, escrituras externas, cambios de schema ni cambios de dependencias.
