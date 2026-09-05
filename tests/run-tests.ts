@@ -13273,7 +13273,7 @@ async function main(): Promise<void> {
     for (const required of ["db-health.ts", "whatsapp-templates-doctor.ts", "retell-doctor.ts", "readiness-runtime.ts", "test-migration-v43.ts", "tests/run-tests.ts"]) {
       assert.ok(doctor.includes(required), required);
     }
-    assert.match(doctor, /failed\.length \? 1 : 0/, "un solo código de salida: cualquier FAIL devuelve 1");
+    assert.match(doctor, /results\.some\(\(result\) => result\.status === "FAIL"\) \? 1 : 0/, "un solo código de salida: cualquier FAIL devuelve 1");
     assert.equal((JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["doctor:v43"], "tsx scripts/doctor-v43.ts");
   });
 
@@ -13340,6 +13340,22 @@ async function main(): Promise<void> {
     for (const token of ordered) { const next = script.indexOf(token); assert.ok(next > cursor, `${token} aparece en orden`); cursor = next; }
     assert.match(script, /CONFIRMAR CON PEDRO/);
     assert.match(script, /V43_BACKUP_ROOT:\?/);
+  });
+
+  await test("F18 doctor resumen conserva veredictos con menor verbosidad y detalla solo FAIL", async () => {
+    const { renderDoctor } = await import("../scripts/doctor-v43");
+    const results = [
+      { name: "DB", status: "PASS" as const, code: 0, detail: "todo correcto", output: "salida DB muy larga" },
+      { name: "Retell", status: "WARN" as const, code: 2, detail: "sin credenciales", output: "salida Retell muy larga" },
+      { name: "Readiness", status: "FAIL" as const, code: 1, detail: "plantilla bloqueada", output: "traza completa del fallo" },
+    ];
+    const full = renderDoctor(results, false);
+    const summary = renderDoctor(results, true);
+    for (const status of ["PASS", "WARN", "FAIL"]) assert.equal(full.includes(status), summary.includes(status), status);
+    assert.ok(summary.length < full.length, "el resumen es menos verboso");
+    assert.ok(!summary.includes("salida DB muy larga") && !summary.includes("salida Retell muy larga"));
+    assert.ok(summary.includes("traza completa del fallo"), "un FAIL conserva todo el detalle");
+    assert.match(fs.readFileSync(path.join(process.cwd(), "scripts/doctor-v43.ts"), "utf8"), /--resumen/);
   });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
