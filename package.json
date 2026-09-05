@@ -51,6 +51,7 @@
     "retell:doctor": "tsx scripts/retell-doctor.ts",
     "doctor:v43": "tsx scripts/doctor-v43.ts",
     "trace": "tsx scripts/trace.ts",
+    "fixture:pedido": "tsx scripts/fixture-pedido.ts",
     "calls:simulate": "tsx scripts/calls-simulate.ts",
     "beeping:auth:init": "tsx scripts/beeping-auth-init.ts",
     "beeping:doctor": "tsx scripts/beeping-doctor.ts",

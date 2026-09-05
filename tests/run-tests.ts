@@ -13302,6 +13302,25 @@ async function main(): Promise<void> {
     assert.equal(result!.order.location, existing.city);
     assert.ok(result!.events.every((event) => !event.detail?.includes(existing.phone)), "la salida redactada no contiene el teléfono");
   });
+
+  await test("F14 fixture de pedido reproduce la normalización real y marca el origen sintético", async () => {
+    const fixture = await import("../src/lib/orders/synthetic-fixture");
+    const normalize = await import("../src/lib/orders/normalize");
+    const expected = normalize.normalizeOrder(fixture.loadAnonymizedShopifyFixture());
+    assert.equal(expected.phone, "34600000001", "el +34 del payload termina en el formato real sin +");
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "+34 600 000 001" }, () => {
+      const row = fixture.createSyntheticOrder("+34 600 000 001");
+      const payload = JSON.parse(row.raw_payload ?? "{}") as import("../src/lib/orders/normalize").ShopifyOrderPayload;
+      const actual = normalize.normalizeOrder(payload);
+      for (const key of ["customerName", "phone", "email", "productSummary", "totalPrice", "currency", "addressLine1", "addressLine2", "city", "province", "postalCode", "country"] as const) {
+        assert.deepEqual(row[({ customerName: "customer_name", phone: "phone", email: "email", productSummary: "product_summary", totalPrice: "total_price", currency: "currency", addressLine1: "address_line1", addressLine2: "address_line2", city: "city", province: "province", postalCode: "postal_code", country: "country" } as const)[key]], actual[key], key);
+      }
+      assert.match(row.shopify_order_number, /^999\d{3}$/);
+      const event = db.systemDbHandle().prepare("SELECT event_type FROM integration_events WHERE order_ref=? ORDER BY id DESC LIMIT 1").get(row.shopify_order_number) as { event_type: string };
+      assert.equal(event.event_type, "synthetic_order_created");
+    });
+    await withEnv({ TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000001" }, () => assert.throws(() => fixture.createSyntheticOrder("+34 611 111 111"), /allowlist/i));
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
