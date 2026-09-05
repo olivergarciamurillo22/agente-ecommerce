@@ -13191,21 +13191,12 @@ async function main(): Promise<void> {
   });
 
   await test("schema 17 migra a workspace 18 y Hunter 19 sin perder tablas", async () => {
-    const Database = (await import("better-sqlite3")).default;
-    const fixture = new Database(":memory:");
-    fixture.pragma("foreign_keys = ON");
-    fixture.pragma("user_version = 17");
-    db.migrateWorkspaceAuth(fixture);
-    fixture.pragma("user_version = 18");
-    db.migrateProductCandidates(fixture);
-    fixture.pragma("user_version = 19");
-    db.migrateWorkspaceAuth(fixture);
-    db.migrateProductCandidates(fixture);
-    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events"]) {
-      assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
-    }
-    assert.equal(fixture.pragma("user_version", { simple: true }), 19);
-    fixture.close();
+    const { runMigrationV43Test } = await import("../scripts/test-migration-v43");
+    const report = await runMigrationV43Test();
+    assert.equal(report.schemaVersion, 19);
+    assert.equal(report.integrity, "ok");
+    assert.deepEqual(report.counts, { orders: 116, conversations: 63, messages: 349, outbox: 180, integration_events: 1700 });
+    console.log(`    migración realista v17→v19: ${report.durationMs} ms`);
   });
 
   await test("la ficha del agente se construye por lista blanca y no filtra PII/proveedor/marketing", async () => {
