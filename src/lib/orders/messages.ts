@@ -59,22 +59,20 @@ function itemsBlock(order: OrderRow): string {
     .join("\n");
 }
 
-/** Mensaje inicial: el guion telefónico de Pedro, adaptado a WhatsApp. */
+/**
+ * Primera confirmación para el proveedor Baileys, que no admite plantillas de
+ * Meta. Es un builder activo y fiel al contrato actual; Cloud API no lo usa
+ * como fallback bajo ninguna circunstancia.
+ */
 export function buildConfirmationMessage(order: OrderRow): string {
   const nombre = firstName(order);
   const total = money(order);
   return (
-    `Hola${nombre ? ` ${nombre}` : ""}, buenas.\n\n` +
-    `Soy Pedro, de atención al cliente de ${shopName()}.\n\n` +
-    `Estoy gestionando tu pedido:\n\n` +
+    `Hola${nombre ? ` ${nombre}` : ""} 👋 Somos ${shopName()}.\n\n` +
+    `Confirma tu pedido #${order.shopify_order_number}:\n\n` +
     `${itemsBlock(order)}\n` +
-    `💰 Total: ${total}\n\n` +
-    `La dirección que tenemos es:\n\n` +
+    `💶 Contra reembolso: ${total}. Pagarás al repartidor al recibirlo.\n` +
     `📍 ${formatAddressForMessage(order)}\n\n` +
-    `¿Está todo correcto?\n\n` +
-    `Si quieres, también puedes dejar alguna nota para el repartidor.\n\n` +
-    `Recuerda tener preparados ${total} en efectivo para pagar al repartidor.\n\n` +
-    `Respóndeme:\n\n` +
     `1 - Todo correcto\n` +
     `2 - Quiero cambiar la dirección\n` +
     `3 - Quiero dejar una nota al repartidor`

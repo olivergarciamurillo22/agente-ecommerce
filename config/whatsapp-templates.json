@@ -19,10 +19,11 @@
       "use": "Primer mensaje del flujo COD cuando el cliente no ha escrito nunca (siempre fuera de ventana por definición).",
       "variables": [
         "nombre",
+        "numero_pedido",
         "producto",
         "importe"
       ],
-      "draft_body": "Hola {{1}} 👋 Tenemos tu pedido de Casamable: {{2}} por {{3}}, a pagar al recibirlo. ¿Está todo correcto?",
+      "draft_body": "Hola {{1}} 👋 Somos Casamable. Confirma tu pedido {{2}}: {{3}}. Es contra reembolso y pagarás {{4}} al repartidor cuando lo recibas.",
       "buttons": [
         {
           "type": "QUICK_REPLY",
@@ -40,7 +41,7 @@
           "payload": "delivery_note"
         }
       ],
-      "fallback": "el mensaje de confirmación de texto actual (orders/messages.ts)"
+      "fallback": "ninguno en Cloud API: si la plantilla no está lista, no se envía"
     },
     {
       "name": "order_reminder",

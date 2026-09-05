@@ -38,7 +38,6 @@ import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../
 import { whatsappProviderName } from "../whatsapp/provider";
 import { buildConfirmationOutbound, firstName } from "../whatsapp/interactive";
 import { buildApprovedTemplateMessage, TemplateNotReadyError } from "../whatsapp/templates";
-import { isWithinSessionWindow } from "../whatsapp/meta-cloud";
 import { buildConfirmationMessage, buildReminderMessage } from "./messages";
 import { tagOrderConfirmed, shopifyAdminConfigured } from "../shopify/admin";
 import {
@@ -203,7 +202,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       let interactive: ReturnType<typeof buildConfirmationOutbound> | null = null;
       if (whatsappProviderName() === "cloud_api") {
         try {
-          interactive = buildConfirmationOutbound(order, isWithinSessionWindow(order.phone));
+          interactive = buildConfirmationOutbound(order);
         } catch (err) {
           // Dos causas posibles, ninguna de Meta:
           //  · TemplateNotReadyError — el mapping lógico→WABA no está
@@ -218,7 +217,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
           );
           logIntegrationEvent(
             "whatsapp",
-            esBloqueo ? "template_not_ready" : "template_build_failed",
+            esBloqueo ? "confirmation_template_not_ready" : "template_build_failed",
             "warning",
             esBloqueo
               ? `confirmación inicial BLOQUEADA (${(err as TemplateNotReadyError).blocker}): ${err instanceof Error ? err.message : ""}`.slice(0, 300)
