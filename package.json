@@ -49,6 +49,7 @@
     "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts",
     "whatsapp:templates:doctor": "tsx scripts/whatsapp-templates-doctor.ts",
     "retell:doctor": "tsx scripts/retell-doctor.ts",
+    "doctor:v43": "tsx scripts/doctor-v43.ts",
     "calls:simulate": "tsx scripts/calls-simulate.ts",
     "beeping:auth:init": "tsx scripts/beeping-auth-init.ts",
     "beeping:doctor": "tsx scripts/beeping-doctor.ts",

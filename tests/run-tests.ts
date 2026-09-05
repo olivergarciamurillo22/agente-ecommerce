@@ -13276,6 +13276,15 @@ async function main(): Promise<void> {
       assert.ok(!visibleJson.includes(forbidden), `respuesta del workspace sin ${forbidden}`);
     }
   });
+
+  await test("F12 doctor v4.3 encadena los seis bloques y unifica PASS/WARN/FAIL", () => {
+    const doctor = fs.readFileSync(path.join(process.cwd(), "scripts/doctor-v43.ts"), "utf8");
+    for (const required of ["db-health.ts", "whatsapp-templates-doctor.ts", "retell-doctor.ts", "readiness-runtime.ts", "test-migration-v43.ts", "tests/run-tests.ts"]) {
+      assert.ok(doctor.includes(required), required);
+    }
+    assert.match(doctor, /failed\.length \? 1 : 0/, "un solo código de salida: cualquier FAIL devuelve 1");
+    assert.equal((JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { scripts: Record<string, string> }).scripts["doctor:v43"], "tsx scripts/doctor-v43.ts");
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
