@@ -925,6 +925,49 @@ export function migrateHunterPredictive(db: Database.Database): void {
   `);
 }
 
+/** Migracion 21: consultas y snapshots historicos de Ad Library. */
+export function migrateHunterDiscovery(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS adlib_queries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      terms_json TEXT NOT NULL,
+      country TEXT NOT NULL,
+      days INTEGER NOT NULL,
+      fields_json TEXT NOT NULL,
+      result_count INTEGER NOT NULL,
+      passed_noise_count INTEGER NOT NULL,
+      group_count INTEGER NOT NULL,
+      rate_limit_json TEXT,
+      queried_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS adlib_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_key TEXT NOT NULL UNIQUE,
+      page_id TEXT NOT NULL,
+      page_name TEXT,
+      fingerprint TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE TABLE IF NOT EXISTS adlib_candidate_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query_id INTEGER NOT NULL REFERENCES adlib_queries(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES adlib_candidates(id) ON DELETE CASCADE,
+      captured_at INTEGER NOT NULL,
+      active_ads INTEGER NOT NULL,
+      oldest_active_at INTEGER,
+      momentum TEXT NOT NULL,
+      previous_active_ads INTEGER,
+      noise INTEGER NOT NULL CHECK(noise IN (0,1)),
+      noise_reason TEXT,
+      ads_json TEXT NOT NULL,
+      UNIQUE(query_id, candidate_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_adlib_snapshots_candidate_date
+      ON adlib_candidate_snapshots(candidate_id, captured_at DESC);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1566,6 +1609,7 @@ function build() {
   migrateWorkspaceAuth(db);
   migrateProductCandidates(db);
   migrateHunterPredictive(db);
+  migrateHunterDiscovery(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1735,7 +1779,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),

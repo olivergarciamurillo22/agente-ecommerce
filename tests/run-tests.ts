@@ -12702,9 +12702,9 @@ async function main(): Promise<void> {
       assert.match(nav, /"Beta"/, "la navegación también lo marca");
     });
 
-    await test("V4.2 Landing Studio sigue local aunque Hunter predictivo usa schema 20", () => {
+    await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 20;/, "Hunter base usa 19 y predictivo añade 20");
+      assert.match(db, /export const SCHEMA_VERSION = 21;/, "predictivo usa 20 y Discovery añade 21");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13180,10 +13180,10 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 20);
+    assert.equal(raw.pragma("user_version", { simple: true }), 21);
   });
 
-  await test("schema 17 migra a workspace 18, Hunter 19 y predictivo 20 sin perder tablas", async () => {
+  await test("schema 17 migra hasta Discovery 21 sin perder tablas", async () => {
     const Database = (await import("better-sqlite3")).default;
     const fixture = new Database(":memory:");
     fixture.pragma("foreign_keys = ON");
@@ -13194,13 +13194,16 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 19");
     db.migrateHunterPredictive(fixture);
     fixture.pragma("user_version = 20");
+    db.migrateHunterDiscovery(fixture);
+    fixture.pragma("user_version = 21");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
-    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates"]) {
+    db.migrateHunterDiscovery(fixture);
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots"]) {
       assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(fixture.pragma("user_version", { simple: true }), 20);
+    assert.equal(fixture.pragma("user_version", { simple: true }), 21);
     fixture.close();
   });
 
@@ -13252,8 +13255,44 @@ async function main(): Promise<void> {
       lengthCm: 14, widthCm: 8, heightCm: 5, variants: ["blanco"], specs: null, claims: null,
     };
 
+    await test("Hunter Discovery · pagina por cursor, pide campos y conserva limites Meta", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const urls: string[] = []; const waits: number[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const url = String(input); urls.push(url); const second = url.includes("after=CURSOR_2");
+        return new Response(JSON.stringify({ data: [{ id: second ? "ad2" : "ad1", page_id: "page1", page_name: "Tienda", ad_creative_bodies: ["Producto fisico comodidad hogar"], ad_delivery_start_time: "2026-08-01" }], paging: second ? {} : { cursors: { after: "CURSOR_2" }, next: "https://next" } }), { headers: { "content-type": "application/json", "x-app-usage": JSON.stringify({ call_count: 12 }) } });
+      }) as typeof fetch;
+      const result = await new AdLibraryClient("token-secreto", fetcher, async (ms) => { waits.push(ms); }).search({ term: "comodidad", country: "ES", since: "2026-08-01", until: "2026-09-05" });
+      assert.equal(result.ads.length, 2); assert.equal(urls.length, 2); assert.match(urls[1], /after=CURSOR_2/);
+      assert.match(urls[0], /ad_reached_countries=%5B%22ES%22%5D/); assert.match(urls[0], /ad_delivery_date_min=2026-08-01/);
+      assert.deepEqual(waits, [1000]); assert.deepEqual(result.rateLimit, { "x-app-usage": { call_count: 12 } });
+      assert.ok(!urls.some((url) => url.includes("token-secreto")), "token solo en Authorization");
+    });
+
+    await test("Hunter Discovery · agrupa variantes y momentum solo nace en el segundo snapshot", async () => {
+      const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+      const { DiscoveryRepository } = await import("../src/lib/hunter/discovery/repository");
+      const ad = (id: string) => ({ id, pageId: "page-discovery-test", pageName: "Tienda prueba", snapshotUrl: `https://facebook.test/${id}`, bodies: ["Producto fisico para comodidad en casa"], captions: ["Compra producto comodidad hogar"], titles: ["Comodidad"], platforms: ["facebook"], languages: ["es"], creationTime: "2026-08-01", startTime: "2026-08-01", stopTime: null, impressions: null, audience: null });
+      const now = Math.floor(Date.parse("2026-09-05T12:00:00Z") / 1000);
+      const firstGroup = groupAds([ad("d1"), ad("d2"), ad("d3")], now);
+      assert.equal(firstGroup.length, 1); const repo = new DiscoveryRepository();
+      const first = repo.saveRun({ terms: ["comodidad"], country: "ES", days: 14, fields: ["id"], rawCount: 3, groups: firstGroup, rateLimit: null, now });
+      assert.equal(first[0].momentum, "sin_historico");
+      const secondGroup = groupAds([ad("d1"), ad("d2"), ad("d3"), ad("d4"), ad("d5")], now + 86400);
+      const second = repo.saveRun({ terms: ["comodidad"], country: "ES", days: 14, fields: ["id"], rawCount: 5, groups: secondGroup, rateLimit: null, now: now + 86400 });
+      assert.equal(second[0].previousActiveAds, 3); assert.equal(second[0].momentum, "fuerte");
+      const queries = db.systemDbHandle().prepare("SELECT COUNT(*) n FROM adlib_queries WHERE terms_json=?").get(JSON.stringify(["comodidad"])) as { n: number };
+      assert.equal(queries.n, 2);
+    });
+
+    await test("Hunter Discovery · ruido de servicios es heuristica explicita", async () => {
+      const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+      const groups = groupAds([{ id: "noise1", pageId: "noise-page", pageName: "Academia", snapshotUrl: null, bodies: ["Curso y webinar de software"], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }]);
+      assert.equal(groups[0].noise, true); assert.match(groups[0].noiseReason ?? "", /servicio, app o contenido/);
+    });
+
     await test("Hunter predictivo · migración 20 convive con Hunter 19", () => {
-      assert.equal(db.SCHEMA_VERSION, 20);
+      assert.equal(db.SCHEMA_VERSION, 21);
       const tables = db.systemDbHandle().prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>;
       assert.ok(tables.some(t => t.name === "product_candidates"));
       assert.ok(tables.some(t => t.name === "candidate_events"));
