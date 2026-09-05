@@ -13357,6 +13357,15 @@ async function main(): Promise<void> {
     assert.ok(summary.includes("traza completa del fallo"), "un FAIL conserva todo el detalle");
     assert.match(fs.readFileSync(path.join(process.cwd(), "scripts/doctor-v43.ts"), "utf8"), /--resumen/);
   });
+  await test("F19 notas de merge conservan scripts base y los diez añadidos en v4.3", () => {
+    const notes = fs.readFileSync(path.join(process.cwd(), "docs/deploy/MERGE-NOTAS-v4.3.md"), "utf8");
+    for (const script of ["doctor:v43", "trace", "fixture:pedido", "users:create", "hunter:add", "hunter:score", "landing:build", "landing:sections", "landing:lint", "landing:e2e"]) {
+      assert.ok(notes.includes(`\`${script}\``), script);
+    }
+    assert.match(notes, /Scripts heredados de v4\.2/);
+    assert.match(notes, /no inspecciona `feat\/landing-ultima-milla`/);
+    assert.match(notes, /no debe resolverse aceptando un lado completo/);
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
