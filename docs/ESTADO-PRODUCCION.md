@@ -41,9 +41,15 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 
 ## 3 · Qué falta para mover producción
 
-**Candidato vigente: `release/casamable-v4.2` @ `7fd8014` (esquema 18).**
-Contiene el hotfix de Retell/ops, la integración móvil y el espacio de
-atención al cliente con roles y auditoría.
+**Candidato vigente: `release/casamable-v4.2` @ `fdad99e` (esquema 18).**
+Contiene el hotfix de Retell/ops, la integración móvil, el espacio de
+atención al cliente con roles y auditoría, y los tres arreglos de conducta
+del bot en WhatsApp del 05-09 (`docs/CONVERSACION-REGLAS.md`).
+
+Efecto operativo a vigilar la primera semana: esa conducta manda **más
+conversaciones a la bandeja de atención** que antes. Es deliberado (sale más
+barato que un rehusado), pero si se llena de casos resolubles el ajuste está
+en `orders/free-text-intent.ts`, no en volver a los bucles.
 Guía exacta: **`docs/deploy/PEDRO-WORKSPACE-05-09.md`** — lleva un **paso
 nuevo obligatorio**: crear los usuarios con `npm run users:create`, sin el
 cual nadie puede entrar al panel.

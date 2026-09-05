@@ -37,6 +37,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 - Local: [LOCAL-ENV-SETUP.md](LOCAL-ENV-SETUP.md)
 - Panel Sistema: [SYSTEM-CONTROL-CENTER.md](SYSTEM-CONTROL-CENTER.md)
 - Atención al cliente (roles/acceso): [WORKSPACE-ACCESO.md](WORKSPACE-ACCESO.md)
+- **Cómo responde el bot (reglas de conversación): [CONVERSACION-REGLAS.md](CONVERSACION-REGLAS.md)**
 - Retención/PII: [DATA-RETENTION.md](DATA-RETENTION.md) · Errores: [ERROR-MODEL.md](ERROR-MODEL.md)
 - Colaboración git: [COLLABORATION.md](COLLABORATION.md)
 - QA visual pendiente: [UI-V3-VISUAL-QA.md](UI-V3-VISUAL-QA.md)

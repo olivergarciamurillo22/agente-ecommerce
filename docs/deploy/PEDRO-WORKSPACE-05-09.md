@@ -1,6 +1,6 @@
 # Pedro — desplegar el espacio de atención al cliente (05-09-2026)
 
-Commit a desplegar: **`7fd8014`**
+Commit a desplegar: **`fdad99e`**
 Esquema: **15 → 18** (producción está hoy en 15)
 
 Este despliegue añade una cosa nueva: **una persona de atención al cliente
@@ -8,8 +8,25 @@ puede entrar en el panel con su propio usuario**, ver solo las conversaciones
 que necesitan una persona, responderlas y resolverlas — **sin** poder tocar
 Sistema, Ajustes, llamadas ni nada que mueva dinero.
 
-Todo lo que ya funcionaba sigue igual. No se toca WhatsApp, ni las llamadas,
-ni los proveedores, ni ningún guardarraíl.
+**Y cambia cómo responde el bot en WhatsApp** (tres arreglos del 05-09).
+Resumen en una línea cada uno — el detalle, en `docs/CONVERSACION-REGLAS.md`:
+
+1. **No se confirma un COD contra una dirección basura.** Si la dirección
+   está vacía, es absurdamente corta o no tiene número, la confirmación se
+   bloquea y lo revisa una persona. Un COD confirmado a una dirección
+   inexistente es un rehusado con portes pagados (~9,37 €).
+2. **El primer mensaje por Cloud API es siempre la plantilla aprobada.** Se
+   quitó el texto de respaldo que podía salir en su lugar.
+3. **Lo que el bot no entiende va a una persona a la primera**, en vez de
+   dar vueltas. Antes llegó a repetir el mismo menú cinco veces sin
+   resolver nada.
+
+Nada más se toca: ni las llamadas, ni los proveedores, ni ningún guardarraíl.
+
+> **Lo que vas a notar:** llegan **más conversaciones a la bandeja** de
+> atención que antes. Es a propósito — sale más barato que un rehusado —,
+> pero mira el volumen la primera semana y dime si se llena de cosas que el
+> bot debería haber resuelto solo.
 
 ---
 
@@ -61,8 +78,8 @@ ls -lt /volume1/docker/CasamableAgent/backups | head -3
 ```bash
 cd <carpeta del repo en el NAS>
 git fetch origin
-git checkout 7fd8014
-git rev-parse HEAD          # debe decir 7fd8014...
+git checkout fdad99e
+git rev-parse HEAD          # debe decir fdad99e...
 
 docker compose build casamable-agent
 docker compose up -d --no-build casamable-agent
@@ -175,6 +192,21 @@ Vienen de antes y no los arregla este commit:
    webhooks reales se rechazan. El código ya está bien; falta la clave
    correcta en el `.env` del NAS. Detalle en
    `docs/retell/PRODUCTION-VALIDATION.md`.
+
+## 8 bis · Una variable nueva, opcional
+
+`META_WHATSAPP_MEDIA_DOWNLOAD_ENABLED` decide si las fotos y audios que
+manda el cliente se descargan de Meta para verlos en el panel.
+
+**Viene ACTIVADA sin tocar nada.** Si no quieres que se descarguen (son
+llamadas a Meta y ficheros en `data/media`), añade al `.env` del NAS:
+
+```
+META_WHATSAPP_MEDIA_DOWNLOAD_ENABLED=0
+```
+
+Mi recomendación: déjala activada. Si un cliente manda una foto de la
+dirección o del portal, verla es justo lo que resuelve el caso.
 
 ## 9 · Si algo va mal
 

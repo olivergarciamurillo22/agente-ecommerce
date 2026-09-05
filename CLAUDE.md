@@ -207,7 +207,7 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 `67f05c7` (esquema 15, cloud_api, TEST_MODE=1). NADA DE LO DE ABAJO ESTÁ
 DESPLEGADO.**
 
-**Candidato: `release/casamable-v4.2` @ `7fd8014` (esquema 18).** Acumula, en
+**Candidato: `release/casamable-v4.2` @ `fdad99e` (esquema 18).** Acumula, en
 este orden:
 
 1. **Hotfix de producción Retell/ops (`114a458`)** — firma de webhooks
@@ -219,6 +219,20 @@ este orden:
    WhatsApp y solapamiento de la nav resuelto en el shell.
 3. **Espacio de atención al cliente (`7fd8014`)** — `/trabajo` con roles
    `owner`/`agent`, auditoría y esquema 18.
+4. **Conducta del bot en WhatsApp (`fdad99e`)** — no se confirma un COD
+   contra una dirección basura; el primer mensaje por Cloud API es siempre
+   la plantilla aprobada; y lo que no se entiende va a una persona A LA
+   PRIMERA en vez de dar vueltas (el bot real llegó a repetir el mismo
+   selector cinco veces). **Contrato en `docs/CONVERSACION-REGLAS.md` —
+   léelo antes de tocar `orders/confirmation.ts`.**
+
+   Tres cosas que costaron caro y no se pueden re-romper: un `1` repetido
+   tras confirmar es **inerte** (si abriera tarea, la bandeja de atención
+   dejaría de servir); la reclamación de duplicado se comprueba **también
+   con el pedido ya en manos humanas** (la pista llega en el tercer mensaje
+   de la conversación real); y **preguntar algo NO des-confirma** un pedido
+   — la escalada se señala con modo HUMAN + `work_item`, jamás degradando
+   el estado.
 
 **Guía de despliegue: `docs/deploy/PEDRO-WORKSPACE-05-09.md`.** Lleva un
 **paso nuevo obligatorio**: `npm run users:create` en el NAS. Sin usuarios
