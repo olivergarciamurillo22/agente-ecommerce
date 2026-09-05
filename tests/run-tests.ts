@@ -12933,6 +12933,16 @@ async function main(): Promise<void> {
       const center=(await import("../src/lib/system/action-center")).getActionCenter();const item=center.items.find(x=>x.orderId===order.id&&x.type==="CANCEL_HELP");assert.ok(item);assert.match(item.problem,/pide ayuda tras cancelar/i);
     });
 
+    await test("rollout: registrar un bloqueo no cambia la decisión y no duplica eventos por tick",async()=>{
+      const safety2=await import("../src/lib/safety");db.setSetting("whatsapp_rollout_percent","25");
+      const phone=Array.from({length:200},(_,i)=>`346777${String(i).padStart(5,"0")}`).find(x=>safety2.rolloutBucket(x)>=25)!;
+      const order=mkOrder("rollout-log","94777",phone),before=safety2.rolloutAllows(phone);
+      safety2.logRolloutBlocked(order);safety2.logRolloutBlocked(order);
+      assert.equal(safety2.rolloutAllows(phone),before,"la observabilidad no toca rolloutAllows");
+      const rows=db.systemDbHandle().prepare("SELECT message FROM integration_events WHERE event_type='rollout_blocked' AND order_ref='94777'").all() as Array<{message:string}>;
+      assert.equal(rows.length,1);assert.match(rows[0].message,/porcentaje 25, bucket \d+/);db.setSetting("whatsapp_rollout_percent","pilot");
+    });
+
     await test("V4.2 Growth: jerarquía sin perder sub-áreas (4 pestañas + Más análisis)", () => {
       const g = src("src/components/GrowthView.tsx");
       const primary = /const TABS: Array<\{ id: GrowthTab; label: string \}> = \[([\s\S]*?)\n\];/.exec(g)![1];

@@ -46,6 +46,7 @@ import {
   orderActionAllowed,
   orderTooOld,
   canSendRealWhatsApp,
+  logRolloutBlocked,
   canWriteToShopify,
   insideSendWindow,
   nextWindowOpen,
@@ -126,10 +127,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       continue;
     }
     if (!orderActionAllowed(order)) {
-      logOnce(
-        `test-skip-${order.id}`,
-        `[TEST MODE] Pedido #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-      );
+      logRolloutBlocked(order);
       continue;
     }
     if (markOrderNeedsCall(order.id)) {
@@ -153,10 +151,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         continue;
       }
       if (!orderActionAllowed(order)) {
-        logOnce(
-          `test-skip-${order.id}`,
-          `[TEST MODE] Pedido #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-        );
+        logRolloutBlocked(order);
         continue;
       }
 
@@ -266,10 +261,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         continue;
       }
       if (!orderActionAllowed(order)) {
-        logOnce(
-          `test-skip-rem-${order.id}`,
-          `[TEST MODE] Recordatorio #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-        );
+        logRolloutBlocked(order);
         continue;
       }
       const message = buildReminderMessage(order);
