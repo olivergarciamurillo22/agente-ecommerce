@@ -13366,6 +13366,13 @@ async function main(): Promise<void> {
     assert.match(notes, /no inspecciona `feat\/landing-ultima-milla`/);
     assert.match(notes, /no debe resolverse aceptando un lado completo/);
   });
+  await test("F20 auditoría numérica declara alcance, fuentes y decisiones sin alterar defaults", () => {
+    const audit = fs.readFileSync(path.join(process.cwd(), "docs/deploy/NUMEROS-SIN-FUENTE-v4.3.md"), "utf8");
+    for (const scope of ["src/lib/orders/**", "src/lib/calls/**", "config/**"]) assert.ok(audit.includes(`\`${scope}\``), scope);
+    for (const value of ["30 min", "120 min", "45 min", "48 h", "30/día", "5 contactos", "09–13 y 17–20"]) assert.ok(audit.includes(value), value);
+    assert.match(audit, /no cambia ningún valor/i);
+    assert.match(audit, /No se encontraron precios, porcentajes de conversión, márgenes, probabilidades ni costes inventados/);
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
