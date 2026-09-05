@@ -1,6 +1,6 @@
 # Pedro — desplegar el espacio de atención al cliente (05-09-2026)
 
-Commit a desplegar: **`fdad99e`**
+Rama a desplegar: **`release/casamable-v4.2`** (código en `fdad99e`)
 Esquema: **15 → 18** (producción está hoy en 15)
 
 Este despliegue añade una cosa nueva: **una persona de atención al cliente
@@ -78,8 +78,9 @@ ls -lt /volume1/docker/CasamableAgent/backups | head -3
 ```bash
 cd <carpeta del repo en el NAS>
 git fetch origin
-git checkout fdad99e
-git rev-parse HEAD          # debe decir fdad99e...
+git checkout release/casamable-v4.2
+git pull --ff-only
+git rev-parse --short HEAD  # apúntalo y pásamelo: así sé qué corre exactamente
 
 docker compose build casamable-agent
 docker compose up -d --no-build casamable-agent
