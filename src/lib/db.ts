@@ -901,6 +901,30 @@ export function migrateProductCandidates(db: Database.Database): void {
   `);
 }
 
+/** Migracion 20: ejecuciones auditables del Hunter predictivo. */
+export function migrateHunterPredictive(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hunter_predictive_estimates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_query TEXT NOT NULL,
+      competitor_url TEXT,
+      search_available INTEGER NOT NULL CHECK(search_available IN (0,1)),
+      search_mechanism TEXT,
+      wholesale_json TEXT,
+      retail_json TEXT,
+      viability_json TEXT,
+      verdict TEXT CHECK(verdict IS NULL OR verdict IN ('descartar','investigar','candidato_fuerte')),
+      reason TEXT,
+      consulted_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      promoted_candidate_id INTEGER REFERENCES product_candidates(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_predictive_expiry
+      ON hunter_predictive_estimates(expires_at DESC, created_at DESC);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1541,6 +1565,7 @@ function build() {
   migrateOrderAttribution(db);
   migrateWorkspaceAuth(db);
   migrateProductCandidates(db);
+  migrateHunterPredictive(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1710,7 +1735,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),

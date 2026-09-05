@@ -12702,9 +12702,9 @@ async function main(): Promise<void> {
       assert.match(nav, /"Beta"/, "la navegación también lo marca");
     });
 
-    await test("V4.2 Landing Studio sigue local aunque Hunter usa schema 19", () => {
+    await test("V4.2 Landing Studio sigue local aunque Hunter predictivo usa schema 20", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 19;/, "workspace usa 18 y Hunter añade 19");
+      assert.match(db, /export const SCHEMA_VERSION = 20;/, "Hunter base usa 19 y predictivo añade 20");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13180,10 +13180,10 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 19);
+    assert.equal(raw.pragma("user_version", { simple: true }), 20);
   });
 
-  await test("schema 17 migra a workspace 18 y Hunter 19 sin perder tablas", async () => {
+  await test("schema 17 migra a workspace 18, Hunter 19 y predictivo 20 sin perder tablas", async () => {
     const Database = (await import("better-sqlite3")).default;
     const fixture = new Database(":memory:");
     fixture.pragma("foreign_keys = ON");
@@ -13192,12 +13192,15 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 18");
     db.migrateProductCandidates(fixture);
     fixture.pragma("user_version = 19");
+    db.migrateHunterPredictive(fixture);
+    fixture.pragma("user_version = 20");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
-    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events"]) {
+    db.migrateHunterPredictive(fixture);
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates"]) {
       assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(fixture.pragma("user_version", { simple: true }), 19);
+    assert.equal(fixture.pragma("user_version", { simple: true }), 20);
     fixture.close();
   });
 
@@ -13249,12 +13252,63 @@ async function main(): Promise<void> {
       lengthCm: 14, widthCm: 8, heightCm: 5, variants: ["blanco"], specs: null, claims: null,
     };
 
-    await test("Hunter · migración 19 convive con workspace 18", () => {
-      assert.equal(db.SCHEMA_VERSION, 19);
+    await test("Hunter predictivo · migración 20 convive con Hunter 19", () => {
+      assert.equal(db.SCHEMA_VERSION, 20);
       const tables = db.systemDbHandle().prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>;
       assert.ok(tables.some(t => t.name === "product_candidates"));
       assert.ok(tables.some(t => t.name === "candidate_events"));
+      assert.ok(tables.some(t => t.name === "hunter_predictive_estimates"));
     });
+    await test("Hunter predictivo · sin buscador persiste null y no inventa cifras", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const { PredictiveRepository } = await import("../src/lib/hunter/predictive/repository");
+      const provider = { available: false, mechanism: null, search: async () => { throw new Error("no debe buscar"); } };
+      const estimate = await estimatePredictiveCandidate("Organizador modular", null, provider, 1_700_000_000);
+      assert.equal(estimate.searchAvailable, false);
+      assert.equal(estimate.wholesale.at100, null);
+      assert.equal(estimate.retail.unit, null);
+      assert.equal(estimate.viability.verdict, null);
+      assert.equal(estimate.expiresAt - estimate.consultedAt, 30 * 86400);
+      const saved = new PredictiveRepository().save(estimate);
+      assert.ok(saved.id);
+      assert.equal(new PredictiveRepository().byId(saved.id!)!.viability.verdict, null);
+    });
+
+    await test("Hunter predictivo · calcula rangos, fuentes y veredicto sin score unico", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const evidence = (kind: "wholesale" | "retail", sourceDomain: string, priceEur: number, quantity: number | null) => ({
+        kind, sourceUrl: `https://${sourceDomain}/producto`, sourceDomain, title: "Producto", priceEur, quantity,
+        weightGrams: 400, observedAt: 1_700_000_000,
+      });
+      const provider = {
+        available: true, mechanism: "test_real_mock_http",
+        search: async ({ kind }: { kind: "wholesale" | "retail" }) => kind === "wholesale" ? [
+          evidence(kind, "alibaba.com", 4, 100), evidence(kind, "cjdropshipping.com", 5, 100),
+          evidence(kind, "alibaba.com", 3, 500), evidence(kind, "cjdropshipping.com", 4, 500),
+        ] : [evidence(kind, "tienda-a.test", 39, null), evidence(kind, "tienda-b.test", 42, null)],
+      };
+      const estimate = await estimatePredictiveCandidate("Organizador modular", "https://tienda-a.test/producto", provider, 1_700_000_000);
+      assert.deepEqual([estimate.wholesale.at500?.min, estimate.wholesale.at500?.max], [3, 4]);
+      assert.deepEqual([estimate.retail.unit?.min, estimate.retail.unit?.max], [39, 42]);
+      assert.equal(estimate.viability.logisticsEur, 6.48);
+      assert.equal(estimate.viability.worstContributionEur, 28.52);
+      assert.equal(estimate.viability.verdict, "candidato_fuerte");
+      assert.equal("score" in estimate.viability, false);
+    });
+
+    await test("Hunter predictivo · promocionar conserva estimado y nunca produce score de decision", async () => {
+      const { PredictiveRepository } = await import("../src/lib/hunter/predictive/repository");
+      const source = { kind: "retail" as const, sourceUrl: "https://competidor.test/producto-predictivo", sourceDomain: "competidor.test", title: "Producto", priceEur: 39, quantity: null, weightGrams: 400, observedAt: 1 };
+      const priceRange = { min: 39, max: 42, probable: 40.5, sources: [source, { ...source, sourceUrl: "https://otro.test/p", sourceDomain: "otro.test", priceEur: 42 }], consultedAt: 1, expiresAt: 2 };
+      const repo = new PredictiveRepository();
+      const saved = repo.save({ productQuery: "Producto predictivo", competitorUrl: source.sourceUrl, searchAvailable: true, searchMechanism: "test", wholesale: { at100: priceRange, at500: priceRange, reason: null }, retail: { unit: priceRange, tiers: { unit: priceRange, pack2Reference: "estimado", pack4Reference: "estimado" }, reason: null }, viability: { verdict: "investigar", worstContributionEur: 1, bestContributionEur: 10, logisticsEur: 6.48, shippingTier: "hasta_1kg", reason: null }, consultedAt: 1, expiresAt: 2 });
+      const promoted = repo.promote(saved.id!);
+      assert.equal(promoted.unitCostEur, null);
+      assert.equal(promoted.specs?.costStatus, "estimado");
+      assert.equal(promoted.specs?.pvpStatus, "estimado");
+      assert.equal(hunterScore.scoreCandidate(promoted), null);
+    });
+
     await test("Hunter · sin medidas no puntúa y explica el motivo", () => {
       const facts = { ...base, lengthCm: null };
       assert.equal(hunterScore.scoreCandidate(facts), null);
