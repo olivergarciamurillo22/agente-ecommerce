@@ -48,6 +48,7 @@ interface Verdict {
   blockedReason: string | null;
   killSwitchActive: boolean;
   autoCalls: "OFF";
+  balance: "UNAVAILABLE_API";
 }
 
 async function get(p: string, key: string): Promise<{ ok: boolean; status: number; json: unknown }> {
@@ -77,6 +78,7 @@ async function main(): Promise<void> {
     blockedReason: null,
     killSwitchActive: false,
     autoCalls: "OFF",
+    balance: "UNAVAILABLE_API",
   };
   const contractFail = (m: string) => {
     verdict.contract = "FAIL";
@@ -218,6 +220,7 @@ async function main(): Promise<void> {
 
   // ------------------------------------------------------------------
   console.log("\n4. EN VIVO (Retell)");
+  console.log("   ◐ Saldo: UNAVAILABLE_API — Retell solo lo muestra en Billing; la API pública no expone balance. Comprobar manualmente antes de activar llamadas.");
   if (!key) {
     console.log("   ◐ UNVERIFIED_EXTERNAL — sin RETELL_API_KEY no se puede consultar el agente. Ejecuta este doctor donde esté la key (el NAS).");
   } else if (!agentId) {

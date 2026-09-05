@@ -13221,6 +13221,7 @@ async function main(): Promise<void> {
     const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
     assert.match(proxy, /const PUBLIC_PREFIXES = \["\/api\/webhooks\/", "\/api\/health"\]/);
   });
+  await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
     for (const file of ["src/app/api/system/route.ts", "src/app/api/settings/route.ts", "src/app/api/calls/route.ts"]) {
