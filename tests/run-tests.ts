@@ -13221,6 +13221,61 @@ async function main(): Promise<void> {
     const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
     assert.match(proxy, /const PUBLIC_PREFIXES = \["\/api\/webhooks\/", "\/api\/health"\]/);
   });
+
+  await test("F9 aceptación: agente atiende el trabajo, queda auditado una vez y no accede a owner", async () => {
+    const { NextRequest } = await import("next/server");
+    const workspaceRoute = await import("../src/app/api/workspace/route");
+    const workspaceAction = await import("../src/app/api/workspace/action/route");
+    const messageRoute = await import("../src/app/api/messages/[conversationId]/route");
+    const modeRoute = await import("../src/app/api/mode/[conversationId]/route");
+    const systemRoute = await import("../src/app/api/system/route");
+    const settingsRoute = await import("../src/app/api/settings/route");
+    const orderActionRoute = await import("../src/app/api/orders/[orderId]/action/route");
+    const sessions = await import("../src/lib/auth/session");
+    const raw = db.systemDbHandle();
+    const suffix = Date.now();
+    const phone = `3499${String(suffix).slice(-7)}`;
+    const orderResult = raw.prepare(`INSERT INTO orders
+      (shopify_order_id,shopify_order_number,customer_name,phone,status,product_summary,total_price,currency,address_line1,city,postal_code,raw_payload)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(`f9-${suffix}`, `F9-${suffix}`, "Cliente F9", phone, "needs_correction", "Producto sintético", "39.90", "EUR", "Dirección anterior", "Madrid", "28001", JSON.stringify({ line_items: [{ quantity: 1 }] }));
+    const orderId = Number(orderResult.lastInsertRowid);
+    const conv = db.getOrCreateConversation(phone, "Cliente F9");
+    db.insertMessage(conv.id, "user", "Necesito corregir la dirección");
+    const userResult = raw.prepare("INSERT INTO users(email,name,role,password_hash) VALUES(?,?,?,?)")
+      .run(`agente-f9-${suffix}@example.test`, "Agente F9", "agent", "scrypt$fixture");
+    const userId = Number(userResult.lastInsertRowid);
+    const token = sessions.createSession(userId);
+    const headers = { cookie: `${sessions.SESSION_COOKIE}=${token}`, "content-type": "application/json" };
+    const request = (url: string, body?: unknown) => new NextRequest(url, body === undefined ? { headers } : { method: "POST", headers, body: JSON.stringify(body) });
+    const params = { params: Promise.resolve({ conversationId: String(conv.id) }) };
+
+    const queueResponse = await workspaceRoute.GET(request(`http://localhost/api/workspace?conversationId=${conv.id}`));
+    assert.equal(queueResponse.status, 200);
+    const queueJson = await queueResponse.json() as { items: Array<{ id: number }>; selected: unknown };
+    assert.ok(queueJson.items.some((item) => item.id === conv.id), "el caso aparece en /trabajo");
+
+    assert.equal((await modeRoute.POST(request("http://localhost/api/mode", { mode: "HUMAN" }), params)).status, 200);
+    assert.equal((await messageRoute.POST(request("http://localhost/api/messages", { content: "Te ayudo con el cambio." }), params)).status, 200);
+    assert.equal((await workspaceAction.POST(request("http://localhost/api/workspace/action", { action: "correct_address", conversationId: conv.id, orderId, value: "Calle Nueva 12, 2º B" }))).status, 200);
+    assert.equal((await workspaceAction.POST(request("http://localhost/api/workspace/action", { action: "resolve", conversationId: conv.id, orderId, value: "Dirección corregida con el cliente" }))).status, 200);
+    assert.equal(db.getOrderById(orderId)?.proposed_address, "Calle Nueva 12, 2º B");
+
+    for (const [action, subject] of [["take_over", conv.id], ["send_message", conv.id], ["correct_address", orderId], ["resolve", conv.id]] as const) {
+      const count = (raw.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE user_id=? AND action=? AND subject_id=?").get(userId, action, String(subject)) as { n: number }).n;
+      assert.equal(count, 1, `${action}: exactamente una fila con username`);
+      const name = raw.prepare("SELECT user_name FROM audit_log WHERE user_id=? AND action=? AND subject_id=?").get(userId, action, String(subject)) as { user_name: string };
+      assert.equal(name.user_name, "Agente F9");
+    }
+
+    assert.equal((await systemRoute.GET(request("http://localhost/api/system"))).status, 403);
+    assert.equal((await settingsRoute.GET(request("http://localhost/api/settings"))).status, 403);
+    assert.equal((await orderActionRoute.POST(request("http://localhost/api/orders/action", { action: "call_now" }), { params: Promise.resolve({ orderId: String(orderId) }) })).status, 403);
+
+    const visibleJson = JSON.stringify(await (await workspaceRoute.GET(request("http://localhost/api/workspace"))).json());
+    for (const forbidden of ["email", "raw_payload", "supplier_", "beeping_", "marketing_", "landing_site", "referring_site"]) {
+      assert.ok(!visibleJson.includes(forbidden), `respuesta del workspace sin ${forbidden}`);
+    }
+  });
   await test("Retell · doctor y readiness declaran saldo no disponible en API",()=>{const doctor=fs.readFileSync(path.join(process.cwd(),"scripts/retell-doctor.ts"),"utf8"),runtime=fs.readFileSync(path.join(process.cwd(),"scripts/readiness-runtime.ts"),"utf8");assert.match(doctor,/Saldo: UNAVAILABLE_API/);assert.match(runtime,/Saldo Retell[\s\S]*UNAVAILABLE_API/);});
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {
