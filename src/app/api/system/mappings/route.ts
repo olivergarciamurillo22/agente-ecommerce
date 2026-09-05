@@ -10,17 +10,20 @@
 //     un pedido se enrutó como se enrutó.
 // ============================================================
 
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import {
   listSupplierProductMappings,
   setSupplierProductMappingActive,
   upsertSupplierProductMapping,
 } from "@/lib/db";
 import { validateMapping, mappingIsSavable } from "@/lib/suppliers/mapping-validation";
+import { requireOwner } from "@/lib/auth/guard";
 
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   try {
     const filas = listSupplierProductMappings();
     return NextResponse.json({
@@ -51,7 +54,9 @@ export async function GET(): Promise<NextResponse> {
 }
 
 /** Crear o actualizar un mapping. Rechaza los que tienen errores de forma. */
-export async function POST(req: Request): Promise<NextResponse> {
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   try {
     const body = (await req.json()) as Record<string, unknown>;
     const candidato = {
@@ -87,7 +92,9 @@ export async function POST(req: Request): Promise<NextResponse> {
 }
 
 /** Activar o desactivar. NUNCA borra. */
-export async function PATCH(req: Request): Promise<NextResponse> {
+export async function PATCH(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   try {
     const body = (await req.json()) as { id?: number; active?: boolean };
     if (typeof body.id !== "number" || typeof body.active !== "boolean") {

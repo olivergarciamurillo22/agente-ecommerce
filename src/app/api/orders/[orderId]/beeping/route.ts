@@ -16,6 +16,7 @@ import { getOrderById, setOrderDispatchNote } from "@/lib/db";
 import { beepingCutoff } from "@/lib/beeping/cutoff";
 import { cancelOrderInBeeping } from "@/lib/beeping/cancel";
 import { evaluateLocalReleaseGate, releaseOrderToBeeping, resolveAmbiguousRelease } from "@/lib/beeping/release";
+import { requireOwner } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,7 +25,9 @@ interface RouteContext {
   params: Promise<{ orderId: string }>;
 }
 
-export async function GET(_req: NextRequest, ctx: RouteContext) {
+export async function GET(req: NextRequest, ctx: RouteContext) {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   const { orderId } = await ctx.params;
   const id = parseInt(orderId, 10);
   const order = Number.isFinite(id) ? getOrderById(id) : null;
@@ -47,6 +50,8 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
 }
 
 export async function POST(req: NextRequest, ctx: RouteContext) {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   const { orderId } = await ctx.params;
   const id = parseInt(orderId, 10);
   const order = Number.isFinite(id) ? getOrderById(id) : null;

@@ -8367,9 +8367,15 @@ async function main(): Promise<void> {
       const src = fs.readFileSync(path.join(process.cwd(), f), "utf8");
       assert.ok(src.includes("timingSafeEqual"), `${f} debe comparar en tiempo constante`);
     }
-    // Y el del panel corre en Edge (sin node:crypto), con su propia versión.
+    // El del panel ya NO compara dentro del proxy: la contraseña de Basic
+    // Auth se verifica en el guard central. Se comprueba DONDE VIVE AHORA la
+    // comparación — antes bastaba con que el proxy tuviera un COMENTARIO con
+    // la palabra "timingSafeEqual" para que este test pasara sin proteger nada.
+    const guard = fs.readFileSync(path.join(process.cwd(), "src/lib/auth/guard.ts"), "utf8");
+    assert.match(guard, /timingSafeEqual\(/, "el guard debe INVOCAR timingSafeEqual, no solo nombrarlo");
+    // Y el proxy debe delegar en ese guard, no reimplementar la comparación.
     const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
-    assert.ok(/safeEqual|timingSafeEqual/.test(proxy));
+    assert.match(proxy, /from "@\/lib\/auth\/guard"/);
   });
 
   await test("SEGURIDAD · no hay secretos escritos en el repositorio", () => {
@@ -13198,6 +13204,62 @@ async function main(): Promise<void> {
   await test("PUBLIC_PREFIXES conserva webhooks y health sin cambios", () => {
     const proxy = fs.readFileSync(path.join(process.cwd(), "src/proxy.ts"), "utf8");
     assert.match(proxy, /const PUBLIC_PREFIXES = \["\/api\/webhooks\/", "\/api\/health"\]/);
+  });
+
+  // BUG 04-09: el proxy mandaba a requireOwner todo lo que no fuese /trabajo
+  // ni /api/workspace, así que /api/mode/* y /api/messages/* devolvían 403 a
+  // un agente AUNQUE sus handlers tuviesen requireStaff. El agente no podía
+  // responder a un cliente. Esto ejerce el proxy REAL con sesiones REALES.
+  await test("PROXY · clasifica staff/propietario y deja que el handler decida la acción", async () => {
+    const { proxy } = await import("../src/proxy");
+    const { NextRequest } = await import("next/server");
+    const { createSession } = await import("../src/lib/auth/session");
+    const raw = db.systemDbHandle();
+    db.migrateWorkspaceAuth(raw);
+    raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('proxy-agente@test','Agente Proxy','agent','x')").run();
+    raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('proxy-duena@test','Dueña Proxy','owner','x')").run();
+    const idDe = (correo: string) =>
+      (raw.prepare("SELECT id FROM users WHERE email=?").get(correo) as { id: number }).id;
+    const cookieAgente = `casamable_session=${createSession(idDe("proxy-agente@test"))}`;
+    const cookieDuena = `casamable_session=${createSession(idDe("proxy-duena@test"))}`;
+
+    const estado = (ruta: string, cookie?: string) => {
+      const req = new NextRequest(`http://localhost${ruta}`, { headers: cookie ? { cookie } : {} });
+      return proxy(req).status;
+    };
+
+    // Lo que un agente NECESITA para atender: el proxy debe dejarlo pasar.
+    for (const ruta of ["/trabajo", "/api/workspace", "/api/workspace/action", "/api/mode/1", "/api/messages/1", "/api/orders/1/action"]) {
+      assert.equal(estado(ruta, cookieAgente), 200, `el agente debe LLEGAR al handler de ${ruta}`);
+    }
+    // Lo que no le corresponde: cortado antes del handler.
+    for (const ruta of ["/", "/sistema", "/ajustes", "/api/system", "/api/settings", "/api/calls", "/api/system/audit", "/api/orders", "/api/conversations", "/api/connection/status"]) {
+      assert.equal(estado(ruta, cookieAgente), 403, `el agente NO debe llegar a ${ruta}`);
+    }
+    // El prefijo cómodo que NO se concedió: .../image no tiene guard propio,
+    // así que sigue siendo del propietario. Si alguien lo abre, esto avisa.
+    assert.equal(estado("/api/messages/1/image", cookieAgente), 403, "/api/messages/*/image no tiene guard propio: no se abre a staff");
+    // La dueña llega a todo.
+    for (const ruta of ["/", "/sistema", "/api/system", "/api/workspace", "/api/mode/1", "/api/orders/1/action"]) {
+      assert.equal(estado(ruta, cookieDuena), 200, `la dueña debe llegar a ${ruta}`);
+    }
+    // Sin sesión: 401 en API y redirección a /login en páginas. Fail-closed.
+    assert.equal(estado("/api/workspace"), 401);
+    assert.equal(estado("/api/system"), 401);
+    assert.equal(estado("/trabajo"), 307);
+    // Públicos intactos.
+    assert.equal(estado("/api/health/live"), 200);
+    assert.equal(estado("/api/webhooks/shopify/orders-events"), 200);
+    assert.equal(estado("/login"), 200);
+  });
+
+  await test("PROXY · la respuesta a un agente no lleva PII aunque la acción esté permitida", async () => {
+    // Abrir /api/orders/*/action a staff dejaba que el agente recibiera la
+    // FILA ENTERA del pedido (email, raw_payload, marketing_*). El permiso de
+    // la acción y la forma de la respuesta son dos cosas distintas.
+    const src = fs.readFileSync(path.join(process.cwd(), "src/app/api/orders/[orderId]/action/route.ts"), "utf8");
+    assert.match(src, /safeOrder/, "debe proyectar con safeOrder para el agente");
+    assert.ok(!/order: getOrderById\(id\)/.test(src), "ninguna respuesta puede devolver la fila cruda sin proyectar");
   });
 
   await test("endpoints de sistema, ajustes, llamadas y acciones comprueban rol explícitamente", () => {

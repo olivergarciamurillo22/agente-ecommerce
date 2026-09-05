@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { listIntegrationEvents } from "@/lib/system/repo";
 import type { EventIntegration, EventSeverity } from "@/lib/system/types";
+import { requireOwner } from "@/lib/auth/guard";
 
 // Feed técnico de eventos (paginado hacia atrás con beforeId).
 // Los mensajes ya se guardaron sanitizados; aquí solo se listan.
@@ -20,6 +21,8 @@ const INTEGRATIONS = new Set([
 ]);
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   try {
     const sp = req.nextUrl.searchParams;
     const severity = sp.get("severity");

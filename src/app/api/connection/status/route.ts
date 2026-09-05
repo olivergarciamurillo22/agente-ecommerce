@@ -1,12 +1,15 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 import QRCode from "qrcode";
 import { getConnectionState } from "@/lib/db";
 import { whatsappProviderName } from "@/lib/whatsapp/provider";
+import { requireOwner } from "@/lib/auth/guard";
 
 // Esta ruta lee de SQLite. No se debe evaluar en build time.
 export const dynamic = "force-dynamic";
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   const provider = whatsappProviderName();
   // Cloud API (V3 §47): no hay sesión de WhatsApp Web — ni QR, ni
   // "reconectar", ni "desconectar". El panel no debe enseñar semántica de

@@ -12,7 +12,7 @@ import { sendDelayNotificationForOrder } from "@/lib/orders/notify-delay";
 import { canOperateOnOrderManually, orderActionAllowed } from "@/lib/safety";
 import { manualDialOrder } from "@/lib/calls/manual";
 import { requireStaff } from "@/lib/auth/guard";
-import { audit } from "@/lib/workspace";
+import { audit, safeOrder } from "@/lib/workspace";
 import { systemDbHandle } from "@/lib/db";
 
 export const runtime = "nodejs";
@@ -68,6 +68,16 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "No tienes permiso para esta acción" }, { status: 403 });
   }
 
+  // Un agente NO recibe la ficha completa: se le devuelve la MISMA proyección
+  // que usa el espacio de trabajo (sin email, raw_payload, marketing_* ni
+  // supplier_*). El propietario sigue recibiendo la fila entera, que es lo
+  // que consume su panel. Sin esto, abrir esta ruta a staff filtraría PII por
+  // la RESPUESTA aunque la acción en sí estuviese permitida.
+  const vistaDelPedido = (pedidoId: number) => {
+    const fila = getOrderById(pedidoId);
+    return auth.user.role === "agent" ? safeOrder(fila) : fila;
+  };
+
   const order = getOrderById(id);
   if (!order) {
     return NextResponse.json({ ok: false, error: "pedido no encontrado" }, { status: 404 });
@@ -83,11 +93,11 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
         { status: 409 }
       );
     }
-    return NextResponse.json({ ok: true, order: getOrderById(id) });
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
   }
   if (action === "revoke_pilot") {
     revokeOrderPilotAuthorization(id);
-    return NextResponse.json({ ok: true, order: getOrderById(id) });
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
   }
 
   // Gate de TEST_MODE para acciones con efecto externo: pasa si el teléfono
@@ -109,7 +119,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
 
   if (action === "confirm") {
     if (order.status === "confirmed") {
-      return NextResponse.json({ ok: true, order: getOrderById(id) });
+      return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
     }
     if (order.status === "cancelled" || order.status === "ignored_old") {
       return NextResponse.json(
@@ -128,7 +138,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     }
     return NextResponse.json({
       ok: true,
-      order: getOrderById(id),
+      order: vistaDelPedido(id),
       providerCallId: result.providerCallId,
     });
   } else if (action === "notify_delay") {
@@ -140,7 +150,7 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     if (!result.ok) {
       return NextResponse.json({ ok: false, error: result.error }, { status: result.status ?? 409 });
     }
-    return NextResponse.json({ ok: true, order: getOrderById(id) });
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
   } else if (action === "needs_call") {
     if (!markOrderNeedsCall(id)) {
       return NextResponse.json(
@@ -177,5 +187,5 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     }
   }
 
-  return NextResponse.json({ ok: true, order: getOrderById(id) });
+  return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
 }
