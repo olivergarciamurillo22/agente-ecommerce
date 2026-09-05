@@ -1,14 +1,18 @@
 {
-  "name": "mayores-60-inicial",
-  "description": "Set inicial derivado de las categorias indicadas en la spec; revisar cuando exista el mapa de pain points citado.",
+  "name": "mayores-60-espana-v1",
+  "market": "ES",
+  "buyer_note": "Comprador habitual: hijos e hijas de 35-55 años; usuario final: persona mayor de 60.",
+  "source": "docs/nicho-abuelos-pain-points.md",
   "terms": [
-    "ayuda movilidad mayores",
-    "dolor articulaciones producto",
-    "comodidad hogar mayores",
-    "abridor facil manos",
-    "organizador medicamentos",
-    "luz nocturna sensor",
-    "calzador largo",
-    "cojin soporte lumbar"
+    "lupa con luz lectura", "lampara lectura letra pequeña",
+    "amplificador television mayores", "timbre luminoso personas mayores",
+    "ayuda levantarse sofa mayores", "antideslizante baño mayores", "pinza recoger objetos suelo",
+    "ayuda manos abrir botes artritis", "cojin soporte lumbar mayores", "calentador pies personas mayores",
+    "pastillero alarma semanal", "cortador pastillas seguro", "organizador medicamentos mayores",
+    "luz nocturna sensor pasillo", "ayuda levantarse cama mayores",
+    "alarma caidas mayores hogar", "recordatorio cocina gas mayores", "asa apoyo baño sin obra",
+    "mando television botones grandes", "telefono teclas grandes mayores", "localizador llaves mayores",
+    "carrito compra ligero mayores", "ayuda cargar bolsas compra",
+    "abridor frascos manos debiles", "calzador largo mayores", "limpieza sin agacharse mayores"
   ]
 }

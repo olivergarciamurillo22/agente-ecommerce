@@ -13291,6 +13291,14 @@ async function main(): Promise<void> {
       assert.equal(groups[0].noise, true); assert.match(groups[0].noiseReason ?? "", /servicio, app o contenido/);
     });
 
+    await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {
+      const config = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/hunter-discovery-terms.json"), "utf8")) as { source: string; buyer_note: string; terms: string[] };
+      assert.equal(config.source, "docs/nicho-abuelos-pain-points.md");
+      assert.match(config.buyer_note, /35-55/);
+      assert.ok(config.terms.length >= 20);
+      assert.ok(fs.existsSync(path.join(process.cwd(), config.source)));
+    });
+
     await test("Hunter predictivo · migración 20 convive con Hunter 19", () => {
       assert.equal(db.SCHEMA_VERSION, 21);
       const tables = db.systemDbHandle().prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>;

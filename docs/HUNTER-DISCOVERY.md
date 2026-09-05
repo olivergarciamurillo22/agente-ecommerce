@@ -12,10 +12,11 @@ datos reales. Aqui no se calculan margenes ni se escribe en Meta o Shopify.
 por separado sin persistir candidatos, para que uno opcional rechazado no
 oculte los que funcionan.
 
-Los terminos son configuracion, no reglas del motor. El set inicial refleja
-gadgets, salud, movilidad y comodidad para mayores de 60 mencionados en la
-spec. El documento `docs/nicho-abuelos-pain-points.md` citado por el encargo no
-existia en la rama; Pedro debe revisar el JSON cuando ese mapa este disponible.
+Los terminos son configuracion, no reglas del motor. El set inicial deriva de
+`docs/nicho-abuelos-pain-points.md` y cubre visión, audición, movilidad,
+dolor/circulación, memoria/medicación, noche, seguridad, tecnología, salidas y
+tareas domésticas. El comprador habitual (hijos de 35–55) queda documentado
+como contexto, no como filtro automático de Meta.
 
 La consulta usa `ad_reached_countries`, ventana `ad_delivery_date_min/max`,
 anuncios activos y paginacion por `paging.cursors.after`. Entre paginas espera
