@@ -1,3 +1,5 @@
+import searchPack from "../../../config/hunter-search-terms/casamable-60-plus-es.json";
+
 export const PRODUCT_INTELLIGENCE_CONFIG = {
   maxQueriesPerRun: 12,
   maxDepth: 2,
@@ -18,15 +20,10 @@ export const PRODUCT_INTELLIGENCE_CONFIG = {
     saturation: 0.05,
     logistics: 0.05,
   },
-  autonomousSeeds: [
-    "pago contra reembolso",
-    "envío 24/48h",
-    "personas mayores",
-    "dolor cervical",
-    "durezas pies",
-    "pelos de mascota",
-  ],
+  autonomousSeeds: searchPack.roots,
 } as const;
+
+export const HUNTER_SEARCH_PACK = searchPack;
 
 export const META_AD_LIBRARY_CONFIG = {
   country: (process.env.META_AD_LIBRARY_COUNTRY || "ES") as "ES" | "PT" | "IT" | "FR" | "DE" | "EU",

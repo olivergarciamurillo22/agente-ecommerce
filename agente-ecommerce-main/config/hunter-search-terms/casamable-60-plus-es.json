@@ -1,0 +1,12 @@
+{
+  "id": "CASAMABLE_60_PLUS_ES",
+  "country": "ES",
+  "roots": ["almohada cervical", "juanetes", "durezas pies", "movilidad mayores", "limpieza hogar"],
+  "expansions": {
+    "juanetes": ["hallux valgus", "corrector juanetes", "férula hallux"],
+    "durezas pies": ["limador eléctrico pies", "eliminar callos pies"],
+    "movilidad mayores": ["ayuda levantarse", "seguridad baño mayores"],
+    "almohada cervical": ["almohada ortopédica cervical", "dolor cervical dormir"],
+    "limpieza hogar": ["limpieza sin agacharse", "cepillo eléctrico limpieza"]
+  }
+}

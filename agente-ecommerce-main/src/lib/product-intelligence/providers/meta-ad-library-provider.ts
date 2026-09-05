@@ -2,7 +2,8 @@ import { META_AD_LIBRARY_CONFIG } from "../config";
 import type { AdSearchOptions, AdSource, ProviderStatus, RawAd } from "../types";
 
 type MetaResponse = { data?: Record<string, unknown>[]; paging?: { next?: string; cursors?: { after?: string } }; error?: { code?: number; message?: string } };
-const FIELDS = ["id", "page_id", "page_name", "ad_creation_time", "ad_delivery_start_time", "ad_delivery_stop_time", "ad_snapshot_url", "ad_creative_bodies", "ad_creative_link_titles", "ad_creative_link_descriptions", "publisher_platforms", "languages", "target_locations", "eu_total_reach", "age_country_gender_reach_breakdown"].join(",");
+export const META_CANDIDATE_FIELDS = ["id", "page_id", "page_name", "ad_snapshot_url", "ad_delivery_start_time", "ad_delivery_stop_time", "ad_creative_bodies", "ad_creative_link_captions", "ad_creative_link_titles", "publisher_platforms", "languages", "impressions", "estimated_audience_size"] as const;
+const FIELDS = META_CANDIDATE_FIELDS.join(",");
 
 function firstText(value: unknown): string | undefined {
   if (typeof value === "string" && value.trim()) return value.trim();
@@ -27,17 +28,21 @@ export function normalizeMetaAd(payload: Record<string, unknown>): RawAd | null 
     copy: firstText(payload.ad_creative_bodies) ?? "",
     productName: firstText(payload.ad_creative_link_titles),
     title: firstText(payload.ad_creative_link_titles),
-    description: firstText(payload.ad_creative_link_descriptions),
+    caption: firstText(payload.ad_creative_link_captions),
+    description: firstText(payload.ad_creative_link_captions),
     landingUrl: firstText(payload.ad_snapshot_url),
+    snapshotUrl: firstText(payload.ad_snapshot_url),
     startedAt,
     endedAt: firstText(payload.ad_delivery_stop_time),
     active: !firstText(payload.ad_delivery_stop_time),
     platforms: Array.isArray(payload.publisher_platforms) ? payload.publisher_platforms.filter((item): item is string => typeof item === "string") : [],
+    languages: Array.isArray(payload.languages) ? payload.languages.filter((item): item is string => typeof item === "string") : [],
     provider: "META_AD_LIBRARY",
     rawProviderPayload: sanitize(payload) as Record<string, unknown>,
     providerVersion: "META_AD_LIBRARY_GRAPH",
     normalizerVersion: "1.0.0",
     normalizedAt: new Date().toISOString(),
+    fetchedAt: new Date().toISOString(),
   };
 }
 
@@ -50,15 +55,18 @@ export class MetaAdLibraryProvider implements AdSource {
   private callHistory: number[] = [];
   private cooldownUntil = 0;
   private lastSuccessfulScan?: string;
+  private usageHeaders: Record<string, string> = {};
   private readonly token = process.env.META_AD_LIBRARY_ACCESS_TOKEN?.trim();
   private readonly apiVersion = process.env.META_GRAPH_API_VERSION?.trim();
-  constructor(private readonly limits: { maxPages?: number; maxCalls?: number; maxRetries?: number } = {}) {}
+  constructor(private readonly limits: { maxPages?: number; maxCalls?: number; maxRetries?: number } = {}, private readonly fetcher: typeof fetch = fetch) {}
+
+  telemetry() { return { callsMade: this.calls, usageHeaders: { ...this.usageHeaders }, lastSuccessfulScan: this.lastSuccessfulScan }; }
 
   status(): ProviderStatus {
     const missing = [!this.token && "META_AD_LIBRARY_ACCESS_TOKEN", !this.apiVersion && "META_GRAPH_API_VERSION"].filter(Boolean);
     return missing.length
       ? { source: "META_AD_LIBRARY", available: false, configured: false, code: "META_NOT_CONFIGURED", authorization: "NOT_CONFIGURED", researchAvailable: false, apiVersion: this.apiVersion, reason: `Configuración ausente: ${missing.join(", ")}` }
-      : { source: "META_AD_LIBRARY", available: false, configured: true, code: "META_CONFIGURED_UNAUTHORIZED", authorization: "PENDING", researchAvailable: false, apiVersion: this.apiVersion, reason: "Meta Ad Library authorization pending", lastSuccessfulScan: this.lastSuccessfulScan };
+      : { source: "META_AD_LIBRARY", available: false, configured: true, code: "META_CONFIGURED_UNAUTHORIZED", authorization: "PENDING", researchAvailable: false, apiVersion: this.apiVersion, reason: "Meta Ad Library authorization pending", lastSuccessfulScan: this.lastSuccessfulScan, usageHeaders: this.usageHeaders, callsMade: this.calls };
   }
 
   async healthCheck(): Promise<ProviderStatus> {
@@ -76,6 +84,22 @@ export class MetaAdLibraryProvider implements AdSource {
   }
 
   async searchAds(query: string): Promise<RawAd[]> { return this.search({ query }); }
+
+  async auditFields(query: string, country = META_AD_LIBRARY_CONFIG.country): Promise<Array<{ field: string; status: "AVAILABLE" | "EMPTY" | "NOT_AVAILABLE" | "ERROR"; example?: unknown; error?: string }>> {
+    const output: Array<{ field: string; status: "AVAILABLE" | "EMPTY" | "NOT_AVAILABLE" | "ERROR"; example?: unknown; error?: string }> = [];
+    for (const field of META_CANDIDATE_FIELDS) {
+      try {
+        this.useCall();
+        const url = this.baseUrl(); url.searchParams.set("search_terms", query); url.searchParams.set("ad_reached_countries", JSON.stringify([country])); url.searchParams.set("ad_active_status", "ACTIVE"); url.searchParams.set("ad_type", "ALL"); url.searchParams.set("fields", field); url.searchParams.set("limit", "1");
+        const payload = await this.request(url); const value = payload.data?.[0]?.[field];
+        output.push(value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length) ? { field, status: "EMPTY" } : { field, status: "AVAILABLE", example: sanitize(value) });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "error desconocido";
+        output.push({ field, status: /field|not exist|not available|permission.*field/i.test(message) ? "NOT_AVAILABLE" : "ERROR", error: message });
+      }
+    }
+    return output;
+  }
 
   async search(options: AdSearchOptions): Promise<RawAd[]> {
     this.assertAvailable();
@@ -116,6 +140,8 @@ export class MetaAdLibraryProvider implements AdSource {
     url.searchParams.set("ad_reached_countries", JSON.stringify(countries));
     url.searchParams.set("ad_active_status", options.activeStatus ?? "ACTIVE");
     url.searchParams.set("ad_type", "ALL"); url.searchParams.set("fields", FIELDS);
+    if (options.dateMin) url.searchParams.set("ad_delivery_date_min", options.dateMin);
+    if (options.dateMax) url.searchParams.set("ad_delivery_date_max", options.dateMax);
     if (options.mediaType && options.mediaType !== "ALL") url.searchParams.set("media_type", options.mediaType);
   }
   private assertAvailable() {
@@ -133,7 +159,8 @@ export class MetaAdLibraryProvider implements AdSource {
     for (let attempt = 0; attempt <= retries; attempt++) {
       const controller = new AbortController(); const timeout = setTimeout(() => controller.abort(), META_AD_LIBRARY_CONFIG.requestTimeoutMs);
       try {
-        const response = await fetch(url, { headers: { Authorization: `Bearer ${this.token}` }, signal: controller.signal });
+        const response = await this.fetcher(url, { headers: { Authorization: `Bearer ${this.token}` }, signal: controller.signal });
+        for (const header of ["x-app-usage", "x-business-use-case-usage", "x-ad-account-usage"]) { const value = response.headers.get(header); if (value) this.usageHeaders[header] = value; }
         const payload = await response.json().catch(() => ({})) as MetaResponse;
         if (response.ok) return payload;
         const limited = response.status === 429 || [4, 17, 613].includes(payload.error?.code ?? 0);
