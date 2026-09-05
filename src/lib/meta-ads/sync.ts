@@ -37,16 +37,39 @@ function dayShift(day: string, deltaDays: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+export function resolveMetaAdsRange(
+  opts: { lookbackDays?: number; since?: string; until?: string },
+  now: Date
+): { since: string; until: string } {
+  const explicit = opts.since !== undefined || opts.until !== undefined;
+  if (explicit) {
+    if (!opts.since || !opts.until || !ISO_DAY.test(opts.since) || !ISO_DAY.test(opts.until)) {
+      throw new Error("--desde y --hasta deben indicarse juntos con formato AAAA-MM-DD");
+    }
+    const sinceMs = Date.parse(`${opts.since}T12:00:00Z`);
+    const untilMs = Date.parse(`${opts.until}T12:00:00Z`);
+    if (!Number.isFinite(sinceMs) || !Number.isFinite(untilMs)) throw new Error("rango de fechas inválido");
+    if (opts.since > opts.until) throw new Error("--desde no puede ser posterior a --hasta");
+    const inclusiveDays = Math.round((untilMs - sinceMs) / 86_400_000) + 1;
+    if (inclusiveDays > 90) throw new Error("el rango máximo de Meta Ads es de 90 días");
+    return { since: opts.since, until: opts.until };
+  }
+  const until = businessDay(now.getTime());
+  const days = Math.min(90, Math.max(1, Math.trunc(opts.lookbackDays ?? 7)));
+  return { since: dayShift(until, -(days - 1)), until };
+}
+
 /**
  * Trae los últimos `lookbackDays` días (por defecto 7: Meta ajusta cifras
  * retroactivamente los primeros días) a los 4 niveles y los persiste.
  */
 export async function syncMetaAdsInsights(
-  opts: { lookbackDays?: number; levels?: MetaAdsLevel[] } = {},
+  opts: { lookbackDays?: number; since?: string; until?: string; levels?: MetaAdsLevel[] } = {},
   deps: MetaAdsSyncDeps = defaultDeps
 ): Promise<MetaAdsSyncReport> {
-  const until = businessDay(deps.now().getTime());
-  const since = dayShift(until, -(opts.lookbackDays ?? 7));
+  const { since, until } = resolveMetaAdsRange(opts, deps.now());
   const levels = opts.levels ?? (["account", "campaign", "adset", "ad"] as MetaAdsLevel[]);
   const report: MetaAdsSyncReport = { skipped: false, since, until, rowsByLevel: {}, spendDaysBridged: 0, errors: [] };
 

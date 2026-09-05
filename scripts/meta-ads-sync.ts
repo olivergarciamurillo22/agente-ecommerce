@@ -3,6 +3,7 @@
 //
 //   npm run meta-ads:sync                 → últimos 7 días
 //   npm run meta-ads:sync -- --days=30    → ventana mayor (backfill)
+//   npm run meta-ads:sync -- --desde=2026-08-01 --hasta=2026-08-31
 //
 // READ-ONLY hacia Meta. Escribe SOLO tablas locales de métricas
 // (meta_ads_daily y daily_ad_spend); no toca pedidos ni manda nada.
@@ -18,9 +19,11 @@ function arg(nombre: string): string | undefined {
 async function main(): Promise<void> {
   const { syncMetaAdsInsights } = await import("../src/lib/meta-ads/sync");
   const dias = Math.min(90, Math.max(1, parseInt(arg("days") ?? "7", 10) || 7));
+  const desde = arg("desde");
+  const hasta = arg("hasta");
 
-  console.log(`\n════════ META ADS · sync (últimos ${dias} días) ════════\n`);
-  const report = await syncMetaAdsInsights({ lookbackDays: dias });
+  console.log(`\n════════ META ADS · sync ${desde || hasta ? "(rango explícito)" : `(últimos ${dias} días)`} ════════\n`);
+  const report = await syncMetaAdsInsights({ lookbackDays: dias, since: desde, until: hasta });
 
   if (report.skipped) {
     console.log(`○ Omitido: ${report.skippedReason}\n`);

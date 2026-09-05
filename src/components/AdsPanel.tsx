@@ -36,6 +36,8 @@ interface AdsHealth {
 
 interface AdsHeader {
   days: number;
+  fromDay: string;
+  toDay: string;
   spendToday: number | null;
   spendRange: number | null;
   ordersRange: number;
@@ -176,12 +178,15 @@ export default function AdsPanel() {
   const [data, setData] = useState<AdsData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState<number>(7);
+  const [desde, setDesde] = useState("");
+  const [hasta, setHasta] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
 
-  const refresh = useCallback(async (d: number) => {
+  const refresh = useCallback(async (d: number, from = desde, to = hasta) => {
     try {
-      const res = await fetch(`/api/ads?days=${d}`, { cache: "no-store" });
+      const query = from && to ? `desde=${encodeURIComponent(from)}&hasta=${encodeURIComponent(to)}` : `days=${d}`;
+      const res = await fetch(`/api/ads?${query}`, { cache: "no-store" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = (await res.json()) as AdsData;
       if (!j.ok) throw new Error("respuesta inválida");
@@ -190,7 +195,7 @@ export default function AdsPanel() {
     } catch {
       setError("No se pudieron cargar los datos de anuncios.");
     }
-  }, []);
+  }, [desde, hasta]);
 
   useEffect(() => {
     setData(null);
@@ -206,7 +211,7 @@ export default function AdsPanel() {
       const res = await fetch("/api/ads", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "sync" }),
+        body: JSON.stringify({ action: "sync", days, desde: desde || undefined, hasta: hasta || undefined }),
         cache: "no-store",
       });
       const j = (await res.json().catch(() => null)) as { ok?: boolean; report?: { errors?: string[]; skippedReason?: string } } | null;
@@ -250,10 +255,13 @@ export default function AdsPanel() {
           </SectionTitle>
           <div className="flex items-center gap-2">
             {RANGES.map((r) => (
-              <Chip key={r} active={days === r} onClick={() => setDays(r)}>
+              <Chip key={r} active={!desde && !hasta && days === r} onClick={() => { setDesde(""); setHasta(""); setDays(r); }}>
                 {r} días
               </Chip>
             ))}
+            <label className="ml-2 text-xs text-brand-muted">Desde <input type="date" value={desde} onChange={(e) => setDesde(e.target.value)} className="ml-1 rounded border border-brand-border bg-transparent px-2 py-1" /></label>
+            <label className="text-xs text-brand-muted">Hasta <input type="date" value={hasta} onChange={(e) => setHasta(e.target.value)} className="ml-1 rounded border border-brand-border bg-transparent px-2 py-1" /></label>
+            <GhostButton onClick={() => refresh(days)} disabled={!desde || !hasta || desde > hasta} className="!px-3 !py-1.5 text-xs">Cargar rango</GhostButton>
           </div>
           {syncError ? <div className="mt-2 text-xs text-red-600">Sincronización: {syncError}</div> : null}
         </section>

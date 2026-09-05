@@ -12364,6 +12364,15 @@ async function main(): Promise<void> {
   // ============ V3.1 · ATRIBUCIÓN DE MARKETING (el dato que no vuelve) ============
   console.log("\n— V3.1 · Atribución: UTM capturadas, latch, campañas —");
   {
+    const metaSync = await import("../src/lib/meta-ads/sync");
+    await test("Meta Ads F7: rango explícito ISO, inclusivo, validado y limitado a 90 días", () => {
+      assert.deepEqual(metaSync.resolveMetaAdsRange({ since: "2026-08-01", until: "2026-08-31" }, new Date("2026-09-05T10:00:00Z")), { since: "2026-08-01", until: "2026-08-31" });
+      assert.throws(() => metaSync.resolveMetaAdsRange({ since: "2026-09-02", until: "2026-09-01" }, new Date()), /posterior/);
+      assert.throws(() => metaSync.resolveMetaAdsRange({ since: "2026-01-01", until: "2026-08-01" }, new Date()), /90 días/);
+      assert.throws(() => metaSync.resolveMetaAdsRange({ since: "2026-08-01" }, new Date()), /juntos/);
+      assert.deepEqual(metaSync.resolveMetaAdsRange({}, new Date("2026-09-05T10:00:00Z")), { since: "2026-08-30", until: "2026-09-05" });
+    });
+
     const attr = await import("../src/lib/orders/attribution");
     const match = await import("../src/lib/meta-ads/attribution-match");
 
