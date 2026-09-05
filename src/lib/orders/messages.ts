@@ -71,7 +71,7 @@ export function buildConfirmationMessage(order: OrderRow): string {
     `💰 Total: ${total}\n\n` +
     `La dirección que tenemos es:\n\n` +
     `📍 ${formatAddressForMessage(order)}\n\n` +
-    `¿Está todo correcto?\n\n` +
+    `¿Confirmas que quieres recibirlo?\n\n` +
     `Si quieres, también puedes dejar alguna nota para el repartidor.\n\n` +
     `Recuerda tener preparados ${total} en efectivo para pagar al repartidor.\n\n` +
     `Respóndeme:\n\n` +
