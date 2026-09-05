@@ -886,6 +886,87 @@ async function main(): Promise<void> {
 
   // ============ 14 · Casamable: opción 3 (nota para el repartidor) ============
   console.log("· Casamable — opción 3 (nota repartidor)");
+  await test("BEEPING mark-to-send: apagado por defecto simula sin hacer HTTP", async () => {
+    const phone = "34600000410";
+    const created = mkOrder("919910", "12910", phone);
+    db.claimOrderInitialSend(created.id);
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch;
+    try {
+      handleOrderReply(phone, "1");
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      assert.equal(calls, 0);
+      const event = db.systemDbHandle().prepare("SELECT event_type FROM integration_events WHERE order_ref=? ORDER BY id DESC LIMIT 1").get("12910") as { event_type: string };
+      assert.equal(event.event_type, "beeping_mark_to_send_simulado");
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  await test("BEEPING mark-to-send: envia external_id y Basic Auth exactos", async () => {
+    await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto:test", BEEPING_API_BASE_URL: "https://beeping.test/" }, async () => {
+      const phone = "34600000411";
+      const created = mkOrder("919911", "35011394", phone);
+      db.claimOrderInitialSend(created.id);
+      const realFetch = globalThis.fetch;
+      let request: { url: string; init?: RequestInit } | null = null;
+      globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+        request = { url: String(url), init };
+        return new Response(null, { status: 204 });
+      }) as typeof fetch;
+      try {
+        handleOrderButtonReply(phone, "confirm_order");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.ok(request);
+        const captured = request as unknown as { url: string; init?: RequestInit };
+        assert.equal(captured.url, "https://beeping.test/api/order/mark-to-send/35011394");
+        assert.equal(captured.init?.method, "PUT");
+        assert.equal(new Headers(captured.init?.headers).get("Authorization"), `Basic ${Buffer.from("pedro@example.com:secreto:test", "utf8").toString("base64")}`);
+        assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='beeping_mark_to_send_ok' AND order_ref='35011394'").get());
+      } finally { globalThis.fetch = realFetch; }
+    });
+  });
+
+  await test("BEEPING mark-to-send: 404, 500 y timeout no revierten la confirmacion", async () => {
+    await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
+      const realFetch = globalThis.fetch;
+      try {
+        for (const [suffix, failure] of [["2", 404], ["3", 500], ["4", "timeout"]] as const) {
+          const phone = `3460000041${suffix}`;
+          const number = `1291${suffix}`;
+          const created = mkOrder(`91991${suffix}`, number, phone);
+          db.claimOrderInitialSend(created.id);
+          globalThis.fetch = (async () => {
+            if (failure === "timeout") { const error = new Error("tiempo agotado"); error.name = "TimeoutError"; throw error; }
+            return new Response(null, { status: failure });
+          }) as typeof fetch;
+          handleOrderReply(phone, "1");
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+          assert.equal(db.getOrderById(created.id)!.status, "confirmed");
+          const expected = failure === 404 ? "beeping_mark_to_send_no_encontrado" : "beeping_mark_to_send_fallo";
+          assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type=? AND order_ref=?").get(expected, number));
+        }
+      } finally { globalThis.fetch = realFetch; }
+    });
+  });
+
+  await test("BEEPING mark-to-send: una direccion sospechosa nunca llega al adaptador", async () => {
+    await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
+      const phone = "34600000415";
+      const created = mkOrder("919915", "12915", phone);
+      db.systemDbHandle().prepare("UPDATE orders SET address_line1='Nombre Apellido' WHERE id=?").run(created.id);
+      db.claimOrderInitialSend(created.id);
+      const realFetch = globalThis.fetch;
+      let calls = 0;
+      globalThis.fetch = (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch;
+      try {
+        handleOrderReply(phone, "1");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(calls, 0);
+        assert.equal(db.getOrderById(created.id)!.status, "needs_correction");
+      } finally { globalThis.fetch = realFetch; }
+    });
+  });
+
   await test("respuesta '3' pide la nota y NO recibe recordatorio mientras espera", async () => {
     mkOrder("920001", "1301", "34600000010");
     await runSchedulerTick(Math.floor(Date.now() / 1000));
