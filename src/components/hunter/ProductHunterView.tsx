@@ -16,8 +16,9 @@ import { hunterGet, InlineNotice, MAX_COMPARE, Pill } from "./hunter-shared";
 import PipelineBoard from "./PipelineBoard";
 import SearchView from "./SearchView";
 import LandingStudio from "../landing-studio/LandingStudio";
+import WinnerRadar from "./radar/WinnerRadar";
 
-type HunterTab = "search" | "saved" | "compare" | "studio";
+type HunterTab = "radar" | "search" | "saved" | "compare" | "studio";
 
 interface Notice {
   tone: "ok" | "error" | "info";
@@ -142,6 +143,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
               tabs={
                 availability.available
                   ? [
+                      { id: "radar", label: "AI Winner Radar" },
                       { id: "search", label: "Buscar" },
                       { id: "saved", label: "Guardados" },
                       { id: "compare", label: "Comparar" },
@@ -151,6 +153,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       // Sin fuente conectada no hay nada que buscar, guardar ni
                       // comparar: enseñar esas pestañas sería prometer un
                       // descubrimiento que no puede ocurrir.
+                      { id: "radar", label: "AI Winner Radar" },
                       { id: "search", label: "Estado" },
                       { id: "studio", label: "Landing Studio" },
                     ]
@@ -164,12 +167,14 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
               counts={{ compare: compareIds.length > 0 ? compareIds.length : undefined }}
             />
 
-            {availability.source === "mock" && tab !== "studio" ? (
+            {availability.source === "mock" && tab !== "studio" && tab !== "radar" ? (
               <InlineNotice tone="info">Estás viendo datos de ejemplo del modo mock: anunciantes y puntuaciones ficticios. En producción este modo no arranca.</InlineNotice>
             ) : null}
             {notice ? <InlineNotice tone={notice.tone}>{notice.text}</InlineNotice> : null}
 
-            {tab === "studio" ? (
+            {tab === "radar" ? (
+              <WinnerRadar />
+            ) : tab === "studio" ? (
               <LandingStudio />
             ) : !availability.available ? (
               <Card>
