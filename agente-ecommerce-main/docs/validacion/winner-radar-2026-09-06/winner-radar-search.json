@@ -1,0 +1,649 @@
+{
+  "elapsedSeconds": 13.579,
+  "result": {
+    "ok": true,
+    "searchId": "hs_4c00a3eb616440768cd0",
+    "run": {
+      "id": "hs_4c00a3eb616440768cd0",
+      "title": "Mascotas · ES",
+      "prompt": "Productos de mascotas para España, contrareembolso, 25-50 €, no frágiles",
+      "filters": {
+        "country": "ES",
+        "platforms": [],
+        "categories": [
+          "mascotas"
+        ],
+        "keywords": [
+          "mascotas"
+        ],
+        "excludeKeywords": [],
+        "priceMin": 25,
+        "priceMax": 50,
+        "supplierCostMax": null,
+        "minMargin": null,
+        "minExpectedProfit": null,
+        "minDaysActive": null,
+        "maxDaysActive": null,
+        "minAdvertisers": null,
+        "maxAdvertisers": null,
+        "minActiveAds": null,
+        "minCreativeCount": null,
+        "momentumMin": null,
+        "saturationMax": null,
+        "codFit": null,
+        "evergreen": null,
+        "seasonality": null,
+        "fragile": false,
+        "requiresSizing": null,
+        "electronics": null,
+        "regulatoryRisk": null,
+        "problemClarity": null,
+        "demoability": null,
+        "impulseBuy": null,
+        "shippingComplexity": null
+      },
+      "queries": [
+        "mascotas",
+        "pet",
+        "pets",
+        "perros",
+        "gatos",
+        "dog",
+        "cat",
+        "como quitar mascotas"
+      ],
+      "state": "running",
+      "progress": {
+        "sourcesQueried": 0,
+        "sourcesTotal": 1,
+        "sourcesFailed": [],
+        "adsAnalyzed": 0,
+        "productsDetected": 0,
+        "candidatesDiscarded": 0,
+        "opportunities": 0
+      },
+      "startedAt": 1788710041,
+      "finishedAt": null,
+      "error": null,
+      "providerCalls": 0,
+      "creditsSpent": null,
+      "fixtureMode": false,
+      "stages": [
+        {
+          "key": "interpret",
+          "label": "Interpretando tu búsqueda",
+          "hint": "Traduciendo lo que has pedido a criterios y consultas",
+          "status": "complete",
+          "startedAt": null,
+          "completedAt": 1788710041,
+          "summary": "8 consultas preparadas",
+          "counters": {
+            "queries": 8
+          }
+        },
+        {
+          "key": "explore",
+          "label": "Explorando Meta",
+          "hint": "Recorriendo la Biblioteca de Anuncios consulta a consulta",
+          "status": "active",
+          "startedAt": 1788710041,
+          "completedAt": null,
+          "summary": null,
+          "counters": {}
+        },
+        {
+          "key": "cluster",
+          "label": "Agrupando productos",
+          "hint": "Reuniendo los anuncios que venden lo mismo",
+          "status": "pending",
+          "startedAt": null,
+          "completedAt": null,
+          "summary": null,
+          "counters": {}
+        },
+        {
+          "key": "creative",
+          "label": "Analizando creatividades",
+          "hint": "Leyendo los anuncios para entender ángulo y formato",
+          "status": "pending",
+          "startedAt": null,
+          "completedAt": null,
+          "summary": null,
+          "counters": {}
+        },
+        {
+          "key": "score",
+          "label": "Calculando oportunidad",
+          "hint": "Cruzando mercado, producto y tus números",
+          "status": "pending",
+          "startedAt": null,
+          "completedAt": null,
+          "summary": null,
+          "counters": {}
+        },
+        {
+          "key": "select",
+          "label": "Preparando tu selección",
+          "hint": "Ordenando lo que merece la pena y redactando el informe",
+          "status": "pending",
+          "startedAt": null,
+          "completedAt": null,
+          "summary": null,
+          "counters": {}
+        }
+      ],
+      "stage": "explore",
+      "currentMessage": "Abriendo la Biblioteca de Anuncios…",
+      "estimateSeconds": 71,
+      "estimatedFinishAt": 1788710068,
+      "durationMs": null,
+      "providerMode": "meta",
+      "coverage": "unknown",
+      "plan": {
+        "sentence": "Buscaremos productos de mascotas, en España, entre 25 y 50 €, no frágiles.",
+        "strategy": [
+          "Se lanzan 8 búsquedas sobre la Biblioteca de Anuncios de Meta en ES.",
+          "Cada una cubre un ángulo distinto (nombre, problema, beneficio, mecanismo) porque cada ángulo encuentra anunciantes que los otros no.",
+          "Se incluyen términos en inglés: parte de las marcas que venden en España anuncian en ese idioma."
+        ],
+        "aiUsed": false
+      },
+      "report": null,
+      "progressRatio": 0.34,
+      "remainingSeconds": 27
+    }
+  },
+  "history": [
+    {
+      "ok": true,
+      "run": {
+        "id": "hs_4c00a3eb616440768cd0",
+        "title": "Mascotas · ES",
+        "prompt": "Productos de mascotas para España, contrareembolso, 25-50 €, no frágiles",
+        "filters": {
+          "country": "ES",
+          "platforms": [],
+          "categories": [
+            "mascotas"
+          ],
+          "keywords": [
+            "mascotas"
+          ],
+          "excludeKeywords": [],
+          "priceMin": 25,
+          "priceMax": 50,
+          "supplierCostMax": null,
+          "minMargin": null,
+          "minExpectedProfit": null,
+          "minDaysActive": null,
+          "maxDaysActive": null,
+          "minAdvertisers": null,
+          "maxAdvertisers": null,
+          "minActiveAds": null,
+          "minCreativeCount": null,
+          "momentumMin": null,
+          "saturationMax": null,
+          "codFit": null,
+          "evergreen": null,
+          "seasonality": null,
+          "fragile": false,
+          "requiresSizing": null,
+          "electronics": null,
+          "regulatoryRisk": null,
+          "problemClarity": null,
+          "demoability": null,
+          "impulseBuy": null,
+          "shippingComplexity": null
+        },
+        "queries": [
+          "mascotas",
+          "pet",
+          "pets",
+          "perros",
+          "gatos",
+          "dog",
+          "cat",
+          "como quitar mascotas"
+        ],
+        "state": "running",
+        "progress": {
+          "sourcesQueried": 0,
+          "sourcesTotal": 1,
+          "sourcesFailed": [],
+          "adsAnalyzed": 0,
+          "productsDetected": 0,
+          "candidatesDiscarded": 0,
+          "opportunities": 0
+        },
+        "startedAt": 1788710041,
+        "finishedAt": null,
+        "error": null,
+        "providerCalls": 0,
+        "creditsSpent": null,
+        "fixtureMode": false,
+        "stages": [
+          {
+            "key": "interpret",
+            "label": "Interpretando tu búsqueda",
+            "hint": "Traduciendo lo que has pedido a criterios y consultas",
+            "status": "complete",
+            "startedAt": null,
+            "completedAt": 1788710041,
+            "summary": "8 consultas preparadas",
+            "counters": {
+              "queries": 8
+            }
+          },
+          {
+            "key": "explore",
+            "label": "Explorando Meta",
+            "hint": "Recorriendo la Biblioteca de Anuncios consulta a consulta",
+            "status": "active",
+            "startedAt": 1788710041,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "cluster",
+            "label": "Agrupando productos",
+            "hint": "Reuniendo los anuncios que venden lo mismo",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "creative",
+            "label": "Analizando creatividades",
+            "hint": "Leyendo los anuncios para entender ángulo y formato",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "score",
+            "label": "Calculando oportunidad",
+            "hint": "Cruzando mercado, producto y tus números",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "select",
+            "label": "Preparando tu selección",
+            "hint": "Ordenando lo que merece la pena y redactando el informe",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          }
+        ],
+        "stage": "explore",
+        "currentMessage": "Abriendo la Biblioteca de Anuncios…",
+        "estimateSeconds": 71,
+        "estimatedFinishAt": 1788710068,
+        "durationMs": null,
+        "providerMode": "meta",
+        "coverage": "unknown",
+        "plan": {
+          "sentence": "Buscaremos productos de mascotas, en España, entre 25 y 50 €, no frágiles.",
+          "strategy": [
+            "Se lanzan 8 búsquedas sobre la Biblioteca de Anuncios de Meta en ES.",
+            "Cada una cubre un ángulo distinto (nombre, problema, beneficio, mecanismo) porque cada ángulo encuentra anunciantes que los otros no.",
+            "Se incluyen términos en inglés: parte de las marcas que venden en España anuncian en ese idioma."
+          ],
+          "aiUsed": false
+        },
+        "report": null,
+        "progressRatio": 0.34,
+        "remainingSeconds": 27
+      },
+      "opportunities": []
+    },
+    {
+      "ok": true,
+      "run": {
+        "id": "hs_4c00a3eb616440768cd0",
+        "title": "Mascotas · ES",
+        "prompt": "Productos de mascotas para España, contrareembolso, 25-50 €, no frágiles",
+        "filters": {
+          "country": "ES",
+          "platforms": [],
+          "categories": [
+            "mascotas"
+          ],
+          "keywords": [
+            "mascotas"
+          ],
+          "excludeKeywords": [],
+          "priceMin": 25,
+          "priceMax": 50,
+          "supplierCostMax": null,
+          "minMargin": null,
+          "minExpectedProfit": null,
+          "minDaysActive": null,
+          "maxDaysActive": null,
+          "minAdvertisers": null,
+          "maxAdvertisers": null,
+          "minActiveAds": null,
+          "minCreativeCount": null,
+          "momentumMin": null,
+          "saturationMax": null,
+          "codFit": null,
+          "evergreen": null,
+          "seasonality": null,
+          "fragile": false,
+          "requiresSizing": null,
+          "electronics": null,
+          "regulatoryRisk": null,
+          "problemClarity": null,
+          "demoability": null,
+          "impulseBuy": null,
+          "shippingComplexity": null
+        },
+        "queries": [
+          "mascotas",
+          "pet",
+          "pets",
+          "perros",
+          "gatos",
+          "dog",
+          "cat",
+          "como quitar mascotas"
+        ],
+        "state": "running",
+        "progress": {
+          "sourcesQueried": 0,
+          "sourcesTotal": 1,
+          "sourcesFailed": [],
+          "adsAnalyzed": 0,
+          "productsDetected": 0,
+          "candidatesDiscarded": 0,
+          "opportunities": 0
+        },
+        "startedAt": 1788710041,
+        "finishedAt": null,
+        "error": null,
+        "providerCalls": 4,
+        "creditsSpent": null,
+        "fixtureMode": false,
+        "stages": [
+          {
+            "key": "interpret",
+            "label": "Interpretando tu búsqueda",
+            "hint": "Traduciendo lo que has pedido a criterios y consultas",
+            "status": "complete",
+            "startedAt": null,
+            "completedAt": 1788710041,
+            "summary": "8 consultas preparadas",
+            "counters": {
+              "queries": 8
+            }
+          },
+          {
+            "key": "explore",
+            "label": "Explorando Meta",
+            "hint": "Recorriendo la Biblioteca de Anuncios consulta a consulta",
+            "status": "active",
+            "startedAt": 1788710041,
+            "completedAt": null,
+            "summary": null,
+            "counters": {
+              "queriesDone": 4,
+              "adsFound": 0,
+              "advertisers": 0,
+              "pages": 4
+            }
+          },
+          {
+            "key": "cluster",
+            "label": "Agrupando productos",
+            "hint": "Reuniendo los anuncios que venden lo mismo",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "creative",
+            "label": "Analizando creatividades",
+            "hint": "Leyendo los anuncios para entender ángulo y formato",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "score",
+            "label": "Calculando oportunidad",
+            "hint": "Cruzando mercado, producto y tus números",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          },
+          {
+            "key": "select",
+            "label": "Preparando tu selección",
+            "hint": "Ordenando lo que merece la pena y redactando el informe",
+            "status": "pending",
+            "startedAt": null,
+            "completedAt": null,
+            "summary": null,
+            "counters": {}
+          }
+        ],
+        "stage": "explore",
+        "currentMessage": "0 anuncios revisados · 0 páginas detectadas",
+        "estimateSeconds": 71,
+        "estimatedFinishAt": 1788710075,
+        "durationMs": null,
+        "providerMode": "meta",
+        "coverage": "unknown",
+        "plan": {
+          "sentence": "Buscaremos productos de mascotas, en España, entre 25 y 50 €, no frágiles.",
+          "strategy": [
+            "Se lanzan 8 búsquedas sobre la Biblioteca de Anuncios de Meta en ES.",
+            "Cada una cubre un ángulo distinto (nombre, problema, beneficio, mecanismo) porque cada ángulo encuentra anunciantes que los otros no.",
+            "Se incluyen términos en inglés: parte de las marcas que venden en España anuncian en ese idioma."
+          ],
+          "aiUsed": false
+        },
+        "report": null,
+        "progressRatio": 0.34,
+        "remainingSeconds": 29
+      },
+      "opportunities": []
+    },
+    {
+      "ok": true,
+      "run": {
+        "id": "hs_4c00a3eb616440768cd0",
+        "title": "Mascotas · ES",
+        "prompt": "Productos de mascotas para España, contrareembolso, 25-50 €, no frágiles",
+        "filters": {
+          "country": "ES",
+          "platforms": [],
+          "categories": [
+            "mascotas"
+          ],
+          "keywords": [
+            "mascotas"
+          ],
+          "excludeKeywords": [],
+          "priceMin": 25,
+          "priceMax": 50,
+          "supplierCostMax": null,
+          "minMargin": null,
+          "minExpectedProfit": null,
+          "minDaysActive": null,
+          "maxDaysActive": null,
+          "minAdvertisers": null,
+          "maxAdvertisers": null,
+          "minActiveAds": null,
+          "minCreativeCount": null,
+          "momentumMin": null,
+          "saturationMax": null,
+          "codFit": null,
+          "evergreen": null,
+          "seasonality": null,
+          "fragile": false,
+          "requiresSizing": null,
+          "electronics": null,
+          "regulatoryRisk": null,
+          "problemClarity": null,
+          "demoability": null,
+          "impulseBuy": null,
+          "shippingComplexity": null
+        },
+        "queries": [
+          "mascotas",
+          "pet",
+          "pets",
+          "perros",
+          "gatos",
+          "dog",
+          "cat",
+          "como quitar mascotas"
+        ],
+        "state": "partial",
+        "progress": {
+          "sourcesQueried": 1,
+          "sourcesTotal": 1,
+          "sourcesFailed": [
+            "meta_ad_library"
+          ],
+          "adsAnalyzed": 0,
+          "productsDetected": 0,
+          "candidatesDiscarded": 0,
+          "opportunities": 0
+        },
+        "startedAt": 1788710041,
+        "finishedAt": 1788710050,
+        "error": "Sin resultados; fallaron: meta_ad_library",
+        "providerCalls": 8,
+        "creditsSpent": null,
+        "fixtureMode": false,
+        "stages": [
+          {
+            "key": "interpret",
+            "label": "Interpretando tu búsqueda",
+            "hint": "Traduciendo lo que has pedido a criterios y consultas",
+            "status": "complete",
+            "startedAt": null,
+            "completedAt": 1788710041,
+            "summary": "8 consultas preparadas",
+            "counters": {
+              "queries": 8
+            }
+          },
+          {
+            "key": "explore",
+            "label": "Explorando Meta",
+            "hint": "Recorriendo la Biblioteca de Anuncios consulta a consulta",
+            "status": "failed",
+            "startedAt": 1788710041,
+            "completedAt": 1788710050,
+            "summary": "0 anuncios de 0 páginas",
+            "counters": {
+              "queriesDone": 8,
+              "adsFound": 0,
+              "advertisers": 0,
+              "pages": 8
+            }
+          },
+          {
+            "key": "cluster",
+            "label": "Agrupando productos",
+            "hint": "Reuniendo los anuncios que venden lo mismo",
+            "status": "complete",
+            "startedAt": 1788710050,
+            "completedAt": 1788710050,
+            "summary": "Sin anuncios que agrupar",
+            "counters": {}
+          },
+          {
+            "key": "creative",
+            "label": "Analizando creatividades",
+            "hint": "Leyendo los anuncios para entender ángulo y formato",
+            "status": "skipped",
+            "startedAt": null,
+            "completedAt": 1788710050,
+            "summary": "Sin datos que procesar",
+            "counters": {}
+          },
+          {
+            "key": "score",
+            "label": "Calculando oportunidad",
+            "hint": "Cruzando mercado, producto y tus números",
+            "status": "skipped",
+            "startedAt": null,
+            "completedAt": 1788710050,
+            "summary": "Sin datos que procesar",
+            "counters": {}
+          },
+          {
+            "key": "select",
+            "label": "Preparando tu selección",
+            "hint": "Ordenando lo que merece la pena y redactando el informe",
+            "status": "skipped",
+            "startedAt": null,
+            "completedAt": 1788710050,
+            "summary": "Sin datos que procesar",
+            "counters": {}
+          }
+        ],
+        "stage": null,
+        "currentMessage": null,
+        "estimateSeconds": 71,
+        "estimatedFinishAt": 1788710072,
+        "durationMs": 9546,
+        "providerMode": "meta",
+        "coverage": "partial",
+        "plan": {
+          "sentence": "Buscaremos productos de mascotas, en España, entre 25 y 50 €, no frágiles.",
+          "strategy": [
+            "Se lanzan 8 búsquedas sobre la Biblioteca de Anuncios de Meta en ES.",
+            "Cada una cubre un ángulo distinto (nombre, problema, beneficio, mecanismo) porque cada ángulo encuentra anunciantes que los otros no.",
+            "Se incluyen términos en inglés: parte de las marcas que venden en España anuncian en ese idioma."
+          ],
+          "aiUsed": false
+        },
+        "report": {
+          "headline": "No hemos encontrado productos con esta búsqueda",
+          "summary": [
+            "Analizamos 0 anuncios y detectamos 0 productos."
+          ],
+          "topPickIds": [],
+          "watchIds": [],
+          "risks": [],
+          "marketNotes": [],
+          "todayActions": [
+            {
+              "productId": null,
+              "productName": null,
+              "verb": "AMPLIAR_BUSQUEDA",
+              "text": "Probar con otras palabras",
+              "because": "No ha salido ningún producto: puede que el vocabulario no coincida con el que usan los anunciantes."
+            }
+          ],
+          "generatedAt": 1788710050,
+          "aiGenerated": false
+        },
+        "progressRatio": 1,
+        "remainingSeconds": 0
+      },
+      "opportunities": []
+    }
+  ]
+}
