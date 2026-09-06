@@ -15,6 +15,9 @@ import type { Measured, MetricProvenance } from "./provenance";
 
 // --- Fuentes ---
 
+import type { StageKey, StageState } from "./stages";
+export type { StageKey, StageState } from "./stages";
+
 export type ProviderId =
   | "winninghunter"
   | "meta_ad_library"
@@ -326,7 +329,32 @@ export interface ProductOpportunity {
   adIds: string[];
   providers: ProviderId[];
   summary: OpportunitySummary | null;
+
+  // ── Presentación (migración 20) ──────────────────────────────
+  /** Proveedor que aportó la mayoría de la evidencia. */
+  primaryProvider: ProviderId | null;
+  /** Hasta 6 imágenes o previsualizaciones para la ficha. Puede venir vacío. */
+  images: string[];
+  /** Dominio de la landing más repetida. Solo el host, nunca la URL completa con parámetros. */
+  landingDomain: string | null;
+  /** Enlace directo a la Biblioteca de Anuncios, si se puede construir. */
+  adLibraryUrl: string | null;
+  /** Qué haría el sistema con esto. Es una RECOMENDACIÓN, no una orden. */
+  recommendation: Recommendation | null;
 }
+
+/**
+ * El veredicto que se enseña en grande. Se calcula con reglas explícitas
+ * (`decideRecommendation`) y no con IA: Pedro tiene que poder preguntar «¿por
+ * qué DESCARTAR?» y recibir una razón, no un encogimiento de hombros.
+ */
+export type Recommendation = "TESTEAR" | "VIGILAR" | "DESCARTAR";
+
+export const RECOMMENDATION_LABEL: Record<Recommendation, string> = {
+  TESTEAR: "Testear",
+  VIGILAR: "Vigilar",
+  DESCARTAR: "Descartar",
+};
 
 /**
  * La explicación se sirve TROCEADA por origen a propósito. Mezclar "14
@@ -391,8 +419,16 @@ export interface SearchRunProgress {
   opportunities: number;
 }
 
+/**
+ * Hasta dónde llegó la búsqueda. `partial` NO es un fallo: es un resultado
+ * con menos cobertura, y hay que poder decirlo sin tirar lo que sí se obtuvo.
+ */
+export type SearchCoverage = "full" | "partial" | "none" | "unknown";
+
 export interface SearchRun {
   id: string;
+  /** Título legible: «Mascotas · España». Se genera al planificar. */
+  title: string | null;
   prompt: string | null;
   filters: HunterFilters;
   queries: string[];
@@ -405,6 +441,59 @@ export interface SearchRun {
   providerCalls: number;
   creditsSpent: number | null;
   fixtureMode: boolean;
+
+  // ── Experiencia de proceso (migración 20) ────────────────────
+  stages: StageState[];
+  /** Etapa activa ahora mismo. */
+  stage: StageKey | null;
+  /** Microcopy de lo que está pasando: «1.284 anuncios revisados». */
+  currentMessage: string | null;
+  /** Duración estimada en segundos al arrancar. */
+  estimateSeconds: number | null;
+  estimatedFinishAt: number | null;
+  /** Duración REAL, en ms. Alimenta la estimación de las siguientes. */
+  durationMs: number | null;
+  /** Qué proveedor mandó en esta búsqueda. */
+  providerMode: string | null;
+  coverage: SearchCoverage;
+  /** El plan tal y como se ejecutó: frase, chips y estrategia. */
+  plan: SearchPlanSnapshot | null;
+  report: RadarReport | null;
+}
+
+/** Copia del plan guardada con la búsqueda: sin ella no se puede reproducir. */
+export interface SearchPlanSnapshot {
+  sentence: string;
+  strategy: string[];
+  aiUsed: boolean;
+}
+
+/**
+ * El informe ejecutivo (§17). Se guarda con la búsqueda para que abrirla dos
+ * semanas después enseñe lo mismo que el día que se lanzó.
+ */
+export interface RadarReport {
+  headline: string;
+  /** «Analizamos 1.284 anuncios y detectamos 38 productos.» */
+  summary: string[];
+  topPickIds: string[];
+  watchIds: string[];
+  risks: string[];
+  marketNotes: string[];
+  /** §18 — lo que haría hoy, en orden. Sale de los datos, no de una plantilla. */
+  todayActions: TodayAction[];
+  generatedAt: number;
+  aiGenerated: boolean;
+}
+
+export interface TodayAction {
+  /** Producto al que se refiere, si aplica. */
+  productId: string | null;
+  productName: string | null;
+  verb: "TESTEAR" | "VIGILAR" | "BUSCAR_PROVEEDOR" | "EVITAR" | "AMPLIAR_BUSQUEDA";
+  text: string;
+  /** Por qué. Sin esto es un horóscopo. */
+  because: string;
 }
 
 export interface DecisionReasonOption {

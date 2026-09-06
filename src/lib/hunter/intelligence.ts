@@ -1,8 +1,10 @@
 // ============================================================
 // AI Winner Radar — LA CAPA DE IA.
 //
-// Reutiliza el proveedor que YA está configurado en Casamable (OpenRouter,
-// `completeText`). No se añade ninguna suscripción nueva.
+// El cliente de modelo vive en `llm.ts` (dos velocidades, dos proveedores y
+// UN cortafuegos de privacidad). Aquí solo están los trabajos concretos:
+// interpretar lo que Pedro escribe, clasificar un producto y redactar por qué
+// destaca.
 //
 // TRES REGLAS QUE NO SE NEGOCIAN:
 //
@@ -11,17 +13,15 @@
 //    multiplica bien es la peor herramienta posible para decidir compras.
 //
 // 2. A LA IA NO LE LLEGA NI UN DATO PERSONAL. Solo texto público (copy de
-//    anuncios, nombres de producto) y agregados. Ni teléfonos, ni correos,
-//    ni direcciones, ni pedidos individuales. `assertNoPII` lo comprueba
-//    antes de cada envío y lanza si algo se cuela: es preferible quedarse sin
-//    análisis que filtrar un cliente.
+//    anuncios, nombres de producto) y agregados. `assertNoPII` lo comprueba
+//    antes de cada envío y lanza si algo se cuela.
 //
 // 3. SIN CLAVE, EL RADAR SIGUE FUNCIONANDO. Todo lo de aquí tiene camino
 //    determinista de respaldo. La IA mejora la lectura; no la sostiene.
 // ============================================================
 
-import { completeText } from "../openrouter";
-import { clamp01, clampScore } from "./provenance";
+import { clampScore } from "./provenance";
+import { ask, assertNoPII, extractJson, llmBackend, llmConfigured, PIILeakError, stringList } from "./llm";
 import {
   PRODUCT_FEATURE_KEYS,
   type HunterFilters,
@@ -32,64 +32,9 @@ import {
 } from "./types";
 import { defaultFilters } from "./search/filters";
 
-export function llmConfigured(): boolean {
-  return (process.env.OPENROUTER_API_KEY ?? "").trim().length > 0;
-}
-
-/** Tope de texto por llamada: un copy larguísimo no mejora el análisis y sí la factura. */
-const MAX_CHARS_PER_CALL = 6000;
-
-export class PIILeakError extends Error {
-  constructor(what: string) {
-    super(`bloqueado: el texto para la IA contenía ${what}`);
-    this.name = "PIILeakError";
-  }
-}
-
-/**
- * Cortafuegos de privacidad. Se ejecuta SIEMPRE antes de salir hacia el
- * modelo. Prefiere el falso positivo: quedarse sin análisis es barato,
- * filtrar el teléfono de un cliente no.
- */
-export function assertNoPII(text: string): void {
-  if (/[\w.+-]+@[\w-]+\.[\w.]{2,}/.test(text)) throw new PIILeakError("un correo electrónico");
-  // Teléfono español con o sin prefijo.
-  if (/(?:\+?34[\s-]?)?[6-9]\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}\b/.test(text)) throw new PIILeakError("un teléfono");
-  if (/\b\d{5}\s+(?:calle|avenida|c\/|plaza)\b/i.test(text)) throw new PIILeakError("una dirección");
-}
-
-/**
- * `system` lleva las instrucciones y `user` SOLO los datos. Separarlos no es
- * estética: reduce que un copy publicitario con texto tipo "ignora lo
- * anterior" se lea como instrucción.
- */
-async function ask(system: string, user: string, maxTokens = 700): Promise<string | null> {
-  if (!llmConfigured()) return null;
-  const datos = user.slice(0, MAX_CHARS_PER_CALL);
-  assertNoPII(datos);
-  try {
-    const out = await completeText(system, datos, { maxTokens });
-    return typeof out === "string" && out.trim() ? out.trim() : null;
-  } catch {
-    // Un fallo de IA nunca tumba una búsqueda: se sigue sin ella.
-    return null;
-  }
-}
-
-/** Extrae el primer objeto JSON de una respuesta que puede traer texto alrededor. */
-export function extractJson(raw: string | null): Record<string, unknown> | null {
-  if (!raw) return null;
-  const limpio = raw.replace(/```(?:json)?/gi, "").trim();
-  const ini = limpio.indexOf("{");
-  const fin = limpio.lastIndexOf("}");
-  if (ini < 0 || fin <= ini) return null;
-  try {
-    const parsed = JSON.parse(limpio.slice(ini, fin + 1)) as unknown;
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
+// Se re-exportan para no obligar a cada llamador a saber que el cliente se
+// mudó de fichero. `llm.ts` es la implementación; esto, la puerta de siempre.
+export { assertNoPII, extractJson, llmBackend, llmConfigured, PIILeakError };
 
 // ------------------------------------------------------------
 // 1 · Interpretar lo que Pedro escribe en lenguaje natural
@@ -118,7 +63,7 @@ Descripción: `;
 
 export async function interpretSearchIntent(prompt: string): Promise<IntentResult> {
   const deterministic = parseIntentDeterministic(prompt);
-  const raw = await ask(INTENT_PROMPT, prompt, 600);
+  const raw = await ask(INTENT_PROMPT, prompt, { tier: "fast", maxTokens: 600, json: true });
   const json = extractJson(raw);
   if (!json) return { ...deterministic, aiUsed: false };
 
@@ -151,7 +96,7 @@ export async function interpretSearchIntent(prompt: string): Promise<IntentResul
 
   return {
     filters: f,
-    suggestedQueries: arr("suggestedQueries").slice(0, 6),
+    suggestedQueries: stringList(json.suggestedQueries, 8, 80),
     aiUsed: true,
     notes: deterministic.notes,
   };
@@ -265,7 +210,7 @@ export async function classifyProduct(input: {
     .filter(Boolean)
     .join("\n");
 
-  const json = extractJson(await ask(FEATURES_PROMPT, texto, 800));
+  const json = extractJson(await ask(FEATURES_PROMPT, texto, { tier: "fast", maxTokens: 800, json: true }));
   if (!json) return [];
 
   const rationale = (json.rationale ?? {}) as Record<string, unknown>;
@@ -317,7 +262,7 @@ export async function generateOpportunitySummary(op: ProductOpportunity): Promis
     `Observado:\n${observed.map((l) => `- ${l}`).join("\n")}\n` +
     `Estimado:\n${estimated.map((l) => `- ${l}`).join("\n")}`;
 
-  const json = extractJson(await ask(system, datos, 500));
+  const json = extractJson(await ask(system, datos, { tier: "fast", maxTokens: 500, json: true }));
   if (!json) return base;
   const lista = (k: string): string[] =>
     Array.isArray(json[k]) ? (json[k] as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 3) : [];
@@ -383,4 +328,103 @@ export function buildRiskLines(op: ProductOpportunity): string[] {
   if (op.supplierCostMin === null) out.push("sin coste de proveedor confirmado");
   if (op.clusterConfidence < 0.6) out.push("la agrupación de anuncios es poco fiable: revisa que sea un solo producto");
   return out;
+}
+
+// ------------------------------------------------------------
+// 4 · Análisis de creatividades (§22)
+// ------------------------------------------------------------
+
+export interface CreativeAnalysis {
+  /** Ganchos que más se repiten, tal y como los usan los anunciantes. */
+  hooks: string[];
+  /** Ángulos de venta dominantes: problema, comparación, testimonio… */
+  angles: string[];
+  /** Formato más frecuente según el copy (no lo dice la API: es lectura). */
+  dominantFormat: string | null;
+  /** Rasgos observados en el conjunto: UGC, antes-después, demostración… */
+  traits: string[];
+  /** Qué copiaríamos si lanzáramos mañana. */
+  takeaways: string[];
+  aiGenerated: boolean;
+}
+
+const CREATIVE_PROMPT = `Eres analista de creatividades publicitarias. Te doy textos de anuncios REALES de un mismo producto.
+Devuelve SOLO este JSON:
+{"hooks":["3-5 ganchos que más se repiten, literales o casi"],
+ "angles":["2-4 ángulos de venta dominantes"],
+ "dominantFormat":"demostración|testimonio|antes y después|comparativa|oferta|desconocido",
+ "traits":["2-5 rasgos observados: UGC, voz en off, antes-después, urgencia…"],
+ "takeaways":["2-3 cosas que copiarías al lanzar este producto"]}
+No inventes: si algo no se ve en los textos, no lo pongas. Español. Responde solo el JSON.`;
+
+/**
+ * Solo se llama sobre la SHORTLIST (§30). Analizar 2.000 anuncios uno a uno
+ * costaría una fortuna y no cambiaría ninguna decisión: lo que importa es el
+ * patrón del conjunto, no cada anuncio.
+ */
+export async function analyzeCreatives(input: {
+  productName: string;
+  adCopies: string[];
+}): Promise<CreativeAnalysis> {
+  const base = deterministicCreatives(input.adCopies);
+  if (!llmConfigured() || input.adCopies.length === 0) return base;
+
+  const datos = [
+    `Producto: ${input.productName}`,
+    ...input.adCopies.slice(0, 12).map((c, i) => `Anuncio ${i + 1}: ${c.slice(0, 320)}`),
+  ].join("\n");
+
+  const json = extractJson(await ask(CREATIVE_PROMPT, datos, { tier: "fast", maxTokens: 700, json: true }));
+  if (!json) return base;
+
+  const formato = typeof json.dominantFormat === "string" ? json.dominantFormat.trim().slice(0, 40) : null;
+  return {
+    hooks: stringList(json.hooks, 5, 140).length > 0 ? stringList(json.hooks, 5, 140) : base.hooks,
+    angles: stringList(json.angles, 4, 100).length > 0 ? stringList(json.angles, 4, 100) : base.angles,
+    dominantFormat: formato && formato.toLowerCase() !== "desconocido" ? formato : base.dominantFormat,
+    traits: stringList(json.traits, 5, 80).length > 0 ? stringList(json.traits, 5, 80) : base.traits,
+    takeaways: stringList(json.takeaways, 3, 160),
+    aiGenerated: true,
+  };
+}
+
+/**
+ * Versión SIN IA. No es un placeholder: cuenta patrones de verdad sobre el
+ * texto, así que sin clave la pestaña de creatividades sigue diciendo algo
+ * cierto en vez de quedarse en blanco.
+ */
+export function deterministicCreatives(copies: string[]): CreativeAnalysis {
+  const limpios = copies.filter((c) => c && c.trim().length > 0);
+  if (limpios.length === 0) {
+    return { hooks: [], angles: [], dominantFormat: null, traits: [], takeaways: [], aiGenerated: false };
+  }
+
+  // Primera frase de cada anuncio = el gancho, por construcción del formato.
+  const primeras = limpios
+    .map((c) => c.split(/[.!?\n]/)[0]?.trim() ?? "")
+    .filter((f) => f.length >= 12 && f.length <= 120);
+  const hooks = [...new Set(primeras)].slice(0, 5);
+
+  const texto = limpios.join(" ").toLowerCase();
+  const PATRONES: Array<[RegExp, string]> = [
+    [/antes y despu[ée]s|before.{0,6}after/, "antes y después"],
+    [/testimoni|clientes? dice|opini[oó]n real/, "testimonio"],
+    [/mira c[oó]mo|te enseño|as[ií] funciona|demostraci/, "demostración"],
+    [/oferta|descuento|\d+\s*%|env[ií]o gratis|2x1/, "oferta"],
+    [/[úu]ltimas unidades|solo hoy|se agota|date prisa/, "urgencia"],
+    [/contrareembolso|paga al recibir|pago al recibir/, "pago al recibir"],
+    [/comparativa|mejor que|frente a/, "comparativa"],
+  ];
+  const traits = PATRONES.filter(([re]) => re.test(texto)).map(([, l]) => l);
+
+  const FORMATO_PRIORIDAD = ["demostración", "antes y después", "testimonio", "comparativa", "oferta"];
+  const dominantFormat = FORMATO_PRIORIDAD.find((f) => traits.includes(f)) ?? null;
+
+  const angles: string[] = [];
+  if (/problema|cansad|harto|molest|no soport/.test(texto)) angles.push("resuelve un problema concreto");
+  if (/ahorr|barat|precio/.test(texto)) angles.push("ahorro");
+  if (/f[áa]cil|r[áa]pido|en segundos|sin esfuerzo/.test(texto)) angles.push("facilidad y rapidez");
+  if (/regalo|ideal para regalar/.test(texto)) angles.push("regalo");
+
+  return { hooks, angles, dominantFormat, traits, takeaways: [], aiGenerated: false };
 }

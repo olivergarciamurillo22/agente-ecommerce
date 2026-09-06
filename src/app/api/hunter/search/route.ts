@@ -1,15 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireOwner } from "@/lib/auth/guard";
-import { createSearchRun, getSearchRun, listProductsForSearch } from "@/lib/hunter/repo";
+import { createSearchRun, getSearchRun, listProductsForSearch, listSearchRuns } from "@/lib/hunter/repo";
 import { executeSearch, planSearch } from "@/lib/hunter/search/run";
 import { radarReadiness } from "@/lib/hunter/providers/registry";
-import { parseIntentDeterministic } from "@/lib/hunter/intelligence";
+import { stageProgress } from "@/lib/hunter/stages";
+import { withVerdictAll } from "@/lib/hunter/verdict";
 
 // Lanzar y consultar búsquedas.
 //
-// POST ?dryRun=1 → solo INTERPRETA y devuelve filtros + consultas, sin salir
-// a la red. Es lo que usa el botón "Analizar criterios": Pedro revisa y
-// corrige antes de que se gaste un solo crédito.
+// POST ?dryRun=1 → solo PLANIFICA: devuelve la frase legible, los chips y la
+// estrategia de consultas, sin salir a la red y sin gastar una llamada. Es lo
+// que alimenta la vista previa antes de pulsar «Buscar».
+//
+// GET ?id=… → estado vivo de una búsqueda: etapas, progreso, tiempo restante
+// y lo que ya se ha encontrado. Es lo que la pantalla de proceso consulta.
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
@@ -32,21 +36,30 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const dryRun = body.dryRun === true || req.nextUrl.searchParams.get("dryRun") === "1";
 
   if (dryRun) {
-    // Sin red y sin coste: solo interpretar.
-    const plan = await planSearch({ prompt: prompt || null, filters: body.filters as never, maxQueries: body.maxQueries });
+    // Sin red y sin coste: solo planificar.
+    const { run, plan } = await planSearch({
+      prompt: prompt || null,
+      filters: body.filters as never,
+      maxQueries: body.maxQueries,
+    });
     return NextResponse.json({
       ok: true,
       dryRun: true,
-      filters: plan.run.filters,
-      queries: plan.run.queries,
+      title: run.title,
+      filters: plan.filters,
+      queries: plan.queries,
+      sentence: plan.sentence,
+      chips: plan.chips,
+      strategy: plan.strategy,
       aiUsed: plan.aiUsed,
-      notes: parseIntentDeterministic(prompt).notes,
+      notes: plan.notes,
+      estimateSeconds: run.estimateSeconds,
     });
   }
 
   const readiness = await radarReadiness();
   if (!readiness.canSearch) {
-    return NextResponse.json({ ok: false, error: readiness.reason }, { status: 409 });
+    return NextResponse.json({ ok: false, error: readiness.reason, nextStep: readiness.nextStep }, { status: 409 });
   }
 
   const ahora = Math.floor(Date.now() / 1000);
@@ -64,21 +77,51 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   }
   createSearchRun(run, auth.user.email || auth.user.name);
 
-  // Se responde YA con el id y la búsqueda sigue en segundo plano (§19): una
+  // Se responde YA con el id y la búsqueda sigue en segundo plano: una
   // petición HTTP abierta cinco minutos se corta sola y deja todo a medias.
   void executeSearch(run).catch(() => {
     /* executeSearch ya persiste su propio estado de fallo */
   });
 
-  return NextResponse.json({ ok: true, searchId: run.id, queries: run.queries, filters: run.filters });
+  return NextResponse.json({ ok: true, searchId: run.id, run: serialize(run) });
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
   const auth = requireOwner(req);
   if (!auth.ok) return auth.response;
+
   const id = req.nextUrl.searchParams.get("id");
-  if (!id) return NextResponse.json({ ok: false, error: "falta id" }, { status: 400 });
+  if (!id) {
+    // Sin id: el historial (§35).
+    return NextResponse.json({ ok: true, runs: listSearchRuns(30).map(serialize) });
+  }
+
   const run = getSearchRun(id);
   if (!run) return NextResponse.json({ ok: false, error: "búsqueda no encontrada" }, { status: 404 });
-  return NextResponse.json({ ok: true, run, opportunities: listProductsForSearch(id) });
+
+  return NextResponse.json({
+    ok: true,
+    run: serialize(run),
+    opportunities: withVerdictAll(listProductsForSearch(id), run.filters?.country ?? "ES"),
+  });
+}
+
+/**
+ * Añade lo que la interfaz necesita y no conviene recalcular en el navegador:
+ * el avance 0..1 y los segundos que quedan. Que los dos números salgan del
+ * MISMO sitio evita que la barra y el reloj se contradigan.
+ */
+function serialize(run: ReturnType<typeof getSearchRun> & object) {
+  const avance = stageProgress(run.stages);
+  const ahora = Math.floor(Date.now() / 1000);
+  const terminada = run.state === "complete" || run.state === "partial" || run.state === "failed";
+  return {
+    ...run,
+    progressRatio: terminada ? 1 : avance,
+    remainingSeconds: terminada
+      ? 0
+      : run.estimatedFinishAt !== null
+        ? Math.max(0, run.estimatedFinishAt - ahora)
+        : null,
+  };
 }

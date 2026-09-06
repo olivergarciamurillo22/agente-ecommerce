@@ -37,7 +37,18 @@ export function migrateHunter(db: Database.Database): void {
       fixture_mode INTEGER NOT NULL DEFAULT 0 CHECK(fixture_mode IN (0,1)),
       created_by TEXT,
       started_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      finished_at INTEGER
+      finished_at INTEGER,
+      -- Migración 20: experiencia de proceso (etapas, ETA e informe).
+      title TEXT,
+      stage TEXT,
+      current_message TEXT,
+      estimate_seconds INTEGER,
+      estimated_finish_at INTEGER,
+      duration_ms INTEGER,
+      provider_mode TEXT,
+      coverage TEXT NOT NULL DEFAULT 'unknown',
+      plan_json TEXT,
+      report_json TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_hunter_searches_state ON hunter_searches(state, started_at DESC);
 
@@ -96,6 +107,10 @@ export function migrateHunter(db: Database.Database): void {
       -- Ediciones a mano de Pedro. Si toca el nombre o el coste, su valor
       -- MANDA sobre lo que traiga el proveedor en el siguiente refresco.
       manual_overrides_json TEXT,
+      -- Migración 20: de dónde vino y con qué se ilustra.
+      primary_provider TEXT,
+      images_json TEXT NOT NULL DEFAULT '[]',
+      landing_domain TEXT,
       created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
@@ -209,4 +224,80 @@ export function migrateHunter(db: Database.Database): void {
       created_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
   `);
+}
+
+/**
+ * Migración 20 — la EXPERIENCIA de una búsqueda: etapas, tiempo estimado e
+ * informe. Va aparte de `migrateHunter` por la regla del repo: una función
+ * por migración, parametrizada por conexión y testeable sin el singleton.
+ *
+ * Doblemente segura: las columnas nuevas también están en el `CREATE TABLE`
+ * de arriba (para bases nuevas) y aquí con comprobación previa + try/catch
+ * (para las que ya venían de la 19). Correrla tres veces seguidas no falla.
+ */
+export function migrateHunterRunDetail(db: Database.Database): void {
+  db.exec(`
+    -- Una fila por etapa y búsqueda. Es lo que la pantalla de progreso lee, y
+    -- también el registro de por qué una búsqueda tardó lo que tardó.
+    --
+    -- Lo que NO se guarda aquí, a propósito: prompts completos, respuestas del
+    -- modelo y cualquier credencial. Solo el nombre de la etapa, su estado,
+    -- sus tiempos y contadores.
+    CREATE TABLE IF NOT EXISTS hunter_search_stages (
+      search_id TEXT NOT NULL REFERENCES hunter_searches(id) ON DELETE CASCADE,
+      stage_key TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'pending',
+      summary TEXT,
+      counters_json TEXT NOT NULL DEFAULT '{}',
+      started_at INTEGER,
+      completed_at INTEGER,
+      PRIMARY KEY (search_id, stage_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_stages_search ON hunter_search_stages(search_id, position);
+  `);
+
+  addColumns(db, "hunter_searches", [
+    ["title", "TEXT"],
+    ["stage", "TEXT"],
+    ["current_message", "TEXT"],
+    ["estimate_seconds", "INTEGER"],
+    ["estimated_finish_at", "INTEGER"],
+    ["duration_ms", "INTEGER"],
+    ["provider_mode", "TEXT"],
+    ["coverage", "TEXT NOT NULL DEFAULT 'unknown'"],
+    ["plan_json", "TEXT"],
+    ["report_json", "TEXT"],
+  ]);
+
+  addColumns(db, "hunter_products", [
+    ["primary_provider", "TEXT"],
+    ["images_json", "TEXT NOT NULL DEFAULT '[]'"],
+    ["landing_domain", "TEXT"],
+  ]);
+}
+
+/**
+ * `ALTER TABLE ADD COLUMN` idempotente: mira antes con PRAGMA y aun así
+ * envuelve en try/catch por si otro proceso se adelantó entre la lectura y la
+ * escritura. Es el patrón del repo; no se improvisa otro.
+ */
+function addColumns(db: Database.Database, table: string, cols: Array<[string, string]>): void {
+  let existentes: Set<string>;
+  try {
+    existentes = new Set(
+      (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((c) => c.name)
+    );
+  } catch {
+    return; // la tabla no existe todavía: la crea `migrateHunter`
+  }
+  for (const [name, decl] of cols) {
+    if (existentes.has(name)) continue;
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+    } catch (err) {
+      const mensaje = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(mensaje)) throw err;
+    }
+  }
 }

@@ -31,6 +31,10 @@ import { noCapabilities, providerFail, providerOk } from "./types";
 const PROVIDER = "meta_ad_library" as const;
 const GRAPH = "https://graph.facebook.com";
 const DEFAULT_VERSION = "v21.0";
+/** Páginas por consulta. 3 × 25 ≈ 75 anuncios: suficiente para ver el mercado. */
+const DEFAULT_PAGES = 3;
+/** Techo duro: más allá de esto se gasta cuota sin aprender nada nuevo. */
+const MAX_PAGES = 6;
 
 /** UE + Reino Unido: los únicos donde `ad_type=ALL` trae anuncios comerciales. */
 export const COMMERCIAL_SCOPE_COUNTRIES: readonly string[] = [
@@ -120,7 +124,40 @@ export class MetaAdLibraryProvider implements IntelligenceProvider {
   async searchAds(q: AdSearchQuery): Promise<ProviderResult<AdSearchResponse>> {
     const scope = assertCommercialScope(q.country);
     if (scope) return providerFail(scope);
-    return this.rawSearch(q);
+
+    // Meta pagina de 25 en 25 aunque pidas más, y un producto que va bien
+    // tiene decenas de anuncios repartidos entre marcas. Quedarse en la
+    // primera página hace que un mercado activo parezca uno muerto — que es
+    // justo el error que arruina la puntuación de saturación.
+    const paginas = Math.max(1, Math.min(q.pages ?? DEFAULT_PAGES, MAX_PAGES));
+    const acumulados: HunterAd[] = [];
+    let cursor = q.cursor ?? null;
+    let llamadas = 0;
+    let deCache = true;
+    let ultimoError: ProviderResult<AdSearchResponse> | null = null;
+
+    for (let i = 0; i < paginas; i++) {
+      const res = await this.rawSearch({ ...q, cursor });
+      llamadas += res.calls;
+      if (!res.ok || !res.data) {
+        // Con páginas ya recogidas, un fallo tardío NO tira la consulta: se
+        // devuelve lo que hay. Perder 60 anuncios buenos por un 429 en la
+        // cuarta página sería tirar llamadas ya pagadas.
+        if (acumulados.length > 0) break;
+        ultimoError = res;
+        break;
+      }
+      if (!res.fromCache) deCache = false;
+      acumulados.push(...res.data.ads);
+      cursor = res.data.nextCursor;
+      if (!cursor || res.data.ads.length === 0) break;
+    }
+
+    if (acumulados.length === 0 && ultimoError) return ultimoError;
+    return providerOk(
+      { ads: acumulados, nextCursor: cursor },
+      { calls: llamadas, fromCache: deCache && llamadas > 0 }
+    );
   }
 
   private async rawSearch(q: AdSearchQuery): Promise<ProviderResult<AdSearchResponse>> {
@@ -192,8 +229,14 @@ export class MetaAdLibraryProvider implements IntelligenceProvider {
       lastSeenAt: stop,
       active: stop === null,
       activeDays: null,
-      landingUrl: null,
+      // Meta NO da la URL de destino, pero sí el dominio que se enseña en el
+      // anuncio (`ad_creative_link_captions`). Es menos, y es cierto: se
+      // guarda eso en vez de inventar una URL completa que nadie ha visto.
+      landingUrl: captionDomain(row.ad_creative_link_captions),
       previewUrl: typeof row.ad_snapshot_url === "string" ? row.ad_snapshot_url : null,
+      // La Ad Library no entrega la imagen del creativo por API. Dejarlo en
+      // null y que la ficha lo diga es mejor que enseñar un icono genérico
+      // haciéndolo pasar por el producto.
       imageUrl: null,
       creativeIds: [],
       priceAmount: null,
@@ -221,4 +264,58 @@ export function assertCommercialScope(country: string): string | null {
 function sanitizeGraphError(msg: string | null): string {
   if (!msg) return "error desconocido de la Ad Library";
   return msg.replace(/access_token=[^&\s]+/gi, "access_token=<oculto>").slice(0, 300);
+}
+
+/**
+ * `ad_creative_link_captions` trae lo que el anuncio ENSEÑA como destino:
+ * normalmente el dominio ("casamable.es"). Se normaliza a host limpio.
+ */
+export function captionDomain(value: unknown): string | null {
+  const lista = Array.isArray(value) ? value : [];
+  for (const v of lista) {
+    if (typeof v !== "string") continue;
+    const dominio = normalizeDomain(v);
+    if (dominio) return dominio;
+  }
+  return null;
+}
+
+export function normalizeDomain(raw: string): string | null {
+  const t = raw.trim().toLowerCase();
+  if (!t) return null;
+  try {
+    const url = new URL(t.includes("://") ? t : `https://${t}`);
+    const host = url.hostname.replace(/^www\./, "");
+    // Un caption puede ser texto suelto ("Compra ya"): sin punto no es dominio.
+    return host.includes(".") && !host.includes(" ") ? host : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enlace a la Biblioteca de Anuncios para que Pedro vea los anuncios de
+ * verdad, en Meta, con un clic. Es pública y no lleva token.
+ */
+export function adLibrarySearchUrl(term: string, country = "ES"): string {
+  const p = new URLSearchParams({
+    active_status: "active",
+    ad_type: "all",
+    country: country.toUpperCase(),
+    q: term.slice(0, 100),
+    search_type: "keyword_unordered",
+    media_type: "all",
+  });
+  return `https://www.facebook.com/ads/library/?${p.toString()}`;
+}
+
+/** Enlace a todos los anuncios de una página concreta. */
+export function adLibraryPageUrl(pageId: string, country = "ES"): string {
+  const p = new URLSearchParams({
+    active_status: "active",
+    ad_type: "all",
+    country: country.toUpperCase(),
+    view_all_page_id: pageId,
+  });
+  return `https://www.facebook.com/ads/library/?${p.toString()}`;
 }

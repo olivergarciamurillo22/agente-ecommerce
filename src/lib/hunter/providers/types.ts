@@ -48,6 +48,12 @@ export interface AdSearchQuery {
   activeOnly?: boolean;
   minDaysActive?: number;
   limit?: number;
+  /**
+   * Cuántas páginas recorrer en una sola llamada. Meta devuelve 25 por
+   * página aunque pidas 100, y quedarse en la primera hace que un mercado
+   * activo parezca muerto.
+   */
+  pages?: number;
   /** Token opaco de paginación del proveedor. */
   cursor?: string | null;
 }

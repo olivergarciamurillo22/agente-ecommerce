@@ -804,8 +804,8 @@ export function migrateOrderAttribution(db: Database.Database): void {
  * (`hunter/schema.ts`) porque son 12 tablas y meterlas aquí enterraría el
  * resto del esquema. ADITIVA: ni una columna de las tablas existentes.
  */
-export { migrateHunter } from "./hunter/schema";
-import { migrateHunter as migrateHunterSchema } from "./hunter/schema";
+export { migrateHunter, migrateHunterRunDetail } from "./hunter/schema";
+import { migrateHunter as migrateHunterSchema, migrateHunterRunDetail as migrateHunterRunDetailSchema } from "./hunter/schema";
 
 export function migrateWorkspaceAuth(db: Database.Database): void {
   db.exec(`
@@ -1497,6 +1497,9 @@ function build() {
   migrateOrderAttribution(db);
   migrateWorkspaceAuth(db);
   migrateHunterSchema(db);
+  // Migración 20: etapas, ETA e informe de cada búsqueda. Aditiva sobre las
+  // tablas del radar; ninguna tabla del negocio se toca.
+  migrateHunterRunDetailSchema(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1666,7 +1669,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 19;
+export const SCHEMA_VERSION = 20;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),

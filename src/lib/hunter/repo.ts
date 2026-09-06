@@ -6,7 +6,8 @@
 // ============================================================
 
 import { systemDbHandle } from "../db";
-import { emptySignals, type HunterAd, type OpportunityStatus, type ProductOpportunity, type ProductSignals, type SearchRun, type ScoreKey, type ScoreValue } from "./types";
+import { emptySignals, type HunterAd, type OpportunityStatus, type ProductOpportunity, type ProductSignals, type RadarReport, type SearchRun, type ScoreKey, type ScoreValue } from "./types";
+import { initialStages, STAGES, stageDef, type StageKey, type StageState } from "./stages";
 import { emptyScoreMap } from "./scoring/opportunity";
 
 function db() {
@@ -30,22 +31,99 @@ export function createSearchRun(run: SearchRun, createdBy: string | null): void 
   db()
     .prepare(
       `INSERT INTO hunter_searches (id, prompt, filters_json, queries_json, state, progress_json,
-         provider_calls, credits_spent, fixture_mode, created_by, started_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         provider_calls, credits_spent, fixture_mode, created_by, started_at,
+         title, stage, current_message, estimate_seconds, estimated_finish_at, provider_mode, coverage, plan_json)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
     )
     .run(
       run.id, run.prompt, json(run.filters), json(run.queries), run.state, json(run.progress),
-      run.providerCalls, run.creditsSpent, run.fixtureMode ? 1 : 0, createdBy, run.startedAt
+      run.providerCalls, run.creditsSpent, run.fixtureMode ? 1 : 0, createdBy, run.startedAt,
+      run.title, run.stage, run.currentMessage, run.estimateSeconds, run.estimatedFinishAt,
+      run.providerMode, run.coverage, json(run.plan)
     );
+  // Las seis etapas se siembran ya en 'pending'. Así la pantalla de progreso
+  // enseña el recorrido completo desde el primer instante en vez de ir
+  // apareciendo etapa a etapa, que se lee como si el sistema improvisara.
+  saveStages(run.id, run.stages.length > 0 ? run.stages : initialStages());
 }
 
 export function updateSearchRun(run: SearchRun): void {
   db()
     .prepare(
       `UPDATE hunter_searches SET state=?, progress_json=?, queries_json=?, error=?,
-         provider_calls=?, credits_spent=?, finished_at=? WHERE id=?`
+         provider_calls=?, credits_spent=?, finished_at=?,
+         title=?, stage=?, current_message=?, estimate_seconds=?, estimated_finish_at=?,
+         duration_ms=?, provider_mode=?, coverage=?, plan_json=?, report_json=?
+       WHERE id=?`
     )
-    .run(run.state, json(run.progress), json(run.queries), run.error, run.providerCalls, run.creditsSpent, run.finishedAt, run.id);
+    .run(
+      run.state, json(run.progress), json(run.queries), run.error, run.providerCalls, run.creditsSpent,
+      run.finishedAt, run.title, run.stage, run.currentMessage, run.estimateSeconds, run.estimatedFinishAt,
+      run.durationMs, run.providerMode, run.coverage, json(run.plan), json(run.report), run.id
+    );
+  if (run.stages.length > 0) saveStages(run.id, run.stages);
+}
+
+// --- Etapas ---
+
+export function saveStages(searchId: string, stages: StageState[]): void {
+  const stmt = db().prepare(
+    `INSERT INTO hunter_search_stages (search_id, stage_key, position, status, summary, counters_json, started_at, completed_at)
+     VALUES (?,?,?,?,?,?,?,?)
+     ON CONFLICT(search_id, stage_key) DO UPDATE SET
+       status=excluded.status, summary=excluded.summary, counters_json=excluded.counters_json,
+       started_at=excluded.started_at, completed_at=excluded.completed_at`
+  );
+  const tx = db().transaction(() => {
+    stages.forEach((st, i) => {
+      stmt.run(searchId, st.key, i, st.status, st.summary, json(st.counters), st.startedAt, st.completedAt);
+    });
+  });
+  tx();
+}
+
+export function getStages(searchId: string): StageState[] {
+  const rows = db()
+    .prepare("SELECT * FROM hunter_search_stages WHERE search_id = ? ORDER BY position")
+    .all(searchId) as Record<string, unknown>[];
+  if (rows.length === 0) return initialStages();
+  return rows.map((r) => {
+    const def = stageDef(String(r.stage_key) as StageKey);
+    return {
+      key: def.key,
+      label: def.label,
+      hint: def.hint,
+      status: (r.status as StageState["status"]) ?? "pending",
+      startedAt: r.started_at === null || r.started_at === undefined ? null : Number(r.started_at),
+      completedAt: r.completed_at === null || r.completed_at === undefined ? null : Number(r.completed_at),
+      summary: (r.summary as string) ?? null,
+      counters: parse(r.counters_json as string, {} as Record<string, number>),
+    };
+  });
+}
+
+/**
+ * Segundos que costó, de media, cada consulta en las búsquedas anteriores
+ * que TERMINARON. Es lo que convierte el tiempo estimado en una medición en
+ * vez de una corazonada.
+ *
+ * Se exigen 2 muestras: con una sola, una búsqueda rarísima marcaría el
+ * ritmo de todas las siguientes.
+ */
+export function historicalSecondsPerQuery(): number | null {
+  const row = db()
+    .prepare(
+      `SELECT AVG(CAST(duration_ms AS REAL) / 1000.0 / MAX(json_array_length(queries_json), 1)) AS media,
+              COUNT(*) AS n
+         FROM (SELECT duration_ms, queries_json FROM hunter_searches
+                WHERE duration_ms IS NOT NULL AND duration_ms > 0
+                  AND state IN ('complete','partial')
+                ORDER BY started_at DESC LIMIT 10)`
+    )
+    .get() as { media: number | null; n: number } | undefined;
+  if (!row || !row.media || row.n < 2) return null;
+  const media = Number(row.media);
+  return Number.isFinite(media) && media > 0 ? media : null;
 }
 
 export function getSearchRun(id: string): SearchRun | null {
@@ -59,8 +137,10 @@ export function listSearchRuns(limit = 25): SearchRun[] {
 }
 
 function rowToRun(r: Record<string, unknown>): SearchRun {
+  const id = String(r.id);
   return {
-    id: String(r.id),
+    id,
+    title: (r.title as string) ?? null,
     prompt: (r.prompt as string) ?? null,
     filters: parse(r.filters_json as string, {} as SearchRun["filters"]),
     queries: parse(r.queries_json as string, [] as string[]),
@@ -75,6 +155,16 @@ function rowToRun(r: Record<string, unknown>): SearchRun {
     providerCalls: Number(r.provider_calls ?? 0),
     creditsSpent: r.credits_spent === null || r.credits_spent === undefined ? null : Number(r.credits_spent),
     fixtureMode: Number(r.fixture_mode ?? 0) === 1,
+    stages: getStages(id),
+    stage: (r.stage as StageKey) ?? null,
+    currentMessage: (r.current_message as string) ?? null,
+    estimateSeconds: r.estimate_seconds === null || r.estimate_seconds === undefined ? null : Number(r.estimate_seconds),
+    estimatedFinishAt: r.estimated_finish_at === null || r.estimated_finish_at === undefined ? null : Number(r.estimated_finish_at),
+    durationMs: r.duration_ms === null || r.duration_ms === undefined ? null : Number(r.duration_ms),
+    providerMode: (r.provider_mode as string) ?? null,
+    coverage: (r.coverage as SearchRun["coverage"]) ?? "unknown",
+    plan: parse(r.plan_json as string, null as SearchRun["plan"]),
+    report: parse(r.report_json as string, null as RadarReport | null),
   };
 }
 
@@ -156,8 +246,9 @@ export function upsertProduct(op: ProductOpportunity, searchId: string | null): 
       `INSERT INTO hunter_products (id, canonical_name, category, description, hero_image_url,
          observed_price_min, observed_price_max, supplier_cost_min, supplier_cost_max, currency,
          first_seen_at, last_seen_at, status, source_confidence, cluster_confidence,
-         signals_json, scores_json, features_json, economics_json, summary_json, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         signals_json, scores_json, features_json, economics_json, summary_json, updated_at,
+         primary_provider, images_json, landing_domain)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          canonical_name=CASE WHEN hunter_products.manual_overrides_json IS NULL
                              THEN excluded.canonical_name ELSE hunter_products.canonical_name END,
@@ -171,13 +262,17 @@ export function upsertProduct(op: ProductOpportunity, searchId: string | null): 
          features_json=excluded.features_json,
          economics_json=excluded.economics_json,
          summary_json=excluded.summary_json,
+         primary_provider=excluded.primary_provider,
+         images_json=excluded.images_json,
+         landing_domain=excluded.landing_domain,
          updated_at=excluded.updated_at`
     )
     .run(
       op.id, op.canonicalName, op.category, op.description, op.heroImageUrl,
       op.observedPriceMin, op.observedPriceMax, op.supplierCostMin, op.supplierCostMax, op.currency,
       op.firstSeenAt, op.lastSeenAt, op.status, op.sourceConfidence, op.clusterConfidence,
-      json(op.signals), json(op.scores), json(op.features), json(op.economics), json(op.summary), now
+      json(op.signals), json(op.scores), json(op.features), json(op.economics), json(op.summary), now,
+      op.primaryProvider, json(op.images), op.landingDomain
     );
 
   const linkAd = db().prepare(
@@ -251,6 +346,14 @@ function rowToProduct(r: Record<string, unknown>, adIds: string[], providers: Pr
     adIds,
     providers,
     summary: parse(r.summary_json as string, null as ProductOpportunity["summary"]),
+    primaryProvider: (r.primary_provider as ProductOpportunity["primaryProvider"]) ?? null,
+    images: parse(r.images_json as string, [] as string[]),
+    landingDomain: (r.landing_domain as string) ?? null,
+    // Enlace y veredicto NO se guardan: se derivan. Así una búsqueda vieja
+    // que se vuelve a abrir se juzga con las reglas de HOY, y cambiar un
+    // umbral no obliga a reescribir la tabla entera.
+    adLibraryUrl: null,
+    recommendation: null,
   };
 }
 
