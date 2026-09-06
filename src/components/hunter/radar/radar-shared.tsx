@@ -20,6 +20,7 @@
 // ============================================================
 
 import type { ReactNode } from "react";
+import { formatEuro, formatInt } from "@/components/ui";
 import type { MetricProvenance } from "@/lib/hunter/provenance";
 import type { OpportunityBadge, Recommendation, ScoreValue } from "@/lib/hunter/types";
 import { BADGE_LABEL } from "@/lib/hunter/types";
@@ -104,7 +105,7 @@ export function scoreLabel(v: ScoreValue, kind: "normal" | "saturation" = "norma
 
 /** Concordancia de número. «1 anunciantes» delata software sin terminar. */
 export function plural(n: number, singular: string, plural_: string): string {
-  return `${new Intl.NumberFormat("es-ES").format(n)} ${n === 1 ? singular : plural_}`;
+  return `${formatInt(n)} ${n === 1 ? singular : plural_}`;
 }
 
 /** Escala verbal. Un «72» sin referencia no significa nada para nadie. */
@@ -221,9 +222,13 @@ export function FixtureBanner() {
   );
 }
 
-export function money(n: number | null, currency = "EUR"): string {
-  if (n === null || !Number.isFinite(n)) return UNKNOWN;
-  return new Intl.NumberFormat("es-ES", { style: "currency", currency, maximumFractionDigits: 2 }).format(n);
+// ── Formato ──
+// Se delega en los formateadores del panel (`ui.tsx`) en vez de tener otros
+// propios. Dos implementaciones del mismo formato es como acaban dos
+// pantallas del mismo panel enseñando "29,9 €" y "29,90 €".
+
+export function money(n: number | null, _currency = "EUR"): string {
+  return n === null || !Number.isFinite(n) ? UNKNOWN : formatEuro(n);
 }
 
 export function pct(n: number | null): string {
@@ -231,7 +236,7 @@ export function pct(n: number | null): string {
 }
 
 export function miles(n: number | null | undefined): string {
-  return n === null || n === undefined || !Number.isFinite(n) ? "—" : new Intl.NumberFormat("es-ES").format(n);
+  return formatInt(n);
 }
 
 // ------------------------------------------------------------

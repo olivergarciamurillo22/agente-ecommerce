@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HunterFilters } from "@/lib/hunter/types";
 import type { RadarReadiness } from "@/lib/hunter/providers/registry";
+import { Card, PrimaryButton, TextButton } from "@/components/ui";
 import { IconFilter, IconSearch } from "@/components/icons";
 
 export interface PlanPreview {
@@ -152,23 +153,22 @@ export default function RadarHome({
             debajo. En una sola fila de 390 px, "Buscar oportunidades" partía
             en dos líneas y el botón quedaba deforme. */}
         <div className="flex flex-col-reverse gap-2 px-3 pb-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-          <button
-            type="button"
-            onClick={onOpenFilters}
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-11 sm:h-9 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-          >
+          <TextButton onClick={onOpenFilters} className="h-11 justify-center px-2.5 text-brand-muted sm:h-9">
             <IconFilter size={16} />
             Ajustar búsqueda
-          </button>
-          <button
-            type="button"
+          </TextButton>
+          {/* El botón del panel, con el alto de acción principal. Se le sube
+              el tamaño porque aquí ES la acción de la pantalla, pero el
+              color, el foco y el estado ocupado son los de siempre. */}
+          <PrimaryButton
             onClick={onSearch}
             disabled={!puedeBuscar}
-            className="inline-flex w-full sm:w-auto items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-brand-gold px-5 h-12 sm:h-11 text-[15px] sm:text-[14px] font-semibold text-white hover:bg-brand-gold-soft disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+            busy={busy}
+            className="w-full whitespace-nowrap px-5 sm:w-auto md:h-11"
           >
-            <IconSearch size={17} />
+            {!busy && <IconSearch size={16} />}
             Buscar oportunidades
-          </button>
+          </PrimaryButton>
         </div>
       </div>
 
@@ -201,7 +201,7 @@ export default function RadarHome({
 
       {/* Vista previa: la frase, no el JSON */}
       {preview && (
-        <div className="mt-6 rounded-xl border border-brand-border bg-brand-surface-subtle px-4 py-3.5">
+        <Card className="mt-6 bg-brand-surface-subtle px-4 py-3.5">
           <p className="text-[14px] leading-relaxed">{preview.sentence}</p>
           {preview.notes.length > 0 && (
             <p className="mt-1.5 text-[12px] text-amber-800">{preview.notes[0]}</p>
@@ -246,7 +246,7 @@ export default function RadarHome({
               </div>
             </div>
           )}
-        </div>
+        </Card>
       )}
 
       {error && (

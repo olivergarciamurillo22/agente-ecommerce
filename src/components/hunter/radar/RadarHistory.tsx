@@ -13,6 +13,7 @@
 
 import type { SearchRun } from "@/lib/hunter/types";
 import { formatDuration } from "@/lib/hunter/stages";
+import { Card, EmptyState, PageHeader, PrimaryButton } from "@/components/ui";
 import { IconChevronRight, IconSearch } from "@/components/icons";
 import { miles } from "./radar-shared";
 
@@ -35,31 +36,32 @@ export default function RadarHistory({
 }) {
   if (runs.length === 0) {
     return (
-      <div className="mx-auto w-full max-w-[820px] px-4 md:px-6 py-16 text-center">
-        <h2 className="text-[17px] font-semibold">Todavía no has hecho ninguna búsqueda</h2>
-        <p className="mx-auto mt-2 max-w-[44ch] text-[13.5px] leading-relaxed text-brand-muted">
-          Cuando lances la primera, aquí quedará guardada con su informe: podrás volver a abrirla tal y como salió.
-        </p>
-        <button
-          type="button"
-          onClick={onNewSearch}
-          className="mt-5 inline-flex items-center gap-2 rounded-xl bg-brand-gold px-5 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
-        >
-          <IconSearch size={16} />
-          Buscar oportunidades
-        </button>
+      <div className="mx-auto w-full max-w-[900px] px-4 md:px-8 py-8">
+        <Card>
+          <EmptyState
+            icon={<IconSearch size={26} />}
+            title="Todavía no has hecho ninguna búsqueda"
+            hint="Cuando lances la primera, aquí quedará guardada con su informe: podrás volver a abrirla tal y como salió."
+          />
+          <div className="-mt-4 flex justify-center pb-8">
+            <PrimaryButton onClick={onNewSearch}>
+              <IconSearch size={15} />
+              Buscar oportunidades
+            </PrimaryButton>
+          </div>
+        </Card>
       </div>
     );
   }
 
   return (
     <div className="mx-auto w-full max-w-[900px] px-4 md:px-8 py-8">
-      <h1 className="text-[22px] font-semibold tracking-tight">Historial</h1>
-      <p className="mt-1 text-[13px] text-brand-muted">
-        Cada búsqueda se guarda con lo que preguntaste y lo que salió.
-      </p>
+      <PageHeader
+        title="Historial"
+        description="Cada búsqueda se guarda con lo que preguntaste y lo que salió."
+      />
 
-      <ul className="mt-5 divide-y divide-brand-border rounded-xl border border-brand-border bg-brand-surface">
+      <ul className="mt-5 divide-y divide-brand-border overflow-hidden rounded-2xl border border-brand-border bg-brand-surface shadow-[var(--shadow-card)]">
         {runs.map((r) => {
           const e = ESTADO[r.state] ?? ESTADO.queued;
           const fecha = new Date(r.startedAt * 1000);

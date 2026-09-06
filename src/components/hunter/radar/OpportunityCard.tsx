@@ -15,10 +15,16 @@
 //
 // Las acciones secundarias viven en un menú. Diez botones en una tarjeta no
 // dan diez opciones: quitan la principal.
+//
+// La CAJA y los BOTONES son los del panel (`Card`, `PrimaryButton`), no unos
+// parecidos escritos aquí. Escribir "casi los mismos" es como se acaba con
+// seis radios de borde y cuatro alturas de botón en la misma aplicación — y
+// además, lo que mejore en el panel no llegaría nunca a esta pantalla.
 // ============================================================
 
 import { useEffect, useRef, useState } from "react";
 import type { ProductOpportunity } from "@/lib/hunter/types";
+import { Card, PrimaryButton } from "@/components/ui";
 import { IconChevronRight, IconMore } from "@/components/icons";
 import { ProductCover, ScoreBar, VerdictChip, miles, money, plural, scoreLabel } from "./radar-shared";
 
@@ -39,7 +45,7 @@ interface CardProps {
 export function OpportunityHero({ op, why, onOpen, onAction, rank }: CardProps) {
   const opp = op.scores.opportunity;
   return (
-    <article className="group flex flex-col rounded-2xl border border-brand-border bg-brand-surface overflow-hidden hover:border-brand-border-strong transition-colors">
+    <Card className="group flex flex-col overflow-hidden hover:border-brand-border-strong transition-colors">
       <button type="button" onClick={onOpen} className="text-left" aria-label={`Abrir ${op.canonicalName}`}>
         <div className="relative">
           <ProductCover name={op.canonicalName} imageUrl={op.heroImageUrl ?? op.images[0] ?? null} size="lg" />
@@ -80,18 +86,14 @@ export function OpportunityHero({ op, why, onOpen, onAction, rank }: CardProps) 
         <SignalRow op={op} />
 
         <div className="mt-3.5 flex items-center gap-2">
-          <button
-            type="button"
-            onClick={onOpen}
-            className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl bg-brand-gold px-4 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
-          >
+          <PrimaryButton onClick={onOpen} className="flex-1">
             Ver a fondo
-            <IconChevronRight size={16} />
-          </button>
+            <IconChevronRight size={15} />
+          </PrimaryButton>
           <ActionMenu onAction={onAction} status={op.status} />
         </div>
       </div>
-    </article>
+    </Card>
   );
 }
 
@@ -102,7 +104,7 @@ export function OpportunityHero({ op, why, onOpen, onAction, rank }: CardProps) 
 export function OpportunityCard({ op, why, onOpen, onAction }: CardProps) {
   const opp = op.scores.opportunity;
   return (
-    <article className="group flex gap-3.5 rounded-xl border border-brand-border bg-brand-surface p-3 hover:border-brand-border-strong transition-colors">
+    <Card className="group flex gap-3.5 p-3 hover:border-brand-border-strong transition-colors">
       <button
         type="button"
         onClick={onOpen}
@@ -131,7 +133,7 @@ export function OpportunityCard({ op, why, onOpen, onAction }: CardProps) {
         <p className="mt-1 text-[12.5px] leading-relaxed text-brand-muted line-clamp-2">{why}</p>
         <SignalRow op={op} compact />
       </div>
-    </article>
+    </Card>
   );
 }
 
@@ -199,12 +201,12 @@ function ActionMenu({ onAction, status }: { onAction: (a: CardAction) => void; s
         onClick={() => setAbierto((v) => !v)}
         aria-label="Más acciones"
         aria-expanded={abierto}
-        className="flex h-11 w-11 md:h-9 md:w-9 items-center justify-center rounded-xl border border-brand-border text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+        className="flex h-11 w-11 md:h-9 md:w-9 shrink-0 items-center justify-center rounded-lg border border-brand-border bg-brand-surface text-brand-muted hover:border-brand-border-strong hover:bg-brand-surface-2 hover:text-brand-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
       >
         <IconMore size={16} />
       </button>
       {abierto && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-xl border border-brand-border bg-brand-surface p-1 shadow-lg">
+        <div className="absolute right-0 top-full z-20 mt-1 w-56 rounded-lg border border-brand-border bg-brand-surface p-1 shadow-[var(--shadow-float)]">
           {ACCIONES.map((a) => (
             <button
               key={a.id}

@@ -25,6 +25,7 @@
 
 import { useOverlayBack } from "@/components/useBackable";
 import type { HunterFilters } from "@/lib/hunter/types";
+import { PrimaryButton, TextButton } from "@/components/ui";
 import { IconClose } from "@/components/icons";
 
 const PAISES: Array<[string, string]> = [
@@ -162,20 +163,8 @@ export default function RadarFilters({
         </div>
 
         <footer className="flex shrink-0 items-center justify-between border-t border-brand-border px-5 py-3 pb-[max(env(safe-area-inset-bottom),12px)]">
-          <button
-            type="button"
-            onClick={onReset}
-            className="rounded-lg px-3 h-10 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-          >
-            Quitar todos
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded-xl bg-brand-gold px-5 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
-          >
-            Listo
-          </button>
+          <TextButton onClick={onReset}>Quitar todos</TextButton>
+          <PrimaryButton onClick={onClose}>Listo</PrimaryButton>
         </footer>
       </div>
     </div>

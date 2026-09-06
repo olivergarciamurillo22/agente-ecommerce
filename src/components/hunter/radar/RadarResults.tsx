@@ -21,6 +21,7 @@
 
 import { useMemo, useState } from "react";
 import type { ProductOpportunity, SearchRun, TodayAction } from "@/lib/hunter/types";
+import { Card, EmptyState, GhostButton, PrimaryButton, SectionTitle, SelectInput } from "@/components/ui";
 import { IconCheck, IconClock, IconSearch, IconWarning } from "@/components/icons";
 import { OpportunityCard, OpportunityHero, type CardAction } from "./OpportunityCard";
 import { FixtureBanner, miles } from "./radar-shared";
@@ -92,14 +93,10 @@ export default function RadarResults({
               {informe?.headline ?? run.title ?? "Resultados"}
             </h1>
           </div>
-          <button
-            type="button"
-            onClick={onNewSearch}
-            className="shrink-0 inline-flex items-center gap-1.5 rounded-xl border border-brand-border bg-brand-surface px-4 h-10 text-[13px] font-medium hover:bg-brand-surface-2 transition-colors"
-          >
+          <GhostButton onClick={onNewSearch} className="shrink-0">
             <IconSearch size={15} />
             Nueva búsqueda
-          </button>
+          </GhostButton>
         </div>
 
         {informe && informe.summary.length > 0 && (
@@ -124,8 +121,8 @@ export default function RadarResults({
       {/* Qué haría hoy */}
       {informe && informe.todayActions.length > 0 && (
         <section className="mt-8">
-          <h2 className="text-[15px] font-semibold tracking-tight">Qué haría hoy</h2>
-          <ol className="mt-3 divide-y divide-brand-border rounded-xl border border-brand-border bg-brand-surface">
+          <SectionTitle>Qué haría hoy</SectionTitle>
+          <ol className="divide-y divide-brand-border overflow-hidden rounded-2xl border border-brand-border bg-brand-surface shadow-[var(--shadow-card)]">
             {informe.todayActions.map((a, i) => {
               const Icono = VERBO_ICONO[a.verb] ?? IconCheck;
               const producto = a.productId ? porId.get(a.productId) : null;
@@ -158,8 +155,8 @@ export default function RadarResults({
       {/* Podio */}
       {top.length > 0 && (
         <section className="mt-10">
-          <h2 className="text-[15px] font-semibold tracking-tight">Las mejores oportunidades</h2>
-          <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <SectionTitle>Las mejores oportunidades</SectionTitle>
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {top.map((op, i) => (
               <OpportunityHero
                 key={op.id}
@@ -177,11 +174,11 @@ export default function RadarResults({
       {/* Para vigilar */}
       {vigilar.length > 0 && (
         <section className="mt-10">
-          <h2 className="text-[15px] font-semibold tracking-tight">Para vigilar</h2>
-          <p className="mt-0.5 text-[12.5px] text-brand-muted">
+          <SectionTitle>Para vigilar</SectionTitle>
+          <p className="-mt-2 mb-3 text-[12.5px] text-brand-muted">
             Interesantes, pero todavía sin lo suficiente para gastar en un test.
           </p>
-          <div className="mt-3 grid gap-2.5 lg:grid-cols-2">
+          <div className="grid gap-2.5 lg:grid-cols-2">
             {vigilar.map((op) => (
               <OpportunityCard key={op.id} op={op} why={why(op)} onOpen={() => onOpen(op)} onAction={(a) => onAction(op, a)} />
             ))}
@@ -192,29 +189,19 @@ export default function RadarResults({
       {/* El resto */}
       {resto.length > 0 && (
         <section className="mt-10">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 className="text-[15px] font-semibold tracking-tight">
-              Otras oportunidades <span className="text-brand-tertiary font-normal">({miles(resto.length)})</span>
-            </h2>
-            <div className="flex items-center gap-1.5">
-              <label htmlFor="radar-orden" className="text-[12px] text-brand-tertiary">
-                Ordenar por
-              </label>
-              <select
-                id="radar-orden"
+          <SectionTitle
+            right={
+              <SelectInput
+                label="Ordenar las oportunidades"
                 value={orden}
-                onChange={(e) => setOrden(e.target.value as Orden)}
-                className="h-9 rounded-lg border border-brand-border bg-brand-surface px-2 text-[13px] cursor-pointer"
-              >
-                {ORDENES.map((o) => (
-                  <option key={o.id} value={o.id}>
-                    {o.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="mt-3 grid gap-2.5 lg:grid-cols-2">
+                onChange={(v) => setOrden(v as Orden)}
+                options={ORDENES.map((o) => ({ value: o.id, label: o.label }))}
+              />
+            }
+          >
+            Otras oportunidades ({miles(resto.length)})
+          </SectionTitle>
+          <div className="grid gap-2.5 lg:grid-cols-2">
             {resto.map((op) => (
               <OpportunityCard key={op.id} op={op} why={why(op)} onOpen={() => onOpen(op)} onAction={(a) => onAction(op, a)} />
             ))}
@@ -224,9 +211,10 @@ export default function RadarResults({
 
       {/* Notas de mercado */}
       {informe && informe.marketNotes.length > 0 && (
-        <section className="mt-10 rounded-xl border border-brand-border bg-brand-surface-subtle px-5 py-4">
-          <h2 className="text-[13px] font-semibold uppercase tracking-[.08em] text-brand-tertiary">Lectura del mercado</h2>
-          <ul className="mt-2 space-y-1.5 text-[13.5px] leading-relaxed text-brand-muted">
+        <section className="mt-10">
+          <SectionTitle>Lectura del mercado</SectionTitle>
+          <Card className="px-5 py-4">
+          <ul className="space-y-1.5 text-[13.5px] leading-relaxed text-brand-muted">
             {informe.marketNotes.map((n, i) => (
               <li key={i}>· {n}</li>
             ))}
@@ -237,25 +225,25 @@ export default function RadarResults({
               interpretación, no.
             </p>
           )}
+          </Card>
         </section>
       )}
 
       {opportunities.length === 0 && (
-        <section className="mt-12 text-center">
-          <h2 className="text-[17px] font-semibold">No ha salido nada con esos criterios</h2>
-          <p className="mx-auto mt-2 max-w-[46ch] text-[13.5px] leading-relaxed text-brand-muted">
-            {run.progress.productsDetected > 0
-              ? `Se detectaron ${miles(run.progress.productsDetected)} productos, pero ninguno pasó tus filtros. Los que más descartan suelen ser el precio y el coste de proveedor.`
-              : "No hemos encontrado anuncios con ese vocabulario. Prueba con las palabras que usaría el anunciante, no las que usarías tú."}
-          </p>
-          <button
-            type="button"
-            onClick={onNewSearch}
-            className="mt-5 rounded-xl bg-brand-gold px-5 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
-          >
-            Probar otra búsqueda
-          </button>
-        </section>
+        <Card className="mt-10">
+          <EmptyState
+            icon={<IconSearch size={26} />}
+            title="No ha salido nada con esos criterios"
+            hint={
+              run.progress.productsDetected > 0
+                ? `Se detectaron ${miles(run.progress.productsDetected)} productos, pero ninguno pasó tus filtros. Los que más descartan suelen ser el precio y el coste de proveedor.`
+                : "No hemos encontrado anuncios con ese vocabulario. Prueba con las palabras que usaría el anunciante, no las que usarías tú."
+            }
+          />
+          <div className="-mt-4 flex justify-center pb-8">
+            <PrimaryButton onClick={onNewSearch}>Probar otra búsqueda</PrimaryButton>
+          </div>
+        </Card>
       )}
     </div>
   );

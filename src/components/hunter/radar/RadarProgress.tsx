@@ -19,6 +19,7 @@
 
 import type { SearchRun } from "@/lib/hunter/types";
 import { formatDuration } from "@/lib/hunter/stages";
+import { Card, GhostButton } from "@/components/ui";
 import { IconCheck, IconClose, IconWarning } from "@/components/icons";
 import { miles } from "./radar-shared";
 
@@ -55,9 +56,9 @@ export default function RadarProgress({
           type="button"
           onClick={onCancelView}
           aria-label="Cerrar esta vista"
-          className="shrink-0 rounded-lg p-2 text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+          className="shrink-0 rounded-lg border border-brand-border p-2 text-brand-muted hover:border-brand-border-strong hover:bg-brand-surface-2 hover:text-brand-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
         >
-          <IconClose size={18} />
+          <IconClose size={16} />
         </button>
       </div>
 
@@ -92,7 +93,8 @@ export default function RadarProgress({
       )}
 
       {/* Etapas */}
-      <ol className="mt-8 space-y-0.5">
+      <Card className="mt-8 px-2 py-2">
+      <ol className="space-y-0.5">
         {run.stages.map((s) => {
           const activa = s.status === "active";
           const hecha = s.status === "complete";
@@ -153,6 +155,7 @@ export default function RadarProgress({
           );
         })}
       </ol>
+      </Card>
 
       {run.progress.sourcesFailed.length > 0 && (
         <div className="mt-5 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
@@ -164,13 +167,7 @@ export default function RadarProgress({
       )}
 
       <div className="mt-8 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={onMinimize}
-          className="rounded-xl border border-brand-border bg-brand-surface px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
-        >
-          Seguir trabajando mientras tanto
-        </button>
+        <GhostButton onClick={onMinimize}>Seguir trabajando mientras tanto</GhostButton>
         <span className="text-[12px] text-brand-tertiary">
           La búsqueda sigue en el servidor. Te avisamos cuando esté.
         </span>

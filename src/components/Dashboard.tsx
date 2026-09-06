@@ -173,9 +173,14 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
     // El Cazador tiene dos destinos (Radar y Landing Studio) y hasta ahora
     // solo se propagaba por el hash. Al volver de Landing Studio al Cazador
     // la pestaña se quedaba pegada en Studio.
-    setHunterTab(r.area === "hunter" ? (r.hunterTab ?? "radar") : (h) => h);
+    if (r.hunterTab) setHunterTab(r.hunterTab);
     if (r.settingsTab) setSettingsTab(r.settingsTab);
-    if (r.followTab || r.growthTab || r.settingsTab || r.area === "hunter") setNavKey((k) => k + 1);
+    // El remonte SOLO cuando cambia la pestaña pedida, nunca por entrar en el
+    // área. Bumpear la clave en cada evento de hash remontaba el Cazador
+    // entero: cerrar la ficha de un producto disparaba un popstate y te
+    // devolvía a la pantalla inicial, perdiendo los resultados de una
+    // búsqueda que había tardado minutos.
+    if (r.followTab || r.growthTab || r.settingsTab || r.hunterTab) setNavKey((k) => k + 1);
     // Antes esto era SIEMPRE replaceState, y por eso "atrás" no devolvía a la
     // sección anterior: te sacaba de la aplicación. En el móvil, donde atrás
     // es un gesto del sistema, eso hacía que el panel se sintiera roto.

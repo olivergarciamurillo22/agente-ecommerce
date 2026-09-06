@@ -13669,6 +13669,71 @@ async function main(): Promise<void> {
     assert.match(dash, /hashOverride \?\? r\.hash/, "el hash del destino se respeta");
   });
 
+  await test("RADAR UX · cerrar la ficha no tira los resultados de la búsqueda", () => {
+    const dash = leerRadar("src/components/Dashboard.tsx");
+    // La clave de remonte SOLO puede subir cuando cambia la pestaña pedida.
+    // Subirla al entrar en el área hacía que cualquier evento de hash
+    // remontara el Cazador entero: cerrar la ficha de un producto dispara un
+    // popstate, y con eso se perdían los resultados de una búsqueda que
+    // había tardado minutos y gastado cuota de Meta.
+    assert.match(
+      dash,
+      /if \(r\.followTab \|\| r\.growthTab \|\| r\.settingsTab \|\| r\.hunterTab\) setNavKey/,
+      "el remonte va por pestaña pedida, no por área"
+    );
+    assert.ok(
+      !/setNavKey[\s\S]{0,80}r\.area === "hunter"/.test(dash),
+      "entrar en el Cazador no puede remontarlo"
+    );
+
+    const radar = leerRadar("src/components/hunter/radar/WinnerRadar.tsx");
+    // Y la ficha vuelve a los RESULTADOS, no al inicio: si volviera al
+    // principio, mirar un producto costaría repetir la búsqueda entera.
+    assert.match(radar, /setVista\("resultados"\)/, "cerrar la ficha devuelve a los resultados");
+  });
+
+  await test("RADAR UX · las pantallas usan las piezas del panel, no unas parecidas", () => {
+    // El fallo que esto evita: escribir un botón "casi igual" que
+    // `PrimaryButton` en cada pantalla nueva. Se acaba con seis radios de
+    // borde y cuatro alturas de botón en la misma aplicación, y lo que se
+    // mejore en el panel no llega nunca a estas pantallas.
+    const dir = "src/components/hunter/radar";
+    const ficheros = fs.readdirSync(path.join(process.cwd(), dir)).filter((f) => f.endsWith(".tsx"));
+
+    for (const f of ficheros) {
+      const code = leerRadar(`${dir}/${f}`);
+
+      // Nadie se dibuja su propio botón principal: ese color es de
+      // `PrimaryButton`, y con él vienen el foco, el estado ocupado y el
+      // deshabilitado.
+      const botonPropio = /<button[^>]*className="[^"]*bg-brand-gold/s.test(code);
+      assert.ok(!botonPropio, `${f}: botón principal a mano en vez de <PrimaryButton>`);
+
+      // Ni su propio formateador de dinero: dos implementaciones es como
+      // acaban dos pantallas enseñando "29,9 €" y "29,90 €".
+      assert.ok(
+        !/Intl\.NumberFormat\([^)]*style:\s*"currency"/.test(code),
+        `${f}: formatea euros por su cuenta en vez de usar formatEuro()`
+      );
+    }
+
+    // Y las pantallas grandes sí tiran de las piezas comunes.
+    for (const [f, pieza] of [
+      ["RadarResults.tsx", /from "@\/components\/ui"/],
+      ["RadarHistory.tsx", /PageHeader/],
+      ["OpportunityDetail.tsx", /TabBar/],
+      ["OpportunityCard.tsx", /PrimaryButton/],
+      ["RadarHome.tsx", /PrimaryButton/],
+      ["RadarFilters.tsx", /PrimaryButton/],
+      ["RadarProgress.tsx", /GhostButton/],
+    ] as Array<[string, RegExp]>) {
+      assert.match(leerRadar(`${dir}/${f}`), pieza, `${f} debe usar la pieza común`);
+    }
+
+    // El formateador de moneda del radar delega en el del panel.
+    assert.match(leerRadar(`${dir}/radar-shared.tsx`), /formatEuro/, "money() delega en formatEuro()");
+  });
+
   await test("RADAR UX · no se usan tokens de color que no existen", () => {
     // `brand-line` y `brand-fg` NUNCA han estado definidos en globals.css.
     // Estaban en 33 sitios del radar generando bordes invisibles: la clase se

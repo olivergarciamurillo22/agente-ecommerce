@@ -40,6 +40,7 @@ import { useOverlayBack } from "@/components/useBackable";
 import type { ProductOpportunity } from "@/lib/hunter/types";
 import { PRODUCT_FEATURE_LABEL } from "@/lib/hunter/types";
 import type { CreativeAnalysis } from "@/lib/hunter/intelligence";
+import { Card, EmptyState, GhostButton, PrimaryButton, SectionTitle, TabBar, TextButton } from "@/components/ui";
 import { IconBack, IconChevronRight } from "@/components/icons";
 import {
   Badge,
@@ -135,26 +136,13 @@ export default function OpportunityDetail({
             </div>
           </div>
 
-          <nav className="flex gap-0.5 overflow-x-auto" aria-label="Secciones del producto">
-            {PESTANAS.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                onClick={() => setTab(p.id)}
-                aria-current={tab === p.id}
-                className={`whitespace-nowrap border-b-2 px-3 py-2.5 text-[13px] font-medium transition-colors ${
-                  tab === p.id
-                    ? "border-brand-gold text-brand-text"
-                    : "border-transparent text-brand-tertiary hover:text-brand-text"
-                }`}
-              >
-                {p.label}
-                {p.id === "anuncios" && data.adCount > 0 && (
-                  <span className="ml-1 text-brand-tertiary tabular-nums">({miles(data.adCount)})</span>
-                )}
-              </button>
-            ))}
-          </nav>
+          <TabBar
+            tabs={PESTANAS}
+            value={tab}
+            onChange={setTab}
+            label="Secciones del producto"
+            counts={{ anuncios: data.adCount > 0 ? data.adCount : undefined }}
+          />
         </div>
       </div>
 
@@ -174,46 +162,24 @@ export default function OpportunityDetail({
       {/* ══ Acciones: fijas abajo, siempre alcanzables ══ */}
       <div className="shrink-0 border-t border-brand-border bg-brand-surface">
         <div className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center gap-2 px-4 md:px-8 py-3">
-          <button
-            type="button"
-            onClick={() => onAction("test")}
-            className="rounded-xl bg-brand-gold px-4 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
-          >
-            Preparar test
-          </button>
-          <button
-            type="button"
-            onClick={() => onAction("watch")}
-            className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
-          >
-            Vigilar
-          </button>
-          <button
-            type="button"
-            onClick={() => onAction("save")}
-            className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
-          >
-            Guardar
-          </button>
+          <PrimaryButton onClick={() => onAction("test")}>Preparar test</PrimaryButton>
+          <GhostButton onClick={() => onAction("watch")}>Vigilar</GhostButton>
+          <GhostButton onClick={() => onAction("save")}>Guardar</GhostButton>
           <div className="flex-1" />
           {op.adLibraryUrl && (
             <a
               href={op.adLibraryUrl}
               target="_blank"
               rel="noreferrer noopener"
-              className="inline-flex items-center gap-1 rounded-xl border border-brand-border px-3 h-11 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+              className="inline-flex h-11 md:h-9 items-center gap-1 rounded-lg border border-brand-border bg-brand-surface px-3 text-[13px] font-medium text-brand-text hover:border-brand-border-strong hover:bg-brand-surface-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
             >
               Ver en Meta
               <IconChevronRight size={14} />
             </a>
           )}
-          <button
-            type="button"
-            onClick={() => onAction("discard")}
-            className="rounded-xl px-3 h-11 text-[13px] text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-          >
+          <TextButton onClick={() => onAction("discard")} className="px-2 text-brand-tertiary">
             Descartar
-          </button>
+          </TextButton>
         </div>
       </div>
     </div>
@@ -224,16 +190,20 @@ export default function OpportunityDetail({
 
 function Seccion({ title, children, hint }: { title: string; children: React.ReactNode; hint?: string }) {
   return (
-    <section className="mb-6">
-      <h3 className="text-[12px] font-semibold uppercase tracking-[.10em] text-brand-tertiary">{title}</h3>
-      {hint && <p className="mt-0.5 text-[12px] text-brand-tertiary">{hint}</p>}
-      <div className="mt-2">{children}</div>
+    <section className="mb-7">
+      <SectionTitle>{title}</SectionTitle>
+      {hint && <p className="-mt-2 mb-2 text-[12px] text-brand-tertiary">{hint}</p>}
+      {children}
     </section>
   );
 }
 
-function Vacio({ children }: { children: React.ReactNode }) {
-  return <p className="text-[13px] text-brand-tertiary">{children}</p>;
+function Vacio({ titulo, children }: { titulo: string; children?: string }) {
+  return (
+    <Card>
+      <EmptyState title={titulo} hint={children} />
+    </Card>
+  );
 }
 
 function Resumen({ data }: { data: DetailPayload }) {
@@ -251,14 +221,14 @@ function Resumen({ data }: { data: DetailPayload }) {
       </Seccion>
 
       <Seccion title="Puntuaciones">
-        <div className="max-w-[560px] rounded-xl border border-brand-border bg-brand-surface px-4 py-3">
+        <Card className="max-w-[560px] px-4 py-3">
           <ScoreBar label="Mercado" value={op.scores.market.score} word={scoreLabel(op.scores.market)} />
           <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreLabel(op.scores.momentum)} tone="good" />
           <ScoreBar label="Saturación" value={op.scores.saturation.score} word={scoreLabel(op.scores.saturation, "saturation")} tone="warn" />
           <ScoreBar label="Señal creativa" value={op.scores.creative_investment.score} word={scoreLabel(op.scores.creative_investment)} />
           <ScoreBar label="Producto" value={op.scores.product.score} word={scoreLabel(op.scores.product)} />
           <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreLabel(op.scores.casamable)} />
-        </div>
+        </Card>
       </Seccion>
 
       {op.summary && (
@@ -313,7 +283,7 @@ function Resumen({ data }: { data: DetailPayload }) {
 
 function Anuncios({ data }: { data: DetailPayload }) {
   const [orden, setOrden] = useState<"antiguos" | "recientes" | "pagina">("antiguos");
-  if (data.ads.length === 0) return <Vacio>No hay anuncios guardados de este producto.</Vacio>;
+  if (data.ads.length === 0) return <Vacio titulo="Sin anuncios guardados">Los anuncios se guardan al ejecutar una búsqueda. Vuelve a lanzarla y aparecerán aquí.</Vacio>;
 
   const lista = [...data.ads].sort((a, b) => {
     if (orden === "pagina") return (a.advertiserName ?? "").localeCompare(b.advertiserName ?? "");
@@ -345,7 +315,7 @@ function Anuncios({ data }: { data: DetailPayload }) {
 
       <div className="grid gap-2.5 sm:grid-cols-2">
         {lista.map((a) => (
-          <article key={a.id} className="rounded-xl border border-brand-border bg-brand-surface p-3">
+          <Card key={a.id} className="p-3">
             <div className="flex items-start justify-between gap-2">
               <span className="text-[13px] font-medium truncate">{a.advertiserName ?? "Sin nombre"}</span>
               <span
@@ -379,7 +349,7 @@ function Anuncios({ data }: { data: DetailPayload }) {
                 </a>
               )}
             </div>
-          </article>
+          </Card>
         ))}
       </div>
     </>
@@ -388,7 +358,7 @@ function Anuncios({ data }: { data: DetailPayload }) {
 
 function Creatividades({ c }: { c: CreativeAnalysis }) {
   const vacio = c.hooks.length === 0 && c.angles.length === 0 && c.traits.length === 0;
-  if (vacio) return <Vacio>No hay suficiente texto de anuncios para leer los ángulos.</Vacio>;
+  if (vacio) return <Vacio titulo="Sin texto que analizar">Estos anuncios no traen copy, así que no hay ángulos ni ganchos que leer.</Vacio>;
   return (
     <>
       {c.dominantFormat && (
@@ -400,7 +370,7 @@ function Creatividades({ c }: { c: CreativeAnalysis }) {
         <Seccion title="Ganchos que más se repiten" hint="Primera frase de cada anuncio: es donde se juega la atención.">
           <ul className="space-y-1.5">
             {c.hooks.map((h, i) => (
-              <li key={i} className="rounded-lg border border-brand-border bg-brand-surface px-3 py-2 text-[13.5px] leading-relaxed">
+              <li key={i} className="rounded-lg border border-brand-border bg-brand-surface px-3 py-2 text-[13.5px] leading-relaxed shadow-[var(--shadow-card)]">
                 «{h}»
               </li>
             ))}
@@ -448,9 +418,9 @@ function Creatividades({ c }: { c: CreativeAnalysis }) {
 }
 
 function Competidores({ data }: { data: DetailPayload }) {
-  if (data.competitors.length === 0) return <Vacio>No hay anunciantes identificados.</Vacio>;
+  if (data.competitors.length === 0) return <Vacio titulo="Sin anunciantes identificados">Ninguno de los anuncios trae el nombre de la página que lo publica.</Vacio>;
   return (
-    <div className="overflow-x-auto">
+    <Card className="overflow-x-auto px-4 py-1">
       <table className="w-full min-w-[520px] text-[13px]">
         <thead>
           <tr className="border-b border-brand-border text-left text-[11px] uppercase tracking-[.08em] text-brand-tertiary">
@@ -483,7 +453,7 @@ function Competidores({ data }: { data: DetailPayload }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </Card>
   );
 }
 
@@ -494,9 +464,8 @@ function Evolucion({ data }: { data: DetailPayload }) {
   if (h.length < 2) {
     return (
       <>
-        <Vacio>
-          Solo tenemos una foto de este producto. La tendencia necesita al menos dos: repite la búsqueda dentro de unos
-          días —o ponlo en Vigilar— y aquí saldrá la evolución.
+        <Vacio titulo="Todavía no hay tendencia">
+          Solo tenemos una foto de este producto. La tendencia necesita al menos dos: repite la búsqueda dentro de unos días —o ponlo en Vigilar— y aquí saldrá la evolución.
         </Vacio>
         <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Anuncios activos hoy" value={miles(s.activeAds)} />
@@ -515,7 +484,7 @@ function Evolucion({ data }: { data: DetailPayload }) {
   return (
     <>
       <Seccion title="Actividad" hint={`${h.length} fotos guardadas`}>
-        <div className="flex h-24 items-end gap-1 rounded-xl border border-brand-border bg-brand-surface px-3 py-3">
+        <Card className="flex h-24 items-end gap-1 px-3 py-3">
           {h.map((p) => (
             <div
               key={p.takenAt}
@@ -524,7 +493,7 @@ function Evolucion({ data }: { data: DetailPayload }) {
               style={{ height: `${Math.max(4, (p.signals.activeAds / max) * 100)}%` }}
             />
           ))}
-        </div>
+        </Card>
       </Seccion>
 
       <Seccion title="Cambio en el periodo">
@@ -563,9 +532,8 @@ function Economia({ data }: { data: DetailPayload }) {
   const tp = data.testPlan;
   if (!e) {
     return (
-      <Vacio>
-        Sin coste de proveedor no se puede calcular nada de esto. Dropi no tiene API pública, así que ese dato hay que
-        meterlo a mano — y hasta que esté, cualquier margen que enseñáramos aquí sería inventado.
+      <Vacio titulo="Falta el coste de proveedor">
+        Sin él no se puede calcular nada de esto. Dropi no tiene API pública, así que ese dato hay que meterlo a mano — y hasta que esté, cualquier margen que enseñáramos aquí sería inventado.
       </Vacio>
     );
   }
@@ -630,8 +598,13 @@ function Calculo({ op }: { op: ProductOpportunity }) {
     <>
       <Seccion title="De qué se compone el score" hint="Media ponderada con penalizaciones duras, no un promedio simple.">
         {partes.length === 0 ? (
-          <Vacio>No se ha podido calcular: {op.scores.opportunity.unavailableReason ?? "faltan datos"}.</Vacio>
+          <Vacio titulo="El score no se ha podido calcular">
+            {op.scores.opportunity.unavailableReason === "INSUFFICIENT_HISTORY"
+              ? "Hace falta al menos una foto anterior de este producto para poder comparar."
+              : "No hay señales suficientes: hacen falta más anuncios o más anunciantes."}
+          </Vacio>
         ) : (
+          <Card className="overflow-hidden px-4 py-1">
           <table className="w-full text-[13px]">
             <tbody className="divide-y divide-brand-border">
               {partes.map((p) => (
@@ -644,11 +617,13 @@ function Calculo({ op }: { op: ProductOpportunity }) {
               ))}
             </tbody>
           </table>
+          </Card>
         )}
       </Seccion>
 
       {op.features.length > 0 && (
         <Seccion title="Lo que infirió la IA" hint="Leyendo el texto de los anuncios. Es una lectura, no una medición.">
+          <Card className="overflow-hidden px-4 py-1">
           <table className="w-full text-[13px]">
             <tbody className="divide-y divide-brand-border">
               {op.features.map((f) => (
@@ -660,6 +635,7 @@ function Calculo({ op }: { op: ProductOpportunity }) {
               ))}
             </tbody>
           </table>
+          </Card>
         </Seccion>
       )}
 
