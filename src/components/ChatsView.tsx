@@ -15,6 +15,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useOverlayBack } from "./useBackable";
 import type { ConversationItem } from "./Dashboard";
 import ConversationPanel from "./ConversationPanel";
 import SafetyBanner from "./SafetyBanner";
@@ -397,6 +398,10 @@ export default function ChatsView({
   const [ordersLoaded, setOrdersLoaded] = useState(false);
   // Móvil: la lista y el chat son pantallas distintas (drill-down).
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  // El chat a pantalla completa en móvil es lo que MÁS se abre y se cierra
+  // del panel. Sin esto, el gesto de atrás sacaba de la aplicación en vez de
+  // volver a la lista de conversaciones.
+  useOverlayBack(mobileChatOpen, () => setMobileChatOpen(false));
   const [mobileContextOpen, setMobileContextOpen] = useState(false);
 
   const refreshOrders = useCallback(async () => {

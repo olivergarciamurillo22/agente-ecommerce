@@ -329,7 +329,14 @@ export default function FollowUpPanel({ onNavigate }: { onNavigate: (v: DockView
                             <button
                               type="button"
                               onClick={(e) => { e.stopPropagation(); act.go(); }}
-                              className={`inline-flex items-center h-8 px-2.5 rounded-lg text-[13px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 focus-visible:opacity-100 ${urgent ? "bg-brand-text text-white hover:bg-brand-gold-soft" : "text-brand-text opacity-0 group-hover:opacity-100 hover:bg-brand-surface-2"}`}
+                              // Este botón estaba en opacity-0 hasta pasar el
+                              // ratón por encima. En un teléfono no hay ratón:
+                              // la acción principal de cada fila era
+                              // literalmente invisible, y además medía 32 px.
+                              // Ahora se ve siempre en táctil y mide 44 px;
+                              // en escritorio se mantiene el aparecer al
+                              // pasar, que ahí sí funciona y da limpieza.
+                              className={`inline-flex items-center h-11 md:h-8 px-3 md:px-2.5 rounded-lg text-[13px] font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 focus-visible:opacity-100 ${urgent ? "bg-brand-text text-white hover:bg-brand-gold-soft" : "text-brand-text border border-brand-border md:border-0 md:opacity-0 md:group-hover:opacity-100 hover:bg-brand-surface-2"}`}
                             >
                               {act.label}
                             </button>

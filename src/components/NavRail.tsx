@@ -15,6 +15,7 @@
 // ============================================================
 
 import { useEffect, useState, type ReactNode } from "react";
+import { IconBack, IconChat, IconGrowth, IconHome, IconHunter, IconLanding, IconMore, IconOrders, IconSettings } from "./icons";
 import { Emblem } from "./Logo";
 import { StatusDot, type UiStatus } from "./ui";
 
@@ -40,13 +41,13 @@ export const NAV_GROUPS: Array<{ id: NavGroup; label: string }> = [
 ];
 
 export const NAV_ITEMS: Array<{ id: NavKey; target: DockView; label: string; hint: string; group: NavGroup }> = [
-  { id: "home", target: "home", label: "Inicio", hint: "Qué pasa hoy y qué necesita tu atención", group: "operation" },
-  { id: "orders", target: "orders", label: "Pedidos", hint: "Confirmar, corregir y liberar pedidos", group: "operation" },
-  { id: "followup", target: "followup", label: "Seguimiento", hint: "WhatsApp, llamadas y envíos por pedido", group: "operation" },
-  { id: "growth", target: "growth", label: "Growth", hint: "Finanzas, embudo, productos y auditoría", group: "growth" },
-  { id: "hunter", target: "hunter", label: "Cazador", hint: "Explorar productos — sin fuente de datos conectada", group: "tools" },
-  { id: "landing", target: "landing", label: "Landing Studio", hint: "Beta: los proyectos se guardan en este navegador", group: "tools" },
-  { id: "settings", target: "settings", label: "Ajustes", hint: "Integraciones, WhatsApp, llamadas y sistema", group: "system" },
+  { id: "home", target: "home", label: "Inicio", hint: "Qué ha pasado hoy y qué necesita que hagas algo", group: "operation" },
+  { id: "orders", target: "orders", label: "Pedidos", hint: "Confirmar, corregir direcciones y enviar al proveedor", group: "operation" },
+  { id: "followup", target: "followup", label: "Seguimiento", hint: "Hablar con el cliente y seguir su envío", group: "operation" },
+  { id: "growth", target: "growth", label: "Growth", hint: "Ver si ganas dinero y con qué productos", group: "growth" },
+  { id: "hunter", target: "hunter", label: "Cazador", hint: "Encontrar productos que ya se venden bien", group: "tools" },
+  { id: "landing", target: "landing", label: "Landing Studio", hint: "Montar la página del producto. Beta: se guarda en este navegador", group: "tools" },
+  { id: "settings", target: "settings", label: "Ajustes", hint: "Conectar servicios y cambiar cómo funciona todo", group: "system" },
 ];
 
 /** Móvil: las CUATRO áreas de operación diaria + "Más" = 5 entradas.
@@ -59,62 +60,18 @@ const MORE_GROUPS: Array<{ label: string; items: NavKey[] }> = [
   { label: "Sistema", items: ["settings"] },
 ];
 
-const stroke = { fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round" } as const;
-
+// Los iconos viven en `icons.tsx`, una sola familia para toda la aplicación.
+// Antes había 41 SVG sueltos con grosores distintos (1,7 aquí, 1,8 allá): se
+// nota aunque nadie sepa decir por qué, la interfaz parece hecha a trozos.
 export const NAV_ICONS: Record<NavKey | "more", ReactNode> = {
-  home: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <path d="M3 10.5 12 3l9 7.5" />
-      <path d="M5.5 9.5V20a1 1 0 0 0 1 1h4V15h3v6h4a1 1 0 0 0 1-1V9.5" />
-    </svg>
-  ),
-  orders: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <path d="M12 3 4 7v10l8 4 8-4V7z" />
-      <path d="M4 7l8 4 8-4" />
-      <path d="M12 11v10" />
-    </svg>
-  ),
-  followup: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <path d="M21 12a8 8 0 0 1-11.6 7.2L4 21l1.8-5.4A8 8 0 1 1 21 12z" />
-      <path d="M9 12h6" />
-    </svg>
-  ),
-  hunter: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <circle cx="11" cy="11" r="6.5" />
-      <path d="m20 20-3.8-3.8" />
-      <path d="M11 8v6M8 11h6" />
-    </svg>
-  ),
-  growth: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <path d="M4 19h16" />
-      <path d="M5 15l4-5 4 3 6-7" />
-      <path d="M15 6h4v4" />
-    </svg>
-  ),
-  landing: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <rect x="3.5" y="4" width="17" height="16" rx="2" />
-      <path d="M3.5 9h17" />
-      <path d="M7 13h6M7 16.5h4" />
-    </svg>
-  ),
-  settings: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <circle cx="12" cy="12" r="3" />
-      <path d="M19 12a7 7 0 0 0-.14-1.4l2-1.55-2-3.46-2.36.95A7 7 0 0 0 14.06 5l-.36-2.5h-4L9.34 5a7 7 0 0 0-2.44 1.4l-2.36-.95-2 3.46 2 1.55a7 7 0 0 0 0 2.8l-2 1.55 2 3.46 2.36-.95a7 7 0 0 0 2.44 1.4l.36 2.5h4l.36-2.5a7 7 0 0 0 2.44-1.4l2.36.95 2-3.46-2-1.55A7 7 0 0 0 19 12z" />
-    </svg>
-  ),
-  more: (
-    <svg viewBox="0 0 24 24" width="20" height="20" {...stroke} aria-hidden>
-      <circle cx="5" cy="12" r="1.6" />
-      <circle cx="12" cy="12" r="1.6" />
-      <circle cx="19" cy="12" r="1.6" />
-    </svg>
-  ),
+  home: <IconHome />,
+  orders: <IconOrders />,
+  followup: <IconChat />,
+  hunter: <IconHunter />,
+  growth: <IconGrowth />,
+  landing: <IconLanding />,
+  settings: <IconSettings />,
+  more: <IconMore />,
 };
 
 function Badge({ n }: { n: number }) {
@@ -229,9 +186,7 @@ export default function NavRail({
             aria-label={collapsed ? "Expandir navegación" : "Colapsar navegación"}
             className={`flex items-center gap-2 w-full rounded-lg h-9 text-[12px] text-brand-tertiary hover:text-brand-text hover:bg-brand-surface-2 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${collapsed ? "justify-center px-0" : "px-3"}`}
           >
-            <svg viewBox="0 0 24 24" width="14" height="14" {...stroke} className={collapsed ? "rotate-180" : ""} aria-hidden>
-              <path d="M15 6l-6 6 6 6" />
-            </svg>
+            <IconBack size={14} className={collapsed ? "rotate-180" : ""} />
             {!collapsed && <span>Colapsar</span>}
           </button>
         </div>
@@ -307,7 +262,7 @@ export default function NavRail({
                         {NAV_ICONS[i.id]}
                         <span className="flex-1 text-left">{i.label}</span>
                         <span className={`text-[12px] font-normal ${active ? "text-white/70" : "text-brand-tertiary"}`}>
-                          {i.id === "hunter" ? "Sin conectar" : i.id === "landing" ? "Beta" : ""}
+                          {i.id === "landing" ? "Beta" : ""}
                         </span>
                       </button>
                     );

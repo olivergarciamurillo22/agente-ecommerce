@@ -6,6 +6,7 @@
 // que nadie ha comprobado.
 
 import { useEffect, useState } from "react";
+import { useOverlayBack } from "@/components/useBackable";
 import type { ProductOpportunity, TestPlan } from "@/lib/hunter/types";
 import type { HunterAd } from "@/lib/hunter/types";
 import { Badge, ProvenanceTag, ScoreChip, Stat, money, pct } from "./radar-shared";
@@ -22,6 +23,8 @@ export default function OpportunityDetail({
   onDecide: (id: string, decision: string, reason?: string) => void;
 }) {
   const [tab, setTab] = useState<Tab>("resumen");
+  // Atrás y Escape cierran la ficha, como espera cualquiera.
+  useOverlayBack(true, onClose);
   const [plan, setPlan] = useState<TestPlan | null>(null);
   const [ads, setAds] = useState<HunterAd[]>([]);
 

@@ -13326,6 +13326,101 @@ async function main(): Promise<void> {
   }
 
 
+
+  // ============ USABILIDAD DEL PANEL ============
+  console.log("\n— Usabilidad del panel —");
+
+  /** Lee un fichero del repo. Estos tests miran el CÓDIGO: son garantías que
+   *  no se pueden comprobar ejecutando, como que un botón no dependa del
+   *  hover o que una pantalla no se importe de forma estática. */
+  const leer = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+
+  await test("UX · el panel no se descarga entero: cada pantalla llega al abrirla", () => {
+    const dash = leer("src/components/Dashboard.tsx");
+    // Importar las seis pantallas de forma estática eran +600 KB para ver
+    // una sola, y por WireGuard eso se nota mucho.
+    for (const pantalla of ["OrdersPanel", "FollowUpView", "GrowthView", "SettingsView", "ProductHunterEntry", "CommandPalette"]) {
+      assert.match(dash, new RegExp(`lazy\\(\\(\\) => import\\("[^"]*${pantalla}"\\)\\)`), `${pantalla} debe cargarse en diferido`);
+      assert.ok(!new RegExp(`^import ${pantalla} from`, "m").test(dash), `${pantalla} no puede importarse de forma estática`);
+    }
+    // Inicio SÍ es estático: es lo primero que se ve y diferirlo solo añade parpadeo.
+    assert.match(dash, /^import HomePanel from/m, "Inicio se carga de entrada a propósito");
+    assert.match(dash, /<Suspense fallback=\{<PanelFallback \/>\}>/, "con esqueleto mientras llega");
+  });
+
+  await test("UX · los sondeos se callan con la pestaña de fondo y no se encolan", () => {
+    const hook = leer("src/components/usePolling.ts");
+    assert.match(hook, /document\.hidden/, "no pide datos si nadie mira");
+    assert.match(hook, /visibilitychange/, "y refresca al volver");
+    assert.match(hook, /enVuelo/, "nunca lanza si la anterior sigue viva");
+
+    // Los que corren SIEMPRE o muy seguido tienen que usar el hook: un
+    // setInterval suelto ahí martillea el NAS con la pestaña olvidada.
+    for (const f of ["src/components/SafetyBanner.tsx", "src/components/OrdersPanel.tsx",
+                     "src/components/HomePanel.tsx", "src/components/ConversationPanel.tsx"]) {
+      const c = leer(f);
+      assert.match(c, /usePolling\(/, `${f} debe sondear con usePolling`);
+      assert.ok(!/setInterval\((?!.*setElapsed)/.test(c), `${f} no puede dejar un setInterval suelto`);
+    }
+  });
+
+  await test("UX · 'atrás' vuelve a la pantalla anterior, no saca de la aplicación", () => {
+    const dash = leer("src/components/Dashboard.tsx");
+    // El bug: navegar siempre con replaceState. Atrás no devolvía a la sección
+    // anterior — te expulsaba del panel. En móvil, donde atrás es un gesto del
+    // sistema, eso hace que la app se sienta rota.
+    assert.match(dash, /navigateHash\(/, "la navegación pasa por navigateHash");
+    assert.ok(!/history\.replaceState/.test(dash), "ya no queda replaceState suelto en la navegación");
+    assert.match(dash, /addEventListener\("popstate"/, "escucha el botón atrás");
+
+    const hook = leer("src/components/useBackable.ts");
+    assert.match(hook, /pushState/, "las capas registran su entrada de historial");
+    assert.match(hook, /"Escape"/, "y Escape las cierra también");
+
+    // Las tres capas que más se abren y cierran.
+    for (const f of ["src/components/OrdersPanel.tsx", "src/components/ChatsView.tsx",
+                     "src/components/hunter/radar/OpportunityDetail.tsx"]) {
+      assert.match(leer(f), /useOverlayBack\(/, `${f}: atrás debe cerrar la capa`);
+    }
+  });
+
+  await test("UX · se puede buscar desde el móvil y los botones se pueden pulsar con el dedo", () => {
+    const header = leer("src/components/DashboardHeader.tsx");
+    // El buscador estaba en `hidden sm:flex`: desde el teléfono NO había
+    // ninguna forma de buscar.
+    assert.match(header, /sm:hidden[^"]*h-11 w-11/, "botón de buscar en móvil, de 44 px");
+
+    const follow = leer("src/components/FollowUpPanel.tsx");
+    // Estaba en opacity-0 hasta pasar el ratón: en táctil, invisible.
+    assert.match(follow, /h-11 md:h-8/, "la acción de cada fila mide 44 px en móvil");
+    assert.ok(!/\bopacity-0 group-hover:opacity-100\b/.test(follow),
+      "la acción principal no puede depender del hover: en un teléfono no existe");
+  });
+
+  await test("UX · una sola familia de iconos, en currentColor y sin peso de red", () => {
+    const icons = leer("src/components/icons.tsx");
+    assert.match(icons, /strokeWidth=\{1\.75\}/, "un único grosor para toda la familia");
+    assert.match(icons, /stroke="currentColor"/, "heredan el color del texto: funcionan en cualquier fondo");
+    assert.ok(!/<img|url\(|\.png|\.jpg/.test(icons), "iconos vectoriales, no imágenes que haya que descargar");
+    assert.match(icons, /viewBox="0 0 24 24"/, "mismo lienzo, mismo peso visual");
+
+    // La navegación ya no dibuja sus propios SVG.
+    const nav = leer("src/components/NavRail.tsx");
+    assert.ok(!/<svg/.test(nav), "NavRail usa el sistema, no SVG sueltos");
+    assert.match(nav, /from "\.\/icons"/);
+  });
+
+  await test("UX · los copys dicen qué puedes hacer, no qué hay dentro", () => {
+    const nav = leer("src/components/NavRail.tsx");
+    // "Finanzas, embudo, productos y auditoría" es un índice, no una ayuda:
+    // no dice para qué entrar ahí.
+    assert.ok(!/Finanzas, embudo, productos y auditoría/.test(nav), "copy de índice sustituido");
+    assert.match(nav, /Ver si ganas dinero/, "dice para qué sirve la sección");
+    // Y el Cazador ya no se anuncia como desconectado: tiene sus propias fuentes.
+    assert.ok(!/sin fuente de datos conectada/.test(nav), "copy obsoleto del Cazador retirado");
+    assert.ok(!/"Sin conectar"/.test(nav), "y su etiqueta de estado también");
+  });
+
   // ============ AI WINNER RADAR ============
   console.log("\n— AI Winner Radar —");
 

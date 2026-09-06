@@ -169,7 +169,7 @@ export default function GrowthView({ initialTab, onNavigate }: { initialTab?: Gr
             value=""
             onChange={(e) => e.target.value && setTab(e.target.value as GrowthTab)}
             aria-label="Más análisis"
-            className={`ml-auto h-8 shrink-0 rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${secondary ? "text-brand-text" : "text-brand-muted"}`}
+            className={`ml-auto h-11 md:h-8 shrink-0 rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${secondary ? "text-brand-text" : "text-brand-muted"}`}
           >
             <option value="">Más análisis</option>
             {SECONDARY_TABS.map((t) => (

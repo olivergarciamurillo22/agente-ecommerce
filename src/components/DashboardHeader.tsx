@@ -10,6 +10,7 @@
 // ============================================================
 
 import Logo from "./Logo";
+import { IconSearch } from "./icons";
 import { StatusDot, type UiStatus } from "./ui";
 
 interface DashboardHeaderProps {
@@ -41,18 +42,28 @@ export default function DashboardHeader({ phone, provider, sectionLabel, onOpenS
         aria-label={`Buscar en ${sectionLabel} y en todo el panel`}
         className="hidden sm:flex items-center gap-2 h-9 w-[280px] rounded-lg border border-brand-border bg-brand-surface px-3 text-[13px] text-brand-tertiary hover:border-brand-border-strong hover:text-brand-muted transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20"
       >
-        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden>
-          <circle cx="11" cy="11" r="7" />
-          <path d="m20 20-3.2-3.2" />
-        </svg>
-        <span className="truncate">Buscar pedido o cliente</span>
+        <IconSearch size={15} />
+        <span className="truncate">Buscar pedido, cliente o pantalla</span>
         <kbd className="ml-auto rounded border border-brand-border px-1.5 text-[11px] font-sans text-brand-tertiary">⌘K</kbd>
       </button>
 
-      <div className="flex-1" />
+      {/* En móvil el buscador NO existía: la barra completa no cabe, así que
+          simplemente se ocultaba y no había ninguna forma de buscar desde el
+          teléfono. Ahora hay un botón de 44 px, que es el mínimo con el que
+          se acierta con el dedo sin pensar. */}
+      <button
+        type="button"
+        onClick={onOpenSearch}
+        aria-label="Buscar pedido, cliente o pantalla"
+        className="sm:hidden ml-auto flex h-11 w-11 items-center justify-center rounded-lg text-brand-muted active:bg-brand-surface-2"
+      >
+        <IconSearch size={19} />
+      </button>
+
+      <div className="hidden sm:block flex-1" />
 
       <div
-        className="flex items-center gap-2 h-9 px-2 rounded-lg text-[13px] text-brand-muted"
+        className="hidden sm:flex items-center gap-2 h-9 px-2 rounded-lg text-[13px] text-brand-muted"
         title={`WhatsApp · ${canal} · ${estado}`}
         aria-label={`WhatsApp ${canal}, ${estado}`}
       >

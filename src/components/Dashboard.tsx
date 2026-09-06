@@ -9,6 +9,7 @@
 // ============================================================
 
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { navigateHash } from "./useBackable";
 import { usePolling } from "./usePolling";
 import DashboardHeader from "./DashboardHeader";
 import HomePanel from "./HomePanel";
@@ -147,26 +148,37 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
   // Cambia de clave para forzar el remount de Seguimiento/Growth con la pestaña pedida.
   const [navKey, setNavKey] = useState(0);
 
-  const changeView = useCallback((t: DockView, hashOverride?: string) => {
+  // `fromHistory` distingue "el usuario ha pulsado algo" de "el navegador ha
+  // cambiado la URL". En el primer caso hay que AÑADIR una entrada para poder
+  // volver; en el segundo, tocar el historial provocaría un bucle.
+  const changeView = useCallback((t: DockView, hashOverride?: string, fromHistory = false) => {
     const r = resolveTarget(t);
     setArea(r.area);
     if (r.followTab) setFollowTab(r.followTab);
     if (r.growthTab) setGrowthTab(r.growthTab);
     if (r.followTab || r.growthTab) setNavKey((k) => k + 1);
-    if (typeof window !== "undefined") window.history.replaceState(null, "", hashOverride ?? AREA_TO_HASH[r.area]);
+    // Antes esto era SIEMPRE replaceState, y por eso "atrás" no devolvía a la
+    // sección anterior: te sacaba de la aplicación. En el móvil, donde atrás
+    // es un gesto del sistema, eso hacía que el panel se sintiera roto.
+    if (!fromHistory) navigateHash(hashOverride ?? AREA_TO_HASH[r.area], "push");
   }, []);
 
   useEffect(() => {
     const onHash = () => {
       const t = HASH_TO_TARGET[window.location.hash];
-      if (t) changeView(t, window.location.hash);
+      if (t) changeView(t, window.location.hash, true);
     };
+    // `popstate` cubre el botón atrás del navegador y el gesto del móvil.
+    window.addEventListener("popstate", onHash);
     // La renderización inicial ocurre también en servidor; reconciliar el hash
     // al montar evita que una URL profunda (#pedidos, #landing-studio…) vuelva
     // visualmente a Inicio hasta el siguiente hashchange.
     onHash();
     window.addEventListener("hashchange", onHash);
-    return () => window.removeEventListener("hashchange", onHash);
+    return () => {
+      window.removeEventListener("hashchange", onHash);
+      window.removeEventListener("popstate", onHash);
+    };
   }, [changeView]);
 
   useEffect(() => {

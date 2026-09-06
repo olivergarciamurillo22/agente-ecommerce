@@ -18,6 +18,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
+import { useOverlayBack } from "./useBackable";
 import { usePolling } from "./usePolling";
 import type { ReactNode } from "react";
 import {
@@ -338,6 +339,8 @@ export default function OrdersPanel() {
   usePolling(refresh, { intervalMs: 10_000 });
 
   const drawerOpen = detail !== null;
+  // Atrás (y Escape) cierran la ficha en vez de sacarte del panel.
+  useOverlayBack(drawerOpen, () => setDetail(null));
   useEffect(() => {
     if (!drawerOpen) {
       setDrawerIn(false);
@@ -632,7 +635,7 @@ export default function OrdersPanel() {
             value={FILTERS.find((f) => f.key === filter && !f.primary) ? filter : ""}
             onChange={(e) => e.target.value && setFilter(e.target.value as Filter)}
             aria-label="Más filtros"
-            className={`h-8 w-auto max-w-[200px] rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${FILTERS.find((f) => f.key === filter && !f.primary) ? "text-brand-text" : "text-brand-muted"}`}
+            className={`h-11 md:h-8 w-auto max-w-[200px] rounded-lg border-0 bg-transparent pl-2 pr-7 text-[13px] font-medium focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/20 ${FILTERS.find((f) => f.key === filter && !f.primary) ? "text-brand-text" : "text-brand-muted"}`}
           >
             <option value="">Más filtros</option>
             {FILTERS.filter((f) => !f.primary).map((f) => (
