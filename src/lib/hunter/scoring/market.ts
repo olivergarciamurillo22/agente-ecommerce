@@ -154,6 +154,12 @@ export interface MomentumInput {
  *   · log1p comprime, de modo que crecer desde una base grande cuenta,
  *   · y el resultado está acotado a 0..100 pase lo que pase.
  */
+/**
+ * Crecimiento que se considera "explosivo" y marca el 100: triplicarse en la
+ * ventana. Subirlo hace el score más exigente; bajarlo lo satura antes.
+ */
+export const GROWTH_REFERENCE = 3;
+
 export function boundedGrowth(now: number | null, before: number | null, floor = 3): number | null {
   if (now === null || before === null) return null;
   if (!Number.isFinite(now) || !Number.isFinite(before)) return null;
@@ -165,9 +171,11 @@ export function boundedGrowth(now: number | null, before: number | null, floor =
     return clampScore(50 * (1 - drop));
   }
   const ratio = delta / base;
-  // log1p(ratio)/log1p(1) → 100 cuando el crecimiento es del 100 % sobre la
-  // base; por encima sigue subiendo pero cada vez menos.
-  const normalized = Math.log1p(ratio) / Math.log1p(1);
+  // La referencia es TRIPLICARSE (+300 %), no duplicarse. Con +100 % como
+  // techo, 7→18 y 40→90 daban los dos 100 y el score dejaba de distinguir
+  // justo entre los productos calientes, que es donde hace falta. Con esta
+  // referencia quedan 84 y 79: siguen siendo altos y ya no empatan.
+  const normalized = Math.log1p(ratio) / Math.log1p(GROWTH_REFERENCE);
   return clampScore(50 + normalized * 50);
 }
 

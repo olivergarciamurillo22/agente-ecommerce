@@ -35,6 +35,8 @@ export type EventIntegration =
   | "beeping"
   | "meta_ads"
   | "tracking"
+  /** AI Winner Radar. La columna no tiene CHECK, así que esto es aditivo. */
+  | "hunter"
   | "sqlite"
   | "backup";
 
