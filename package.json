@@ -58,7 +58,9 @@
     "retell:pilot": "tsx scripts/retell-pilot.ts",
     "deploy:guard": "tsx scripts/deploy-guard.ts",
     "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts",
-    "users:create": "tsx scripts/users-create.ts"
+    "users:create": "tsx scripts/users-create.ts",
+    "hunter:doctor": "tsx scripts/hunter-doctor.ts",
+    "hunter:providers:test": "tsx scripts/hunter-providers-test.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
