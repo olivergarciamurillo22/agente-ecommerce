@@ -747,8 +747,8 @@ function ScrollPane({ children, wide = false }: { children: ReactNode; wide?: bo
   );
 }
 
-export default function SettingsView() {
-  const [section, setSection] = useState<SettingsSection>("whatsapp");
+export default function SettingsView({ initialSection }: { initialSection?: SettingsSection } = {}) {
+  const [section, setSection] = useState<SettingsSection>(initialSection ?? "whatsapp");
 
   return (
     <div className="h-full flex flex-col md:flex-row">

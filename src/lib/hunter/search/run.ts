@@ -58,14 +58,21 @@ export interface StartSearchInput {
   createdBy?: string | null;
 }
 
-export function newSearchRun(input: StartSearchInput, plan: SearchPlan): SearchRun {
-  const proveedores = searchProviders().length || 1;
-  const eta = estimateDuration({
+/**
+ * Duración estimada de un plan, con su etiqueta honesta. Se expone aparte
+ * porque la vista previa la necesita antes de que exista una búsqueda.
+ */
+export function estimateFor(plan: SearchPlan) {
+  return estimateDuration({
     queries: plan.queries.length,
-    providers: proveedores,
+    providers: searchProviders().length || 1,
     aiBudget: MAX_AI_ANALYSIS,
     historicalSecondsPerQuery: safeHistorical(),
   });
+}
+
+export function newSearchRun(input: StartSearchInput, plan: SearchPlan): SearchRun {
+  const eta = estimateFor(plan);
   const ahora = Math.floor(Date.now() / 1000);
 
   return {

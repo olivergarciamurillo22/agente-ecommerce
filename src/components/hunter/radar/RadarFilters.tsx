@@ -10,6 +10,12 @@
 // Se abre, se toca lo que se quiera y se cierra. Los cambios se aplican al
 // momento; no hay un «guardar» que se pueda olvidar.
 //
+// La forma del panel NO se inventa aquí: es la misma que la ficha de pedido
+// (`OrdersPanel`) — cajón a la derecha de 480 px en escritorio, hoja desde
+// abajo en móvil, fondo oscurecido al 50 % y botón de cerrar CON BORDE. Una X
+// sin borde sobre fondo claro no se lee como botón, y en una capa que tapa
+// contenido eso deja al usuario sin salida visible.
+//
 // Los controles son de tres tipos y ninguno es un desplegable largo:
 //   · segmentos  → cuando hay 2-4 opciones excluyentes
 //   · chips      → cuando se pueden elegir varias
@@ -44,15 +50,13 @@ export default function RadarFilters({
   useOverlayBack(true, onClose);
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/25" onClick={onClose}>
+    <div className="fixed inset-0 z-50" role="dialog" aria-modal aria-label="Ajustar búsqueda">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
       <div
-        className="flex h-full w-full max-w-[440px] flex-col bg-brand-surface shadow-2xl"
+        className="absolute inset-x-0 bottom-0 flex max-h-[92vh] flex-col rounded-t-2xl border-t border-brand-border bg-brand-surface shadow-2xl md:inset-x-auto md:right-0 md:top-0 md:bottom-0 md:h-full md:max-h-full md:w-[480px] md:max-w-full md:rounded-none md:border-t-0 md:border-l anim-slide-right"
         onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Ajustar búsqueda"
       >
-        <header className="flex shrink-0 items-center justify-between border-b border-brand-border px-5 py-4">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-brand-border px-5 py-4">
           <div>
             <h2 className="text-[16px] font-semibold tracking-tight">Ajustar búsqueda</h2>
             <p className="text-[12px] text-brand-tertiary">Todo esto es opcional.</p>
@@ -61,9 +65,9 @@ export default function RadarFilters({
             type="button"
             onClick={onClose}
             aria-label="Cerrar"
-            className="rounded-lg p-2 text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+            className="shrink-0 rounded-lg border border-brand-border p-2 text-brand-muted hover:border-brand-border-strong hover:bg-brand-surface-2 hover:text-brand-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30"
           >
-            <IconClose size={18} />
+            <IconClose size={16} />
           </button>
         </header>
 
@@ -157,7 +161,7 @@ export default function RadarFilters({
           </Grupo>
         </div>
 
-        <footer className="flex shrink-0 items-center justify-between border-t border-brand-border px-5 py-3">
+        <footer className="flex shrink-0 items-center justify-between border-t border-brand-border px-5 py-3 pb-[max(env(safe-area-inset-bottom),12px)]">
           <button
             type="button"
             onClick={onReset}

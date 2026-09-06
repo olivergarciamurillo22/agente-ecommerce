@@ -20,7 +20,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { ProductOpportunity } from "@/lib/hunter/types";
 import { IconChevronRight, IconMore } from "@/components/icons";
-import { ProductCover, ScoreBar, VerdictChip, miles, money, saturationWord, scoreWord } from "./radar-shared";
+import { ProductCover, ScoreBar, VerdictChip, miles, money, plural, scoreLabel } from "./radar-shared";
 
 export type CardAction = "test" | "watch" | "save" | "discard";
 
@@ -72,9 +72,9 @@ export function OpportunityHero({ op, why, onOpen, onAction, rank }: CardProps) 
         <p className="mt-1.5 text-[13px] leading-relaxed text-brand-muted line-clamp-3">{why}</p>
 
         <div className="mt-3.5 space-y-0.5 border-t border-brand-border pt-3">
-          <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreWord(op.scores.momentum.score)} tone="good" />
-          <ScoreBar label="Saturación" value={op.scores.saturation.score} word={saturationWord(op.scores.saturation.score)} tone="warn" />
-          <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreWord(op.scores.casamable.score)} />
+          <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreLabel(op.scores.momentum)} tone="good" />
+          <ScoreBar label="Saturación" value={op.scores.saturation.score} word={scoreLabel(op.scores.saturation, "saturation")} tone="warn" />
+          <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreLabel(op.scores.casamable)} />
         </div>
 
         <SignalRow op={op} />
@@ -146,23 +146,22 @@ function SignalRow({ op, compact = false }: { op: ProductOpportunity; compact?: 
       ? `${money(op.observedPriceMin, op.currency)}–${money(op.observedPriceMax, op.currency)}`
       : money(op.observedPriceMax ?? op.observedPriceMin, op.currency);
 
-  const datos: Array<[string, string]> = [
-    ["anunciantes", miles(s.advertiserCount)],
-    ["activos", miles(s.activeAds)],
-    ["creatividades", miles(s.creativeCount)],
+  const datos: string[] = [
+    plural(s.advertiserCount, "anunciante", "anunciantes"),
+    plural(s.activeAds, "anuncio activo", "anuncios activos"),
+    plural(s.creativeCount, "creatividad", "creatividades"),
   ];
-  if (s.oldestActiveAdDays !== null) datos.push(["días el más veterano", miles(s.oldestActiveAdDays)]);
-  if (op.observedPriceMax !== null || op.observedPriceMin !== null) datos.push(["precio visto", precio]);
+  if (s.oldestActiveAdDays !== null) datos.push(`${miles(s.oldestActiveAdDays)} días el más veterano`);
+  if (op.observedPriceMax !== null || op.observedPriceMin !== null) datos.push(`${precio} de precio visto`);
 
   return (
-    <dl className={`flex flex-wrap gap-x-4 gap-y-1 ${compact ? "mt-1.5" : "mt-3"} text-[12px] tabular-nums`}>
-      {datos.slice(0, compact ? 4 : 5).map(([k, v]) => (
-        <div key={k} className="flex items-baseline gap-1">
-          <dd className="font-medium">{v}</dd>
-          <dt className="text-brand-tertiary">{k}</dt>
-        </div>
+    <ul className={`flex flex-wrap gap-x-4 gap-y-1 ${compact ? "mt-1.5" : "mt-3"} text-[12px] tabular-nums text-brand-tertiary`}>
+      {datos.slice(0, compact ? 4 : 5).map((t) => (
+        <li key={t}>
+          <span className="font-medium text-brand-text">{t.split(" ")[0]}</span> {t.split(" ").slice(1).join(" ")}
+        </li>
       ))}
-    </dl>
+    </ul>
   );
 }
 

@@ -24,7 +24,7 @@ export type NavArea = "home" | "orders" | "followup" | "hunter" | "growth" | "se
 /** Destinos que aceptan las pantallas: las áreas + alias heredados que el
  *  shell traduce a área+pestaña (acciones/chats/envíos/agente → Seguimiento;
  *  anuncios/finanzas → Growth). */
-export type DockView = NavArea | "landing" | "actions" | "chats" | "agent" | "shipments" | "ads" | "finance";
+export type DockView = NavArea | "landing" | "system" | "actions" | "chats" | "agent" | "shipments" | "ads" | "finance";
 
 /** Clave de resaltado: las áreas + "landing" (que es Cazador en su pestaña
  *  de Landing Studio, no un área propia). */
@@ -176,10 +176,23 @@ export default function NavRail({
 
         <div className={`py-3 space-y-0.5 border-t border-brand-border ${collapsed ? "px-3" : "px-3"}`}>
           {NAV_ITEMS.filter((i) => i.group === "system").map((i) => item(i.id, i.target, i.label, i.hint))}
-          <div className={`flex items-center gap-2 h-9 text-[12px] text-brand-tertiary ${collapsed ? "justify-center px-0" : "px-3"}`}>
+          {/* ══ LA SALUD DEL SISTEMA, EN UN CLIC ══
+              Esto era un rótulo muerto: decía "Con avisos" y no llevaba a
+              ninguna parte, así que para ver QUÉ aviso había que entrar en
+              Ajustes y acertar con la pestaña. Un indicador que informa de un
+              problema y no deja abrirlo es peor que no tenerlo. */}
+          <button
+            type="button"
+            onClick={() => onViewChange("system")}
+            title={`${systemLabel} · abrir el estado del sistema`}
+            aria-label={`Estado del sistema: ${systemLabel}. Abrir.`}
+            className={`flex items-center gap-2 w-full rounded-lg h-9 text-[12px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-text/30 ${
+              view === "settings" ? "text-brand-text bg-brand-surface-2" : "text-brand-tertiary hover:text-brand-text hover:bg-brand-surface-2"
+            } ${collapsed ? "justify-center px-0" : "px-3"}`}
+          >
             <StatusDot status={systemStatus} pulse={systemStatus === "error"} />
             {!collapsed && <span className="truncate">{systemLabel}</span>}
-          </div>
+          </button>
           <button
             type="button"
             onClick={toggle}

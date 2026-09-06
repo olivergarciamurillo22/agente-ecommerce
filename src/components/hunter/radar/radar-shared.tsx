@@ -84,6 +84,29 @@ function motivoCorto(reason: string | null): string {
   return "no calculable";
 }
 
+/**
+ * Texto de una puntuación. Cuando NO se puede calcular no dice «No
+ * disponible» —que se lee como avería— sino POR QUÉ no se puede: «Sin
+ * histórico» es información útil (vuelve en unos días y la habrá), «No
+ * disponible» no es nada.
+ */
+export function scoreLabel(v: ScoreValue, kind: "normal" | "saturation" = "normal"): string {
+  if (v.score !== null) return kind === "saturation" ? saturationWord(v.score) : scoreWord(v.score);
+  switch (v.unavailableReason) {
+    case "INSUFFICIENT_HISTORY":
+      return "Sin histórico aún";
+    case "INSUFFICIENT_DATA":
+      return "Faltan datos";
+    default:
+      return "Sin calcular";
+  }
+}
+
+/** Concordancia de número. «1 anunciantes» delata software sin terminar. */
+export function plural(n: number, singular: string, plural_: string): string {
+  return `${new Intl.NumberFormat("es-ES").format(n)} ${n === 1 ? singular : plural_}`;
+}
+
 /** Escala verbal. Un «72» sin referencia no significa nada para nadie. */
 export function scoreWord(n: number | null): string {
   if (n === null) return UNKNOWN;

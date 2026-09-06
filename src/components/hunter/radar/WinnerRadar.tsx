@@ -38,7 +38,7 @@ const RadarHistory = lazy(() => import("./RadarHistory"));
 const RadarFilters = lazy(() => import("./RadarFilters"));
 const OpportunityDetail = lazy(() => import("./OpportunityDetail"));
 
-type Vista = "inicio" | "progreso" | "resultados" | "historial";
+type Vista = "inicio" | "progreso" | "resultados" | "historial" | "detalle";
 
 /** Mientras corre se pregunta cada 2 s; con la pestaña de fondo, nada. */
 const POLL_MS = 2000;
@@ -54,7 +54,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<{ ok: true; data
   }
 }
 
-export default function WinnerRadar() {
+export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } = {}) {
   const [vista, setVista] = useState<Vista>("inicio");
   const [readiness, setReadiness] = useState<RadarReadiness | null>(null);
 
@@ -161,8 +161,15 @@ export default function WinnerRadar() {
   // --- Abrir ficha ---
   const abrir = useCallback(async (op: ProductOpportunity) => {
     const r = await api<DetailPayload>(`/api/hunter/opportunities?id=${encodeURIComponent(op.id)}`);
-    if (r.ok) setDetalle(r.data);
-    else setError(r.error);
+    if (r.ok) {
+      setDetalle(r.data);
+      setVista("detalle");
+    } else setError(r.error);
+  }, []);
+
+  const cerrarDetalle = useCallback(() => {
+    setDetalle(null);
+    setVista("resultados");
   }, []);
 
   // --- Decidir ---
@@ -214,24 +221,35 @@ export default function WinnerRadar() {
               : op.signals.oldestActiveAdDays !== null && op.signals.oldestActiveAdDays >= 60
                 ? `Lleva ${op.signals.oldestActiveAdDays} días vendiéndose sin parar`
                 : "Señal temprana";
+      const n = (v: number, s1: string, s2: string) => `${v} ${v === 1 ? s1 : s2}`;
       const datos: string[] = [];
-      if (op.signals.newAdvertisers14d) datos.push(`${op.signals.newAdvertisers14d} anunciantes nuevos en 14 días`);
-      else if (op.signals.advertiserCount) datos.push(`${op.signals.advertiserCount} anunciantes`);
-      if (op.signals.activeAds) datos.push(`${op.signals.activeAds} creatividades activas`);
+      if (op.signals.newAdvertisers14d) datos.push(n(op.signals.newAdvertisers14d, "anunciante nuevo en 14 días", "anunciantes nuevos en 14 días"));
+      else if (op.signals.advertiserCount) datos.push(n(op.signals.advertiserCount, "anunciante", "anunciantes"));
+      if (op.signals.activeAds) datos.push(n(op.signals.activeAds, "creatividad activa", "creatividades activas"));
       return datos.length ? `${cabeza}. ${datos.join(" y ")}.` : `${cabeza}.`;
     }
     return op.description ?? "Todavía sin lectura: hacen falta más anuncios.";
   }, []);
 
   return (
-    <div className="relative h-full overflow-y-auto bg-brand-bg">
-      {/* Barra fina: solo lo que se necesita saber estando en cualquier vista */}
-      <div className="sticky top-0 z-20 flex items-center justify-between gap-3 border-b border-brand-border bg-brand-bg/85 px-4 md:px-8 py-2.5 backdrop-blur">
-        <div className="flex items-center gap-2">
-          <span className="text-[12px] font-semibold uppercase tracking-[.12em] text-brand-tertiary">Winner Radar</span>
-          {readiness?.activeProvider === "meta_ad_library" && (
-            <span className="hidden sm:inline text-[11px] text-brand-tertiary">· Biblioteca de Anuncios de Meta</span>
-          )}
+    <div className={`relative h-full bg-brand-bg ${vista === "detalle" ? "overflow-hidden" : "overflow-y-auto"}`}>
+      {/* Barra fina: solo lo que se necesita saber estando en cualquier vista.
+          En la ficha no aparece: esa pantalla trae su propia cabecera y su
+          "volver", y dos filas de navegación apiladas hacen dudar de dónde
+          estás y qué cierra cada cosa. */}
+      <div className={`sticky top-0 z-20 items-center justify-between gap-3 border-b border-brand-border bg-brand-bg/85 px-4 md:px-8 py-2.5 backdrop-blur ${vista === "detalle" ? "hidden" : "flex"}`}>
+        <div className="flex min-w-0 items-center gap-3">
+          {toolbar}
+          {/* El aviso de datos de ejemplo va en la BARRA, no solo en los
+              resultados: si solo se ve al final, se puede pasar una búsqueda
+              entera creyendo que los productos son reales. */}
+          {readiness?.fixtureMode ? (
+            <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[.08em] text-amber-900">
+              Datos de ejemplo
+            </span>
+          ) : readiness?.activeProvider === "meta_ad_library" ? (
+            <span className="hidden lg:inline text-[11px] text-brand-tertiary">Biblioteca de Anuncios de Meta</span>
+          ) : null}
         </div>
         <div className="flex items-center gap-1">
           {corriendo && vista !== "progreso" && (
@@ -313,10 +331,10 @@ export default function WinnerRadar() {
           />
         )}
 
-        {detalle && (
+        {vista === "detalle" && detalle && (
           <OpportunityDetail
             data={detalle}
-            onClose={() => setDetalle(null)}
+            onClose={cerrarDetalle}
             onAction={(a) => void decidir(detalle.opportunity, a)}
           />
         )}

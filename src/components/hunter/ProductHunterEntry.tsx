@@ -8,7 +8,7 @@ import { SkeletonRows } from "../ui";
 
 const ProductHunterView = lazy(() => import("./ProductHunterView"));
 
-export default function ProductHunterEntry({ initialTab }: { initialTab?: "search" | "studio" } = {}) {
+export default function ProductHunterEntry({ initialTab }: { initialTab?: "radar" | "studio" } = {}) {
   return (
     <Suspense
       fallback={

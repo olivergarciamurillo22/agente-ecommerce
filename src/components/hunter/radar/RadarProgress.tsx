@@ -189,7 +189,9 @@ const CONTADOR_NOMBRE: Record<string, string> = {
   queriesDone: "búsquedas hechas",
   adsFound: "anuncios revisados",
   advertisers: "páginas detectadas",
-  pages: "páginas leídas",
+  // `pages` no se traduce a propósito: significaba «páginas de la API», y
+  // junto a «páginas detectadas» (que son páginas de Facebook) la misma
+  // palabra decía dos cosas distintas en la misma línea.
   clusters: "productos distintos",
   duplicatesRemoved: "duplicados fuera",
   analyzed: "analizados",
@@ -202,6 +204,8 @@ const CONTADOR_NOMBRE: Record<string, string> = {
 
 export function contadoresLegibles(counters: Record<string, number>): Array<[string, number]> {
   return Object.entries(counters)
-    .filter(([k]) => k in CONTADOR_NOMBRE)
+    // Un contador a cero mientras la etapa corre se lee como «esto no está
+    // funcionando». Aparece en cuanto tiene algo que contar.
+    .filter(([k, v]) => k in CONTADOR_NOMBRE && v > 0)
     .map(([k, v]) => [CONTADOR_NOMBRE[k], v] as [string, number]);
 }

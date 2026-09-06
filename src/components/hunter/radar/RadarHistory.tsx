@@ -85,7 +85,9 @@ export default function RadarHistory({
                 <dl className="hidden shrink-0 gap-5 text-right sm:flex">
                   <div>
                     <dd className="text-[14px] font-semibold tabular-nums">{miles(r.progress.opportunities)}</dd>
-                    <dt className="text-[10px] uppercase tracking-[.06em] text-brand-tertiary">productos</dt>
+                    <dt className="text-[10px] uppercase tracking-[.06em] text-brand-tertiary">
+                      {r.progress.opportunities === 1 ? "producto" : "productos"}
+                    </dt>
                   </div>
                   <div>
                     <dd className="text-[14px] font-medium tabular-nums text-brand-muted">

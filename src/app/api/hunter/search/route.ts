@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { requireOwner } from "@/lib/auth/guard";
 import { createSearchRun, getSearchRun, listProductsForSearch, listSearchRuns } from "@/lib/hunter/repo";
-import { executeSearch, planSearch } from "@/lib/hunter/search/run";
+import { estimateFor, executeSearch, planSearch } from "@/lib/hunter/search/run";
 import { radarReadiness } from "@/lib/hunter/providers/registry";
 import { stageProgress } from "@/lib/hunter/stages";
 import { withVerdictAll } from "@/lib/hunter/verdict";
@@ -56,6 +56,10 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       aiUsed: plan.aiUsed,
       notes: plan.notes,
       estimateSeconds: run.estimateSeconds,
+      // Etiqueta honesta: un segundero solo cuando hay histórico que lo
+      // sostenga; si no, la horquilla.
+      estimateLabel: estimateFor(plan).label,
+      estimateFromHistory: estimateFor(plan).fromHistory,
     });
   }
 

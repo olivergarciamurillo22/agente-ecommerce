@@ -76,6 +76,27 @@ const FAMILIES = [
 ];
 
 const DAY = 86400;
+/** Latencia simulada por consulta, para que el progreso se vea trabajar. */
+const FIXTURE_PACE_MS = 900;
+
+/**
+ * Plantillas de copy con ÁNGULOS distintos (problema, demostración,
+ * testimonio, oferta, urgencia). Un fixture donde todos los anuncios dicen lo
+ * mismo haría que el análisis de creatividades pareciera funcionar cuando en
+ * realidad no tiene nada que distinguir.
+ */
+const COPY_TEMPLATES: ReadonlyArray<(producto: string) => string> = [
+  (p) => `¿Harto de perder media hora limpiando? ${p} lo deja listo en dos minutos. Pago al recibir.`,
+  (p) => `Mira cómo funciona: pasas ${p} una vez y se acabó. Envío en 24-48 h.`,
+  (p) => `"Lo compré sin fe y ahora no lo suelto" — María, Valencia. ${p}, contrareembolso.`,
+  (p) => `Antes y después con ${p}. La diferencia se ve en el primer uso. Envío gratis.`,
+  (p) => `Últimas unidades de ${p}. 30 % de descuento solo hoy y pagas al recibirlo en casa.`,
+  (p) => `${p} frente a hacerlo a mano: mismo resultado, una décima parte del tiempo.`,
+];
+
+function copyDe(canonical: string, alias: string, k: number): string {
+  return COPY_TEMPLATES[k % COPY_TEMPLATES.length](k % 2 === 0 ? alias : canonical);
+}
 
 export class FixtureProvider implements IntelligenceProvider {
   readonly id = PROVIDER;
@@ -101,6 +122,12 @@ export class FixtureProvider implements IntelligenceProvider {
   }
 
   async searchAds(q: AdSearchQuery): Promise<ProviderResult<AdSearchResponse>> {
+    // Pausa deliberada. El modo de ejemplo existe para poder ver y probar la
+    // experiencia completa; sin ella la búsqueda termina antes de que se
+    // pinte la primera etapa y la pantalla de progreso no se puede revisar.
+    // Es una constante, no una variable de entorno: nadie tiene que
+    // configurar nada para que el modo demo se comporte como el real.
+    await new Promise((r) => setTimeout(r, FIXTURE_PACE_MS));
     const now = Math.floor(Date.now() / 1000);
     const term = q.keywords.toLowerCase();
     // Se filtra por palabra clave para que la búsqueda se comporte como una
@@ -115,8 +142,21 @@ export class FixtureProvider implements IntelligenceProvider {
     );
     const elegidas = familias.length > 0 ? familias : FAMILIES;
 
+    // ══ EL ÍNDICE ES EL DE LA FAMILIA, NO EL DE ESTA RESPUESTA ══
+    // Antes se usaba la posición dentro de la lista YA FILTRADA, así que la
+    // familia del coche era `fx-0-*` en la consulta "organizador" y la de
+    // mascotas era `fx-0-*` en la consulta "quitapelos". Al juntar los
+    // resultados de las ocho consultas de una búsqueda, dos productos
+    // distintos compartían identificadores: la deduplicación se quedaba con
+    // uno de cada par y el resultado era un cluster mezclado que no
+    // correspondía a nada.
+    //
+    // Con datos de ejemplo eso es una demo que miente; con datos reales, el
+    // identificador lo pone Meta y es estable. La demo tiene que comportarse
+    // igual o no sirve para comprobar nada.
     const ads: HunterAd[] = [];
-    elegidas.forEach((fam, fi) => {
+    elegidas.forEach((fam) => {
+      const fi = FAMILIES.indexOf(fam);
       fam.advertisers.forEach((adv, ai) => {
         // Cada anunciante tiene entre 1 y 4 creatividades del mismo producto.
         const nAds = 1 + ((fi + ai) % 4);
@@ -131,7 +171,7 @@ export class FixtureProvider implements IntelligenceProvider {
               advertiserName: adv,
               advertiserExternalId: `fxadv-${fi}-${ai}`,
               productName: alias,
-              adCopy: `¿Cansado de ${fam.category}? ${alias} lo resuelve en segundos. Envío 24-48 h y pago contrareembolso.`,
+              adCopy: copyDe(fam.canonical, alias, k),
               format: k % 2 === 0 ? "video" : "image",
               countries: [q.country.toUpperCase()],
               startedAt,

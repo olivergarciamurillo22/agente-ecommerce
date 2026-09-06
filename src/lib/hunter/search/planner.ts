@@ -186,7 +186,13 @@ export function chipsFor(f: HunterFilters): PlanChip[] {
   const out: PlanChip[] = [];
   out.push({ field: "country", label: PAIS_NOMBRE[f.country] ?? f.country });
   f.categories.forEach((c, i) => out.push({ field: "categories", label: CATEGORIA_NOMBRE[c] ?? c, index: i }));
-  f.keywords.forEach((k, i) => out.push({ field: "keywords", label: k, index: i }));
+  // Una palabra que YA es categoría no vuelve a salir como chip: ver
+  // «mascotas» dos veces hace dudar de si el sistema ha entendido bien.
+  const yaEsCategoria = new Set(f.categories.map((c) => (CATEGORIA_NOMBRE[c] ?? c).toLowerCase()));
+  f.keywords.forEach((k, i) => {
+    if (yaEsCategoria.has(k.toLowerCase())) return;
+    out.push({ field: "keywords", label: k, index: i });
+  });
 
   if (f.priceMin !== null || f.priceMax !== null) {
     out.push({

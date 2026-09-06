@@ -64,7 +64,8 @@ export interface ConversationItem {
 
 type FollowTab = "followup" | "actions" | "chats" | "shipments" | "agent";
 type GrowthTab = "summary" | "funnel" | "products" | "ads" | "calculator" | "audit" | "repurchase" | "competition";
-type HunterTab = "search" | "studio";
+type HunterTab = "radar" | "studio";
+type SettingsTab = "general" | "whatsapp" | "calls" | "integrations" | "costs" | "system";
 
 const HASH_TO_TARGET: Record<string, DockView> = {
   "#inicio": "home",
@@ -74,6 +75,7 @@ const HASH_TO_TARGET: Record<string, DockView> = {
   "#landing-studio": "landing",
   "#growth": "growth",
   "#ajustes": "settings",
+  "#sistema": "system",
   // alias heredados (enlaces antiguos siguen funcionando)
   "#acciones": "actions",
   "#chats": "chats",
@@ -87,10 +89,14 @@ const AREA_TO_HASH: Record<NavArea, string> = { home: "#inicio", orders: "#pedid
 /** Traduce cualquier destino a área + pestaña. `landing` no es un área
  *  propia: es el Cazador abierto en su pestaña de Landing Studio, y por eso
  *  lleva su propio hash (deep-link que el módulo ya sabe leer). */
-function resolveTarget(t: DockView): { area: NavArea; followTab?: FollowTab; growthTab?: GrowthTab; hunterTab?: HunterTab; hash?: string } {
+function resolveTarget(t: DockView): { area: NavArea; followTab?: FollowTab; growthTab?: GrowthTab; hunterTab?: HunterTab; settingsTab?: SettingsTab; hash?: string } {
   switch (t) {
     case "landing":
       return { area: "hunter", hunterTab: "studio", hash: "#landing-studio" };
+    // La salud del sistema vivía enterrada como pestaña dentro de Ajustes, sin
+    // forma de llegar en un clic. Ahora tiene destino propio.
+    case "system":
+      return { area: "settings", settingsTab: "system", hash: "#sistema" };
     case "actions":
       return { area: "followup", followTab: "actions" };
     case "chats":
@@ -138,9 +144,17 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
   const [hunterTab, setHunterTab] = useState<HunterTab>(() => {
     if (typeof window !== "undefined") {
       const t = HASH_TO_TARGET[window.location.hash];
-      if (t) return resolveTarget(t).hunterTab ?? "search";
+      if (t) return resolveTarget(t).hunterTab ?? "radar";
     }
-    return "search";
+    // El Cazador abre en el Radar: es lo que encuentra productos.
+    return "radar";
+  });
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>(() => {
+    if (typeof window !== "undefined") {
+      const t = HASH_TO_TARGET[window.location.hash];
+      if (t) return resolveTarget(t).settingsTab ?? "whatsapp";
+    }
+    return "whatsapp";
   });
   const [badges, setBadges] = useState<Partial<Record<NavArea, number>>>({});
   const [systemStatus, setSystemStatus] = useState<UiStatus>("muted");
@@ -156,7 +170,12 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
     setArea(r.area);
     if (r.followTab) setFollowTab(r.followTab);
     if (r.growthTab) setGrowthTab(r.growthTab);
-    if (r.followTab || r.growthTab) setNavKey((k) => k + 1);
+    // El Cazador tiene dos destinos (Radar y Landing Studio) y hasta ahora
+    // solo se propagaba por el hash. Al volver de Landing Studio al Cazador
+    // la pestaña se quedaba pegada en Studio.
+    setHunterTab(r.area === "hunter" ? (r.hunterTab ?? "radar") : (h) => h);
+    if (r.settingsTab) setSettingsTab(r.settingsTab);
+    if (r.followTab || r.growthTab || r.settingsTab || r.area === "hunter") setNavKey((k) => k + 1);
     // Antes esto era SIEMPRE replaceState, y por eso "atrás" no devolvía a la
     // sección anterior: te sacaba de la aplicación. En el móvil, donde atrás
     // es un gesto del sistema, eso hacía que el panel se sintiera roto.
@@ -300,7 +319,7 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
           ) : area === "growth" ? (
             <GrowthView key={`g${navKey}`} initialTab={growthTab} onNavigate={changeView} />
           ) : (
-            <SettingsView />
+            <SettingsView key={`s${navKey}`} initialSection={settingsTab} />
           )}
           </Suspense>
         </div>

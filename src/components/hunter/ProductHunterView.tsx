@@ -8,11 +8,11 @@
 // ============================================================
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Card, EmptyState, ErrorState, GhostButton, ReadinessBadge, Skeleton, TabBar } from "../ui";
+import { Card, EmptyState, ErrorState, GhostButton, Skeleton, TabBar } from "../ui";
 import type { AdLibraryResult, ProductHunterAvailability, ProductResearchStatus, WinningProductCandidate } from "@/lib/product-hunter/types";
 import CandidateDetail, { type DetailTarget } from "./CandidateDetail";
 import CompareTable from "./CompareTable";
-import { hunterGet, InlineNotice, MAX_COMPARE, Pill } from "./hunter-shared";
+import { hunterGet, InlineNotice, MAX_COMPARE } from "./hunter-shared";
 import PipelineBoard from "./PipelineBoard";
 import SearchView from "./SearchView";
 import LandingStudio from "../landing-studio/LandingStudio";
@@ -20,17 +20,31 @@ import WinnerRadar from "./radar/WinnerRadar";
 
 type HunterTab = "radar" | "search" | "saved" | "compare" | "studio";
 
+/**
+ * Tres cosas distintas conviven en el Cazador y sin separarlas parecen una
+ * lista arbitraria de pestañas: ENCONTRAR productos (el Radar), TRABAJAR los
+ * candidatos guardados (el pipeline heredado) y PUBLICAR la landing.
+ */
+const SECCIONES: ReadonlyArray<{ id: "radar" | "candidatos" | "studio"; label: string }> = [
+  { id: "radar", label: "Radar" },
+  { id: "candidatos", label: "Mis candidatos" },
+  { id: "studio", label: "Landing Studio" },
+];
+
 interface Notice {
   tone: "ok" | "error" | "info";
   text: string;
 }
 
-export default function ProductHunterView({ initialTab }: { initialTab?: "search" | "studio" } = {}) {
+export default function ProductHunterView({ initialTab }: { initialTab?: "radar" | "studio" } = {}) {
   const [availability, setAvailability] = useState<ProductHunterAvailability | null>(null);
   const [availError, setAvailError] = useState<string | null>(null);
   const [tab, setTab] = useState<HunterTab>(() => {
     if (initialTab) return initialTab;
-    return typeof window !== "undefined" && window.location.hash === "#landing-studio" ? "studio" : "search";
+    // Por defecto, el Radar: es lo que de verdad encuentra productos. Antes se
+    // abría en «Estado», una pantalla vacía del backend heredado, y el módulo
+    // parecía roto desde el primer segundo.
+    return typeof window !== "undefined" && window.location.hash === "#landing-studio" ? "studio" : "radar";
   });
   const [compareIds, setCompareIds] = useState<string[]>([]);
   const [savedMap, setSavedMap] = useState<Record<string, ProductResearchStatus>>({});
@@ -94,41 +108,61 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
   const openCandidate = useCallback((c: WinningProductCandidate) => setDetail({ id: c.id, initial: c }), []);
   const closeDetail = useCallback(() => setDetail(null), []);
 
-  return (
-    <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
-      <div className="space-y-6">
-        {/* ── Título ── */}
-        <header className="flex flex-col items-start gap-3 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h1 className="font-display text-[26px] md:text-[30px] font-semibold text-brand-text leading-[1.15] tracking-[-0.02em]">Cazador de productos</h1>
-            <p className="mt-1.5 text-[14px] text-brand-muted max-w-2xl leading-snug">
-              {availability && !availability.available
-                ? "Puedes explorar la interfaz, pero todavía no hay una fuente real de productos conectada."
-                : "Anuncios que llevan tiempo activos en la Biblioteca de anuncios de Meta, puntuados por el backend, para que decidas qué probar en COD."}
-            </p>
-          </div>
-          {availability ? (
-            availability.available ? (
-              <Pill tone={availability.source === "mock" ? "warn" : "ok"} title={availability.reason}>
-                {availability.source === "mock" ? "Datos de ejemplo" : "Conectado"}
-              </Pill>
-            ) : (
-              <ReadinessBadge readiness="not_configured" title={availability.reason} />
-            )
-          ) : null}
-        </header>
+  const cambiarPestana = useCallback((next: HunterTab) => {
+    setTab(next);
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", next === "studio" ? "#landing-studio" : "#cazador");
+    }
+  }, []);
 
+  // Tira de secciones. Vive DENTRO de la barra del radar cuando estamos en él:
+  // dos tiras apiladas (nombre del módulo arriba, secciones debajo) es
+  // justamente el aspecto de backoffice que sobraba.
+  const tiraSecciones = (
+    <nav className="flex min-w-0 items-center gap-0.5" aria-label="Secciones del cazador">
+      {SECCIONES.filter((sec) => sec.id !== "candidatos" || availability?.available).map((sec) => (
+        <button
+          key={sec.id}
+          type="button"
+          onClick={() => cambiarPestana(sec.id === "candidatos" ? "search" : (sec.id as HunterTab))}
+          aria-current={sec.id === "candidatos" ? tab === "search" || tab === "saved" || tab === "compare" : tab === sec.id}
+          className={`whitespace-nowrap rounded-lg px-2.5 h-8 text-[12.5px] font-medium transition-colors ${
+            (sec.id === "candidatos" ? tab === "search" || tab === "saved" || tab === "compare" : tab === sec.id)
+              ? "bg-brand-surface text-brand-text shadow-sm"
+              : "text-brand-muted hover:text-brand-text"
+          }`}
+        >
+          {sec.label}
+        </button>
+      ))}
+    </nav>
+  );
+
+  // El Radar se sirve a pantalla completa: tiene su propia cabecera y su
+  // propio recorrido, y envolverlo en el título de página le robaba 120 px
+  // de alto sin decir nada nuevo.
+  if (tab === "radar") {
+    return (
+      <>
+        <WinnerRadar toolbar={tiraSecciones} />
+        <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />
+      </>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-y-auto">
+      <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-brand-border bg-brand-bg/85 px-4 md:px-8 py-2.5 backdrop-blur">
+        {tiraSecciones}
+      </div>
+      <div className="px-4 md:px-8 py-6 pb-8">
+      <div className="space-y-6">
         {availError ? (
           <Card>
             <ErrorState message={availError} onRetry={() => void loadAvailability()} />
           </Card>
         ) : availability === null ? (
           <div className="space-y-4" aria-busy>
-            <div className="flex gap-2" aria-hidden>
-              {["w-24", "w-28", "w-32"].map((w) => (
-                <div key={w} className={`h-8 ${w} animate-pulse rounded-lg bg-brand-surface-2`} />
-              ))}
-            </div>
             <Skeleton className="h-11 w-full" />
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {Array.from({ length: 3 }).map((_, i) => (
@@ -138,67 +172,35 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
           </div>
         ) : (
           <>
-            {/* ── Vistas ── */}
-            <TabBar
-              tabs={
-                availability.available
-                  ? [
-                      { id: "radar", label: "AI Winner Radar" },
-                      { id: "search", label: "Buscar" },
-                      { id: "saved", label: "Guardados" },
-                      { id: "compare", label: "Comparar" },
-                      { id: "studio", label: "Landing Studio" },
-                    ]
-                  : [
-                      // Sin fuente conectada no hay nada que buscar, guardar ni
-                      // comparar: enseñar esas pestañas sería prometer un
-                      // descubrimiento que no puede ocurrir.
-                      { id: "radar", label: "AI Winner Radar" },
-                      { id: "search", label: "Estado" },
-                      { id: "studio", label: "Landing Studio" },
-                    ]
-              }
-              // Tres cosas distintas conviven aquí y sin separarlas parecen
-              // una sola lista arbitraria: descubrir productos (Radar),
-              // trabajar los candidatos guardados (el pipeline de siempre) y
-              // construir la landing.
-              groups={[
-                { label: "Descubrir", ids: ["radar"] as const },
-                { label: "Mis candidatos", ids: ["search", "saved", "compare"] as const },
-                { label: "Publicar", ids: ["studio"] as const },
-              ]}
-              value={tab}
-              onChange={(next) => {
-                setTab(next);
-                if (typeof window !== "undefined") window.history.replaceState(null, "", next === "studio" ? "#landing-studio" : "#cazador");
-              }}
-              label="Vistas del cazador"
-              counts={{ compare: compareIds.length > 0 ? compareIds.length : undefined }}
-            />
+            {tab !== "studio" && availability.available && (
+              <TabBar
+                tabs={[
+                  { id: "search", label: "Buscar" },
+                  { id: "saved", label: "Guardados" },
+                  { id: "compare", label: "Comparar" },
+                ]}
+                value={tab as "search" | "saved" | "compare"}
+                onChange={(next) => cambiarPestana(next)}
+                label="Vistas de candidatos"
+                counts={{ compare: compareIds.length > 0 ? compareIds.length : undefined }}
+              />
+            )}
 
-            {availability.source === "mock" && tab !== "studio" && tab !== "radar" ? (
+            {availability.source === "mock" && tab !== "studio" ? (
               <InlineNotice tone="info">Estás viendo datos de ejemplo del modo mock: anunciantes y puntuaciones ficticios. En producción este modo no arranca.</InlineNotice>
             ) : null}
             {notice ? <InlineNotice tone={notice.tone}>{notice.text}</InlineNotice> : null}
 
-            {tab === "radar" ? (
-              <WinnerRadar />
-            ) : tab === "studio" ? (
+            {tab === "studio" ? (
               <LandingStudio />
             ) : !availability.available ? (
               <Card>
                 <EmptyState
-                  icon={
-                    <svg viewBox="0 0 24 24" fill="none" className="h-8 w-8" aria-hidden>
-                      <circle cx="11" cy="11" r="6.5" stroke="currentColor" strokeWidth="1.5" />
-                      <path d="M16 16l4.5 4.5M8 11h6M11 8v6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                    </svg>
-                  }
-                  title="No hay una fuente de descubrimiento conectada"
-                  hint={`Esto NO significa que no haya productos: significa que todavía no se ha buscado en ningún sitio. ${availability.reason}`}
+                  title="El pipeline de candidatos usa otro backend"
+                  hint={`Esta pestaña es el flujo antiguo (descubierto → ganador) y necesita PRODUCT_HUNTER_SOURCE configurado. Para encontrar productos usa el Radar, que ya funciona. ${availability.reason}`}
                 />
                 <div className="flex justify-center pb-8 -mt-4">
-                  <GhostButton onClick={() => void loadAvailability()}>Pendiente de conexión · reintentar</GhostButton>
+                  <GhostButton onClick={() => void loadAvailability()}>Reintentar conexión</GhostButton>
                 </div>
               </Card>
             ) : tab === "search" ? (
@@ -229,6 +231,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
             )}
           </>
         )}
+      </div>
       </div>
 
       <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />

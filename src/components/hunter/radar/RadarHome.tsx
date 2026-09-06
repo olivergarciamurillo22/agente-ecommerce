@@ -22,7 +22,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HunterFilters } from "@/lib/hunter/types";
 import type { RadarReadiness } from "@/lib/hunter/providers/registry";
 import { IconFilter, IconSearch } from "@/components/icons";
-import { formatDuration } from "@/lib/hunter/stages";
 
 export interface PlanPreview {
   title: string | null;
@@ -32,6 +31,9 @@ export interface PlanPreview {
   strategy: string[];
   filters: HunterFilters;
   estimateSeconds: number | null;
+  /** Ya viene redactado: horquilla si no hay histórico, cifra si lo hay. */
+  estimateLabel: string | null;
+  estimateFromHistory: boolean;
   notes: string[];
 }
 
@@ -212,8 +214,8 @@ export default function RadarHome({
             ))}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-brand-tertiary">
-            {preview.estimateSeconds !== null && (
-              <span>Tardará unos {formatDuration(preview.estimateSeconds)}</span>
+            {preview.estimateLabel && (
+              <span>{preview.estimateFromHistory ? "Tardará unos" : "Suele tardar"} {preview.estimateLabel}</span>
             )}
             <button
               type="button"

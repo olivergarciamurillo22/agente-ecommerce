@@ -80,7 +80,9 @@ export function decideVerdict(op: ProductOpportunity): Verdict {
   if (op.signals.advertiserCount <= 1) {
     return {
       recommendation: "VIGILAR",
-      because: `Solo lo anuncia ${op.signals.advertiserCount} marca: puede ser el principio de algo o puede no funcionar para nadie.`,
+      because: op.signals.advertiserCount === 1
+        ? "Solo lo anuncia una marca: puede ser el principio de algo o puede no funcionar para nadie."
+        : "Todavía no lo anuncia nadie de forma sostenida: no hay mercado que medir.",
       blockers: ["Esperar a que entre un segundo anunciante"],
     };
   }
@@ -104,8 +106,8 @@ export function decideVerdict(op: ProductOpportunity): Verdict {
     return {
       recommendation: "TESTEAR",
       because: razones.length > 0
-        ? `${capitalizar(razones.join(", "))}. ${op.signals.advertiserCount} anunciantes y ${op.signals.activeAds} anuncios activos lo sostienen.`
-        : `Buena señal de mercado con ${op.signals.advertiserCount} anunciantes y ${op.signals.activeAds} anuncios activos.`,
+        ? `${capitalizar(razones.join(", "))}. ${cuenta(op.signals.advertiserCount, "anunciante")} y ${cuenta(op.signals.activeAds, "anuncio activo", "anuncios activos")} lo sostienen.`
+        : `Buena señal de mercado con ${cuenta(op.signals.advertiserCount, "anunciante")} y ${cuenta(op.signals.activeAds, "anuncio activo", "anuncios activos")}.`,
       blockers: [],
     };
   }
@@ -126,6 +128,11 @@ export function decideVerdict(op: ProductOpportunity): Verdict {
 
 function capitalizar(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** «1 anunciantes» delata software sin terminar. */
+function cuenta(n: number, singular: string, plural?: string): string {
+  return `${n} ${n === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
 
 /**
@@ -152,9 +159,12 @@ export function whyLine(op: ProductOpportunity): string {
   }
 
   const datos: string[] = [];
-  if (s.newAdvertisers14d !== null && s.newAdvertisers14d > 0) datos.push(`${s.newAdvertisers14d} anunciantes nuevos en 14 días`);
-  else if (s.advertiserCount > 0) datos.push(`${s.advertiserCount} anunciantes`);
-  if (s.activeAds > 0) datos.push(`${s.activeAds} creatividades activas`);
+  if (s.newAdvertisers14d !== null && s.newAdvertisers14d > 0) {
+    datos.push(s.newAdvertisers14d === 1 ? "1 anunciante nuevo en 14 días" : `${s.newAdvertisers14d} anunciantes nuevos en 14 días`);
+  } else if (s.advertiserCount > 0) {
+    datos.push(s.advertiserCount === 1 ? "1 anunciante" : `${s.advertiserCount} anunciantes`);
+  }
+  if (s.activeAds > 0) datos.push(s.activeAds === 1 ? "1 creatividad activa" : `${s.activeAds} creatividades activas`);
 
   return datos.length > 0 ? `${trozos[0]}. ${capitalizar(datos.join(" y "))}.` : `${trozos[0]}.`;
 }

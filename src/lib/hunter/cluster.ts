@@ -47,6 +47,12 @@ const STOPWORDS = new Set([
 ]);
 
 export const TOKEN_SIMILARITY_THRESHOLD = 0.6;
+/**
+ * Umbral para cuando NO hay nombre y hay que conformarse con el copy. Más
+ * alto a propósito: el texto publicitario comparte fórmula entre productos
+ * distintos, así que un parecido del 60 % ahí no significa lo mismo.
+ */
+export const COPY_SIMILARITY_THRESHOLD = 0.8;
 
 export function significantTokens(text: string): Set<string> {
   return new Set(
@@ -67,9 +73,51 @@ export function jaccard(a: Set<string>, b: Set<string>): number {
 
 interface Nodo {
   ad: HunterAd;
-  texto: string;
-  tokens: Set<string>;
+  /** Tokens del NOMBRE del producto. Es lo que identifica un producto. */
+  nameTokens: Set<string>;
+  /** Tokens del texto del anuncio. Mucho más ruidoso: casi todo es fórmula. */
+  copyTokens: Set<string>;
   dominio: string;
+}
+
+/**
+ * Similitud entre dos anuncios, o `null` si no llegan a parecerse lo
+ * suficiente para unirlos. Devolver `null` en vez de un número bajo obliga a
+ * que la decisión viva AQUÍ y no repartida por el bucle.
+ */
+function tokenSimilarity(a: Nodo, b: Nodo): number | null {
+  const conNombreA = a.nameTokens.size >= 2;
+  const conNombreB = b.nameTokens.size >= 2;
+
+  // Caso normal: los dos traen nombre. Se comparan los nombres y nada más.
+  if (conNombreA && conNombreB) {
+    if (sharedCount(a.nameTokens, b.nameTokens) < 2) return null;
+    const sim = jaccard(a.nameTokens, b.nameTokens);
+    return sim >= TOKEN_SIMILARITY_THRESHOLD ? sim : null;
+  }
+
+  // Uno tiene nombre y el otro no (pasa en Meta: muchos anuncios no traen
+  // título de enlace). Se exige que el copy del anónimo CONTENGA el nombre
+  // entero del otro: menos que eso es adivinar.
+  if (conNombreA !== conNombreB) {
+    const nombre = conNombreA ? a.nameTokens : b.nameTokens;
+    const copy = conNombreA ? b.copyTokens : a.copyTokens;
+    if (nombre.size < 2 || copy.size === 0) return null;
+    const dentro = sharedCount(nombre, copy);
+    return dentro === nombre.size ? 0.7 : null;
+  }
+
+  // Ninguno tiene nombre: solo queda el copy, con el listón más alto.
+  if (a.copyTokens.size < 3 || b.copyTokens.size < 3) return null;
+  if (sharedCount(a.copyTokens, b.copyTokens) < 3) return null;
+  const sim = jaccard(a.copyTokens, b.copyTokens);
+  return sim >= COPY_SIMILARITY_THRESHOLD ? sim : null;
+}
+
+function sharedCount(a: Set<string>, b: Set<string>): number {
+  let n = 0;
+  for (const t of a) if (b.has(t)) n += 1;
+  return n;
 }
 
 /** Union-Find: agrupa sin decidir de antemano cuántos grupos hay. */
@@ -96,10 +144,12 @@ class UnionFind {
 export function clusterAds(ads: HunterAd[]): AdCluster[] {
   if (ads.length === 0) return [];
 
-  const nodos: Nodo[] = ads.map((ad) => {
-    const texto = [ad.productNameRaw, ad.adCopy?.slice(0, 160)].filter(Boolean).join(" ");
-    return { ad, texto, tokens: significantTokens(texto), dominio: extractDomain(ad.landingUrl) };
-  });
+  const nodos: Nodo[] = ads.map((ad) => ({
+    ad,
+    nameTokens: significantTokens(ad.productNameRaw ?? ""),
+    copyTokens: significantTokens(ad.adCopy?.slice(0, 200) ?? ""),
+    dominio: extractDomain(ad.landingUrl),
+  }));
 
   const uf = new UnionFind();
   for (const n of nodos) uf.find(n.ad.id);
@@ -144,22 +194,51 @@ export function clusterAds(ads: HunterAd[]): AdCluster[] {
   }
 
   // PASADA 3 · solape de palabras significativas. Es la que puede meter la
-  // pata, así que exige un umbral alto y AL MENOS DOS palabras en común:
-  // con una sola, "cepillo" uniría el cepillo del perro con el del pelo.
+  // pata, así que va con tres frenos.
+  //
+  // ── FRENO 1: EL NOMBRE MANDA SOBRE EL COPY ──
+  // Los anuncios del mismo nicho usan la MISMA fórmula: "¿Cansado de X? Y lo
+  // resuelve en segundos. Envío 24-48 h y pago contrareembolso". Eso son diez
+  // palabras compartidas entre productos que no tienen nada que ver, y basta
+  // para superar cualquier umbral razonable. Comprobado con datos reales del
+  // módulo: 37 anuncios de CUATRO productos distintos acabaron en un solo
+  // cluster, y el radar enseñó una oportunidad gigante que no existía.
+  // Cuando los dos anuncios traen nombre de producto, se comparan SOLO los
+  // nombres. El copy no puede unir nada por sí solo.
+  //
+  // ── FRENO 2: MÍNIMO DOS PALABRAS EN COMÚN ──
+  // Con una sola, "cepillo" uniría el cepillo del perro con el del pelo.
+  //
+  // ── FRENO 3: NADA DE CADENAS ──
+  // Union-Find une por transitividad: si A se parece a B y B a C, A y C
+  // acaban juntos aunque no se parezcan en nada. Un solo enlace flojo
+  // colapsa el mercado entero en un producto. Antes de unir se comprueba
+  // también contra el REPRESENTANTE del grupo de destino.
+  const representante = new Map<string, Nodo>();
+  for (const n of nodos) representante.set(uf.find(n.ad.id), n);
+
   for (let i = 0; i < nodos.length; i++) {
     for (let j = i + 1; j < nodos.length; j++) {
       const a = nodos[i];
       const b = nodos[j];
-      if (uf.find(a.ad.id) === uf.find(b.ad.id)) continue;
-      if (a.tokens.size < 2 || b.tokens.size < 2) continue;
-      let comunes = 0;
-      for (const t of a.tokens) if (b.tokens.has(t)) comunes += 1;
-      if (comunes < 2) continue;
-      const sim = jaccard(a.tokens, b.tokens);
-      if (sim >= TOKEN_SIMILARITY_THRESHOLD) {
-        uf.union(a.ad.id, b.ad.id);
-        record(b.ad.id, "tokens", sim);
-      }
+      const ra = uf.find(a.ad.id);
+      const rb = uf.find(b.ad.id);
+      if (ra === rb) continue;
+
+      const sim = tokenSimilarity(a, b);
+      if (sim === null) continue;
+
+      // Freno 3: el enlace tiene que sostenerse también contra los
+      // representantes, no solo contra el anuncio concreto que hizo de puente.
+      const repA = representante.get(ra);
+      const repB = representante.get(rb);
+      if (repA && repA !== a && tokenSimilarity(repA, b) === null) continue;
+      if (repB && repB !== b && tokenSimilarity(a, repB) === null) continue;
+
+      uf.union(a.ad.id, b.ad.id);
+      record(b.ad.id, "tokens", sim);
+      const nuevaRaiz = uf.find(a.ad.id);
+      representante.set(nuevaRaiz, repA ?? a);
     }
   }
 

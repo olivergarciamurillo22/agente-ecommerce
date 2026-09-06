@@ -3,9 +3,24 @@
 // ============================================================
 // WINNER RADAR — FICHA DE UN PRODUCTO.
 //
-// Se abre ENCIMA de los resultados, no en otra página: volver tiene que ser
-// un gesto, no una navegación. `useOverlayBack` hace que atrás y Escape la
-// cierren en vez de sacar de la aplicación.
+// ══ POR QUÉ ES UNA PANTALLA Y NO UN PANEL LATERAL ══
+// La primera versión era un cajón que tapaba media pantalla y se cerraba con
+// una X pequeña arriba a la derecha. Estaba mal por dos motivos:
+//
+//   · No se veía cómo salir. Una X sin borde ni etiqueta, sobre contenido
+//     claro, en la esquina, no es un botón: es un adorno que resulta que
+//     funciona.
+//   · El contenido no cabe. Siete pestañas con tablas de competidores y
+//     rejillas de anuncios necesitan ancho; en un cajón todo sale apretado y
+//     además deja media pantalla inútil detrás, en gris.
+//
+// El panel ya resuelve esto en otros sitios: las secciones son PANTALLAS con
+// su cabecera y su vuelta atrás, y los cajones se reservan para fichas
+// cortas (un pedido, un formulario). Esto es una pantalla.
+//
+// «Volver a los resultados» es un botón con texto. Atrás y Escape siguen
+// funcionando —`useOverlayBack`—, pero no son la única salida: nadie debería
+// tener que adivinar un gesto.
 //
 // Siete pestañas, y todas responden a una pregunta distinta:
 //   Resumen        ¿qué es y qué hago con esto?
@@ -25,7 +40,7 @@ import { useOverlayBack } from "@/components/useBackable";
 import type { ProductOpportunity } from "@/lib/hunter/types";
 import { PRODUCT_FEATURE_LABEL } from "@/lib/hunter/types";
 import type { CreativeAnalysis } from "@/lib/hunter/intelligence";
-import { IconChevronRight, IconClose } from "@/components/icons";
+import { IconBack, IconChevronRight } from "@/components/icons";
 import {
   Badge,
   ProductCover,
@@ -38,8 +53,8 @@ import {
   miles,
   money,
   pct,
-  saturationWord,
-  scoreWord,
+  plural,
+  scoreLabel,
 } from "./radar-shared";
 
 type Pestana = "resumen" | "anuncios" | "creatividades" | "competidores" | "evolucion" | "economia" | "calculo";
@@ -88,17 +103,21 @@ export default function OpportunityDetail({
   useEffect(() => setTab("resumen"), [op.id]);
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end bg-black/25 backdrop-blur-[1px]">
-      <div
-        className="flex h-full w-full max-w-[860px] flex-col bg-brand-bg shadow-2xl"
-        role="dialog"
-        aria-modal="true"
-        aria-label={op.canonicalName}
-      >
-        {/* Cabecera */}
-        <div className="shrink-0 border-b border-brand-border bg-brand-surface">
-          <div className="flex items-start gap-4 px-5 py-4">
-            <div className="w-[104px] shrink-0">
+    <div className="flex h-full flex-col bg-brand-bg">
+      {/* ══ Cabecera: la salida es lo primero que se ve ══ */}
+      <div className="shrink-0 border-b border-brand-border bg-brand-surface">
+        <div className="mx-auto w-full max-w-[1180px] px-4 md:px-8">
+          <button
+            type="button"
+            onClick={onClose}
+            className="-ml-2 mt-3 inline-flex items-center gap-1.5 rounded-lg px-2.5 h-9 text-[13px] font-medium text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+          >
+            <IconBack size={16} />
+            Volver a los resultados
+          </button>
+
+          <div className="flex flex-col gap-4 pt-3 pb-4 sm:flex-row sm:items-start">
+            <div className="w-[120px] shrink-0">
               <ProductCover name={op.canonicalName} imageUrl={op.heroImageUrl ?? op.images[0] ?? null} />
             </div>
             <div className="min-w-0 flex-1">
@@ -108,23 +127,15 @@ export default function OpportunityDetail({
                   <Badge key={b} badge={b} />
                 ))}
               </div>
-              <h2 className="mt-2 text-[19px] font-semibold leading-snug tracking-tight">{op.canonicalName}</h2>
-              <p className="mt-1 text-[13px] leading-relaxed text-brand-muted">{data.verdict.because}</p>
+              <h2 className="mt-2 text-[20px] md:text-[24px] font-semibold leading-snug tracking-tight">{op.canonicalName}</h2>
+              <p className="mt-1 max-w-[70ch] text-[13.5px] leading-relaxed text-brand-muted">{data.verdict.because}</p>
             </div>
-            <div className="shrink-0 text-right">
+            <div className="shrink-0 sm:pt-1">
               <ScoreBig value={op.scores.opportunity} />
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Cerrar"
-                className="mt-3 rounded-lg p-2 text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-              >
-                <IconClose size={18} />
-              </button>
             </div>
           </div>
 
-          <nav className="flex gap-0.5 overflow-x-auto px-3" aria-label="Secciones del producto">
+          <nav className="flex gap-0.5 overflow-x-auto" aria-label="Secciones del producto">
             {PESTANAS.map((p) => (
               <button
                 key={p.id}
@@ -145,9 +156,11 @@ export default function OpportunityDetail({
             ))}
           </nav>
         </div>
+      </div>
 
-        {/* Contenido */}
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+      {/* ══ Contenido ══ */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <div className="mx-auto w-full max-w-[1180px] px-4 md:px-8 py-6">
           {tab === "resumen" && <Resumen data={data} />}
           {tab === "anuncios" && <Anuncios data={data} />}
           {tab === "creatividades" && <Creatividades c={data.creatives} />}
@@ -156,51 +169,51 @@ export default function OpportunityDetail({
           {tab === "economia" && <Economia data={data} />}
           {tab === "calculo" && <Calculo op={op} />}
         </div>
+      </div>
 
-        {/* Acciones */}
-        <div className="shrink-0 border-t border-brand-border bg-brand-surface px-5 py-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => onAction("test")}
-              className="rounded-xl bg-brand-gold px-4 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
+      {/* ══ Acciones: fijas abajo, siempre alcanzables ══ */}
+      <div className="shrink-0 border-t border-brand-border bg-brand-surface">
+        <div className="mx-auto flex w-full max-w-[1180px] flex-wrap items-center gap-2 px-4 md:px-8 py-3">
+          <button
+            type="button"
+            onClick={() => onAction("test")}
+            className="rounded-xl bg-brand-gold px-4 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
+          >
+            Preparar test
+          </button>
+          <button
+            type="button"
+            onClick={() => onAction("watch")}
+            className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
+          >
+            Vigilar
+          </button>
+          <button
+            type="button"
+            onClick={() => onAction("save")}
+            className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
+          >
+            Guardar
+          </button>
+          <div className="flex-1" />
+          {op.adLibraryUrl && (
+            <a
+              href={op.adLibraryUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-1 rounded-xl border border-brand-border px-3 h-11 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
             >
-              Preparar test
-            </button>
-            <button
-              type="button"
-              onClick={() => onAction("watch")}
-              className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
-            >
-              Vigilar
-            </button>
-            <button
-              type="button"
-              onClick={() => onAction("save")}
-              className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
-            >
-              Guardar
-            </button>
-            <div className="flex-1" />
-            {op.adLibraryUrl && (
-              <a
-                href={op.adLibraryUrl}
-                target="_blank"
-                rel="noreferrer noopener"
-                className="inline-flex items-center gap-1 rounded-xl px-3 h-11 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-              >
-                Ver en Meta
-                <IconChevronRight size={14} />
-              </a>
-            )}
-            <button
-              type="button"
-              onClick={() => onAction("discard")}
-              className="rounded-xl px-3 h-11 text-[13px] text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
-            >
-              Descartar
-            </button>
-          </div>
+              Ver en Meta
+              <IconChevronRight size={14} />
+            </a>
+          )}
+          <button
+            type="button"
+            onClick={() => onAction("discard")}
+            className="rounded-xl px-3 h-11 text-[13px] text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+          >
+            Descartar
+          </button>
         </div>
       </div>
     </div>
@@ -229,22 +242,22 @@ function Resumen({ data }: { data: DetailPayload }) {
   return (
     <>
       <Seccion title="Señales">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <div className="grid max-w-[720px] grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Anunciantes" value={miles(s.advertiserCount)} />
           <Stat label="Anuncios activos" value={miles(s.activeAds)} hint={`de ${miles(s.totalAds)} vistos`} />
           <Stat label="Creatividades" value={miles(s.creativeCount)} />
-          <Stat label="El más veterano" value={s.oldestActiveAdDays === null ? UNKNOWN : `${s.oldestActiveAdDays} días`} />
+          <Stat label="El más veterano" value={s.oldestActiveAdDays === null ? UNKNOWN : plural(s.oldestActiveAdDays, "día", "días")} />
         </div>
       </Seccion>
 
       <Seccion title="Puntuaciones">
-        <div className="rounded-xl border border-brand-border bg-brand-surface px-4 py-3">
-          <ScoreBar label="Mercado" value={op.scores.market.score} word={scoreWord(op.scores.market.score)} />
-          <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreWord(op.scores.momentum.score)} tone="good" />
-          <ScoreBar label="Saturación" value={op.scores.saturation.score} word={saturationWord(op.scores.saturation.score)} tone="warn" />
-          <ScoreBar label="Señal creativa" value={op.scores.creative_investment.score} word={scoreWord(op.scores.creative_investment.score)} />
-          <ScoreBar label="Producto" value={op.scores.product.score} word={scoreWord(op.scores.product.score)} />
-          <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreWord(op.scores.casamable.score)} />
+        <div className="max-w-[560px] rounded-xl border border-brand-border bg-brand-surface px-4 py-3">
+          <ScoreBar label="Mercado" value={op.scores.market.score} word={scoreLabel(op.scores.market)} />
+          <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreLabel(op.scores.momentum)} tone="good" />
+          <ScoreBar label="Saturación" value={op.scores.saturation.score} word={scoreLabel(op.scores.saturation, "saturation")} tone="warn" />
+          <ScoreBar label="Señal creativa" value={op.scores.creative_investment.score} word={scoreLabel(op.scores.creative_investment)} />
+          <ScoreBar label="Producto" value={op.scores.product.score} word={scoreLabel(op.scores.product)} />
+          <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreLabel(op.scores.casamable)} />
         </div>
       </Seccion>
 

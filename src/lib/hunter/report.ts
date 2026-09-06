@@ -32,7 +32,12 @@ export async function buildReport(run: SearchRun, ops: ProductOpportunity[]): Pr
   const descartar = ordenadas.filter((o) => o.recommendation === "DESCARTAR");
 
   const top = (testear.length > 0 ? testear : ordenadas).slice(0, TOP_PICKS);
-  const watch = vigilar.slice(0, 8);
+  // «Para vigilar» NO puede repetir lo que ya está en el podio. Cuando no hay
+  // nada testeable, el podio se rellena con los mejores —que son justo los
+  // que merecen seguimiento—, y sin este filtro el mismo producto aparecía
+  // arriba y abajo, y encima con dos consejos distintos.
+  const enElPodio = new Set(top.map((o) => o.id));
+  const watch = vigilar.filter((o) => !enElPodio.has(o.id)).slice(0, 8);
 
   const base: RadarReport = {
     headline: headlineFor(run, testear.length, ordenadas.length),
@@ -92,7 +97,9 @@ function summaryLines(run: SearchRun, ops: ProductOpportunity[], testables: numb
     `Analizamos ${miles(anuncios)} anuncio${anuncios === 1 ? "" : "s"} y detectamos ${miles(detectados)} producto${detectados === 1 ? "" : "s"}.`
   );
   if (ops.length !== detectados) {
-    out.push(`${miles(ops.length)} pasaron tus filtros; ${miles(run.progress.candidatesDiscarded)} se descartaron por no cumplirlos.`);
+    out.push(ops.length === 1
+      ? `1 pasó tus filtros; ${miles(run.progress.candidatesDiscarded)} se descartaron por no cumplirlos.`
+      : `${miles(ops.length)} pasaron tus filtros; ${miles(run.progress.candidatesDiscarded)} se descartaron por no cumplirlos.`);
   }
   if (testables > 0) out.push(`${testables} está${testables === 1 ? "" : "n"} en zona de test y ${vigilables} merece${vigilables === 1 ? "" : "n"} seguimiento.`);
   else if (vigilables > 0) out.push(`Ninguno está listo para gastar en un test; ${vigilables} merece${vigilables === 1 ? "" : "n"} seguimiento.`);
@@ -158,11 +165,21 @@ export function todayActions(
   run: SearchRun
 ): TodayAction[] {
   const out: TodayAction[] = [];
+  // UNA acción por producto. Decirle a Pedro «busca proveedor de X» y tres
+  // líneas más abajo «vigila X siete días» no son dos tareas: son dos
+  // consejos contradictorios sobre la misma cosa, y hacen que la lista deje
+  // de leerse.
+  const yaMencionado = new Set<string>();
+  const anotar = (a: TodayAction) => {
+    if (a.productId && yaMencionado.has(a.productId)) return;
+    if (a.productId) yaMencionado.add(a.productId);
+    out.push(a);
+  };
 
   for (const o of top) {
     const v = decideVerdict(o);
     if (o.recommendation === "TESTEAR") {
-      out.push({
+      anotar({
         productId: o.id,
         productName: o.canonicalName,
         verb: "TESTEAR",
@@ -170,7 +187,7 @@ export function todayActions(
         because: v.because,
       });
     } else if (o.economics === null) {
-      out.push({
+      anotar({
         productId: o.id,
         productName: o.canonicalName,
         verb: "BUSCAR_PROVEEDOR",
@@ -183,7 +200,7 @@ export function todayActions(
   for (const o of watch.slice(0, 2)) {
     if (out.length >= MAX_TODAY_ACTIONS) break;
     const dias = o.scores.momentum.score === null ? 7 : 5;
-    out.push({
+    anotar({
       productId: o.id,
       productName: o.canonicalName,
       verb: "VIGILAR",
@@ -194,7 +211,7 @@ export function todayActions(
 
   const peor = descartados.find((o) => (o.scores.saturation.score ?? 0) >= 75);
   if (peor && out.length < MAX_TODAY_ACTIONS) {
-    out.push({
+    anotar({
       productId: peor.id,
       productName: peor.canonicalName,
       verb: "EVITAR",
@@ -204,7 +221,7 @@ export function todayActions(
   }
 
   if (out.length === 0) {
-    out.push({
+    anotar({
       productId: null,
       productName: null,
       verb: "AMPLIAR_BUSQUEDA",

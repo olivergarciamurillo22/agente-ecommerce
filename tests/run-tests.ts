@@ -12835,12 +12835,24 @@ async function main(): Promise<void> {
       process.env.PRODUCT_HUNTER_SOURCE = previo;
 
       const view = src("src/components/hunter/ProductHunterView.tsx");
-      assert.match(view, /No hay una fuente de descubrimiento conectada/, "dice NO CONFIGURADO, no 'sin resultados'");
-      assert.ok(!/0 productos encontrados|0 resultados/.test(view), "nunca implica que se buscó y no hubo nada");
-      assert.match(view, /todavía no hay una fuente real de productos conectada/, "subtexto honesto");
-      assert.match(view, /readiness="not_configured"/, "badge de madurez");
-      // Sin fuente NO se ofrecen Buscar/Guardados/Comparar: serían CTA engañosas.
-      assert.match(view, /availability\.available\s*\?\s*\[[\s\S]*?id: "search", label: "Buscar"[\s\S]*?\]\s*:\s*\[/, "las pestañas de búsqueda solo existen con fuente conectada");
+      // Lo que protege este test NO es una frase concreta —los copys cambian—
+      // sino que una fuente SIN CONFIGURAR jamás se presente como "hemos
+      // buscado y no hay nada". Son cosas distintas y confundirlas hace que
+      // Pedro descarte un nicho que nadie ha mirado.
+      assert.ok(!/0 productos encontrados|0 resultados|sin resultados/i.test(view),
+        "nunca implica que se buscó y no hubo nada");
+      assert.match(view, /PRODUCT_HUNTER_SOURCE/, "dice qué falta configurar, con el nombre exacto");
+      assert.match(view, /Reintentar/, "ofrece reintentar en vez de dejar la pantalla muerta");
+      // Y el Radar, que sí funciona sin ese backend, tiene que estar
+      // señalado como la salida: si no, la pantalla parece un callejón.
+      assert.match(view, /usa el Radar/, "manda al Radar, que no depende de ese backend");
+      // Sin fuente NO se ofrecen Buscar/Guardados/Comparar: serían CTA
+      // engañosas. Se comprueba en las DOS capas donde podrían aparecer:
+      // la tira de secciones y la barra interna de candidatos.
+      assert.match(view, /sec\.id !== "candidatos" \|\| availability\?\.available/,
+        "la sección de candidatos no se ofrece sin fuente conectada");
+      assert.match(view, /tab !== "studio" && availability\.available && \(\s*<TabBar/,
+        "las pestañas Buscar/Guardados/Comparar solo existen con fuente conectada");
     });
 
     await test("V4.2 Landing Studio: Beta + aviso de que se guarda en este navegador", () => {
@@ -13602,6 +13614,74 @@ async function main(): Promise<void> {
     const ads = [mk("a", "M1", "Cepillo alisador de pelo"), mk("b", "M2", "Cepillo quitapelos mascotas sofa")];
     const clusters = clusterAds(ads);
     assert.equal(clusters.length, 2, "compartir UNA palabra no puede unir dos productos");
+  });
+
+  await test("RADAR · la FÓRMULA del copy no agrupa productos distintos (bug real del 06-09)", async () => {
+    const { clusterAds } = await import("../src/lib/hunter/cluster");
+    const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");
+
+    // El caso exacto que rompió el módulo: cuatro productos que no tienen
+    // nada que ver, anunciados con la MISMA plantilla de copy. Los anuncios
+    // de un nicho se escriben todos igual ("¿Cansado de X? Y lo resuelve en
+    // segundos. Envío 24-48 h y pago contrareembolso"), así que comparten
+    // diez palabras y superaban cualquier umbral por Jaccard. Resultado: 37
+    // anuncios de 4 productos en UN cluster, y el radar enseñando una
+    // oportunidad gigante que no existía.
+    const plantilla = (p: string) =>
+      `¿Harto de perder media hora limpiando? ${p} lo deja listo en dos minutos. Envío 24-48 h y pago contrareembolso.`;
+    const PRODUCTOS = [
+      ["Cepillo quitapelos para perros y gatos", "PetGlow"],
+      ["Organizador maletero plegable coche", "AutoNeat"],
+      ["Cortaúñas eléctrico profesional", "NailPro"],
+      ["Proyector estrellas dormitorio", "LumiHome"],
+    ];
+    const ads = PRODUCTOS.flatMap(([nombre, marca], i) =>
+      [0, 1].map((k) =>
+        normalizeExternalAd({
+          provider: "meta_ad_library", externalId: `f-${i}-${k}`, platform: "facebook",
+          advertiserName: `${marca} ${k}`, advertiserExternalId: `p-${i}-${k}`,
+          productName: nombre, adCopy: plantilla(nombre), format: null, countries: ["ES"],
+          startedAt: null, lastSeenAt: null, active: true, activeDays: 30,
+          landingUrl: `https://tienda-${i}-${k}.example/p`, previewUrl: null, imageUrl: null,
+          creativeIds: [], priceAmount: 29.9, priceCurrency: "EUR", raw: null,
+        } as never)
+      )
+    );
+
+    const clusters = clusterAds(ads);
+    assert.equal(clusters.length, 4, "cuatro productos distintos siguen siendo cuatro");
+    for (const c of clusters) {
+      assert.equal(c.adIds.length, 2, "cada producto conserva sus dos anuncios");
+    }
+  });
+
+  await test("RADAR · sin nombre de producto, el copy solo agrupa con un parecido MUY alto", async () => {
+    const { clusterAds } = await import("../src/lib/hunter/cluster");
+    const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");
+
+    // Meta a menudo no entrega título de enlace. Entonces solo queda el copy,
+    // y el listón sube: unir por fórmula publicitaria compartida sería
+    // exactamente el error de arriba, pero sin la red del nombre.
+    const anonimo = (id: string, copy: string) =>
+      normalizeExternalAd({
+        provider: "meta_ad_library", externalId: id, platform: "facebook",
+        advertiserName: `Marca ${id}`, advertiserExternalId: id, productName: null,
+        adCopy: copy, format: null, countries: ["ES"], startedAt: null, lastSeenAt: null,
+        active: true, activeDays: 20, landingUrl: `https://${id}.example/p`, previewUrl: null,
+        imageUrl: null, creativeIds: [], priceAmount: null, priceCurrency: null, raw: null,
+      } as never);
+
+    const distintos = clusterAds([
+      anonimo("a", "¿Harto de perder media hora limpiando? Lo deja listo en dos minutos. Envío 24-48 h."),
+      anonimo("b", "¿Harto de perder media hora limpiando? Aparca sin rayarte. Envío 24-48 h."),
+    ]);
+    assert.equal(distintos.length, 2, "compartir la fórmula no es ser el mismo producto");
+
+    const iguales = clusterAds([
+      anonimo("c", "Rodillo quitapelos reutilizable para sofá y ropa, sin recambios"),
+      anonimo("d", "Rodillo quitapelos reutilizable sofá ropa sin recambios"),
+    ]);
+    assert.equal(iguales.length, 1, "cuando el texto SÍ describe lo mismo, se agrupa");
   });
 
   await test("RADAR · deduplica el mismo anuncio llegado por dos fuentes y conserva el más rico", async () => {

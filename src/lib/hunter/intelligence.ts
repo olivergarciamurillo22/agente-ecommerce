@@ -276,18 +276,35 @@ export async function generateOpportunitySummary(op: ProductOpportunity): Promis
   };
 }
 
+/**
+ * «4 anunciante(s)» no lo escribe una persona: lo escribe un programa que no
+ * se molestó. Y esto es lo primero que Pedro lee de cada producto.
+ */
+function n(valor: number, singular: string, plural: string): string {
+  return `${new Intl.NumberFormat("es-ES").format(valor)} ${valor === 1 ? singular : plural}`;
+}
+
 export function buildObservedLines(op: ProductOpportunity): string[] {
   const s = op.signals;
   const out = [
-    `${s.advertiserCount} anunciante(s) distintos`,
-    `${s.activeAds} anuncio(s) activos de ${s.totalAds} vistos`,
-    `${s.creativeCount} creatividad(es)`,
+    n(s.advertiserCount, "anunciante distinto", "anunciantes distintos"),
+    `${n(s.activeAds, "anuncio activo", "anuncios activos")} de ${s.totalAds} vistos`,
+    n(s.creativeCount, "creatividad", "creatividades"),
   ];
   if (s.oldestActiveAdDays !== null) out.push(`el anuncio más veterano lleva ${s.oldestActiveAdDays} días activo`);
-  if (s.newAds7d !== null) out.push(`${s.newAds7d} anuncio(s) nuevos en 7 días`);
-  if (s.countryCount > 0) out.push(`presente en ${s.countryCount} país(es) y ${s.platformCount} plataforma(s)`);
+  if (s.newAds7d !== null) {
+    out.push(s.newAds7d === 0
+      ? "ningún anuncio nuevo en los últimos 7 días"
+      : n(s.newAds7d, "anuncio nuevo en 7 días", "anuncios nuevos en 7 días"));
+  }
+  if (s.countryCount > 0) {
+    out.push(`presente en ${n(s.countryCount, "país", "países")} y ${n(s.platformCount, "plataforma", "plataformas")}`);
+  }
   if (op.observedPriceMin !== null && op.observedPriceMax !== null) {
-    out.push(`precio observado entre ${op.observedPriceMin.toFixed(2)} y ${op.observedPriceMax.toFixed(2)} ${op.currency}`);
+    const fmt = new Intl.NumberFormat("es-ES", { style: "currency", currency: op.currency || "EUR" });
+    out.push(op.observedPriceMin === op.observedPriceMax
+      ? `precio observado: ${fmt.format(op.observedPriceMin)}`
+      : `precio observado entre ${fmt.format(op.observedPriceMin)} y ${fmt.format(op.observedPriceMax)}`);
   }
   return out;
 }

@@ -23,6 +23,44 @@
 
 import { useEffect, useRef } from "react";
 
+// ============================================================
+// EL CIERRE DE LA ENTRADA SE APLAZA UN TICK.
+//
+// Bug real, visto el 06-09 con la ficha de producto: al abrirla se cerraba
+// sola y encima te sacaba del Cazador.
+//
+// La causa: el efecto de esta capa puede MONTARSE, LIMPIARSE Y VOLVER A
+// MONTARSE de forma inmediata — React en modo estricto lo hace siempre en
+// desarrollo, y un componente cargado con `lazy` puede suspender y rehacer el
+// montaje también en producción. En esa secuencia, la limpieza llamaba a
+// `history.back()` justo después de que el segundo montaje hubiera apilado su
+// entrada: el `popstate` resultante se leía como "el usuario ha pulsado
+// atrás" y se cerraba la capa recién abierta.
+//
+// La solución es esperar un tick antes de retirar la entrada. Si en ese tick
+// vuelve a montarse la misma capa, se cancela la retirada y se REUTILIZA la
+// entrada que ya estaba puesta. Un montaje-desmontaje-montaje deja de
+// distinguirse de un montaje normal, que es exactamente lo que es.
+// ============================================================
+
+let retiradaPendiente: ReturnType<typeof setTimeout> | null = null;
+
+function programarRetirada(): void {
+  if (retiradaPendiente) clearTimeout(retiradaPendiente);
+  retiradaPendiente = setTimeout(() => {
+    retiradaPendiente = null;
+    window.history.back();
+  }, 0);
+}
+
+/** ¿Había una retirada en vuelo? Si la hay se cancela y se reutiliza la entrada. */
+function rescatarEntrada(): boolean {
+  if (retiradaPendiente === null) return false;
+  clearTimeout(retiradaPendiente);
+  retiradaPendiente = null;
+  return true;
+}
+
 /**
  * Mientras `open` sea true, atrás (y Escape) ejecutan `onClose` en vez de
  * salir de la aplicación.
@@ -39,7 +77,9 @@ export function useOverlayBack(open: boolean, onClose: () => void): void {
   useEffect(() => {
     if (!open || typeof window === "undefined") return;
 
-    window.history.pushState({ casamableOverlay: true }, "");
+    // Si veníamos de una retirada aplazada, la entrada sigue en el
+    // historial: reutilizarla en vez de apilar otra.
+    if (!rescatarEntrada()) window.history.pushState({ casamableOverlay: true }, "");
     marcaPuesta.current = true;
 
     const alVolver = () => {
@@ -66,7 +106,7 @@ export function useOverlayBack(open: boolean, onClose: () => void): void {
       // visible y parecería que el botón está roto.
       if (marcaPuesta.current) {
         marcaPuesta.current = false;
-        window.history.back();
+        programarRetirada();
       }
     };
   }, [open]);
