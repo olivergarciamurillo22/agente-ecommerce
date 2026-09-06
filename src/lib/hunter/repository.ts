@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import { systemDbHandle } from "../db";
 import { missingScoreReasons, scoreCandidate } from "./scoring";
-import type { CandidateFacts, CandidateScore, CandidateState, ProductCandidate, ScoreReason, Verdict } from "./types";
+import type { CandidateFacts, CandidateScore, CandidateState, ProductCandidate, ScoreReason, ShippingTier, Verdict } from "./types";
 
 type Row = Record<string, unknown>;
 const parse = <T>(value: unknown, fallback: T): T => {
@@ -11,7 +11,7 @@ const parse = <T>(value: unknown, fallback: T): T => {
 
 function fromRow(row: Row): ProductCandidate {
   const scoring: CandidateScore | null = row.score === null ? null : {
-    shippingTier: row.tramo_envio as "hasta_1kg" | "hasta_4kg",
+    shippingTier: row.tramo_envio as ShippingTier,
     shippingEur: Number(row.envio_eur), proposedPriceEur: Number(row.pvp_propuesto_eur),
     unitMarginEur: Number(row.margen_unitario_eur), maxCpaEur: Number(row.cpa_maximo_eur),
     breakEvenDeliveryPct: Number(row.break_even_entrega_pct), score: Number(row.score),

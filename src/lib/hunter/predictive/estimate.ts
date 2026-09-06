@@ -1,8 +1,13 @@
+import { shippingTierForGrams } from "../scoring";
 import type { PredictiveEstimate, PredictiveSearchProvider, PriceRange, PreliminaryViability, SearchEvidence } from "./types";
 
+// ESTIMACIÓN INTERNA, no dato confirmado por Pedro: caducidad de una estimación.
 export const ESTIMATE_TTL_DAYS = 30;
-export const PICKING_EUR = 1.7;
+// Confirmado por Pedro (contrato Beeping actualizado, 2026-09-05/06): picking & packing 1,40 €.
+export const PICKING_EUR = 1.4;
+// Confirmado por Pedro (contrato Beeping): comisión COD 0,70 €.
 export const COD_EUR = 0.7;
+// ESTIMACIÓN INTERNA, no dato confirmado por Pedro: umbral de "candidato fuerte".
 export const STRONG_MIN_WORST_MARGIN_EUR = 8;
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -36,9 +41,10 @@ function logistics(evidence: SearchEvidence[]): Pick<PreliminaryViability, "logi
   const weights = evidence.map((e) => e.weightGrams).filter((n): n is number => n !== null);
   if (!weights.length) return { logisticsEur: null, shippingTier: null, reason: "sin peso fiable para aplicar el tramo logistico" };
   const worstWeight = Math.max(...weights);
-  if (worstWeight <= 1000) return { logisticsEur: round2(PICKING_EUR + COD_EUR + 4.08), shippingTier: "hasta_1kg", reason: null };
-  if (worstWeight <= 4000) return { logisticsEur: round2(PICKING_EUR + COD_EUR + 6.5), shippingTier: "hasta_4kg", reason: null };
-  return { logisticsEur: null, shippingTier: null, reason: "peso fuera de los tramos Beeping conocidos" };
+  // Envío por tramo: la MISMA tabla que el scoring (SHIPPING_TIERS, contrato Beeping / Correos Express).
+  const shipping = shippingTierForGrams(worstWeight);
+  if (!shipping) return { logisticsEur: null, shippingTier: null, reason: "peso fuera de los tramos Beeping conocidos" };
+  return { logisticsEur: round2(PICKING_EUR + COD_EUR + shipping.eur), shippingTier: shipping.tier, reason: null };
 }
 
 export async function estimatePredictiveCandidate(

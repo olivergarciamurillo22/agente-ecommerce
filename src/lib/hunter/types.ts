@@ -21,9 +21,12 @@ export interface CandidateFacts {
   claims: string[] | null;
 }
 
+/** Tramos de peso facturable con tarifa confirmada (ver SHIPPING_TIERS en scoring.ts). */
+export type ShippingTier = "hasta_1kg" | "hasta_2kg" | "hasta_3kg" | "hasta_4kg";
+
 export interface ScoreReason { factor: string; points: number; detail: string }
 export interface CandidateScore {
-  shippingTier: "hasta_1kg" | "hasta_4kg";
+  shippingTier: ShippingTier;
   shippingEur: number;
   proposedPriceEur: number;
   unitMarginEur: number;

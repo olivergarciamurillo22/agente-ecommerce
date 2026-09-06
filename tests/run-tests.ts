@@ -13679,8 +13679,9 @@ async function main(): Promise<void> {
       const estimate = await estimatePredictiveCandidate("Organizador modular", "https://tienda-a.test/producto", provider, 1_700_000_000);
       assert.deepEqual([estimate.wholesale.at500?.min, estimate.wholesale.at500?.max], [3, 4]);
       assert.deepEqual([estimate.retail.unit?.min, estimate.retail.unit?.max], [39, 42]);
-      assert.equal(estimate.viability.logisticsEur, 6.48);
-      assert.equal(estimate.viability.worstContributionEur, 28.52);
+      // picking 1,40 + COD 0,70 + envío ≤1 kg 3,80 (contrato Beeping / Correos Express, Pedro 06-09)
+      assert.equal(estimate.viability.logisticsEur, 5.9);
+      assert.equal(estimate.viability.worstContributionEur, 29.1);
       assert.equal(estimate.viability.verdict, "candidato_fuerte");
       assert.equal("score" in estimate.viability, false);
     });
@@ -13767,6 +13768,17 @@ async function main(): Promise<void> {
       const folded={...fixture,weightGrams:190,lengthCm:51,widthCm:41,heightCm:11};
       assert.equal(hunterScore.shippingTier(folded)?.tier,"hasta_1kg","por defecto manda el peso real");
       assert.equal(hunterScore.shippingTier(folded,6000)?.tier,"hasta_4kg","un divisor explícito activa el cálculo");
+    });
+    await test("Hunter · tramos de envío = contrato Beeping/Correos Express confirmado por Pedro (06-09), picking 1,40", () => {
+      const { estimate: predictive } = { estimate: require("../src/lib/hunter/predictive/estimate") as typeof import("../src/lib/hunter/predictive/estimate") };
+      assert.deepEqual(hunterScore.SHIPPING_TIERS.map((t) => [t.tier, t.maxGrams, t.eur]), [["hasta_1kg",1000,3.8],["hasta_2kg",2000,3.86],["hasta_3kg",3000,3.94],["hasta_4kg",4000,4.0]]);
+      assert.deepEqual(hunterScore.shippingTierForGrams(190), { tier: "hasta_1kg", eur: 3.8 });
+      assert.deepEqual(hunterScore.shippingTierForGrams(2500), { tier: "hasta_3kg", eur: 3.94 });
+      assert.equal(hunterScore.shippingTierForGrams(4001), null, "por encima de 4 kg no hay tarifa confirmada: fail-closed");
+      assert.equal(predictive.PICKING_EUR, 1.4);
+      assert.equal(predictive.COD_EUR, 0.7);
+      assert.equal(hunterScore.COD_FEE_EUR, 0.7);
+      assert.equal(hunterScore.DEFAULT_ASSUMED_DELIVERY_RATE, 0.629);
     });
     await test("Hunter · limpia tres títulos spam reales", () => {
       const titles = [

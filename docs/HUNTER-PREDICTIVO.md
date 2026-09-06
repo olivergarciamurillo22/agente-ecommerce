@@ -41,8 +41,13 @@ precios mostrados en EUR: no se inventa un cambio de divisa para 1688.
 ## Viabilidad preliminar
 
 La estimacion cruza el rango minorista con el coste a 500 unidades. Aplica los
-costes conocidos de Beeping: picking 1,70 EUR, COD 0,70 EUR y envio 4,08 EUR
-hasta 1 kg o 6,50 EUR hasta 4 kg. Sin peso fiable no hay veredicto.
+costes del contrato Beeping confirmados por Pedro (2026-09-05/06): picking &
+packing 1,40 EUR, COD 0,70 EUR y envio Correos Express con recargo de
+combustible por tramo de peso, practicamente plano: 3,80 EUR hasta 1 kg,
+3,86 EUR hasta 2 kg, 3,94 EUR hasta 3 kg y 4,00 EUR hasta 4 kg (tabla
+`SHIPPING_TIERS` en `src/lib/hunter/scoring.ts`, compartida con el scoring).
+Por encima de 4 kg no hay tramo confirmado y no hay veredicto. Sin peso
+fiable tampoco.
 
 - `descartar`: ni el mejor caso deja contribucion positiva.
 - `investigar`: existe margen posible, pero el peor caso deja menos de 8 EUR.
