@@ -132,6 +132,9 @@ export function parseIntentDeterministic(prompt: string): IntentResult {
   const dias = t.match(/(\d+)\s*d[ií]as?\s+(?:con\s+)?(?:anuncios?\s+)?activos?/);
   if (dias) f.minDaysActive = parseInt(dias[1], 10);
 
+  // «contrareembolso» es LA condición del negocio de Casamable y se quedaba
+  // sin interpretar: el plan decía codFit=null aunque estuviera escrito.
+  if (/contra\s?reembolso|contrareembolso|\bcod\b|pago al recibir|paga al recibir/.test(t)) f.codFit = true;
   if (/sin tallas?|no.{0,8}tallas?/.test(t)) f.requiresSizing = false;
   if (/no fr[áa]gil|nada fr[áa]gil|que no se rompa/.test(t)) f.fragile = false;
   if (/sin electr[óo]nica|no electr[óo]nic/.test(t)) f.electronics = false;

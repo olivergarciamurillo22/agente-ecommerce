@@ -13778,6 +13778,130 @@ async function main(): Promise<void> {
     }
   });
 
+  await test("RADAR · «se puede buscar» NO puede decirse con la fuente caída", async () => {
+    const guardado = { ...process.env };
+    try {
+      const reg = await import("../src/lib/hunter/providers/registry");
+      delete process.env.WINNINGHUNTER_API_KEY;
+      delete process.env.HUNTER_FIXTURE_MODE;
+      // Token con formato válido pero que Meta rechaza. La sonda saldrá con
+      // ERROR y el veredicto NO puede seguir siendo verde.
+      process.env.META_AD_LIBRARY_ACCESS_TOKEN = "EAAtokendepruebaquenoexisteXXXXXXXXXXXX";
+
+      const r = await reg.radarReadiness();
+      const meta = r.providers.find((p) => p.id === "meta_ad_library");
+      // En una validación real el doctor decía «META ERROR» y tres líneas más
+      // abajo «SE PUEDE BUSCAR», saliendo con código 0. Un diagnóstico que se
+      // contradice manda a buscar a quien no puede, y en CI pasa por verde.
+      if (meta && meta.status === "ERROR") {
+        assert.equal(r.canSearch, false, "con la única fuente caída NO se puede buscar");
+        assert.deepEqual(r.brokenProviders, ["meta_ad_library"], "y se dice cuál falla");
+        assert.match(r.nextStep ?? "", /META_AD_LIBRARY_ACCESS_TOKEN/, "con el siguiente paso concreto");
+        assert.match(r.reason, /NO responde/i);
+      }
+      // Sin red la sonda no puede fallar de forma determinista, así que lo
+      // que se fija SIEMPRE es el contrato: canSearch nunca puede ser true
+      // si no hay ninguna fuente sana.
+      const sanas = r.providers.filter((p) => p.status === "CONNECTED" || p.status === "READY").map((p) => p.id);
+      const buscadoras = sanas.filter((id) => id === "meta_ad_library" || id === "winninghunter" || id === "tiktok_research" || id === "fixture");
+      if (buscadoras.length === 0) assert.equal(r.canSearch, false, "sin fuente sana, jamás verde");
+    } finally {
+      for (const k of ["META_AD_LIBRARY_ACCESS_TOKEN", "WINNINGHUNTER_API_KEY", "HUNTER_FIXTURE_MODE"]) {
+        if (guardado[k] === undefined) delete process.env[k];
+        else process.env[k] = guardado[k];
+      }
+    }
+  });
+
+  await test("RADAR · el error del proveedor llega entero, y sin la clave dentro", async () => {
+    const { providerMessage, scrubSecrets } = await import("../src/lib/hunter/http");
+
+    // El caso literal de la validación: el doctor decía «respuesta 400» y
+    // hubo que repetir la llamada con curl para descubrir que el token había
+    // caducado. Esa frase es LA respuesta, y se estaba tirando.
+    const cuerpoMeta = JSON.stringify({
+      error: {
+        message: "Error validating access token: Session has expired on Wednesday, 02-Sep-26 07:00:00 PDT.",
+        type: "OAuthException", code: 190, error_subcode: 463,
+      },
+    });
+    const msg = await providerMessage(new Response(cuerpoMeta, { status: 400 }));
+    assert.match(msg ?? "", /Session has expired/, "el motivo real sobrevive");
+    assert.ok(!/OAuthException/.test(msg ?? ""), "solo el mensaje, no el JSON entero");
+
+    // Y nunca puede llevar la credencial: esto acaba en un log y en la base.
+    const conToken = scrubSecrets(
+      "GET /ads_archive?access_token=EAABsecretoLARGO123456789&q=x falló · Bearer sk-proj-ABCDEFGHIJ"
+    );
+    assert.ok(!/EAABsecretoLARGO123456789/.test(conToken), "el token de Meta no aparece");
+    assert.ok(!/sk-proj-ABCDEFGHIJ/.test(conToken), "la clave de OpenAI tampoco");
+    assert.match(conToken, /oculto|oculta/);
+
+    // Un cuerpo que no es JSON no rompe nada: peor error es no tener error.
+    assert.match((await providerMessage(new Response("Bad Gateway", { status: 502 }))) ?? "", /Bad Gateway/);
+    assert.equal(await providerMessage(new Response("", { status: 500 })), null);
+  });
+
+  await test("RADAR · sin resultados Y con la fuente caída NO es «no hay productos»", async () => {
+    const { buildReport } = await import("../src/lib/hunter/report");
+
+    const run = {
+      title: "Mascotas · ES", prompt: null, fixtureMode: false, coverage: "partial" as const,
+      error: "respuesta 400: Session has expired on Wednesday, 02-Sep-26",
+      progress: {
+        sourcesQueried: 1, sourcesTotal: 1, sourcesFailed: ["meta_ad_library"],
+        adsAnalyzed: 0, productsDetected: 0, candidatesDiscarded: 0, opportunities: 0,
+      },
+    };
+    const informe = await buildReport(run as never, []);
+
+    // Decirle a alguien «prueba con otras palabras» cuando lo que ha fallado
+    // es la fuente le hace buscar sinónimos media hora. Pasó de verdad.
+    assert.match(informe.headline, /no se ha podido consultar/i, "el titular dice la verdad");
+    assert.ok(
+      informe.risks.some((r) => /no se ha podido mirar/i.test(r)),
+      "y se distingue «no hay» de «no se ha mirado»"
+    );
+    assert.ok(
+      informe.risks.some((r) => /Session has expired/.test(r)),
+      "con el motivo concreto, no solo el hecho"
+    );
+  });
+
+  await test("RADAR · el techo horario de Meta existe de verdad, no solo en un comentario", async () => {
+    const { DEFAULT_RATE_LIMIT, callsLastHour } = await import("../src/lib/hunter/http");
+    const { META_MAX_CALLS_PER_HOUR } = await import("../src/lib/hunter/providers/meta-ad-library");
+    const proveedor = fs.readFileSync(
+      path.join(process.cwd(), "src/lib/hunter/providers/meta-ad-library.ts"), "utf8"
+    );
+
+    // El comentario prometía respetar ~200 llamadas/hora, pero lo único que
+    // había era 1,2 s de espaciado — que permite 3.000. Se señaló en una
+    // validación real y era cierto: la protección no existía.
+    assert.match(proveedor, /maxPerHour: META_MAX_CALLS_PER_HOUR/, "el techo se declara donde se usa");
+    assert.ok(META_MAX_CALLS_PER_HOUR <= 200, "conservador: pasarse bloquea la app entera, no una llamada");
+    assert.equal(typeof callsLastHour("meta_ad_library"), "number", "y hay un contador de verdad detrás");
+    assert.ok(DEFAULT_RATE_LIMIT.minIntervalMs > 0, "el espaciado sigue, pero ya no se le atribuye lo que no hace");
+  });
+
+  await test("RADAR · «contrareembolso» escrito en la búsqueda se interpreta", async () => {
+    const { parseIntentDeterministic } = await import("../src/lib/hunter/intelligence");
+    // Es LA condición del negocio de Casamable y se quedaba en null aunque
+    // estuviera escrita con todas las letras.
+    for (const frase of [
+      "Productos de mascotas para España, contrareembolso, 25-50 €",
+      "algo para el coche, contra reembolso",
+      "hogar, pago al recibir, menos de 40 €",
+    ]) {
+      assert.equal(parseIntentDeterministic(frase).filters.codFit, true, frase);
+    }
+    assert.equal(
+      parseIntentDeterministic("productos de cocina baratos").filters.codFit,
+      null,
+      "y no se inventa cuando no se menciona"
+    );
+  });
+
   await test("RADAR · Meta es la fuente principal y WinningHunter es OPCIONAL", async () => {
     const guardado = { ...process.env };
     try {

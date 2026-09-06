@@ -40,6 +40,12 @@ const DEFAULT_VERSION = "v21.0";
 const DEFAULT_PAGES = 3;
 /** Techo duro: más allá de esto se gasta cuota sin aprender nada nuevo. */
 const MAX_PAGES = 6;
+/**
+ * Techo horario del acceso estándar a la Ad Library. Conservador a propósito:
+ * pasarse no da un error puntual, da un bloqueo temporal de la app entera y
+ * el radar se queda muerto el resto del día.
+ */
+export const META_MAX_CALLS_PER_HOUR = 180;
 
 /** UE + Reino Unido: los únicos donde `ad_type=ALL` trae anuncios comerciales. */
 export const COMMERCIAL_SCOPE_COUNTRIES: readonly string[] = [
@@ -104,8 +110,14 @@ export class MetaAdLibraryProvider implements IntelligenceProvider {
         checkedAt: now,
       };
     }
-    // Sonda mínima y barata: 1 anuncio en España.
-    const res = await this.rawSearch({ keywords: "casa", country: "ES", limit: 1 });
+    // Sonda mínima: 1 anuncio en España, y SIN CACHÉ.
+    //
+    // Con caché, la respuesta guardada de un token que funcionaba hacía que
+    // un token ya caducado diera CONNECTED. La clave de caché se indexa sin
+    // el token —a propósito, para no escribirlo en la base—, así que cambiar
+    // de credencial no invalida la entrada. Una sonda que puede pasar sin
+    // tocar al proveedor no comprueba la credencial: la supone.
+    const res = await this.rawSearch({ keywords: "casa", country: "ES", limit: 1 }, { noCache: true });
     if (!res.ok) {
       return {
         id: PROVIDER,
@@ -165,7 +177,7 @@ export class MetaAdLibraryProvider implements IntelligenceProvider {
     );
   }
 
-  private async rawSearch(q: AdSearchQuery): Promise<ProviderResult<AdSearchResponse>> {
+  private async rawSearch(q: AdSearchQuery, opts: { noCache?: boolean } = {}): Promise<ProviderResult<AdSearchResponse>> {
     if (!token()) return providerFail("Meta Ad Library no está configurada");
     const version = (process.env.META_AD_LIBRARY_API_VERSION ?? DEFAULT_VERSION).trim();
     const params = new URLSearchParams({
@@ -186,10 +198,13 @@ export class MetaAdLibraryProvider implements IntelligenceProvider {
       // La clave viaja en la query (lo exige Graph), pero la caché se indexa
       // SIN ella: si no, el token acabaría escrito en la tabla de caché.
       cacheKey: `${PROVIDER}|${version}|${q.country}|${q.keywords}|${q.activeOnly}|${q.limit}|${q.cursor ?? ""}`,
-      cacheTtlSeconds: 1800,
+      cacheTtlSeconds: opts.noCache ? 0 : 1800,
       budget: this.budget,
-      // Cuota de ~200/hora: 1,2 s entre llamadas deja margen de sobra.
-      config: { minIntervalMs: 1200 },
+      // Dos frenos, porque uno solo no basta: el espaciado evita ráfagas y
+      // el techo horario evita el goteo sostenido. Con 1,2 s se podrían
+      // hacer 3.000 llamadas/hora — muy por encima de lo que el acceso
+      // estándar aguanta— y decir «respeta la cuota» sería falso.
+      config: { minIntervalMs: 1200, maxPerHour: META_MAX_CALLS_PER_HOUR },
     });
 
     if (!res.ok) {

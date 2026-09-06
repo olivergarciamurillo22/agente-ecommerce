@@ -1,6 +1,10 @@
 # Pedro — validar la rama del Winner Radar
 
-**Rama:** `feat/ai-winner-radar` · **HEAD:** `7934bef` · **Esquema:** 19 → 20
+**Rama:** `feat/ai-winner-radar` · **Esquema:** 19 → 20
+
+> No fijo aquí un SHA a propósito: se queda obsoleto en cuanto se comprueba
+> algo y luego no cuadra con lo que te digo por mensaje. Usa siempre el HEAD
+> de la rama y pásamelo tú.
 
 **Esto NO es un despliegue.** No toques el NAS. Es probar en tu máquina y
 decirme qué sale.
@@ -88,19 +92,36 @@ Si META u OPENAI dicen otra cosa, es la clave en `.env.local`, no el código.
 ## 4 · La migración, sobre una copia
 
 El esquema sube de 19 a 20. Solo añade tablas nuevas con prefijo `hunter_`;
-no toca ni una columna de `orders`. Aun así se ensaya sobre una copia:
+no toca ni una columna de `orders`. Aun así se ensaya sobre una copia.
+
+El código abre siempre `$DATA_DIR/messages.db`, así que la copia tiene que
+llamarse **exactamente así**, dentro de una carpeta aparte. En la primera
+validación esta guía decía `cp … /tmp/prueba-20.db` y `DATA_DIR=/tmp`: eso
+abría `/tmp/messages.db`, o sea otro fichero. El comando comprobaba algo que
+no era la copia.
 
 ```bash
-cp data/messages.db /tmp/prueba-20.db
-DATA_DIR=/tmp npm run db:health
+mkdir -p /tmp/radar-prueba
+cp data/messages.db /tmp/radar-prueba/messages.db
+DATA_DIR=/tmp/radar-prueba npm run db:health
 ```
 
 Comprueba que dice **esquema 20**, **integridad ok**, y que el número de
 pedidos es **el mismo que antes**.
 
+Y que tu base ORIGINAL sigue intacta:
+
 ```bash
-rm /tmp/prueba-20.db
+npm run db:health     # debe seguir en el esquema que tenías, con tus pedidos
 ```
+
+```bash
+rm -rf /tmp/radar-prueba
+```
+
+> **Si tu base local está vacía** (0 pedidos, esquema 0), esto valida 0 → 20,
+> que no es lo mismo que 19 → 20 con datos reales. Dímelo y preparo una copia
+> con pedidos para ensayar el salto de verdad.
 
 ---
 
@@ -120,9 +141,9 @@ Abre el panel, entra en **Cazador** y escribe algo concreto. Por ejemplo:
 Pulsa **Buscar oportunidades** y mira estas cuatro cosas:
 
 **a) ¿Avanza?** Verás seis etapas con nombre y contadores que se mueven
-(«1.284 anuncios revisados»). **Irá más lento que una web normal** — Meta
-limita a unos 200 accesos por hora y el sistema respeta esa pausa. Dos o tres
-minutos es lo esperado.
+(«1.284 anuncios revisados»). **Irá más lento que una web normal**: el código
+deja 1,2 s entre llamadas a Meta y no pasa de 180 por hora, para no acabar
+con la app bloqueada. Dos o tres minutos es lo esperado.
 
 **b) ¿Los productos son productos distintos?** Abre dos o tres. Si ves uno
 que mezcla anuncios de cosas que no tienen nada que ver —un quitapelos de
@@ -138,6 +159,22 @@ navegador. Las tres tienen que devolverte a los resultados **con los
 resultados todavía ahí**.
 
 Si Meta devuelve un error, no lo interpretes: pégamelo tal cual.
+
+---
+
+## 5 bis · Si Meta falla, ahora lo dice
+
+En la primera validación el doctor decía `META ERROR · respuesta 400` y tres
+líneas más abajo `SE PUEDE BUSCAR`, saliendo con código 0. Y la pantalla de
+resultados vacíos culpaba al vocabulario de un fallo del proveedor. Las dos
+cosas están arregladas:
+
+- El doctor enseña **el motivo real** (`Session has expired on…`), dice
+  `NO SE PUEDE BUSCAR` y **sale con código 1**.
+- La pantalla vacía distingue «no hay productos» de «no se ha podido mirar».
+
+Si te vuelve a pasar, el propio doctor debería decirte qué arreglar sin que
+tengas que lanzar un `curl`.
 
 ---
 

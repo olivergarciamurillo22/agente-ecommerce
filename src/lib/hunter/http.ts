@@ -19,6 +19,13 @@ import { systemDbHandle } from "../db";
 export interface RateLimitConfig {
   /** Espaciado mínimo entre llamadas al mismo proveedor (ms). */
   minIntervalMs: number;
+  /**
+   * Techo de llamadas por hora al proveedor. El espaciado por sí solo NO lo
+   * garantiza: 1.200 ms entre llamadas permiten 3.000 a la hora. Se señaló en
+   * una validación real, y tenía razón — el comentario prometía una
+   * protección que el código no daba.
+   */
+  maxPerHour?: number;
   maxRetries: number;
   timeoutMs: number;
 }
@@ -31,6 +38,34 @@ export const DEFAULT_RATE_LIMIT: RateLimitConfig = {
 };
 
 const lastCallAt = new Map<string, number>();
+/** Marcas de tiempo de la última hora, por proveedor. Ventana deslizante. */
+const llamadasRecientes = new Map<string, number[]>();
+
+export class HourlyLimitError extends Error {
+  constructor(provider: string, limit: number) {
+    super(`${provider}: alcanzado el techo de ${limit} llamadas/hora. Se detiene para no acabar bloqueado.`);
+    this.name = "HourlyLimitError";
+  }
+}
+
+/**
+ * ¿Cuántas llamadas se han hecho a este proveedor en la última hora?
+ * Es un contador EN MEMORIA: se reinicia al reiniciar el proceso. Suficiente
+ * para un contenedor único —que es lo que hay— y honesto sobre su alcance:
+ * no pretende ser una cuota distribuida.
+ */
+export function callsLastHour(provider: string): number {
+  const hace1h = Date.now() - 3_600_000;
+  const l = (llamadasRecientes.get(provider) ?? []).filter((t) => t > hace1h);
+  llamadasRecientes.set(provider, l);
+  return l.length;
+}
+
+function anotarLlamada(provider: string): void {
+  const l = llamadasRecientes.get(provider) ?? [];
+  l.push(Date.now());
+  llamadasRecientes.set(provider, l);
+}
 
 export class CreditsExhaustedError extends Error {
   constructor(provider: string) {
@@ -113,7 +148,21 @@ export async function hunterFetch<T>(req: HttpRequest): Promise<HttpResponse<T>>
   let calls = 0;
 
   while (attempt <= cfg.maxRetries) {
+    // Techo horario: se comprueba ANTES de gastar la llamada. Pasarse del
+    // límite de un proveedor no da un error puntual, da un bloqueo temporal
+    // de la app entera — y eso deja el radar muerto para todo el día.
+    if (cfg.maxPerHour !== undefined && callsLastHour(req.provider) >= cfg.maxPerHour) {
+      return {
+        ok: false,
+        status: null,
+        data: null,
+        error: new HourlyLimitError(req.provider, cfg.maxPerHour).message,
+        calls,
+        fromCache: false,
+      };
+    }
     await respectPace(req.provider, cfg.minIntervalMs);
+    anotarLlamada(req.provider);
     try {
       req.budget?.consume(1);
       calls += 1;
@@ -135,31 +184,53 @@ export async function hunterFetch<T>(req: HttpRequest): Promise<HttpResponse<T>>
         return { ok: true, status: res.status, data, error: null, calls, fromCache: false };
       }
 
+      // ══ EL CUERPO DEL ERROR ES LA RESPUESTA, NO UN ADORNO ══
+      // Esto devolvía "respuesta 400" a secas. En una validación real de
+      // Meta, ese 400 traía en el cuerpo la frase que resolvía el caso —
+      // «Session has expired on Wednesday, 02-Sep-26» — y hubo que repetir
+      // la llamada a mano con curl para verla. Un diagnóstico que esconde el
+      // motivo hace perder más tiempo que no tener diagnóstico.
+      const detalle = await providerMessage(res);
+
       // Credenciales o permisos: reintentar es tirar cuota a la basura.
       if (res.status === 401 || res.status === 403) {
+        const base = res.status === 401 ? "credenciales rechazadas (401)" : "sin permiso para este recurso (403)";
         return {
           ok: false,
           status: res.status,
           data: null,
-          error: res.status === 401 ? "credenciales rechazadas (401)" : "sin permiso para este recurso (403)",
+          error: detalle ? `${base}: ${detalle}` : base,
           calls,
           fromCache: false,
         };
       }
       if (res.status === 404) {
-        return { ok: false, status: 404, data: null, error: "recurso no encontrado (404)", calls, fromCache: false };
+        return {
+          ok: false,
+          status: 404,
+          data: null,
+          error: detalle ? `recurso no encontrado (404): ${detalle}` : "recurso no encontrado (404)",
+          calls,
+          fromCache: false,
+        };
       }
       if (res.status === 429) {
         // 429 puede ser ritmo (se espera) o créditos agotados (se aborta).
-        const texto = await safeText(res);
-        if (/credit|quota|exhaust/i.test(texto)) {
+        if (/credit|quota|exhaust/i.test(detalle ?? "")) {
           return { ok: false, status: 429, data: null, error: new CreditsExhaustedError(req.provider).message, calls, fromCache: false };
         }
-        lastError = "límite de ritmo (429)";
+        lastError = detalle ? `límite de ritmo (429): ${detalle}` : "límite de ritmo (429)";
       } else if (res.status >= 500) {
-        lastError = `error del proveedor (${res.status})`;
+        lastError = detalle ? `error del proveedor (${res.status}): ${detalle}` : `error del proveedor (${res.status})`;
       } else {
-        return { ok: false, status: res.status, data: null, error: `respuesta ${res.status}`, calls, fromCache: false };
+        return {
+          ok: false,
+          status: res.status,
+          data: null,
+          error: detalle ? `respuesta ${res.status}: ${detalle}` : `respuesta ${res.status}`,
+          calls,
+          fromCache: false,
+        };
       }
     } catch (err) {
       if (err instanceof CallBudgetError) {
@@ -226,6 +297,41 @@ function writeCache(key: string, provider: string, data: unknown, ttlSeconds: nu
 }
 
 /** Limpia lo caducado. La usa el job de mantenimiento (§58). */
+/**
+ * Saca el mensaje que el proveedor pone en el cuerpo del error.
+ *
+ * Graph y la mayoría de APIs REST devuelven `{"error":{"message":"..."}}`.
+ * Se lee ESO y no el JSON entero: el cuerpo completo puede traer trazas,
+ * cabeceras y —en el caso de Graph— la URL con el token dentro.
+ *
+ * Nunca lanza: si el cuerpo no se puede leer, el error sigue siendo el
+ * código HTTP, que es mejor que ninguno.
+ */
+export async function providerMessage(res: Response): Promise<string | null> {
+  const texto = await safeText(res);
+  if (!texto) return null;
+  let mensaje = texto;
+  try {
+    const j = JSON.parse(texto) as Record<string, unknown>;
+    const err = j.error as Record<string, unknown> | string | undefined;
+    if (typeof err === "string") mensaje = err;
+    else if (err && typeof err === "object" && typeof err.message === "string") mensaje = err.message;
+    else if (typeof j.message === "string") mensaje = j.message;
+  } catch {
+    // No era JSON: se usa el texto tal cual, recortado.
+  }
+  return scrubSecrets(mensaje).slice(0, 300) || null;
+}
+
+/** Ni tokens ni claves en un mensaje que va a acabar en un log o en la base. */
+export function scrubSecrets(s: string): string {
+  return s
+    .replace(/access_token=[^&\s"]+/gi, "access_token=<oculto>")
+    .replace(/\bEAA[A-Za-z0-9]{20,}/g, "<token oculto>")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "sk-<oculta>")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer <oculto>");
+}
+
 export function purgeHunterCache(): number {
   try {
     const r = systemDbHandle().prepare("DELETE FROM hunter_cache WHERE expires_at <= unixepoch()").run();
@@ -237,5 +343,6 @@ export function purgeHunterCache(): number {
 
 /** Solo para tests: reinicia el espaciado entre llamadas. */
 export function __resetPaceForTests(): void {
+  llamadasRecientes.clear();
   lastCallAt.clear();
 }

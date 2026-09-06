@@ -232,16 +232,27 @@ export default function RadarResults({
       {opportunities.length === 0 && (
         <Card className="mt-10">
           <EmptyState
-            icon={<IconSearch size={26} />}
-            title="No ha salido nada con esos criterios"
+            icon={run.progress.sourcesFailed.length > 0 ? <IconWarning size={26} /> : <IconSearch size={26} />}
+            title={
+              // «Prueba con otras palabras» cuando lo que ha fallado es la
+              // fuente manda a buscar sinónimos durante media hora. Son dos
+              // situaciones distintas y tienen que decirse distinto.
+              run.progress.sourcesFailed.length > 0
+                ? "No se ha podido consultar la fuente"
+                : "No ha salido nada con esos criterios"
+            }
             hint={
-              run.progress.productsDetected > 0
-                ? `Se detectaron ${miles(run.progress.productsDetected)} productos, pero ninguno pasó tus filtros. Los que más descartan suelen ser el precio y el coste de proveedor.`
-                : "No hemos encontrado anuncios con ese vocabulario. Prueba con las palabras que usaría el anunciante, no las que usarías tú."
+              run.progress.sourcesFailed.length > 0
+                ? `${run.error ?? "La fuente de anuncios no respondió."} Esto NO significa que no haya productos: significa que no se ha podido mirar.`
+                : run.progress.productsDetected > 0
+                  ? `Se detectaron ${miles(run.progress.productsDetected)} productos, pero ninguno pasó tus filtros. Los que más descartan suelen ser el precio y el coste de proveedor.`
+                  : "No hemos encontrado anuncios con ese vocabulario. Prueba con las palabras que usaría el anunciante, no las que usarías tú."
             }
           />
           <div className="-mt-4 flex justify-center pb-8">
-            <PrimaryButton onClick={onNewSearch}>Probar otra búsqueda</PrimaryButton>
+            <PrimaryButton onClick={onNewSearch}>
+              {run.progress.sourcesFailed.length > 0 ? "Volver a intentarlo" : "Probar otra búsqueda"}
+            </PrimaryButton>
           </div>
         </Card>
       )}

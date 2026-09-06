@@ -83,6 +83,9 @@ function fmtScore(n: number | null): string {
 }
 
 function headlineFor(run: SearchRun, testables: number, total: number): string {
+  // Sin resultados Y con la fuente caída no es "no hay productos": es "no se
+  // ha podido mirar". Confundirlo hace descartar un nicho que nadie ha visto.
+  if (total === 0 && run.progress.sourcesFailed.length > 0) return "No se ha podido consultar la fuente";
   if (total === 0) return "No hemos encontrado productos con esta búsqueda";
   if (testables === 0) return `${total} producto${total === 1 ? "" : "s"} detectado${total === 1 ? "" : "s"}, ninguno listo para testear`;
   return `${testables} producto${testables === 1 ? "" : "s"} en zona de test`;
@@ -113,8 +116,15 @@ function summaryLines(run: SearchRun, ops: ProductOpportunity[], testables: numb
 function riskLines(ops: ProductOpportunity[], descartados: ProductOpportunity[], run: SearchRun): string[] {
   const out: string[] = [];
   if (run.fixtureMode) out.push("Estos datos son de EJEMPLO: no sirven para decidir nada.");
-  if (run.coverage === "partial" && run.progress.sourcesFailed.length > 0) {
-    out.push(`No respondieron: ${run.progress.sourcesFailed.join(", ")}. Los números son un suelo, no un total.`);
+  if (run.progress.sourcesFailed.length > 0) {
+    // El MOTIVO, no solo el hecho. «No respondió Meta» no dice qué hacer;
+    // «el token ha caducado» sí.
+    const motivo = run.error && !/^Sin resultados/.test(run.error) ? ` Motivo: ${run.error}` : "";
+    out.push(
+      ops.length === 0
+        ? `La fuente no respondió, así que esto NO significa que no haya productos: significa que no se ha podido mirar.${motivo}`
+        : `No respondieron: ${run.progress.sourcesFailed.join(", ")}. Los números son un suelo, no un total.${motivo}`
+    );
   }
 
   const sinEconomia = ops.filter((o) => o.economics === null).length;

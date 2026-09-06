@@ -103,6 +103,8 @@ export interface RadarReadiness {
   mode: RadarProviderMode;
   /** Proveedor que va a mandar de verdad en la próxima búsqueda. */
   activeProvider: ProviderId | null;
+  /** Fuentes configuradas que NO responden. Vacío es lo normal. */
+  brokenProviders: ProviderId[];
   enabled: boolean;
   fixtureMode: boolean;
   /** Petición de modo ejemplo ignorada por estar en producción. */
@@ -123,6 +125,19 @@ export async function radarReadiness(): Promise<RadarReadiness> {
   const buscadores = searchProviders();
   const activo = (buscadores[0]?.id ?? null) as ProviderId | null;
 
+  // ══ «SE PUEDE BUSCAR» TIENE QUE SIGNIFICAR QUE SE PUEDE BUSCAR ══
+  // Esto solo miraba que hubiera una fuente CONFIGURADA. En una validación
+  // real, con el token de Meta caducado, el doctor decía META ERROR en una
+  // línea y «SE PUEDE BUSCAR» tres líneas más abajo, y salía con código 0.
+  // Un diagnóstico que se contradice a sí mismo es peor que ninguno: manda a
+  // buscar a quien no puede, y en integración continua pasa por verde.
+  const salud = new Map(providers.map((p) => [p.id, p]));
+  const vivas = buscadores.filter((b) => {
+    const h = salud.get(b.id);
+    return h ? h.status === "CONNECTED" || h.status === "READY" : false;
+  });
+  const rotas = buscadores.filter((b) => !vivas.some((v) => v.id === b.id));
+
   let reason: string;
   let nextStep: string | null = null;
 
@@ -139,17 +154,30 @@ export async function radarReadiness(): Promise<RadarReadiness> {
     nextStep = "Añade META_AD_LIBRARY_ACCESS_TOKEN para usar la fuente principal.";
   } else if (modo === "wh" && activo !== "winninghunter") {
     reason = `WINNER_RADAR_PROVIDER=wh pero falta WINNINGHUNTER_API_KEY; se usará ${activo}.`;
+  } else if (vivas.length === 0) {
+    // Configurada pero sin responder. El motivo lo da la propia sonda, y ahí
+    // está lo que hay que arreglar (token caducado, permiso, cuota).
+    const detalle = rotas.map((r) => salud.get(r.id)?.detail).filter(Boolean)[0];
+    reason = `La fuente está configurada pero NO responde. ${detalle ?? ""}`.trim();
+    nextStep = rotas.some((r) => r.id === "meta_ad_library")
+      ? "Revisa META_AD_LIBRARY_ACCESS_TOKEN: los tokens de Meta caducan. Genera uno nuevo en developers.facebook.com."
+      : "Revisa la credencial de la fuente que falla.";
+  } else if (rotas.length > 0) {
+    reason = `${vivas.length} de ${buscadores.length} fuentes responden. Fallan: ${rotas.map((r) => r.id).join(", ")}.`;
   } else {
     const nombres = buscadores.length === 1 ? "la Biblioteca de Anuncios de Meta" : `${buscadores.length} fuentes`;
     reason = `Listo para buscar con ${activo === "meta_ad_library" ? "la Biblioteca de Anuncios de Meta" : nombres}.`;
   }
 
   return {
-    canSearch: radarEnabled() && (fixture || buscadores.length > 0),
+    // Se puede buscar si hay AL MENOS UNA fuente que responde, no una
+    // configurada. Con varias, que caiga una da cobertura parcial, no cero.
+    canSearch: radarEnabled() && (fixture || vivas.length > 0),
     reason,
     nextStep,
     mode: modo,
-    activeProvider: activo,
+    activeProvider: (vivas[0]?.id ?? activo) as ProviderId | null,
+    brokenProviders: rotas.map((r) => r.id) as ProviderId[],
     enabled: radarEnabled(),
     fixtureMode: fixture,
     fixtureRefusedInProduction: refused,

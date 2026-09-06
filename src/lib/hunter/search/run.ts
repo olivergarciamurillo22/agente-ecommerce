@@ -319,6 +319,11 @@ export async function executeSearch(run: SearchRun): Promise<SearchRun> {
     for (const k of ["creative", "score", "select"] as StageKey[]) {
       marcar(run, k, "skipped", { summary: "Sin datos que procesar" });
     }
+    // La cobertura se fija ANTES de redactar. Si no, el informe se escribe
+    // creyendo que todo fue bien y la pantalla acaba diciendo «prueba con
+    // otras palabras» cuando lo que ha pasado es que la fuente no respondió.
+    // Pedro perdió el tiempo buscando sinónimos por esto.
+    run.coverage = parcial ? "partial" : "full";
     run.report = await buildReport(run, []);
     return terminar(run, t0, parcial ? "partial" : "complete",
       parcial ? `Sin resultados; fallaron: ${run.progress.sourcesFailed.join(", ")}` : null);
@@ -518,6 +523,7 @@ export async function executeSearch(run: SearchRun): Promise<SearchRun> {
     repo.saveSnapshot(op.id, op.signals, op.scores);
   }
 
+  run.coverage = parcial ? "partial" : "full";
   run.report = await buildReport(run, oportunidades);
   marcar(run, "select", "complete", {
     summary: run.report.headline,
