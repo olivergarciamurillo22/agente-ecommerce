@@ -70,7 +70,11 @@ export function findPIIInDataset(rows: TrainingRow[]): string[] {
   const problemas: string[] = [];
   const texto = JSON.stringify(rows);
   if (/[\w.+-]+@[\w-]+\.[\w.]{2,}/.test(texto)) problemas.push("correo electrónico");
-  if (/(?:\+?34[\s-]?)?[6-9]\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}\b/.test(texto)) problemas.push("teléfono");
+  // Los lookarounds de dígito son imprescindibles: sin ellos, un epoch de 10
+  // cifras (1788639165) contiene una secuencia que parece un móvil español y
+  // el detector saltaba en CADA export. Un detector que siempre grita es un
+  // detector que se acaba ignorando, y entonces no protege nada.
+  if (/(?<!\d)(?:\+?34[\s-]?)?[6-9]\d{2}[\s-]?\d{2}[\s-]?\d{2}[\s-]?\d{2}(?!\d)/.test(texto)) problemas.push("teléfono");
   for (const clave of ["phone", "email", "customer_name", "address_line1", "raw_payload"]) {
     if (texto.includes(`"${clave}"`)) problemas.push(`clave ${clave}`);
   }

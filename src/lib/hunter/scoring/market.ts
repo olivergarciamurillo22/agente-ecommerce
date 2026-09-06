@@ -65,7 +65,22 @@ function combine(parts: ScorePart[]): { score: number | null; coverage: number }
 // MARKET SCORE — ¿hay mercado demostrado para esto?
 // ------------------------------------------------------------
 
+/**
+ * Sin un solo anuncio contado NO hay mercado que puntuar. Es una distinción
+ * que parece sutil y no lo es: "0 anuncios activos de 20 vistos" es un cero
+ * MEDIDO y significa que el producto se está apagando; "no hemos contado
+ * nada" no significa nada. Sin esta guarda, un producto del que no sabemos
+ * absolutamente nada salía con score 0 y 22 % de confianza, es decir,
+ * indistinguible de uno que hemos medido y es malo.
+ */
+function sinEvidencia(s: ProductSignals): boolean {
+  return s.totalAds === 0 && s.advertiserCount === 0;
+}
+
 export function scoreMarket(signals: ProductSignals): ScoreValue {
+  if (sinEvidencia(signals)) {
+    return { score: null, confidence: 0, parts: [], unavailableReason: INSUFFICIENT_DATA };
+  }
   const parts: ScorePart[] = [
     part(
       "adLongevity",
@@ -209,6 +224,9 @@ export function scoreMomentum(input: MomentumInput): ScoreValue {
 // ------------------------------------------------------------
 
 export function scoreSaturation(signals: ProductSignals): ScoreValue {
+  if (sinEvidencia(signals)) {
+    return { score: null, confidence: 0, parts: [], unavailableReason: INSUFFICIENT_DATA };
+  }
   const dup = creativeDuplication(signals);
   const parts: ScorePart[] = [
     part("advertiserCount", "Anunciantes compitiendo",
@@ -260,6 +278,9 @@ function concentrationSaturation(topShare: number | null): number | null {
 export type CreativeInvestmentLevel = "HIGH" | "MED" | "LOW";
 
 export function scoreCreativeInvestment(signals: ProductSignals): ScoreValue {
+  if (sinEvidencia(signals)) {
+    return { score: null, confidence: 0, parts: [], unavailableReason: INSUFFICIENT_DATA };
+  }
   const parts: ScorePart[] = [
     part("creativesPerAdvertiser", "Creatividades por anunciante",
       logRamp(signals.creativesPerAdvertiser, MARKET_REFERENCE.creativesPerAdvertiserFull), 0.45,

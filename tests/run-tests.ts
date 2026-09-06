@@ -12852,9 +12852,14 @@ async function main(): Promise<void> {
       assert.match(nav, /"Beta"/, "la navegación también lo marca");
     });
 
-    await test("V4.2 la persistencia server-side de Landing Studio NO está integrada (schema sigue en 17)", () => {
+    await test("V4.2 la persistencia server-side de Landing Studio NO está integrada", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 18;/, "el workspace de atención usa el schema 18");
+      // Lo que este test protege es que Landing Studio NO tiene persistencia
+      // en servidor. Fijar aquí el número exacto de esquema lo rompía en cada
+      // migración ajena sin que nada de Landing Studio hubiese cambiado: un
+      // test que falla por motivos que no son el suyo acaba desactivado.
+      const version = Number(/export const SCHEMA_VERSION = (\d+);/.exec(db)?.[1] ?? 0);
+      assert.ok(version >= 18, `esquema ${version}: no puede retroceder`);
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13320,6 +13325,572 @@ async function main(): Promise<void> {
     });
   }
 
+
+  // ============ AI WINNER RADAR ============
+  console.log("\n— AI Winner Radar —");
+
+  await test("RADAR · esquema 19 crea las tablas del radar de forma idempotente y sin tocar nada existente", () => {
+    const raw = db.systemDbHandle();
+    const antesPedidos = (raw.prepare("SELECT COUNT(*) n FROM orders").get() as { n: number }).n;
+    db.migrateHunter(raw);
+    db.migrateHunter(raw);
+    for (const t of ["hunter_searches", "hunter_ads", "hunter_products", "hunter_product_ads",
+      "hunter_product_snapshots", "hunter_product_sources", "hunter_decisions", "hunter_watchlist",
+      "hunter_alerts", "hunter_provider_runs", "hunter_cache", "hunter_presets"]) {
+      assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t), t);
+    }
+    assert.equal(raw.pragma("user_version", { simple: true }), 19);
+    assert.equal((raw.prepare("SELECT COUNT(*) n FROM orders").get() as { n: number }).n, antesPedidos, "no toca pedidos");
+    assert.equal(raw.pragma("integrity_check", { simple: true }), "ok");
+  });
+
+  await test("RADAR · momentum: sin histórico NO se inventa, y con histórico premia la aceleración", async () => {
+    const { scoreMomentum, boundedGrowth } = await import("../src/lib/hunter/scoring/market");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const base = { ...emptySignals(), activeAds: 20, advertiserCount: 6, creativeCount: 12, totalAds: 22 };
+
+    const sinHistorico = scoreMomentum({ now: base, ago7d: null });
+    assert.equal(sinHistorico.score, null, "sin foto anterior no hay momentum");
+    assert.equal(sinHistorico.unavailableReason, "INSUFFICIENT_HISTORY");
+    assert.equal(sinHistorico.confidence, 0);
+
+    const creciendo = scoreMomentum({ now: base, ago7d: { ...base, activeAds: 8, advertiserCount: 3, creativeCount: 5 } });
+    const plano = scoreMomentum({ now: base, ago7d: base });
+    const cayendo = scoreMomentum({ now: base, ago7d: { ...base, activeAds: 40, advertiserCount: 12, creativeCount: 30 } });
+    assert.ok((creciendo.score ?? 0) > (plano.score ?? 0), "crecer puntúa más que estar plano");
+    assert.ok((plano.score ?? 0) > (cayendo.score ?? 0), "estar plano puntúa más que caer");
+
+    // El bug real: sin suelo ni compresión, crecer desde 1 aplastaría a
+    // crecer desde 40, y 7→18 y 40→90 empataban en 100.
+    assert.ok(boundedGrowth(3, 1)! < boundedGrowth(18, 7)!, "crecer desde base minúscula no puede ganar");
+    assert.notEqual(boundedGrowth(18, 7), boundedGrowth(90, 40), "dos crecimientos distintos no pueden empatar");
+    assert.ok(boundedGrowth(5, 0)! <= 100 && boundedGrowth(5, 0)! > 50, "desde cero no explota ni divide por cero");
+    assert.equal(boundedGrowth(7, 7), 50, "plano = 50");
+    assert.equal(boundedGrowth(null, 5), null, "sin dato, null");
+  });
+
+  await test("RADAR · una señal ausente baja la CONFIANZA, nunca hunde el score", async () => {
+    const { scoreMarket } = await import("../src/lib/hunter/scoring/market");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const completo = { ...emptySignals(), activeAds: 20, totalAds: 24, advertiserCount: 8, creativeCount: 24,
+      oldestActiveAdDays: 60, newCreatives7d: 6, newAdvertisers7d: 2, countryCount: 2, platformCount: 2,
+      creativesPerAdvertiser: 3, topAdvertiserShare: 0.3 };
+    const parcial = { ...completo, oldestActiveAdDays: null, newCreatives7d: null, newAdvertisers7d: null };
+
+    const a = scoreMarket(completo);
+    const b = scoreMarket(parcial);
+    assert.ok(a.score !== null && b.score !== null);
+    assert.ok(b.confidence < a.confidence, "menos señales = menos confianza");
+    assert.ok((b.score ?? 0) > 20, "pero el score NO se hunde: no saber no es ser malo");
+  });
+
+  await test("RADAR · saturación: 0 es mercado vacío y 100 es mercado lleno", async () => {
+    const { scoreSaturation } = await import("../src/lib/hunter/scoring/market");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const vacio = { ...emptySignals(), advertiserCount: 1, totalAds: 2, creativeCount: 2, countryCount: 1, topAdvertiserShare: 1 };
+    const lleno = { ...emptySignals(), advertiserCount: 30, totalAds: 150, creativeCount: 40, countryCount: 8,
+      oldestActiveAdDays: 200, topAdvertiserShare: 0.1 };
+    const s1 = scoreSaturation(vacio).score ?? 0;
+    const s2 = scoreSaturation(lleno).score ?? 0;
+    assert.ok(s2 > s1 + 30, `lleno (${s2}) debe superar claramente a vacío (${s1})`);
+  });
+
+  await test("RADAR · el score final NO es una media: las penalizaciones son duras", async () => {
+    const { scoreOpportunity } = await import("../src/lib/hunter/scoring/opportunity");
+    const bueno = { score: 90, confidence: 0.9, parts: [], unavailableReason: null };
+    const comun = {
+      market: bueno, product: bueno, casamable: bueno,
+      saturation: { score: 20, confidence: 0.8, parts: [], unavailableReason: null },
+      momentum: { score: 70, confidence: 0.8, parts: [], unavailableReason: null },
+      providerCount: 3, failedProviders: 0, historyDepth: 4, dataAgeHours: 2, clusterConfidence: 0.9,
+    };
+    const limpio = scoreOpportunity({ ...comun, features: [], economics: null, supplierAvailable: true });
+    assert.ok((limpio.score.score ?? 0) >= 85, "sin defectos, alto");
+
+    const regulado = scoreOpportunity({
+      ...comun, supplierAvailable: true, economics: null,
+      features: [{ key: "regulatoryRisk", value: 90, confidence: 0.6, rationale: null }],
+    });
+    assert.ok((regulado.score.score ?? 0) < (limpio.score.score ?? 0) * 0.7,
+      "un producto regulado no es 'un poco peor': puede costar la cuenta publicitaria");
+
+    const sinStock = scoreOpportunity({ ...comun, features: [], economics: null, supplierAvailable: false });
+    assert.ok((sinStock.score.score ?? 0) < (limpio.score.score ?? 0), "sin proveedor no hay negocio");
+
+    // `null` = no comprobado. Castigarlo enterraría todo lo nuevo, que es
+    // justo lo que interesa descubrir.
+    const sinComprobar = scoreOpportunity({ ...comun, features: [], economics: null, supplierAvailable: null });
+    assert.equal(sinComprobar.score.score, limpio.score.score, "no haberlo mirado no puede penalizar");
+  });
+
+  await test("RADAR · confianza y score son independientes: una fuente caída no baja la nota", async () => {
+    const { scoreOpportunity } = await import("../src/lib/hunter/scoring/opportunity");
+    const bueno = { score: 80, confidence: 0.9, parts: [], unavailableReason: null };
+    const base = {
+      market: bueno, product: bueno, casamable: bueno,
+      saturation: { score: 30, confidence: 0.8, parts: [], unavailableReason: null },
+      momentum: { score: 60, confidence: 0.8, parts: [], unavailableReason: null },
+      features: [], economics: null, supplierAvailable: true,
+      providerCount: 3, historyDepth: 4, dataAgeHours: 1, clusterConfidence: 0.9,
+    };
+    const todas = scoreOpportunity({ ...base, failedProviders: 0 });
+    const conFallo = scoreOpportunity({ ...base, failedProviders: 2 });
+    assert.equal(conFallo.score.score, todas.score.score, "el score NO cambia porque una fuente se caiga");
+    assert.ok(conFallo.score.confidence < todas.score.confidence, "pero la confianza SÍ baja");
+  });
+
+  await test("RADAR · clustering: agrupa el mismo producto y NO mezcla productos distintos", async () => {
+    const { clusterAds } = await import("../src/lib/hunter/cluster");
+    const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");
+    const mk = (id: string, adv: string, name: string, landing: string) =>
+      normalizeExternalAd({
+        provider: "fixture", externalId: id, platform: "facebook", advertiserName: adv,
+        advertiserExternalId: adv, productName: name, adCopy: name, format: "video", countries: ["ES"],
+        startedAt: 1780000000, lastSeenAt: 1788000000, active: true, activeDays: 40,
+        landingUrl: landing, previewUrl: null, imageUrl: null, creativeIds: [], priceAmount: 29.9,
+        priceCurrency: "EUR", raw: null,
+      });
+
+    const ads = [
+      mk("1", "PetGlow", "Cepillo quitapelos para perros y gatos", "https://petglow.example/p1"),
+      mk("2", "PetGlow", "Cepillo quitapelos para perros y gatos", "https://petglow.example/p1"),
+      mk("3", "AnimalCare", "Cepillo quitapelos perros gatos", "https://animalcare.example/x"),
+      mk("4", "AutoNeat", "Organizador de maletero para coche", "https://autoneat.example/o"),
+      mk("5", "CarHome", "Organizador maletero coche plegable", "https://carhome.example/o"),
+    ];
+    const clusters = clusterAds(ads);
+    const del = (id: string) => clusters.find((c) => c.adIds.includes(`fixture:${id}`))!;
+    assert.equal(del("1").id, del("2").id, "misma landing y anunciante: mismo producto");
+    assert.equal(del("1").id, del("3").id, "otro anunciante, mismo producto: se agrupa");
+    assert.notEqual(del("1").id, del("4").id, "quitapelos y organizador NO son el mismo producto");
+    assert.equal(del("4").id, del("5").id, "dos marcas del organizador: mismo producto");
+    assert.ok(del("1").confidence > 0.5, "confianza razonable en el cluster");
+  });
+
+  await test("RADAR · agrupar de MÁS es el peor error: una palabra común no basta", async () => {
+    const { clusterAds } = await import("../src/lib/hunter/cluster");
+    const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");
+    const mk = (id: string, adv: string, name: string) =>
+      normalizeExternalAd({
+        provider: "fixture", externalId: id, platform: "facebook", advertiserName: adv,
+        advertiserExternalId: adv, productName: name, adCopy: name, format: null, countries: ["ES"],
+        startedAt: null, lastSeenAt: null, active: true, activeDays: null,
+        landingUrl: `https://${adv}.example/${id}`, previewUrl: null, imageUrl: null,
+        creativeIds: [], priceAmount: null, priceCurrency: null, raw: null,
+      });
+    // Comparten "cepillo" pero son cosas distintas.
+    const ads = [mk("a", "M1", "Cepillo alisador de pelo"), mk("b", "M2", "Cepillo quitapelos mascotas sofa")];
+    const clusters = clusterAds(ads);
+    assert.equal(clusters.length, 2, "compartir UNA palabra no puede unir dos productos");
+  });
+
+  await test("RADAR · deduplica el mismo anuncio llegado por dos fuentes y conserva el más rico", async () => {
+    const { dedupeAds } = await import("../src/lib/hunter/signals");
+    const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");
+    const comun = {
+      platform: "facebook", advertiserName: "PetGlow", advertiserExternalId: "pg",
+      productName: "Cepillo quitapelos", adCopy: "Adiós a los pelos del sofá", format: "video",
+      countries: ["ES"], startedAt: 1780000000, lastSeenAt: null, active: true, activeDays: 30,
+      landingUrl: "https://petglow.example/p?utm_source=fb", previewUrl: null, creativeIds: [], raw: null,
+    };
+    const pobre = normalizeExternalAd({ ...comun, provider: "meta_ad_library", externalId: "m1", imageUrl: null, priceAmount: null, priceCurrency: null } as never);
+    const rico = normalizeExternalAd({ ...comun, provider: "winninghunter", externalId: "w1", imageUrl: "https://img", priceAmount: 29.9, priceCurrency: "EUR" } as never);
+    assert.equal(pobre.fingerprint, rico.fingerprint, "el mismo anuncio produce la misma huella entre fuentes");
+    const { ads, removed } = dedupeAds([pobre, rico]);
+    assert.equal(removed, 1);
+    assert.equal(ads.length, 1);
+    assert.ok(ads[0].priceObserved !== null, "se conserva el que trae MÁS información, no el primero");
+  });
+
+  await test("RADAR · Meta Ad Library: bloquea países donde solo devolvería anuncios políticos", async () => {
+    const { assertCommercialScope, isCommercialScopeCountry } = await import("../src/lib/hunter/providers/meta-ad-library");
+    assert.equal(assertCommercialScope("ES"), null, "España es UE: se permite");
+    assert.equal(isCommercialScopeCountry("gb"), true, "Reino Unido también");
+    const fuera = assertCommercialScope("US");
+    assert.ok(fuera && /pol[ií]tic/i.test(fuera), "fuera de UE/UK se explica POR QUÉ se bloquea");
+    assert.ok(assertCommercialScope("MX") !== null);
+  });
+
+  await test("RADAR · la IA no recibe datos personales: el cortafuegos lanza antes de enviar", async () => {
+    const { assertNoPII, PIILeakError } = await import("../src/lib/hunter/intelligence");
+    assert.doesNotThrow(() => assertNoPII("Cepillo quitapelos para mascotas, envío 24h"));
+    assert.throws(() => assertNoPII("Escríbenos a cliente@ejemplo.com"), PIILeakError);
+    assert.throws(() => assertNoPII("Llama al 600 11 22 33"), PIILeakError);
+    assert.throws(() => assertNoPII("teléfono +34600112233 del cliente"), PIILeakError);
+  });
+
+  await test("RADAR · sin clave de IA el radar sigue funcionando con el analizador determinista", async () => {
+    const { parseIntentDeterministic } = await import("../src/lib/hunter/intelligence");
+    const r = parseIntentDeterministic(
+      "Quiero productos de hogar o mascotas para España, COD, 25-55 €, coste proveedor menor de 12 €, sin tallas y no frágiles"
+    );
+    assert.equal(r.aiUsed, false);
+    assert.equal(r.filters.country, "ES");
+    assert.equal(r.filters.priceMin, 25);
+    assert.equal(r.filters.priceMax, 55);
+    assert.equal(r.filters.supplierCostMax, 12);
+    assert.equal(r.filters.requiresSizing, false);
+    assert.equal(r.filters.fragile, false);
+    assert.ok(r.filters.categories.includes("hogar") && r.filters.categories.includes("mascotas"));
+    // Las palabras de la RESTRICCIÓN no pueden convertirse en consultas de pago.
+    for (const ruido of ["proveedor", "menor", "frágiles", "fragiles", "ágiles", "coste"]) {
+      assert.ok(!r.filters.keywords.includes(ruido), `"${ruido}" describe la restricción, no el producto`);
+    }
+  });
+
+  await test("RADAR · la expansión de consultas es determinista, acotada y sin duplicados", async () => {
+    const { expandQueries, dedupeQueries } = await import("../src/lib/hunter/search/query-expansion");
+    const a = expandQueries(["quitapelos mascotas"], { maxQueries: 8 });
+    const b = expandQueries(["quitapelos mascotas"], { maxQueries: 8 });
+    assert.deepEqual(a, b, "dos búsquedas iguales dan las mismas consultas");
+    assert.ok(a.length > 1 && a.length <= 8, "expande pero respeta el tope");
+    assert.equal(new Set(a).size, a.length, "sin duplicados");
+    assert.ok(a.every((q) => q.length <= 100), "la Ad Library corta en 100 caracteres");
+    assert.equal(dedupeQueries(["pelo gato", "gato pelo"]).length, 1, "mismo conjunto de palabras = una consulta");
+    assert.deepEqual(expandQueries([], {}), [], "sin palabras clave no se lanza nada");
+  });
+
+  await test("RADAR · los filtros no descartan por falta de dato: lo marcan como no evaluado", async () => {
+    const { applyPostFilters, applyFinancialFilters, defaultFilters } = await import("../src/lib/hunter/search/filters");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const { emptyScoreMap } = await import("../src/lib/hunter/scoring/opportunity");
+    const op = {
+      id: "x", canonicalName: "Producto", category: null, description: null, heroImageUrl: null,
+      observedPriceMin: null, observedPriceMax: null, supplierCostMin: null, supplierCostMax: null,
+      currency: "EUR", firstSeenAt: null, lastSeenAt: null, status: "new" as const,
+      sourceConfidence: 0.5, clusterConfidence: 0.8,
+      signals: { ...emptySignals(), advertiserCount: 5, activeAds: 10 },
+      scores: emptyScoreMap(), features: [], economics: null, badges: [], adIds: [], providers: [], summary: null,
+    };
+    const f = { ...defaultFilters(), priceMax: 50, momentumMin: 60, minMargin: 0.3 };
+    const post = applyPostFilters(op, f);
+    assert.equal(post.keep, true, "sin precio ni momentum NO se descarta");
+    assert.ok(post.skipped.includes("priceMax") && post.skipped.includes("momentumMin"), "pero se deja constancia");
+    const fin = applyFinancialFilters(op, f);
+    assert.equal(fin.keep, true);
+    assert.ok(fin.skipped.includes("minMargin"));
+    // Y cuando SÍ hay dato, filtra de verdad.
+    const caro = { ...op, observedPriceMin: 90, observedPriceMax: 120 };
+    assert.equal(applyPostFilters(caro, f).rejectedBy, "priceMax");
+  });
+
+  await test("RADAR · la economía sale del motor financiero real y no se inventa sin datos", async () => {
+    const { computeOpportunityEconomics } = await import("../src/lib/hunter/economics");
+    const base = {
+      salePrice: 39.9, salePriceProvenance: "OBSERVED" as const,
+      supplierCost: 8, supplierCostProvenance: "INTERNAL_REAL" as const, supplierCostSource: "test",
+      deliveryRate: 0.72, deliveryRateSource: "test", shippingRate: 0.9, shippingRateSource: "test",
+      rawCPA: 9, rawCPASource: "test", outboundShippingCost: 5.5, codFee: 0.7, returnCost: 4.5,
+      vatRate: 0, otherCostPerOrder: 0,
+    };
+    const e = computeOpportunityEconomics(base)!;
+    assert.ok(e, "con todos los datos sí calcula");
+    assert.equal(e.expectedProfit.provenance, "CALCULATED");
+    assert.ok(e.breakEvenCPA.value !== null, "hay CPA de equilibrio");
+    assert.ok(e.assumptions.length >= 6, "los supuestos quedan por escrito y son auditables");
+
+    // Debe coincidir EXACTAMENTE con la Calculadora COD: dos versiones que se
+    // desvían un céntimo destruyen la confianza en ambas.
+    const { calculatePedroModel } = await import("../src/lib/cod-calculator/pedro-model");
+    const directo = calculatePedroModel({
+      salePrice: 39.9, productCost: 8, vatRate: 0, rawCPA: 9, shippingRate: 0.9, deliveryRate: 0.72,
+      outboundShippingCost: 5.5, codFee: 0.7, returnCost: 4.5, otherCostPerOrder: 0,
+    });
+    assert.equal(e.expectedProfit.value, directo.profit, "mismo motor, mismo número");
+
+    assert.equal(computeOpportunityEconomics({ ...base, supplierCost: null }), null, "sin coste no se inventa un beneficio");
+    assert.equal(computeOpportunityEconomics({ ...base, deliveryRate: null }), null, "sin tasa de entrega tampoco");
+  });
+
+  await test("RADAR · modo ejemplo: se niega a activarse en producción", async () => {
+    await withEnv({ HUNTER_FIXTURE_MODE: "1" }, async () => {
+      const fx = await import("../src/lib/hunter/providers/fixture");
+      assert.equal(fx.fixtureModeRequested(), true);
+      // NODE_ENV en los tests no es "production", así que aquí sí se activa.
+      assert.equal(fx.fixtureModeActive(), process.env.NODE_ENV !== "production");
+    });
+    const src = fs.readFileSync(path.join(process.cwd(), "src/lib/hunter/providers/fixture.ts"), "utf8");
+    assert.match(src, /NODE_ENV !== "production"/, "el candado de producción vive en el código, no en un comentario");
+  });
+
+  await test("RADAR · SALVAGUARDA: el proveedor de suministro no importa NI UNA escritura", () => {
+    const bruto = fs.readFileSync(path.join(process.cwd(), "src/lib/hunter/providers/supplier.ts"), "utf8");
+    // Se comprueba el CÓDIGO, no los comentarios: la cabecera del fichero
+    // nombra a propósito lo que NO se importa, y ese texto es documentación
+    // valiosa. La garantía es sobre lo que se ejecuta.
+    const src = bruto.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/^\s*\/\/.*$/gm, " ");
+    // Misma idea que la salvaguarda de WhatsApp en los scripts de datos: un
+    // 'if (readOnly) return' se borra en un refactor, un import inexistente no.
+    for (const prohibido of ["createDropeaOrder", "confirmDropeaOrder", "adoptDropeaOrder",
+      "releaseOrderToBeeping", "cancelOrderInBeeping", "dropeaRequest"]) {
+      assert.ok(!src.includes(prohibido), `supplier.ts no puede importar ni llamar a ${prohibido}`);
+    }
+    assert.ok(!/from "\.\.\/\.\.\/suppliers/.test(src), "no importa nada del módulo de proveedores");
+  });
+
+  await test("RADAR · el presupuesto de llamadas corta antes de gastar de más", async () => {
+    const { CallBudget, CallBudgetError } = await import("../src/lib/hunter/http");
+    const b = new CallBudget(3);
+    b.consume(1); b.consume(1);
+    assert.equal(b.spent, 2);
+    assert.equal(b.remaining, 1);
+    assert.equal(b.canAfford(2), false, "no puede permitirse dos más");
+    b.consume(1);
+    assert.throws(() => b.consume(1), CallBudgetError, "al pasarse, lanza en vez de seguir gastando");
+  });
+
+  await test("RADAR · el dataset de aprendizaje sale sin un solo dato personal", async () => {
+    const { exportHunterTrainingDataset, findPIIInDataset } = await import("../src/lib/hunter/dataset");
+    const raw = db.systemDbHandle();
+    db.migrateHunter(raw);
+    raw.prepare(`INSERT OR REPLACE INTO hunter_products (id, canonical_name, status) VALUES ('hp_t1','Producto de prueba','saved')`).run();
+    raw.prepare(`INSERT INTO hunter_decisions (product_id, decision, reason, signals_at_decision_json, scores_at_decision_json)
+                 VALUES ('hp_t1','discard','bad_margin','{"advertiserCount":4}','{"opportunity":{"score":40}}')`).run();
+    const rows = exportHunterTrainingDataset();
+    assert.ok(rows.length >= 1);
+    const fila = rows.find((r) => r.productId === "hp_t1")!;
+    assert.equal(fila.decision, "discard");
+    assert.equal(fila.reason, "bad_margin");
+    assert.ok(fila.signalsAtDecision, "guarda la foto de las señales al decidir");
+    assert.deepEqual(findPIIInDataset(rows), [], "cero datos personales en el export");
+  });
+
+  await test("RADAR · las rutas comprueban el rol por sí mismas, no solo por el proxy", () => {
+    const dir = path.join(process.cwd(), "src/app/api/hunter");
+    const rutas: string[] = [];
+    const recorrer = (d: string) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const p = path.join(d, e.name);
+        if (e.isDirectory()) recorrer(p);
+        else if (e.name === "route.ts") rutas.push(p);
+      }
+    };
+    recorrer(dir);
+    assert.ok(rutas.length >= 6, `esperaba al menos 6 rutas, hay ${rutas.length}`);
+    for (const r of rutas) {
+      const src = fs.readFileSync(r, "utf8");
+      assert.match(src, /requireOwner\(req\)/, `${path.basename(path.dirname(r))} debe llamar a requireOwner`);
+      assert.ok(!/requireStaff/.test(src), "ninguna ruta del radar es de staff: buscar cuesta créditos");
+    }
+  });
+
+  await test("RADAR · pipeline completo en modo ejemplo: de la frase a las oportunidades", async () => {
+    await withEnv({ HUNTER_FIXTURE_MODE: "1", OPENROUTER_API_KEY: "" }, async () => {
+      const { planSearch, executeSearch } = await import("../src/lib/hunter/search/run");
+      const repo = await import("../src/lib/hunter/repo");
+      db.migrateHunter(db.systemDbHandle());
+
+      const { run } = await planSearch({ prompt: "Productos de mascotas para España, 25-55 €, no frágiles" });
+      assert.ok(run.queries.length > 0, "genera consultas");
+      repo.createSearchRun(run, "test");
+      const fin = await executeSearch(run);
+
+      assert.equal(fin.state, "complete");
+      assert.equal(fin.providerCalls, 0, "el modo ejemplo no gasta ni una llamada");
+      assert.ok(fin.progress.adsAnalyzed > 0, "analiza anuncios");
+      assert.ok(fin.progress.productsDetected > 0, "los agrupa en productos");
+
+      const ops = repo.listProductsForSearch(fin.id);
+      assert.ok(ops.length > 0, "produce oportunidades");
+      const o = ops[0];
+      assert.ok(o.scores.opportunity.score !== null, "con score");
+      assert.ok(o.scores.opportunity.confidence < 1, "la confianza nunca es total");
+      assert.equal(o.scores.momentum.score, null, "en la primera pasada NO hay momentum");
+      assert.equal(o.scores.momentum.unavailableReason, "INSUFFICIENT_HISTORY");
+      assert.ok(o.signals.advertiserCount > 1, "agrupa varios anunciantes en un producto");
+      assert.ok(repo.countSnapshots(o.id) > 0, "deja la primera foto para poder medir momentum mañana");
+    });
+  });
+
+  await test("RADAR · decisiones: guardan la foto del momento y cambian el estado", async () => {
+    const { recordDecision, listWatchlist } = await import("../src/lib/hunter/decisions");
+    const repo = await import("../src/lib/hunter/repo");
+    const raw = db.systemDbHandle();
+    db.migrateHunter(raw);
+    raw.prepare(`INSERT OR REPLACE INTO hunter_products (id, canonical_name, status, signals_json, scores_json)
+                 VALUES ('hp_d1','Producto decisión','new','{"advertiserCount":7}','{"opportunity":{"score":66}}')`).run();
+
+    const vigilado = recordDecision({ productId: "hp_d1", decision: "watch", decidedBy: "test" })!;
+    assert.equal(vigilado.status, "watching");
+    assert.ok(listWatchlist().some((w) => w.product.id === "hp_d1"), "entra en vigilancia");
+
+    const fila = raw.prepare("SELECT signals_at_decision_json FROM hunter_decisions WHERE product_id='hp_d1'").get() as { signals_at_decision_json: string };
+    assert.match(fila.signals_at_decision_json, /advertiserCount/, "guarda lo que se veía al decidir");
+
+    const descartado = recordDecision({ productId: "hp_d1", decision: "discard", reason: "too_saturated", decidedBy: "test" })!;
+    assert.equal(descartado.status, "discarded");
+    assert.ok(!listWatchlist().some((w) => w.product.id === "hp_d1"), "descartar lo saca de vigilancia");
+    assert.equal(recordDecision({ productId: "no-existe", decision: "save" }), null);
+  });
+
+  await test("RADAR · el plan de prueba sale de las cuentas, no de la IA, y no lanza nada", async () => {
+    const { buildTestPlan } = await import("../src/lib/hunter/test-plan");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const { emptyScoreMap } = await import("../src/lib/hunter/scoring/opportunity");
+    const { computeOpportunityEconomics } = await import("../src/lib/hunter/economics");
+    const economics = computeOpportunityEconomics({
+      salePrice: 39.9, salePriceProvenance: "OBSERVED", supplierCost: 8,
+      supplierCostProvenance: "INTERNAL_REAL", supplierCostSource: "t",
+      deliveryRate: 0.72, deliveryRateSource: "t", shippingRate: 0.9, shippingRateSource: "t",
+      rawCPA: 9, rawCPASource: "t", outboundShippingCost: 5.5, codFee: 0.7, returnCost: 4.5,
+      vatRate: 0, otherCostPerOrder: 0,
+    });
+    const plan = buildTestPlan({
+      id: "hp_p1", canonicalName: "P", category: null, description: null, heroImageUrl: null,
+      observedPriceMin: 29.9, observedPriceMax: 39.9, supplierCostMin: 8, supplierCostMax: 8,
+      currency: "EUR", firstSeenAt: null, lastSeenAt: null, status: "new", sourceConfidence: 0.6,
+      clusterConfidence: 0.8, signals: { ...emptySignals(), creativeCount: 10 }, scores: emptyScoreMap(),
+      features: [], economics, badges: [], adIds: [], providers: [], summary: null,
+    });
+    assert.equal(plan.recommendedPrice, 39.9, "empieza por el precio más alto observado");
+    assert.ok(plan.breakEvenCPA !== null && plan.targetCPA !== null);
+    assert.ok(plan.targetCPA! < plan.breakEvenCPA!, "el objetivo deja margen, no empata");
+    assert.ok(plan.rationale.length >= 2, "explica de dónde salen los números");
+    const src = fs.readFileSync(path.join(process.cwd(), "src/lib/hunter/test-plan.ts"), "utf8");
+    assert.ok(!/createCampaign|launchCampaign|metaAdsWrite/.test(src), "el plan NO lanza campañas");
+  });
+
+  await test("RADAR · ningún score inventa un número cuando no hay datos", async () => {
+    const { scoreMarket, scoreSaturation, scoreCreativeInvestment } = await import("../src/lib/hunter/scoring/market");
+    const { scoreProduct, scoreCasamable } = await import("../src/lib/hunter/scoring/product");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const vacio = emptySignals();
+    for (const [nombre, v] of [
+      ["market", scoreMarket(vacio)],
+      ["saturation", scoreSaturation(vacio)],
+      ["creative", scoreCreativeInvestment(vacio)],
+      ["product", scoreProduct([])],
+      ["casamable", scoreCasamable({
+        economics: null, historicalDeliveryRate: null, historicalRefusalRate: null,
+        historicalCancellationRate: null, supplierAvailable: null, supplierLeadTimeDays: null,
+        codSuitability: null, shippingComplexity: null,
+      })],
+    ] as const) {
+      assert.equal(v.confidence, 0, `${nombre}: sin datos, confianza 0`);
+      assert.ok(v.score === null || v.score === 0, `${nombre}: sin datos no puede dar un número plausible`);
+    }
+  });
+
+
+  await test("RADAR · HTTP: 401/403 no se reintentan, 429 y 5xx sí, y el cuerpo malformado no revienta", async () => {
+    const { hunterFetch, __resetPaceForTests, CallBudget } = await import("../src/lib/hunter/http");
+    const realFetch = global.fetch;
+    let llamadas = 0;
+    const responder = (status: number, body: unknown = { ok: true }) => {
+      global.fetch = (async () => {
+        llamadas += 1;
+        return new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
+      }) as typeof fetch;
+    };
+    try {
+      // 401: una sola llamada. Reintentar contra una clave mala es tirar cuota.
+      __resetPaceForTests(); llamadas = 0; responder(401);
+      let r = await hunterFetch({ provider: "t", url: "https://x.test/a", config: { minIntervalMs: 0, maxRetries: 3 } });
+      assert.equal(r.ok, false);
+      assert.equal(r.status, 401);
+      assert.equal(llamadas, 1, "401 NO se reintenta");
+
+      __resetPaceForTests(); llamadas = 0; responder(403);
+      r = await hunterFetch({ provider: "t", url: "https://x.test/b", config: { minIntervalMs: 0, maxRetries: 3 } });
+      assert.equal(llamadas, 1, "403 tampoco");
+
+      __resetPaceForTests(); llamadas = 0; responder(404);
+      r = await hunterFetch({ provider: "t", url: "https://x.test/c", config: { minIntervalMs: 0, maxRetries: 3 } });
+      assert.equal(llamadas, 1, "404 tampoco");
+
+      // 500: sí se reintenta, con el tope configurado.
+      __resetPaceForTests(); llamadas = 0; responder(500);
+      r = await hunterFetch({ provider: "t", url: "https://x.test/d", config: { minIntervalMs: 0, maxRetries: 2 } });
+      assert.equal(r.ok, false);
+      assert.equal(llamadas, 3, "un intento + 2 reintentos");
+
+      // 429 por CRÉDITOS: se aborta, no se insiste.
+      __resetPaceForTests(); llamadas = 0; responder(429, "credits exhausted for this plan");
+      r = await hunterFetch({ provider: "t", url: "https://x.test/e", config: { minIntervalMs: 0, maxRetries: 3 } });
+      assert.equal(llamadas, 1, "sin créditos no se insiste");
+      assert.match(r.error ?? "", /cr[ée]dito/i);
+
+      // Cuerpo que no es JSON: fallo controlado, nunca una excepción suelta.
+      __resetPaceForTests(); llamadas = 0;
+      global.fetch = (async () => new Response("<html>vaya</html>", { status: 200 })) as typeof fetch;
+      r = await hunterFetch({ provider: "t", url: "https://x.test/f", config: { minIntervalMs: 0, maxRetries: 0 } });
+      assert.equal(r.ok, false, "un payload malformado no puede tumbar la búsqueda");
+
+      // Respuesta vacía válida: se acepta tal cual.
+      __resetPaceForTests(); responder(200, { data: [] });
+      r = await hunterFetch<{ data: unknown[] }>({ provider: "t", url: "https://x.test/g", config: { minIntervalMs: 0 } });
+      assert.equal(r.ok, true);
+      assert.deepEqual((r.data as { data: unknown[] }).data, []);
+
+      // El presupuesto corta antes de salir a la red.
+      __resetPaceForTests(); llamadas = 0; responder(200);
+      const budget = new CallBudget(1);
+      await hunterFetch({ provider: "t", url: "https://x.test/h", budget, config: { minIntervalMs: 0 } });
+      const segunda = await hunterFetch({ provider: "t", url: "https://x.test/i", budget, config: { minIntervalMs: 0 } });
+      assert.equal(segunda.ok, false, "agotado el presupuesto, no se llama");
+      assert.equal(llamadas, 1, "y no se hace la segunda petición de red");
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("RADAR · el proveedor mapea a la defensiva y no inventa cuando faltan campos", async () => {
+    const { WinningHunterProvider } = await import("../src/lib/hunter/providers/winninghunter");
+    const { __resetPaceForTests } = await import("../src/lib/hunter/http");
+    const realFetch = global.fetch;
+    try {
+      await withEnv({ WINNINGHUNTER_API_KEY: "wh_test_solo_para_este_test" }, async () => {
+        __resetPaceForTests();
+        // Nombres de campo DISTINTOS a los primeros candidatos: es justo el
+        // escenario que se espera cuando se conecte la API real.
+        global.fetch = (async () =>
+          new Response(JSON.stringify({
+            results: [{ ad_id: "A1", pageName: "MarcaX", headline: "Cepillo quitapelos",
+                        caption: "Adiós a los pelos", link_url: "https://marcax.example/p", running_days: 44 }],
+            next_scroll: "tok2",
+          }), { status: 200 })) as typeof fetch;
+
+        const p = new WinningHunterProvider();
+        const r = await p.searchAds({ keywords: "quitapelos", country: "ES", limit: 1 });
+        assert.equal(r.ok, true);
+        const ad = r.data!.ads[0];
+        assert.equal(ad.externalId, "A1", "encuentra el id aunque se llame ad_id");
+        assert.equal(ad.advertiserName, "MarcaX", "y el anunciante aunque se llame pageName");
+        assert.equal(ad.activeDays, 44);
+        assert.equal(ad.priceObserved, null, "lo que no viene se queda en null, no en 0");
+        assert.equal(ad.format, null);
+        assert.equal(r.data!.nextCursor, "tok2", "sigue la paginación real");
+
+        // Respuesta con una forma que no reconocemos: cero anuncios, sin romper.
+        __resetPaceForTests();
+        global.fetch = (async () => new Response(JSON.stringify({ payload: { weird: true } }), { status: 200 })) as typeof fetch;
+        const r2 = await p.searchAds({ keywords: "x", country: "ES", limit: 1 });
+        assert.equal(r2.ok, true);
+        assert.equal(r2.data!.ads.length, 0, "forma desconocida = 0 anuncios, nunca basura inventada");
+      });
+    } finally {
+      global.fetch = realFetch;
+    }
+  });
+
+  await test("RADAR · una fuente caída deja la búsqueda PARCIAL, no la tumba", async () => {
+    await withEnv({ HUNTER_FIXTURE_MODE: "1", OPENROUTER_API_KEY: "" }, async () => {
+      const { planSearch, executeSearch } = await import("../src/lib/hunter/search/run");
+      const repo = await import("../src/lib/hunter/repo");
+      db.migrateHunter(db.systemDbHandle());
+      const { run } = await planSearch({ prompt: "Productos de coche para España" });
+      repo.createSearchRun(run, "test");
+      const fin = await executeSearch(run);
+      // En modo ejemplo no falla nada, así que debe cerrar COMPLETA.
+      assert.equal(fin.state, "complete");
+      assert.deepEqual(fin.progress.sourcesFailed, []);
+      // Y el estado se persiste, que es lo que consulta la interfaz.
+      const leida = repo.getSearchRun(fin.id)!;
+      assert.equal(leida.state, "complete");
+      assert.equal(leida.progress.opportunities, fin.progress.opportunities);
+    });
+  });
+
   // ============ WORKSPACE DE ATENCIÓN · roles, privacidad y auditoría ============
   console.log("\n— Workspace de atención —");
   await test("schema 18 crea users, sessions, audit_log y límites de reenvío de forma idempotente", () => {
@@ -13329,7 +13900,7 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 18);
+    assert.equal(raw.pragma("user_version", { simple: true }), db.SCHEMA_VERSION);
   });
 
   await test("la ficha del agente se construye por lista blanca y no filtra PII/proveedor/marketing", async () => {

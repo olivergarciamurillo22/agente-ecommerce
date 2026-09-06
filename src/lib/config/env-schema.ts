@@ -44,6 +44,7 @@ export type EnvCategory =
   | "BEEPING"
   | "META_ADS"
   | "PRODUCT_HUNTER"
+  | "WINNER_RADAR"
   | "TRACKING"
   | "SYSTEM"
   | "LEGACY";
@@ -382,6 +383,58 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     requiredFor: [],
     defaultValue: "off",
     validate: enumOf("off", "api", "mock"),
+  },
+  // ── AI Winner Radar ──────────────────────────────────────────────
+  {
+    name: "WINNINGHUNTER_API_KEY",
+    category: "WINNER_RADAR",
+    secret: true,
+    description:
+      "Clave de WinningHunter (formato wh_...). Es la ÚNICA credencial nueva que el radar necesita para funcionar. Sin ella no hay fuente de anuncios.",
+    requiredFor: [],
+  },
+  {
+    name: "META_AD_LIBRARY_ACCESS_TOKEN",
+    category: "WINNER_RADAR",
+    secret: true,
+    description:
+      "Token propio de la Ad Library de Meta. OPCIONAL y deliberadamente SEPARADO de los de WhatsApp y Meta Ads: revocar uno no debe tumbar los otros. Solo devuelve anuncios comerciales en UE/Reino Unido.",
+    requiredFor: [],
+  },
+  {
+    name: "META_AD_LIBRARY_API_VERSION",
+    category: "WINNER_RADAR",
+    secret: false,
+    description: "Versión de la Graph API para la Ad Library. Por defecto v21.0.",
+    requiredFor: [],
+    defaultValue: "v21.0",
+  },
+  {
+    name: "TIKTOK_RESEARCH_CLIENT_KEY",
+    category: "WINNER_RADAR",
+    secret: false,
+    description: "Client key de la Research API de TikTok. OPCIONAL: exige solicitud aprobada por TikTok.",
+    requiredFor: [],
+  },
+  {
+    name: "TIKTOK_RESEARCH_CLIENT_SECRET",
+    category: "WINNER_RADAR",
+    secret: true,
+    description: "Client secret de TikTok Research. Solo se usa en servidor para pedir el token; NUNCA se guarda en la base de datos.",
+    requiredFor: [],
+  },
+  {
+    name: "HUNTER_FIXTURE_MODE",
+    category: "WINNER_RADAR",
+    secret: false,
+    description:
+      "1 = datos de EJEMPLO para desarrollar sin claves. Se IGNORA en producción a propósito: si falta una fuente se dice, nunca se rellena con inventos.",
+    requiredFor: [],
+    // Sin mustEqual a propósito: el modo ejemplo es una COMODIDAD para
+    // desarrollar sin claves, no un requisito. Exigirlo en local-safe haría
+    // que un entorno perfectamente válido apareciera como incompleto.
+    defaultValue: "0",
+    validate: bool01,
   },
   { name: "PRODUCT_HUNTER_API_URL", category: "PRODUCT_HUNTER", secret: false, description: "URL base del backend del Cazador (contrato en src/lib/product-hunter/adapter.ts).", requiredFor: [] },
   { name: "PRODUCT_HUNTER_API_TOKEN", category: "PRODUCT_HUNTER", secret: true, description: "Bearer opcional para el backend del Cazador. Solo servidor; jamás llega al navegador.", requiredFor: [] },
