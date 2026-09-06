@@ -49,11 +49,10 @@ export interface InteractiveSpec {
 export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
   const nombre = firstName(order);
   const body =
-    `Hola${nombre ? ` ${nombre}` : ""} 👋\n\n` +
-    `Tenemos tu pedido de Casamable™:\n\n` +
-    `📦 ${shortProductLine(order)}\n` +
-    `💰 ${money(order)}\n\n` +
-    `¿Está todo correcto?`;
+    `Hola${nombre ? ` ${nombre}` : ""} 👋 Somos Casamable.\n\n` +
+    `Hemos recibido tu pedido #${order.shopify_order_number}: ${shortProductLine(order)}\n\n` +
+    `Es un pedido contra reembolso: pagarás ${money(order)} en efectivo al repartidor cuando lo recibas.\n\n` +
+    `¿Confirmas que quieres recibirlo?`;
   return {
     message: {
       kind: "interactive_buttons",
@@ -63,11 +62,8 @@ export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
         { id: BUTTON_PAYLOADS.CHANGE_ADDRESS, title: "📍 Cambiar dirección" },
         { id: BUTTON_PAYLOADS.DELIVERY_NOTE, title: "📝 Dejar nota" },
       ],
-      footer: `Para cancelar, escribe CANCELAR ${order.shopify_order_number}`,
     },
-    fallbackText:
-      `${body}\n\n` +
-      `1 — Confirmar\n2 — Cambiar la dirección\n3 — Dejar nota al repartidor`,
+    fallbackText: body,
   };
 }
 
@@ -82,19 +78,7 @@ export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
  * seguimiento, etc. se añaden aquí cuando sus plantillas estén aprobadas
  * en Meta — no antes, para no fallar por un nombre que la WABA no conoce.
  */
-export function buildConfirmationOutbound(order: OrderRow, withinSessionWindow: boolean): InteractiveSpec {
-  if (withinSessionWindow) {
-    const spec = buildConfirmationInteractive(order);
-    // La ventana puede caducar con la fila EN la cola: se adjunta la
-    // plantilla equivalente para que el loop de entrega pueda degradar.
-    // Si la plantilla aún no está verificada, el INTERACTIVO sale igual
-    // (estamos dentro de ventana): solo se pierde la degradación tardía.
-    try {
-      return { ...spec, templateFallback: confirmationTemplate(order) };
-    } catch {
-      return spec;
-    }
-  }
+export function buildConfirmationOutbound(order: OrderRow, _withinSessionWindow?: boolean): InteractiveSpec {
   return {
     message: confirmationTemplate(order),
     // Mismo texto que el interactivo: es lo que enseña el panel y lo que

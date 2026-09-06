@@ -21,6 +21,8 @@ import {
   clearSelectedOrderContext,
   getActiveOrdersByPhone,
   getNeedsCallOrdersByPhone,
+  getLatestCustomerOrderByPhone,
+  getOrCreateConversation,
   getOrderById,
   getConversationOrderContext,
   markOrderPossibleDuplicate,
@@ -40,8 +42,8 @@ import {
   saveOrderDeliveryNote,
   setOrderCustomerReplied,
   appendOrderProposedAddress,
-  incrementOrderClarify,
   setOrderShopifyTagged,
+  setMode,
   type OrderRow,
 } from "../db";
 import { tagOrderConfirmed } from "../shopify/admin";
@@ -58,8 +60,6 @@ import {
   MSG_ADDRESS_SAVED,
   MSG_ASK_NOTE,
   MSG_NOTE_SAVED,
-  MSG_CLARIFY,
-  MSG_WILL_CALL,
   buildDisambiguationMessage,
 } from "./messages";
 import {
@@ -71,6 +71,7 @@ import {
   saysBoth,
 } from "./multi-order";
 import { logIntegrationEvent } from "../system/repo";
+import { assessOrderAddress } from "./address-quality";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -158,6 +159,45 @@ export function classifyOrderReply(text: string): OrderReplyIntent {
   return "unknown";
 }
 
+/** Detector deliberadamente pequeño: solo escala, nunca cancela ni responde. */
+export function isPossibleCancellationText(text: string): boolean {
+  const n = normalizeText(text);
+  return (
+    /\b(cancelar|cancela|cancele|cancelacion|anular|anula|devolver|devolucion)\b/.test(n) ||
+    /\bno lo quiero\b/.test(n) ||
+    /\bsin mi permiso\b/.test(n) ||
+    /\bequivocacion\b/.test(n) ||
+    /\berror en el pedido\b/.test(n)
+  );
+}
+
+function requiresImmediateHumanForCancellation(text: string): boolean {
+  const n = normalizeText(text);
+  return (
+    /\bsin mi permiso\b/.test(n) ||
+    /\bdevolver|devolucion\b/.test(n) ||
+    /\bequivocacion\b/.test(n) ||
+    /\berror en el pedido\b/.test(n)
+  );
+}
+
+function escalateFreeText(phone: string, orders: OrderRow[], cancellation: boolean): OrderReplyResult {
+  const convo = getOrCreateConversation(phone);
+  setMode(convo.id, "HUMAN");
+  for (const order of orders) markOrderNeedsCall(order.id);
+  const order = orders[0];
+  logIntegrationEvent(
+    "whatsapp",
+    cancellation ? "posible_cancelacion_texto_libre" : "texto_libre_requiere_atencion",
+    "critical",
+    cancellation
+      ? "posible cancelación detectada en texto libre; conversación derivada a HUMAN"
+      : "texto libre no reconocido; conversación derivada a HUMAN por seguridad",
+    order?.shopify_order_number ?? null
+  );
+  return { handled: true, authorized: orders.some((o) => o.pilot_authorized === 1) };
+}
+
 /**
  * Confirma un pedido (por respuesta del cliente o a mano desde el panel) y
  * lanza el tag WA_CONFIRMED en Shopify en segundo plano (tagsAdd: añade sin
@@ -191,6 +231,19 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): void {
 /** Respuesta 1/2/3/desconocida sobre un pedido en awaiting_reply/reminder_sent. */
 function applyIntent(order: OrderRow, intent: OrderReplyIntent): OrderReplyResult {
   if (intent === "confirm") {
+    const address = assessOrderAddress(order.address_line1);
+    if (address.suspicious) {
+      markOrderNeedsCorrection(order.id);
+      logIntegrationEvent(
+        "whatsapp",
+        "direccion_sospechosa",
+        "warning",
+        `confirmación automática bloqueada: ${address.reason}`,
+        order.shopify_order_number
+      );
+      logger.warn(`[ORDER] #${order.shopify_order_number} -> needs_correction (dirección sospechosa: ${address.reason})`);
+      return { handled: true, reply: MSG_ASK_ADDRESS };
+    }
     logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number}`);
     confirmOrder(order, "reply");
     return { handled: true, reply: MSG_CONFIRMED };
@@ -205,15 +258,9 @@ function applyIntent(order: OrderRow, intent: OrderReplyIntent): OrderReplyResul
     logger.info(`[ORDER] #${order.shopify_order_number} -> awaiting_delivery_note`);
     return { handled: true, reply: MSG_ASK_NOTE };
   }
-  // Ambigua: una aclaración y, si reincide, a la lista de llamadas.
-  setOrderCustomerReplied(order.id);
-  const clarifies = incrementOrderClarify(order.id);
-  if (clarifies <= 1) {
-    return { handled: true, reply: MSG_CLARIFY };
-  }
-  markOrderNeedsCall(order.id);
-  logger.info(`[ORDER] #${order.shopify_order_number} -> needs_call (respuestas ambiguas)`);
-  return { handled: true, reply: MSG_WILL_CALL };
+  // Fuera de un flujo esperado, el texto libre no se archiva en silencio:
+  // se aparta el bot y lo revisa una persona. No se genera respuesta.
+  return escalateFreeText(order.phone, [order], false);
 }
 
 /** El pedido está en needs_correction: capturamos su dirección propuesta. */
@@ -222,9 +269,7 @@ function captureAddress(order: OrderRow, rawText: string, intent: OrderReplyInte
   // todo estaba bien. Con dirección ya propuesta, es un simple asentimiento.
   if (intent === "confirm") {
     if (!order.proposed_address) {
-      logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number} (tras dudar)`);
-      confirmOrder(order, "reply");
-      return { handled: true, reply: MSG_CONFIRMED };
+      return applyIntent(order, intent);
     }
     return { handled: true, reply: "¡Gracias! Revisamos la dirección y preparamos tu pedido 👍" };
   }
@@ -247,6 +292,9 @@ function captureAddress(order: OrderRow, rawText: string, intent: OrderReplyInte
 
 /** El pedido está en awaiting_delivery_note: el siguiente texto ES la nota. */
 function captureNote(order: OrderRow, rawText: string, intent: OrderReplyIntent): OrderReplyResult {
+  if (isPossibleCancellationText(rawText)) {
+    return escalateFreeText(order.phone, [order], true);
+  }
   // Cambió de idea: confirma directamente (la nota queda sin dejar).
   if (intent === "confirm") {
     logger.info(`[WHATSAPP] Customer confirmed #${order.shopify_order_number} (sin nota)`);
@@ -397,6 +445,10 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
       const enManosHumanas = getNeedsCallOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
       if (enManosHumanas.length > 0) return executeCancellation(phone, enManosHumanas);
     }
+    const latest = getLatestCustomerOrderByPhone(phone);
+    if (latest && orderActionAllowed(latest) && classifyOrderReply(text) === "unknown") {
+      return escalateFreeText(phone, [latest], isPossibleCancellationText(text));
+    }
     return { handled: false };
   }
 
@@ -408,6 +460,12 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
   const intent = classifyOrderReply(text);
   const quiereCancelar = isCancelIntent(text);
   const context = loadValidContext(phone, active);
+
+  // Una posible cancelación escrita libremente nunca se guarda como nota ni
+  // queda esperando otra confirmación del bot: pasa directamente a HUMAN.
+  if (requiresImmediateHumanForCancellation(text)) {
+    return escalateFreeText(phone, active, true);
+  }
 
   // --- Caso simple: un único pedido activo ---
   if (active.length === 1) {

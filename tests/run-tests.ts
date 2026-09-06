@@ -323,7 +323,7 @@ async function main(): Promise<void> {
 
   const investigateSkipped = await import("../src/lib/shopify/investigate-skipped-backfill");
   const dropeaReconcile = await import("../src/lib/suppliers/dropea/reconcile");
-  const { handleOrderReply, classifyOrderReply, confirmOrder } = await import(
+  const { handleOrderReply, handleOrderButtonReply, classifyOrderReply, confirmOrder } = await import(
     "../src/lib/orders/confirmation"
   );
   const { tagOrderConfirmed } = await import("../src/lib/shopify/admin");
@@ -670,15 +670,15 @@ async function main(): Promise<void> {
   });
 
   // ============ 9 · Respuestas ambiguas ============
-  await test("respuesta ambigua → aclaración; segunda ambigua → needs_call", async () => {
+  await test("texto libre no reconocido → HUMAN inmediato, sin respuesta automática", async () => {
     mkOrder("910005", "1205", "34600000004");
     await runSchedulerTick(Math.floor(Date.now() / 1000));
     const r1 = handleOrderReply("34600000004", "hola, quién eres?");
-    assert.equal(r1.reply, msgs.MSG_CLARIFY);
-    assert.equal(db.getOrderByShopifyId("910005")!.status, "awaiting_reply");
-    const r2 = handleOrderReply("34600000004", "no entiendo nada");
-    assert.equal(r2.reply, msgs.MSG_WILL_CALL);
+    assert.equal(r1.handled, true);
+    assert.equal(r1.reply, undefined);
     assert.equal(db.getOrderByShopifyId("910005")!.status, "needs_call");
+    const convoId = db.getConversationIdByPhone("34600000004")!;
+    assert.equal(db.getConversationById(convoId)!.mode, "HUMAN");
   });
 
   // ============ 10 · Recordatorio y needs_call por tiempo ============
@@ -855,6 +855,40 @@ async function main(): Promise<void> {
       assert.equal(classifyOrderReply(t), "unknown", `"${t}"`);
   });
 
+  await test("BUG WhatsApp · una dirección sospechosa no confirma y abre corrección", async () => {
+    const { assessOrderAddress } = await import("../src/lib/orders/address-quality");
+    assert.deepEqual(assessOrderAddress("Nombre Apellido"), { suspicious: true, reason: "parece_nombre" }, "fixture anonimizado del patrón real de #35011404");
+    assert.equal(assessOrderAddress("").suspicious, true);
+    assert.equal(assessOrderAddress("Calle Alcalá 123").suspicious, false);
+
+    for (const [suffix, address] of [["1", "Nombre Apellido"], ["2", ""]] as const) {
+      const phone = `3460000040${suffix}`;
+      const created = mkOrder(`91990${suffix}`, `1290${suffix}`, phone);
+      db.systemDbHandle().prepare("UPDATE orders SET address_line1=? WHERE id=?").run(address, created.id);
+      db.claimOrderInitialSend(created.id);
+      const result = handleOrderReply(phone, "1");
+      const order = db.getOrderById(created.id)!;
+      assert.equal(result.reply, msgs.MSG_ASK_ADDRESS);
+      assert.equal(order.status, "needs_correction");
+      assert.equal(order.confirmed_at, null);
+      assert.equal(order.shopify_tagged, 0);
+      const event = db.systemDbHandle().prepare("SELECT severity FROM integration_events WHERE event_type='direccion_sospechosa' AND order_ref=?").get(order.shopify_order_number) as { severity: string };
+      assert.equal(event.severity, "warning");
+    }
+  });
+
+  await test("BUG WhatsApp · dirección real confirma por texto y por botón sin fricción", () => {
+    for (const [suffix, useButton] of [["3", false], ["4", true]] as const) {
+      const phone = `3460000040${suffix}`;
+      const created = mkOrder(`91990${suffix}`, `1290${suffix}`, phone);
+      db.systemDbHandle().prepare("UPDATE orders SET address_line1='Calle Alcalá 123' WHERE id=?").run(created.id);
+      db.claimOrderInitialSend(created.id);
+      const result = useButton ? handleOrderButtonReply(phone, "confirm_order") : handleOrderReply(phone, "todo correcto");
+      assert.equal(result.reply, msgs.MSG_CONFIRMED);
+      assert.equal(db.getOrderById(created.id)!.status, "confirmed");
+    }
+  });
+
   // ============ 14 · Casamable: opción 3 (nota para el repartidor) ============
   console.log("· Casamable — opción 3 (nota repartidor)");
   await test("respuesta '3' pide la nota y NO recibe recordatorio mientras espera", async () => {
@@ -887,6 +921,41 @@ async function main(): Promise<void> {
     const row = db.getOrderByShopifyId("920001")!;
     assert.equal(row.status, "confirmed");
     assert.equal(row.delivery_note, "Llamar antes de subir", "la nota se conserva");
+  });
+
+  await test("BUG WhatsApp · cancelación libre después de confirmar escala a HUMAN con severidad alta", () => {
+    const phone = "34600000415";
+    const order = mkOrder("919915", "12915", phone);
+    db.claimOrderInitialSend(order.id);
+    handleOrderButtonReply(phone, "confirm_order");
+    const text = "tengo q cancelar el pedido, mi hijo me cogió el móvil y pidió sin mi permiso";
+    const result = handleOrderReply(phone, text);
+    assert.equal(result.handled, true);
+    assert.equal(result.reply, undefined, "el detector no inventa respuesta automática");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(phone)!)!.mode, "HUMAN");
+    const event = db.systemDbHandle().prepare("SELECT severity FROM integration_events WHERE event_type='posible_cancelacion_texto_libre' AND order_ref='12915'").get() as { severity: string };
+    assert.equal(event.severity, "critical");
+  });
+
+  await test("BUG WhatsApp · una cancelación escrita como supuesta nota no se archiva como delivery_note", () => {
+    const phone = "34600000416";
+    const order = mkOrder("919916", "12916", phone);
+    db.claimOrderInitialSend(order.id);
+    assert.equal(handleOrderButtonReply(phone, "delivery_note").reply, msgs.MSG_ASK_NOTE);
+    const result = handleOrderReply(phone, "tengo q cancelar el pedido, mi hijo me cogió el móvil y pidió sin mi permiso");
+    const fresh = db.getOrderById(order.id)!;
+    assert.equal(result.reply, undefined);
+    assert.equal(fresh.delivery_note, null);
+    assert.equal(fresh.status, "needs_call");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(phone)!)!.mode, "HUMAN");
+  });
+
+  await test("HOTFIX WhatsApp · el documento conserva causas reales y límites operativos", () => {
+    const doc = fs.readFileSync(path.join(process.cwd(), "docs/deploy/HOTFIX-WHATSAPP-05-09.md"), "utf8");
+    for (const order of ["#35011404", "#35011394"]) assert.ok(doc.includes(order));
+    for (const cause of ["markOrderConfirmed", "buildConfirmationOutbound", "captureNote", "handled:false"]) assert.ok(doc.includes(`\`${cause}\``));
+    assert.match(doc, /no se consultó la base real de producción/i);
+    assert.match(doc, /no dispone de email o push independiente/i);
   });
 
   await test("multipedido + opción 3: la nota JAMÁS va al pedido equivocado", async () => {
@@ -8543,7 +8612,8 @@ async function main(): Promise<void> {
 
     // La automatización terminó: nada más que el bot pueda liar.
     const r4 = handleOrderReply(tel, "1097");
-    assert.equal(r4.handled, false, "sin pedidos activos, el flujo ya no interviene: lo lleva Pedro");
+    assert.equal(r4.handled, true, "el texto libre queda retenido en HUMAN, no vuelve a la automatización");
+    assert.equal(r4.reply, undefined);
 
     // Y el evento para el panel quedó registrado, sin PII.
     const evs = sysRepo.listIntegrationEvents({ integration: "whatsapp", limit: 200 });
@@ -8861,12 +8931,12 @@ async function main(): Promise<void> {
   });
 
   await test("META · plantillas: el catálogo valida nombre y número de variables", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#1234", "Limpiador", "29,99 €"]);
     assert.equal(m.kind, "template");
     assert.throws(() => waTemplates.buildTemplateMessage("plantilla_inventada", []), /desconocida/);
     assert.throws(
       () => waTemplates.buildTemplateMessage("order_confirmation_request", ["solo-una"]),
-      /esperaba 3/
+      /esperaba 4/
     );
     assert.equal(
       waTemplates.loadTemplateSpecs().length,
@@ -8877,7 +8947,7 @@ async function main(): Promise<void> {
   });
 
   await test("BUG1 · buildTemplateMessage incluye los payloads de botón del catálogo, en orden", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#1234", "Limpiador", "29,99 €"]);
     assert.equal(m.kind, "template");
     if (m.kind !== "template") throw new Error("unreachable");
     assert.deepEqual(
@@ -8896,7 +8966,7 @@ async function main(): Promise<void> {
   });
 
   await test("BUG1 · buildMetaPayload de una plantilla manda un componente button/quick_reply POR CADA botón, con su payload", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#1234", "Limpiador", "29,99 €"]);
     const payload = metaProv.buildMetaPayload("34600000000", m) as {
       template: { components: Array<{ type: string; sub_type?: string; index?: string; parameters: Array<Record<string, string>> }> };
     };
@@ -8928,12 +8998,12 @@ async function main(): Promise<void> {
     JSON.stringify({ provider: "confirmacion_pedido_cod", language: "es", status: "APPROVED", paramCount: 4, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
   );
 
-  await test("BUG1 · buildConfirmationOutbound: dentro de ventana manda el interactivo, fuera manda la plantilla con los datos reales del pedido", () => {
+  await test("HOTFIX · buildConfirmationOutbound usa siempre la plantilla con los datos reales", () => {
     const o = mkMulti("972501", "7501", "34600177501", { product_summary: "Limpiador Ultrasónico", total_price: "19.99" });
     const orden = db.getOrderById(o.id)!;
 
     const dentro = interactive.buildConfirmationOutbound(orden, true);
-    assert.equal(dentro.message.kind, "interactive_buttons", "dentro de ventana: interactivo normal, NUNCA plantilla (coste)");
+    assert.equal(dentro.message.kind, "template", "dentro de ventana tampoco revive la versión antigua");
 
     const fuera = interactive.buildConfirmationOutbound(orden, false);
     assert.equal(fuera.message.kind, "template");
@@ -8944,7 +9014,21 @@ async function main(): Promise<void> {
       ["Cliente", `#${orden.shopify_order_number}`, "Limpiador Ultrasónico", "19,99 €"],
       "nombre, número de pedido, producto e importe, en ese orden"
     );
-    assert.equal(fuera.fallbackText, dentro.fallbackText, "el fallback (panel / rollback) es el mismo texto en los dos casos");
+    assert.equal(fuera.fallbackText, dentro.fallbackText, "la vista del panel es la misma en los dos casos");
+  });
+
+  await test("HOTFIX · todas las rutas de reenvío convergen en la plantilla y el texto viejo no existe", () => {
+    const schedulerSource = fs.readFileSync(path.join(process.cwd(), "src/lib/orders/scheduler.ts"), "utf8");
+    const actionSource = fs.readFileSync(path.join(process.cwd(), "src/app/api/orders/[orderId]/action/route.ts"), "utf8");
+    assert.match(schedulerSource, /buildConfirmationOutbound\(order\)/, "scheduler y reenvíos construyen la plantilla canónica");
+    assert.match(actionSource, /resetOrderForResend\(id\)/, "el panel devuelve el pedido al mismo scheduler");
+    for (const file of ["src/lib/whatsapp/interactive.ts", "src/lib/orders/messages.ts", "config/whatsapp-templates.json"]) {
+      const source = fs.readFileSync(path.join(process.cwd(), file), "utf8");
+      assert.ok(!source.includes("¿Está todo correcto?"), `${file} no conserva la versión retirada`);
+    }
+    const mapping = waTemplates.getProviderMapping("order_confirmation_request")!;
+    assert.equal(mapping.providerTemplate, "confirmacion_pedido_cod");
+    assert.deepEqual(mapping.params, ["nombre", "numero_pedido", "producto", "importe"]);
   });
 
   await test("BUG1 · sendWhatsAppInteractive con una plantilla guarda message_type='template' y template_name — no 'interactive_buttons'", async () => {
@@ -9140,7 +9224,7 @@ async function main(): Promise<void> {
       const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
       assert.equal(item.message_type, "interactive_buttons");
       assert.ok(item.payload_json, "el mensaje interactivo entero viaja en payload_json");
-      assert.match(item.content, /1 — Confirmar/, "content = fallback para el panel");
+      assert.match(item.content, /¿Confirmas que quieres recibirlo\?/i, "content = vista fiel para el panel");
     });
     await withEnv({ WHATSAPP_PROVIDER: "baileys" }, () => {
       waTop.sendWhatsAppInteractive(tel, spec);
@@ -9388,7 +9472,7 @@ async function main(): Promise<void> {
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "interactive_buttons", "encolado como interactivo");
-    assert.match(item.content, /1 — Confirmar/, "y su content ES el fallback: Baileys lo manda tal cual");
+    assert.match(item.content, /¿Confirmas que quieres recibirlo\?/i, "el fallback ya no contiene la lista antigua");
     assert.equal(item.type, "text", "para el loop de Baileys es un texto normal (columna vieja `type`)");
   });
 
@@ -9405,7 +9489,7 @@ async function main(): Promise<void> {
     throw new Error(`el pedido ${orderId} sigue en ${estadoInicial} tras 25 ticks`);
   }
 
-  await test("BOTONES · el scheduler manda la confirmación inicial como interactivo cuando el proveedor activo es cloud_api", async () => {
+  await test("BOTONES · el scheduler manda siempre confirmacion_pedido_cod con sus botones reales", async () => {
     const tel = "34600000138";
     // BUG1: dentro de la ventana de 24h (el cliente ya escribió) es cuando
     // corresponde el interactivo — fuera de ventana ahora es una plantilla
@@ -9417,21 +9501,21 @@ async function main(): Promise<void> {
       await tickHastaQueSalgaDe(o.id, "pending_send");
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
-    assert.equal(item.message_type, "interactive_buttons", "cloud_api: la confirmación inicial sale como interactivo");
+    assert.equal(item.message_type, "template", "cloud_api: la confirmación inicial sale como plantilla");
     const payload = JSON.parse(item.payload_json!) as {
       kind: string;
-      buttons: Array<{ id: string; title: string }>;
+      buttonPayloads: string[];
     };
-    assert.equal(payload.kind, "interactive_buttons");
+    assert.equal(payload.kind, "template");
     assert.deepEqual(
-      payload.buttons.map((b) => b.id),
+      payload.buttonPayloads,
       [confirmMod.BUTTON_PAYLOADS.CONFIRM, confirmMod.BUTTON_PAYLOADS.CHANGE_ADDRESS, confirmMod.BUTTON_PAYLOADS.DELIVERY_NOTE],
       "los tres botones, en los payloads deterministas que interpreta handleOrderButtonReply"
     );
     assert.match(
       item.content,
-      /1 — Confirmar/,
-      "el fallback (panel / rollback) es el de buildConfirmationInteractive, no el texto plano de messages.ts"
+      /¿Confirmas que quieres recibirlo\?/i,
+      "el panel refleja la plantilla correcta"
     );
   });
 
@@ -9442,7 +9526,7 @@ async function main(): Promise<void> {
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
     assert.equal(item.message_type, "text", "baileys: sigue siendo texto plano, exactamente como antes de este cambio");
     assert.equal(item.payload_json, null, "sin payload interactivo para Baileys — nada nuevo que interpretar");
-    assert.match(item.content, /1 - Todo correcto/);
+    assert.match(item.content, /¿Confirmas que quieres recibirlo\?/i);
   });
 
   await test("COEXISTENCIA · los ECOS del móvil de Pedro jamás disparan el flujo: sin bucles posibles", async () => {
@@ -9520,7 +9604,7 @@ async function main(): Promise<void> {
     ]);
   });
 
-  await test("BUG1 · scheduler: si el cliente YA escribió (dentro de ventana), sigue mandando el interactivo normal — no gasta plantilla de más", async () => {
+  await test("HOTFIX · dentro de ventana el scheduler tampoco usa la versión antigua", async () => {
     const tel = "34600177602";
     const convo = db.getOrCreateConversation(tel, "Cliente Ventana");
     db.insertMessage(convo.id, "user", "hola, ya he escrito antes"); // abre la ventana
@@ -9529,19 +9613,19 @@ async function main(): Promise<void> {
       await tickHastaQueSalgaDe(o.id, "pending_send");
     });
     const item = db.getPendingOutbox(500).filter((x) => x.phone === tel).pop()!;
-    assert.equal(item.message_type, "interactive_buttons", "dentro de ventana: interactivo normal, la plantilla se cobra y aquí no hace falta");
-    assert.equal(item.template_name, null);
+    assert.equal(item.message_type, "template");
+    assert.equal(item.template_name, "confirmacion_pedido_cod");
   });
 
-  await test("T1 · degradación EN ENVÍO: la ventana caduca con la fila en cola → sale la plantilla y la DB dice la verdad", async () => {
+  await test("HOTFIX · la plantilla se encola desde el inicio y no necesita degradación", async () => {
     const tel = "34600177610";
     const convo = db.getOrCreateConversation(tel, "Cliente Caducado");
     db.insertMessage(convo.id, "user", "hola"); // dentro de ventana AL ENCOLAR
 
     const orden = mkMulti("972610", "7610", tel);
     const spec = interactive.buildConfirmationOutbound(db.getOrderById(orden.id)!, true);
-    assert.equal(spec.message.kind, "interactive_buttons", "dentro de ventana: se encola interactivo");
-    assert.ok(spec.templateFallback, "con su plantilla equivalente adjunta");
+    assert.equal(spec.message.kind, "template");
+    assert.equal(spec.templateFallback, undefined);
     let itemId = 0;
     await withEnv({ WHATSAPP_PROVIDER: "cloud_api" }, () => {
       waTop.sendWhatsAppInteractive(tel, spec);
@@ -9566,7 +9650,7 @@ async function main(): Promise<void> {
       await metaOutbox.runCloudOutboxTick(prov);
     }
 
-    assert.deepEqual(enviados, ["interactive_buttons", "template"], "un intento interactivo, luego LA plantilla — jamás dos mensajes al cliente");
+    assert.deepEqual(enviados, ["template"], "un único intento con la plantilla aprobada");
     const fila = db.systemDbHandle().prepare("SELECT * FROM outbox WHERE id = ?").get(itemId) as {
       sent: number; message_type: string; template_name: string | null; provider_message_id: string | null;
       failure_reason: string | null; failed_at: number | null;
@@ -9575,7 +9659,7 @@ async function main(): Promise<void> {
     assert.equal(fila.message_type, "template", "la DB dice lo que salió DE VERDAD, no lo que se encoló");
     assert.equal(fila.template_name, "confirmacion_pedido_cod");
     assert.equal(fila.provider_message_id, "wamid.degradado1");
-    assert.match(fila.failure_reason ?? "", /fallback_reason=outside_24h_window/, "la degradación queda auditada");
+    assert.equal(fila.failure_reason, null);
     assert.equal(fila.failed_at, null, "degradado con éxito NO es un fallo");
   });
 
@@ -9608,7 +9692,7 @@ async function main(): Promise<void> {
 
     const conf = interactive.buildConfirmationInteractive(db.getOrderById(o1.id)!);
     assert.equal(metaProv.validateOutbound(conf.message), null, "la confirmación pasa los límites");
-    assert.match(conf.fallbackText, /1 — Confirmar/, "el fallback ES el flujo 1/2/3");
+    assert.match(conf.fallbackText, /¿Confirmas que quieres recibirlo\?/i);
 
     const lista = interactive.buildOrderSelectionList([db.getOrderById(o1.id)!, db.getOrderById(o2.id)!]);
     assert.equal(metaProv.validateOutbound(lista.message), null, "la lista pasa los límites (título ≤24, desc ≤72)");
@@ -10973,8 +11057,10 @@ async function main(): Promise<void> {
         (sid) => db.getOrderByShopifyId(sid)!.status === "needs_call"
       );
       if (r.handled) {
-        assert.ok(r.reply && r.reply.length > 0, `"${msg}" gestionado siempre lleva respuesta`);
-        respuestas.push(r.reply!);
+        const convoId = db.getConversationIdByPhone(tel);
+        const human = convoId !== null && db.getConversationById(convoId)?.mode === "HUMAN";
+        assert.ok((r.reply && r.reply.length > 0) || human, `"${msg}" responde o queda visible en HUMAN`);
+        if (r.reply) respuestas.push(r.reply);
       } else {
         // El silencio SOLO es legítimo cuando el bot ya se apartó (todo en
         // needs_call = manos humanas). Mientras el bot lleve la
@@ -11744,12 +11830,10 @@ async function main(): Promise<void> {
       assert.equal((m.buttonPayloads ?? []).length, 3, "payloads locales para los 3 botones reales");
     });
 
-    await test("132001: dentro de ventana SIN verificación, el interactivo sale igual (solo se pierde la degradación tardía)", () => {
+    await test("HOTFIX: dentro de ventana SIN verificación también queda bloqueado", () => {
       limpiarVerificacion();
       const o = mkOrder("v3wa-2", "94102", "34600994102");
-      const spec = buildConfirmationOutbound(o, true);
-      assert.equal(spec.message.kind, "interactive_buttons", "dentro de ventana no hace falta plantilla");
-      assert.equal(spec.templateFallback, undefined, "sin plantilla verificada no se adjunta fallback");
+      assert.throws(() => buildConfirmationOutbound(o, true), tpl.TemplateNotReadyError);
     });
 
     await test("132001: aridad distinta, estado no APPROVED o verificación obsoleta → BLOQUEADO con su motivo exacto", () => {
