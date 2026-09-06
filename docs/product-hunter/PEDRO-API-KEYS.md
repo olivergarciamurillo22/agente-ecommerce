@@ -1,48 +1,34 @@
-# Pedro — qué credenciales hace falta pedir para el AI Winner Radar
+# Pedro — qué credenciales hace falta pedir para el Winner Radar
 
 Documento **versionado**. Ninguna clave aparece aquí: solo qué es cada una,
 dónde se saca y si de verdad hace falta.
 
+> **Cambio del 06-09-2026.** El radar ya NO depende de WinningHunter. La
+> fuente principal es la **Biblioteca de Anuncios de Meta**, que es gratuita
+> y son los anuncios de verdad, publicados por las marcas, con su fecha de
+> arranque real. Un agregador de pago es esa misma información cobrada, con
+> retraso y con estimaciones encima que no se pueden auditar — y el día que
+> sube de precio o cierra, el radar deja de existir.
+
 ## Resumen en una línea
 
-**Solo hay que conseguir UNA cosa para empezar: la clave de WinningHunter.**
-Todo lo demás o ya lo tenemos, o es opcional.
+**Solo hay que conseguir UNA cosa: el token de la Biblioteca de Anuncios de
+Meta. Es gratis.** Todo lo demás o ya lo tenemos, o es opcional.
 
 ---
 
-## 1 · WINNINGHUNTER_API_KEY
-
-| | |
-|---|---|
-| **ENV_NAME** | `WINNINGHUNTER_API_KEY` |
-| **PROVIDER** | WinningHunter |
-| **REQUIRED/OPTIONAL** | **REQUERIDA** — sin ella no hay ninguna fuente de anuncios |
-| **WHERE_PEDRO_GETS_IT** | Entrando en `app.winninghunter.com` → sección **API** → crear clave. Empieza por `wh_` |
-| **WHAT_PERMISSION_IS_NEEDED** | Plan **Basic o superior**. La clave sirve para todo el API programático |
-| **HOW_TO_VALIDATE** | `docker exec casamable-agent npm run hunter:doctor` → debe decir `WINNINGHUNTER CONNECTED` y el saldo de créditos |
-| **DOES_IT_COST_MONEY** | **Sí.** Es una suscripción de pago y **cada llamada consume 1 crédito**. Basic trae 100 créditos; Standard, 20.000 |
-| **CAN_V1_RUN_WITHOUT_IT** | No para buscar de verdad. La interfaz y el análisis funcionan, pero no hay de dónde sacar anuncios |
-
-**Cuánto se gasta en la práctica:** una búsqueda lanza hasta 8 consultas y el
-sistema tiene un tope duro de **24 llamadas por búsqueda**. Con el plan Basic
-(100 créditos) salen unas 4-8 búsquedas al mes; si se va a usar en serio,
-hace falta un plan mayor. El panel enseña el consumo del día antes de que
-llegue la factura.
-
----
-
-## 2 · META_AD_LIBRARY_ACCESS_TOKEN
+## 1 · META_AD_LIBRARY_ACCESS_TOKEN — la única que hace falta
 
 | | |
 |---|---|
 | **ENV_NAME** | `META_AD_LIBRARY_ACCESS_TOKEN` |
 | **PROVIDER** | Meta (Graph API — Ad Library) |
-| **REQUIRED/OPTIONAL** | **OPCIONAL** — añade una segunda fuente y sube la confianza de los resultados |
+| **REQUIRED/OPTIONAL** | **REQUERIDA.** Es la fuente principal: sin ella no hay de dónde sacar anuncios |
 | **WHERE_PEDRO_GETS_IT** | En la app de Meta que ya tenemos creada, generando un token de acceso para la Ad Library |
 | **WHAT_PERMISSION_IS_NEEDED** | Acceso estándar a la Ad Library. **No** hace falta permiso especial para la UE |
-| **HOW_TO_VALIDATE** | `npm run hunter:doctor` → `META_AD_LIBRARY CONNECTED` |
+| **HOW_TO_VALIDATE** | `npm run hunter:doctor` → `META CONNECTED` y `PROVIDER meta` |
 | **DOES_IT_COST_MONEY** | **No.** Es gratis. Límite de ~200 llamadas/hora |
-| **CAN_V1_RUN_WITHOUT_IT** | Sí, perfectamente |
+| **CAN_V1_RUN_WITHOUT_IT** | No. El panel abre y explica qué falta, pero no puede buscar |
 
 **Importante, y no es un detalle:** esta API solo devuelve anuncios
 **comerciales** cuando se consulta la **UE o Reino Unido** — lo obliga la DSA,
@@ -53,6 +39,27 @@ parecen buenos y no lo son. España es UE, así que nuestro caso funciona.
 
 **No reutilizar el token de WhatsApp ni el de Meta Ads.** Es a propósito: si
 un día se revoca uno, los otros siguen vivos.
+
+---
+
+## 2 · WINNINGHUNTER_API_KEY — ya NO hace falta
+
+| | |
+|---|---|
+| **ENV_NAME** | `WINNINGHUNTER_API_KEY` |
+| **PROVIDER** | WinningHunter |
+| **REQUIRED/OPTIONAL** | **OPCIONAL.** El radar funciona entero sin ella |
+| **WHERE_PEDRO_GETS_IT** | Entrando en `app.winninghunter.com` → sección **API** → crear clave. Empieza por `wh_` |
+| **WHAT_PERMISSION_IS_NEEDED** | Plan **Basic o superior**. La clave sirve para todo el API programático |
+| **HOW_TO_VALIDATE** | `docker exec casamable-agent npm run hunter:doctor` → debe decir `WINNINGHUNTER CONNECTED` y el saldo de créditos |
+| **DOES_IT_COST_MONEY** | **Sí.** Es una suscripción de pago y **cada llamada consume 1 crédito**. Basic trae 100 créditos; Standard, 20.000 |
+| **CAN_V1_RUN_WITHOUT_IT** | Sí. Solo sirve para contrastar con una segunda fuente, y hay que activarla con `WINNER_RADAR_PROVIDER=wh` o `=all` |
+
+**No la contrates para esto.** Se mantiene el soporte porque el código ya
+estaba escrito y quitarlo no aporta nada, pero con Meta configurada no se
+consulta. Si algún día quieres comparar las dos fuentes, se activa con
+`WINNER_RADAR_PROVIDER=all` y el panel enseña el consumo de créditos del día
+antes de que llegue la factura.
 
 ---
 
@@ -78,14 +85,19 @@ El `client_secret` solo se usa en el servidor para pedir un token temporal y
 
 | Qué | ENV | Estado |
 |---|---|---|
-| Modelo de lenguaje | `OPENROUTER_API_KEY` | **ALREADY_CONFIGURED** — se reutiliza el que ya usa Casamable. No hace falta ninguna suscripción nueva |
+| Modelo de lenguaje | `OPENAI_API_KEY` *o* `OPENROUTER_API_KEY` | **OPCIONAL.** Si hay clave de OpenAI se usa esa; si no, la de OpenRouter que Casamable ya tiene. No hace falta ninguna suscripción nueva |
 | Datos de pedidos, entregas y rehúses | (ninguna) | **ALREADY_CONFIGURED** — salen de la propia base de datos |
 | Tasas de entrega, envío y CPA | (ninguna) | **ALREADY_CONFIGURED** — del mismo sitio que la Calculadora COD |
 | Costes de producto conocidos | (ninguna) | **ALREADY_CONFIGURED** — de `product_costs` |
 
-Sin `OPENROUTER_API_KEY` el radar **sigue funcionando**: interpreta los
+Sin ninguna de las dos el radar **sigue funcionando**: interpreta los
 criterios con un analizador determinista y se queda sin los resúmenes y sin
 la clasificación del producto. Nada se rompe.
+
+**Cuánto cuesta el modelo:** el trabajo en volumen (clasificar treinta o
+cuarenta productos) va con el modelo barato, y el capaz se usa una o dos
+veces por búsqueda — planificar las consultas y redactar el informe. Mandarlo
+todo al caro multiplicaría la factura por diez sin mejorar nada.
 
 ---
 
@@ -97,6 +109,17 @@ por chat.** Después de añadirlas:
 ```bash
 docker exec casamable-agent npm run hunter:doctor
 docker exec casamable-agent npm run hunter:providers:test
+```
+
+Lo que tiene que salir con todo bien:
+
+```
+● PROVIDER      meta
+● META          CONNECTED
+● OPENAI        CONNECTED      (o OPENROUTER, o ◐ si no hay ninguna: no bloquea)
+● JOBS          READY
+◐ HISTORY       SIN_DATOS      (normal hasta la primera búsqueda terminada)
+● SE PUEDE BUSCAR
 ```
 
 El segundo hace la consulta más barata posible de cada fuente y enseña **qué
