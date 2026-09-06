@@ -11,7 +11,7 @@ Extraído de la documentación pública de Beeping (`help.gobeeping.com`, catego
 | **Base URL** | `https://app.gobeeping.com/api/` |
 | **Autenticación** | **HTTP Basic** — email y contraseña de la cuenta, en base64, cabecera `Authorization: Basic <base64>` |
 | **Formato** | JSON |
-| **Webhooks** | ⚠️ **No documentados.** Todo apunta a polling (ver § 5) |
+| **Webhooks** | ⚠️ **Existen en el panel pero NO están documentados.** Ver § 8 (06-09-2026); el polling de § 5 sigue siendo la vía fiable |
 
 > ⚠️ **Riesgo de seguridad a plantear a Beeping.** La autenticación usa la contraseña de la cuenta, no una API key con permisos acotados. Implica que la contraseña de acceso al panel vive en el `.env`, sin posibilidad de rotarla ni limitar su alcance, y si se filtra da acceso total. **Preguntar si ofrecen API keys.** Si no, esa credencial debe tratarse con el mismo cuidado que un token de Shopify.
 
@@ -174,3 +174,91 @@ El contrato debe soportar ambos, y cada adaptador **declarar cuál usa**. Es el 
 ---
 
 *Documento de investigación elaborado a partir de documentación pública. Ninguna llamada a la API de Beeping se ha realizado — Casamable no tiene cuenta todavía.*
+
+---
+
+## 8 · WEBHOOKS_DISCOVERED_2026-09-06
+
+**Qué cambió.** La pregunta nº 4 de § 7 ("¿tenéis webhooks?") tiene respuesta
+parcial: **sí los hay**. El panel de Beeping permite dar de alta un endpoint y
+suscribir eventos. Esto contradice el § 6.3, que se redactó cuando la única
+evidencia era la documentación.
+
+### 8.1 · Lo que SÍ sabemos (evidencia: el panel, vista por Pedro)
+
+Los eventos que ofrece la pantalla de alta son exactamente cuatro:
+
+| Evento | Qué esperamos que signifique |
+|---|---|
+| `order.created` | pedido dado de alta en Beeping |
+| `order.status_changed` | cambia el `status` del pedido (catálogo 0-6 de § 4) |
+| `order.logistics_status_changed` | cambia el `tracking_stage` (catálogo 1-8) |
+| `order.updated` | cualquier otra modificación del pedido |
+
+### 8.2 · Lo que NO sabemos, y por qué importa
+
+Su documentación de API **no describe webhooks en absoluto**. El índice
+público (`https://apidocs.gobeeping.com/llms.txt`, consultado el 06-09-2026)
+lista **46 endpoints REST y ninguno** de webhooks, eventos, notificaciones ni
+callbacks. Por tanto siguen sin confirmar:
+
+| Incógnita | Por qué bloquea |
+|---|---|
+| **Autenticación / firma** | Sin ella, el endpoint es público y **cualquiera podría inventar estados de envío**, cerrar pedidos como entregados y disparar WhatsApps de postventa |
+| **Forma del envoltorio** | No se sabe si el pedido viene en la raíz o dentro de `data`/`order`/… |
+| **Identificador de entrega** | Sin él no hay idempotencia por entrega (usamos huella determinista) |
+| **Reintentos** | No se sabe cuántas veces ni con qué espaciado repiten una entrega |
+| **Orden de llegada** | No hay garantía: se asume que NO llegan ordenados |
+
+### 8.3 · Qué se ha implementado con eso
+
+Receptor en `POST /api/webhooks/beeping`
+(`src/lib/beeping/webhook.ts`), **fail-closed**:
+
+- **Sin `BEEPING_WEBHOOK_AUTH_MODE` + `BEEPING_WEBHOOK_SECRET` declarados,
+  responde `503 WEBHOOK_AUTH_NOT_CONFIGURED` y no produce ningún efecto.**
+  Ese es el estado de hoy. No existe camino que procese sin verificar.
+- Dos modos soportados, ambos declarados a mano (no se adivina ninguno):
+  `token` (secreto compartido en una cabecera) y `hmac_sha256` (firma sobre
+  los **bytes crudos**; se toleran hex y base64, con o sin prefijo `sha256=`).
+- **Parseo defensivo**: evento, identificador de entrega y pedido se buscan
+  entre varias claves plausibles. Lo que no se entiende se **descarta sin
+  efectos** y queda registrado. Cada recepción deja en el feed la **forma**
+  del envoltorio (nombres de claves, nunca su contenido) — que es justo lo
+  que permitirá cerrar este contrato con entregas reales.
+- **Idempotencia**: por identificador de entrega si lo hay, y si no por
+  **huella determinista** del estado (`evento + external_id + status +
+  tracking_stage + tracking_number + date_tracking_update`). La misma entrega
+  diez veces produce **un solo** efecto de negocio.
+  Un `id` pelado **nunca** se usa como identificador de entrega: si el
+  envoltorio fuese el propio pedido, el primer evento deduplicaría a todos
+  los demás y el pedido se congelaría en su primer estado.
+- **Correlación**: por `external_id` contra `shopify_order_id` o el número de
+  pedido, el mismo criterio del polling. **Jamás por nombre ni teléfono.**
+- **Un solo camino de negocio**: los cuatro eventos convergen en
+  `applyBeepingOrderLocally()`, la MISMA función que usa el polling. El
+  nombre del evento no selecciona lógica — Beeping manda el estado del
+  pedido y el mapper de § 4 es la única fuente de verdad. Por eso las dos
+  vías no pueden divergir ni duplicar efectos, y las guardas (terminales del
+  eje logístico y del de cierre, anti-retroceso por llegada atrasada, sellos
+  anti-duplicado de WhatsApp) viven una sola vez.
+
+### 8.4 · El polling NO se retira
+
+Arquitectura acordada: **webhook = near-real-time, polling = reconciliación y
+red de seguridad**. El polling corrige la deriva de las entregas que no
+lleguen (endpoint cerrado, entrega perdida, pedido que aún no existía en
+local cuando llegó su evento) y, al converger en la misma función, no duplica
+efectos. No se retira hasta que haya semanas de entregas reales que
+justifiquen lo contrario.
+
+### 8.5 · Preguntas nuevas para Beeping
+
+1. ¿Cómo autenticáis los webhooks? ¿Firmáis el cuerpo (¿qué algoritmo, qué
+   codificación, en qué cabecera?) o basta un secreto compartido?
+2. ¿Mandáis un **identificador único de entrega** (cabecera o campo) para
+   poder deduplicar reintentos?
+3. ¿Cuál es la **política de reintentos** y qué código de respuesta esperáis?
+4. ¿Garantizáis el **orden** de entrega de los eventos? (asumimos que no)
+5. ¿Cuál es la **forma exacta del cuerpo** de cada uno de los cuatro eventos?
+6. ¿Hay una **entrega de prueba** desde el panel para validar sin pedidos reales?

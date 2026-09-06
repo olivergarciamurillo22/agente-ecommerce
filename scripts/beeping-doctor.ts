@@ -13,8 +13,9 @@ import "./env-loader";
 const ICON: Record<string, string> = { ok: "●", warn: "◐", err: "○" };
 
 async function main(): Promise<void> {
-  const { beepingConfig, beepingEnabled, beepingWriteEnabled, beepingAutoReleaseEnabled, cachedBeepingShopId, cachedBeepingShopName, BEEPING_DEFAULT_BASE_URL } =
+  const { beepingConfig, beepingEnabled, beepingWriteEnabled, beepingAutoReleaseEnabled, beepingWebhookAuth, cachedBeepingShopId, cachedBeepingShopName, BEEPING_DEFAULT_BASE_URL } =
     await import("../src/lib/beeping/config");
+  const { BEEPING_WEBHOOK_EVENTS } = await import("../src/lib/beeping/webhook");
   const client = await import("../src/lib/beeping/client");
   const { BEEPING_ORDER_STATUS } = await import("../src/lib/beeping/types");
   const { beepingCutoff } = await import("../src/lib/beeping/cutoff");
@@ -31,12 +32,46 @@ async function main(): Promise<void> {
   console.log(`   Escritura      : ${beepingWriteEnabled() ? "⚠️ HABILITADA" : "BLOQUEADA (correcto hasta el piloto)"}`);
   console.log(`   Auto-release   : ${beepingAutoReleaseEnabled() ? "⚠️ ACTIVO" : "apagado (LIBERACIÓN MANUAL — correcto)"}`);
 
+  // --- 1.b Webhooks entrantes (nunca se imprime el secreto) ---
+  const auth = beepingWebhookAuth();
+  const modoDeclarado = (process.env.BEEPING_WEBHOOK_AUTH_MODE ?? "").trim();
+  // Declarado pero incompleto = mal configurado, que es distinto de "aún no
+  // configurado": el primero hay que arreglarlo, el segundo es lo esperado.
+  const webhookEstado: "READY" | "NOT_CONFIGURED" | "FAIL" = auth ? "READY" : modoDeclarado ? "FAIL" : "NOT_CONFIGURED";
+
+  console.log("\n1.b WEBHOOKS ENTRANTES");
+  console.log(`   Endpoint       : POST /api/webhooks/beeping (público en el proxy)`);
+  console.log(`   Eventos        : ${BEEPING_WEBHOOK_EVENTS.join(", ")}`);
+  if (webhookEstado === "READY" && auth) {
+    console.log(`   ${ICON.ok} Configurado — modo ${auth.mode}, cabecera "${auth.header}" (secreto no se muestra)`);
+  } else if (webhookEstado === "FAIL") {
+    const falta = !(process.env.BEEPING_WEBHOOK_SECRET ?? "").trim()
+      ? "falta BEEPING_WEBHOOK_SECRET"
+      : modoDeclarado.toLowerCase() === "hmac_sha256"
+        ? "en hmac_sha256 hace falta BEEPING_WEBHOOK_AUTH_HEADER (el nombre lo pone Beeping)"
+        : `BEEPING_WEBHOOK_AUTH_MODE="${modoDeclarado}" no es válido (usa token o hmac_sha256)`;
+    console.log(`   ${ICON.err} MAL CONFIGURADO: ${falta}`);
+    console.log(`     → Mientras tanto el endpoint responde 503 y NO procesa eventos.`);
+  } else {
+    console.log(`   ${ICON.warn} SIN CONFIGURAR — el endpoint responde 503 y no procesa nada (correcto por ahora)`);
+    console.log(`     → Beeping no documenta cómo autentica sus webhooks: hay que confirmarlo`);
+    console.log(`       con una entrega real antes de abrirlo. Ver docs/deploy/PEDRO-BEEPING-WEBHOOK.md`);
+  }
+
+  /** Veredicto en dos líneas, siempre con el mismo formato. */
+  const veredicto = (polling: string): void => {
+    console.log(`\n   POLLING=${polling}`);
+    console.log(`   WEBHOOK=${webhookEstado}\n`);
+  };
+
   if (!config) {
-    console.log("\n○ Sin credencial: no se puede continuar.\n");
+    console.log("\n○ Sin credencial: no se puede continuar.");
+    veredicto("NOT_CONFIGURED");
     process.exit(1);
   }
   if (!beepingEnabled()) {
-    console.log("\n◐ Lectura deshabilitada. Pon BEEPING_ENABLED=1 en .env.local para diagnosticar.\n");
+    console.log("\n◐ Lectura deshabilitada. Pon BEEPING_ENABLED=1 en .env.local para diagnosticar.");
+    veredicto("DISABLED");
     process.exit(1);
   }
 
@@ -50,7 +85,7 @@ async function main(): Promise<void> {
     } else {
       console.log("     → ¿Hay red? ¿app.gobeeping.com accesible? Reintenta en unos minutos.");
     }
-    console.log();
+    veredicto("FAIL");
     process.exit(1);
   }
   console.log(`   ${ICON.ok} Conectado — autenticación OK`);
@@ -74,7 +109,8 @@ async function main(): Promise<void> {
   try {
     pedidos = await client.listOrders({ fromDate, shopId: shopCacheada ?? salud.shops[0]?.id, perPage: 100 });
   } catch (err) {
-    console.log(`   ${ICON.err} No se pudieron listar: ${err instanceof Error ? err.message : "error"}\n`);
+    console.log(`   ${ICON.err} No se pudieron listar: ${err instanceof Error ? err.message : "error"}`);
+    veredicto("FAIL");
     process.exit(1);
   }
   console.log(`   ${ICON.ok} Listado OK — ${pedidos.length} pedido(s) devueltos (máx. 100)`);
@@ -117,7 +153,7 @@ async function main(): Promise<void> {
   console.log(`   Enviados: ${porEstado.get("shipped") ?? 0}`);
   console.log(`   Devueltos: ${porEstado.get("returned") ?? 0}`);
   console.log(`   Cancelados: ${porEstado.get("cancelled") ?? 0}`);
-  console.log();
+  veredicto("READY");
 }
 
 main().catch((err) => {
