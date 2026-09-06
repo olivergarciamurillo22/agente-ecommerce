@@ -742,7 +742,7 @@ function CallsSection() {
 function ScrollPane({ children, wide = false }: { children: ReactNode; wide?: boolean }) {
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
-      <div className={wide ? "max-w-[1280px]" : "max-w-[880px]"}>{children}</div>
+      <div className={wide ? "max-w-[1500px]" : "max-w-[880px]"}>{children}</div>
     </div>
   );
 }

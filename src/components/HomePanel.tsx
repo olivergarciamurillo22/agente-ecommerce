@@ -123,7 +123,7 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-6 pb-8">
-      <div className="max-w-[1280px] space-y-8">
+      <div className="max-w-[1500px] space-y-8">
         {/* ── Saludo + estado del sistema (§6, bloque 1) ── */}
         <header className="flex flex-col md:flex-row md:items-end md:justify-between gap-3">
           <div>

@@ -128,7 +128,7 @@ export default function CodCalculatorPanel() {
   if (!inputs || !auto || !be || !light || !real)
     return (
       <div className="h-full overflow-y-auto px-4 md:px-8 py-5">
-        <div className="max-w-[1280px] space-y-3">
+        <div className="max-w-[1500px] space-y-3">
           <Skeleton className="h-24" />
           <Skeleton className="h-40" />
           <Skeleton className="h-56" />
@@ -246,7 +246,7 @@ export default function CodCalculatorPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
-      <div className="max-w-[1280px] space-y-6">
+      <div className="max-w-[1500px] space-y-6">
         {/* Cabecera + modelo */}
         <div>
           <SectionTitle

@@ -158,6 +158,15 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "search
                       { id: "studio", label: "Landing Studio" },
                     ]
               }
+              // Tres cosas distintas conviven aquí y sin separarlas parecen
+              // una sola lista arbitraria: descubrir productos (Radar),
+              // trabajar los candidatos guardados (el pipeline de siempre) y
+              // construir la landing.
+              groups={[
+                { label: "Descubrir", ids: ["radar"] as const },
+                { label: "Mis candidatos", ids: ["search", "saved", "compare"] as const },
+                { label: "Publicar", ids: ["studio"] as const },
+              ]}
               value={tab}
               onChange={(next) => {
                 setTab(next);

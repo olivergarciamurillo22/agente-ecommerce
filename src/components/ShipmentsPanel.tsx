@@ -240,7 +240,7 @@ export default function ShipmentsPanel() {
 
   return (
     <div className="h-full overflow-y-auto px-4 md:px-8 py-5 pb-8">
-      <div className="max-w-[1280px] space-y-5">
+      <div className="max-w-[1500px] space-y-5">
         {/* ── Cabecera: corte de Beeping + sync manual ── */}
         <section>
           <SectionTitle

@@ -40,7 +40,7 @@ const CommandPalette = lazy(() => import("./CommandPalette"));
 function PanelFallback() {
   return (
     <div className="h-full overflow-hidden px-4 md:px-8 py-6">
-      <div className="max-w-[1280px]">
+      <div className="max-w-[1500px]">
         <SkeletonRows rows={6} />
       </div>
     </div>

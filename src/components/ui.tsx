@@ -10,7 +10,7 @@
 // globals.css. Nada de colores sueltos por los componentes.
 // ============================================================
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, type ReactNode } from "react";
 
 // --- Formateadores compartidos ---
 
@@ -207,18 +207,38 @@ export function MetricCell({ label, value, support, status, onClick, active }: {
  *  En móvil la fila no cabe entera: la pestaña activa se trae SOLA a la
  *  vista, para que nadie tenga que adivinar dónde está ni descubrir por
  *  accidente que la fila se desplaza. */
-export function TabBar<T extends string>({ tabs, value, onChange, label, counts }: { tabs: Array<{ id: T; label: string }>; value: T; onChange: (t: T) => void; label: string; counts?: Partial<Record<T, number | undefined>> }) {
+/**
+ * Barra de pestañas. `groups` es opcional y existe por un motivo concreto:
+ * Growth tiene OCHO pestañas y, en fila plana con scroll horizontal, no se
+ * ven todas a la vez ni se entiende qué tiene que ver cada una con las
+ * demás. Agrupar no quita ninguna pestaña, pero convierte una lista larga en
+ * tres ideas ("cómo va el negocio", "qué vendo", "qué cuadro"), que es la
+ * diferencia entre buscar y encontrar.
+ */
+export function TabBar<T extends string>({ tabs, value, onChange, label, counts, groups }: { tabs: Array<{ id: T; label: string }>; value: T; onChange: (t: T) => void; label: string; counts?: Partial<Record<T, number | undefined>>; groups?: Array<{ label: string; ids: readonly T[] }> }) {
   const activeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     // `nearest` no mueve la página, solo el carril de pestañas.
     activeRef.current?.scrollIntoView({ inline: "nearest", block: "nearest", behavior: "smooth" });
   }, [value]);
   return (
-    <div role="tablist" aria-label={label} className="flex gap-5 md:gap-6 overflow-x-auto border-b border-brand-border no-scrollbar">
-      {tabs.map((t) => {
+    <div role="tablist" aria-label={label} className="flex items-center gap-5 md:gap-6 overflow-x-auto border-b border-brand-border no-scrollbar">
+      {tabs.map((t, i) => {
         const active = t.id === value;
         const n = counts?.[t.id];
+        // Etiqueta de grupo antes de la primera pestaña de cada bloque
+        // (menos el primero, que no necesita presentación).
+        const grupo = groups?.find((g) => g.ids[0] === t.id);
+        const encabezado =
+          grupo && i > 0 ? (
+            <span key={`g-${t.id}`} className="flex shrink-0 items-center gap-2 pl-1 text-[10px] font-semibold uppercase tracking-[.12em] text-brand-tertiary">
+              <span className="h-4 w-px bg-brand-border" aria-hidden />
+              {grupo.label}
+            </span>
+          ) : null;
         return (
+          <Fragment key={`w-${t.id}`}>
+          {encabezado}
           <button
             key={t.id}
             ref={active ? activeRef : undefined}
@@ -232,6 +252,7 @@ export function TabBar<T extends string>({ tabs, value, onChange, label, counts 
             {n !== undefined && n > 0 ? <span className={`ml-1.5 text-[12px] tabular-nums ${active ? "text-brand-muted" : "text-brand-tertiary"}`}>{n}</span> : null}
             <span className={`absolute inset-x-0 -bottom-px h-[2px] rounded-full ${active ? "bg-brand-text" : "bg-transparent"}`} aria-hidden />
           </button>
+          </Fragment>
         );
       })}
     </div>
