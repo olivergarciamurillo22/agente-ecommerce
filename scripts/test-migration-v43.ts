@@ -51,9 +51,15 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     fixture.pragma("user_version = 18");
     migrations.migrateProductCandidates(fixture);
     fixture.pragma("user_version = 19");
-    // Segunda pasada: las dos migraciones deben ser idempotentes.
+    migrations.migrateHunterPredictive(fixture);
+    fixture.pragma("user_version = 20");
+    migrations.migrateHunterDiscovery(fixture);
+    fixture.pragma("user_version = 21");
+    // Segunda pasada: las cuatro migraciones deben ser idempotentes.
     migrations.migrateWorkspaceAuth(fixture);
     migrations.migrateProductCandidates(fixture);
+    migrations.migrateHunterPredictive(fixture);
+    migrations.migrateHunterDiscovery(fixture);
     const durationMs = Math.round((performance.now() - started) * 100) / 100;
 
     const counts = Object.fromEntries(Object.keys(EXPECTED).map((table) => {
@@ -63,7 +69,7 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     for (const [table, expected] of Object.entries(EXPECTED)) {
       if (counts[table as keyof typeof EXPECTED] !== expected) throw new Error(`${table}: se esperaban ${expected} filas`);
     }
-    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events"]) {
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots"]) {
       if (!fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new Error(`falta ${table}`);
     }
     const integrity = String(fixture.pragma("integrity_check", { simple: true }));

@@ -12867,9 +12867,9 @@ async function main(): Promise<void> {
       assert.match(nav, /"Beta"/, "la navegación también lo marca");
     });
 
-    await test("V4.2 Landing Studio sigue local aunque Hunter usa schema 19", () => {
+    await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 19;/, "workspace usa 18 y Hunter añade 19");
+      assert.match(db, /export const SCHEMA_VERSION = 21;/, "predictivo usa 20 y Discovery añade 21");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13343,16 +13343,40 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 19);
+    assert.equal(raw.pragma("user_version", { simple: true }), 21);
   });
 
-  await test("schema 17 migra a workspace 18 y Hunter 19 sin perder tablas", async () => {
+  await test("schema 17 migra a workspace 18, Hunter 19, predictivo 20 y discovery 21 sin perder datos (fixture realista)", async () => {
     const { runMigrationV43Test } = await import("../scripts/test-migration-v43");
     const report = await runMigrationV43Test();
-    assert.equal(report.schemaVersion, 19);
+    assert.equal(report.schemaVersion, 21);
     assert.equal(report.integrity, "ok");
     assert.deepEqual(report.counts, { orders: 116, conversations: 63, messages: 349, outbox: 180, integration_events: 1700 });
-    console.log(`    migración realista v17→v19: ${report.durationMs} ms`);
+    console.log(`    migración realista v17→v21: ${report.durationMs} ms`);
+  });
+
+  await test("schema 17 migra hasta Discovery 21 sin perder tablas", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    const fixture = new Database(":memory:");
+    fixture.pragma("foreign_keys = ON");
+    fixture.pragma("user_version = 17");
+    db.migrateWorkspaceAuth(fixture);
+    fixture.pragma("user_version = 18");
+    db.migrateProductCandidates(fixture);
+    fixture.pragma("user_version = 19");
+    db.migrateHunterPredictive(fixture);
+    fixture.pragma("user_version = 20");
+    db.migrateHunterDiscovery(fixture);
+    fixture.pragma("user_version = 21");
+    db.migrateWorkspaceAuth(fixture);
+    db.migrateProductCandidates(fixture);
+    db.migrateHunterPredictive(fixture);
+    db.migrateHunterDiscovery(fixture);
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots"]) {
+      assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
+    }
+    assert.equal(fixture.pragma("user_version", { simple: true }), 21);
+    fixture.close();
   });
 
   await test("la ficha del agente se construye por lista blanca y no filtra PII/proveedor/marketing", async () => {
@@ -13573,12 +13597,150 @@ async function main(): Promise<void> {
       lengthCm: 14, widthCm: 8, heightCm: 5, variants: ["blanco"], specs: null, claims: null,
     };
 
-    await test("Hunter · migración 19 convive con workspace 18", () => {
-      assert.equal(db.SCHEMA_VERSION, 19);
+    await test("Hunter Discovery · pagina por cursor, pide campos y conserva limites Meta", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const urls: string[] = []; const waits: number[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const url = String(input); urls.push(url); const second = url.includes("after=CURSOR_2");
+        return new Response(JSON.stringify({ data: [{ id: second ? "ad2" : "ad1", page_id: "page1", page_name: "Tienda", ad_creative_bodies: ["Producto fisico comodidad hogar"], ad_delivery_start_time: "2026-08-01" }], paging: second ? {} : { cursors: { after: "CURSOR_2" }, next: "https://next" } }), { headers: { "content-type": "application/json", "x-app-usage": JSON.stringify({ call_count: 12 }) } });
+      }) as typeof fetch;
+      const result = await new AdLibraryClient("token-secreto", fetcher, async (ms) => { waits.push(ms); }).search({ term: "comodidad", country: "ES", since: "2026-08-01", until: "2026-09-05" });
+      assert.equal(result.ads.length, 2); assert.equal(urls.length, 2); assert.match(urls[1], /after=CURSOR_2/);
+      assert.match(urls[0], /ad_reached_countries=%5B%22ES%22%5D/); assert.match(urls[0], /ad_delivery_date_min=2026-08-01/);
+      assert.deepEqual(waits, [1000]); assert.deepEqual(result.rateLimit, { "x-app-usage": { call_count: 12 } });
+      assert.ok(!urls.some((url) => url.includes("token-secreto")), "token solo en Authorization");
+    });
+
+    await test("Hunter Discovery · agrupa variantes y momentum solo nace en el segundo snapshot", async () => {
+      const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+      const { DiscoveryRepository } = await import("../src/lib/hunter/discovery/repository");
+      const ad = (id: string) => ({ id, pageId: "page-discovery-test", pageName: "Tienda prueba", snapshotUrl: `https://facebook.test/${id}`, bodies: ["Producto fisico para comodidad en casa"], captions: ["Compra producto comodidad hogar"], titles: ["Comodidad"], platforms: ["facebook"], languages: ["es"], creationTime: "2026-08-01", startTime: "2026-08-01", stopTime: null, impressions: null, audience: null });
+      const now = Math.floor(Date.parse("2026-09-05T12:00:00Z") / 1000);
+      const firstGroup = groupAds([ad("d1"), ad("d2"), ad("d3")], now);
+      assert.equal(firstGroup.length, 1); const repo = new DiscoveryRepository();
+      const first = repo.saveRun({ terms: ["comodidad"], country: "ES", days: 14, fields: ["id"], rawCount: 3, groups: firstGroup, rateLimit: null, now });
+      assert.equal(first[0].momentum, "sin_historico");
+      const secondGroup = groupAds([ad("d1"), ad("d2"), ad("d3"), ad("d4"), ad("d5")], now + 86400);
+      const second = repo.saveRun({ terms: ["comodidad"], country: "ES", days: 14, fields: ["id"], rawCount: 5, groups: secondGroup, rateLimit: null, now: now + 86400 });
+      assert.equal(second[0].previousActiveAds, 3); assert.equal(second[0].momentum, "fuerte");
+      const queries = db.systemDbHandle().prepare("SELECT COUNT(*) n FROM adlib_queries WHERE terms_json=?").get(JSON.stringify(["comodidad"])) as { n: number };
+      assert.equal(queries.n, 2);
+    });
+
+    await test("Hunter Discovery · ruido de servicios es heuristica explicita", async () => {
+      const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+      const groups = groupAds([{ id: "noise1", pageId: "noise-page", pageName: "Academia", snapshotUrl: null, bodies: ["Curso y webinar de software"], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }]);
+      assert.equal(groups[0].noise, true); assert.match(groups[0].noiseReason ?? "", /servicio, app o contenido/);
+    });
+
+    await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {
+      const config = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/hunter-discovery-terms.json"), "utf8")) as { source: string; buyer_note: string; terms: string[] };
+      assert.equal(config.source, "docs/nicho-abuelos-pain-points.md");
+      assert.match(config.buyer_note, /35-55/);
+      assert.ok(config.terms.length >= 20);
+      assert.ok(fs.existsSync(path.join(process.cwd(), config.source)));
+    });
+
+    await test("Hunter predictivo · migración 20 convive con Hunter 19", () => {
+      assert.equal(db.SCHEMA_VERSION, 21);
       const tables = db.systemDbHandle().prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>;
       assert.ok(tables.some(t => t.name === "product_candidates"));
       assert.ok(tables.some(t => t.name === "candidate_events"));
+      assert.ok(tables.some(t => t.name === "hunter_predictive_estimates"));
     });
+    await test("Hunter predictivo · sin buscador persiste null y no inventa cifras", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const { PredictiveRepository } = await import("../src/lib/hunter/predictive/repository");
+      const provider = { available: false, mechanism: null, search: async () => { throw new Error("no debe buscar"); } };
+      const estimate = await estimatePredictiveCandidate("Organizador modular", null, provider, 1_700_000_000);
+      assert.equal(estimate.searchAvailable, false);
+      assert.equal(estimate.wholesale.at100, null);
+      assert.equal(estimate.retail.unit, null);
+      assert.equal(estimate.viability.verdict, null);
+      assert.equal(estimate.expiresAt - estimate.consultedAt, 30 * 86400);
+      const saved = new PredictiveRepository().save(estimate);
+      assert.ok(saved.id);
+      assert.equal(new PredictiveRepository().byId(saved.id!)!.viability.verdict, null);
+    });
+
+    await test("Hunter predictivo · calcula rangos, fuentes y veredicto sin score unico", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const evidence = (kind: "wholesale" | "retail", sourceDomain: string, priceEur: number, quantity: number | null) => ({
+        kind, sourceUrl: `https://${sourceDomain}/producto`, sourceDomain, title: "Producto", priceEur, quantity,
+        weightGrams: 400, observedAt: 1_700_000_000,
+      });
+      const provider = {
+        available: true, mechanism: "test_real_mock_http",
+        search: async ({ kind }: { kind: "wholesale" | "retail" }) => kind === "wholesale" ? [
+          evidence(kind, "alibaba.com", 4, 100), evidence(kind, "cjdropshipping.com", 5, 100),
+          evidence(kind, "alibaba.com", 3, 500), evidence(kind, "cjdropshipping.com", 4, 500),
+        ] : [evidence(kind, "tienda-a.test", 39, null), evidence(kind, "tienda-b.test", 42, null)],
+      };
+      const estimate = await estimatePredictiveCandidate("Organizador modular", "https://tienda-a.test/producto", provider, 1_700_000_000);
+      assert.deepEqual([estimate.wholesale.at500?.min, estimate.wholesale.at500?.max], [3, 4]);
+      assert.deepEqual([estimate.retail.unit?.min, estimate.retail.unit?.max], [39, 42]);
+      assert.equal(estimate.viability.logisticsEur, 6.48);
+      assert.equal(estimate.viability.worstContributionEur, 28.52);
+      assert.equal(estimate.viability.verdict, "candidato_fuerte");
+      assert.equal("score" in estimate.viability, false);
+    });
+
+    await test("Hunter predictivo · scraping publico conserva URL y aisla 403/captcha", async () => {
+      await withEnv({ HUNTER_PREDICTIVE_SEARCH_SOURCE: "scraping_publico", HUNTER_PREDICTIVE_PUBLIC_RESULT_LIMIT: "10" }, async () => {
+        const { PublicScrapingSearchProvider, PUBLIC_SEARCH_USER_AGENT } = await import("../src/lib/hunter/predictive/scraping-publico");
+        const calls: Array<{ url: string; userAgent: string | null }> = [];
+        const mockFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input); calls.push({ url, userAgent: new Headers(init?.headers).get("user-agent") });
+          if (url.includes("1688.com")) return new Response("bloqueado", { status: 403 });
+          if (url.includes("alibaba.com")) return new Response("<html><body>captcha security verification</body></html>", { status: 200 });
+          return new Response(`<html><body><a href="https://www.aliexpress.com/item/1001.html">Oferta EUR 3.50 · 100 units</a></body></html>`, { status: 200 });
+        }) as typeof fetch;
+        const provider = new PublicScrapingSearchProvider(mockFetch);
+        const evidence = await provider.search({ query: "organizador", kind: "wholesale" });
+        assert.equal(evidence.length, 1);
+        assert.equal(evidence[0].sourceUrl, "https://www.aliexpress.com/item/1001.html");
+        assert.equal(evidence[0].priceEur, 3.5);
+        assert.ok(calls.every((call) => call.userAgent === PUBLIC_SEARCH_USER_AGENT));
+        assert.deepEqual(provider.sourceStatuses().map((s) => [s.source, s.status, s.reason]), [
+          ["aliexpress", "disponible", null], ["1688", "no_disponible", "HTTP 403"], ["alibaba", "no_disponible", "captcha detectado"],
+        ]);
+      });
+    });
+
+    await test("Hunter predictivo · una sola fuente da confianza baja; tres fallos cierran la busqueda", async () => {
+      const { estimatePredictiveCandidate } = await import("../src/lib/hunter/predictive/estimate");
+      const { PublicScrapingSearchProvider } = await import("../src/lib/hunter/predictive/scraping-publico");
+      await withEnv({ HUNTER_PREDICTIVE_SEARCH_SOURCE: "scraping_publico" }, async () => {
+        const oneFetch = (async (input: string | URL | Request) => String(input).includes("aliexpress.com")
+          ? new Response(`<html><body><a href="https://www.aliexpress.com/item/2002.html">EUR 4.25 · 500 units</a></body></html>`)
+          : new Response("denegado", { status: 403 })) as typeof fetch;
+        const one = await estimatePredictiveCandidate("producto", null, new PublicScrapingSearchProvider(oneFetch), 1000);
+        assert.equal(one.wholesale.at500?.probable, 4.25);
+        assert.equal(one.wholesale.at500?.confidence, "baja");
+        assert.equal(one.searchAvailable, true);
+
+        const failedFetch = (async () => new Response("denegado", { status: 403 })) as typeof fetch;
+        const failed = await estimatePredictiveCandidate("producto", null, new PublicScrapingSearchProvider(failedFetch), 1000);
+        assert.equal(failed.searchAvailable, false);
+        assert.equal(failed.wholesale.at100, null);
+        assert.equal(failed.wholesale.at500, null);
+        assert.equal(failed.viability.verdict, null);
+      });
+    });
+
+    await test("Hunter predictivo · promocionar conserva estimado y nunca produce score de decision", async () => {
+      const { PredictiveRepository } = await import("../src/lib/hunter/predictive/repository");
+      const source = { kind: "retail" as const, sourceUrl: "https://competidor.test/producto-predictivo", sourceDomain: "competidor.test", title: "Producto", priceEur: 39, quantity: null, weightGrams: 400, observedAt: 1 };
+      const priceRange = { min: 39, max: 42, probable: 40.5, sources: [source, { ...source, sourceUrl: "https://otro.test/p", sourceDomain: "otro.test", priceEur: 42 }], consultedAt: 1, expiresAt: 2, confidence: "media" as const };
+      const repo = new PredictiveRepository();
+      const saved = repo.save({ productQuery: "Producto predictivo", competitorUrl: source.sourceUrl, searchAvailable: true, searchMechanism: "test", wholesale: { at100: priceRange, at500: priceRange, reason: null }, retail: { unit: priceRange, tiers: { unit: priceRange, pack2Reference: "estimado", pack4Reference: "estimado" }, reason: null }, viability: { verdict: "investigar", worstContributionEur: 1, bestContributionEur: 10, logisticsEur: 6.48, shippingTier: "hasta_1kg", reason: null }, consultedAt: 1, expiresAt: 2 });
+      const promoted = repo.promote(saved.id!);
+      assert.equal(promoted.unitCostEur, null);
+      assert.equal(promoted.specs?.costStatus, "estimado");
+      assert.equal(promoted.specs?.pvpStatus, "estimado");
+      assert.equal(hunterScore.scoreCandidate(promoted), null);
+    });
+
     await test("Hunter · sin medidas no puntúa y explica el motivo", () => {
       const facts = { ...base, lengthCm: null };
       assert.equal(hunterScore.scoreCandidate(facts), null);
