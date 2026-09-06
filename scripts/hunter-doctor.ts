@@ -22,7 +22,7 @@ async function main(): Promise<void> {
   console.log("\n════════ CASAMABLE · WINNER RADAR — DOCTOR ════════\n");
 
   const { radarReadiness, providerMode, radarEnabled } = await import("../src/lib/hunter/providers/registry");
-  const { llmBackend, modelFor } = await import("../src/lib/hunter/llm");
+  const { llmHealth } = await import("../src/lib/hunter/llm");
   const { getInternalRates, getCategoryPerformance } = await import("../src/lib/hunter/providers/internal");
 
   const readiness = await radarReadiness();
@@ -66,15 +66,17 @@ async function main(): Promise<void> {
     }
   }
 
-  // ── Modelo. Se nombra por lo que es, sin enseñar la clave. ──
-  const backend = llmBackend();
+  // ── Modelo: se COMPRUEBA, no se supone ──
+  // Decir CONNECTED por ver la variable no vacía es una mentira
+  // tranquilizadora: con una clave caducada el radar seguiría funcionando en
+  // determinista y el diagnóstico diría que todo va bien. La sonda usa
+  // `models.list()`, que no gasta ni un token.
+  const salud = await llmHealth();
   linea(
-    backend === "openai" ? "OPENAI" : backend === "openrouter" ? "OPENROUTER" : "MODELO_IA",
-    backend === "none" ? "NOT_CONFIGURED" : "CONNECTED",
-    backend === "none"
-      ? "Sin OPENAI_API_KEY ni OPENROUTER_API_KEY el radar busca igual, con análisis determinista y sin resúmenes."
-      : `rápido=${modelFor("fast")} · profundo=${modelFor("deep")}`,
-    backend === "none" ? "warn" : "ok"
+    salud.backend === "openai" ? "OPENAI" : salud.backend === "openrouter" ? "OPENROUTER" : "MODELO_IA",
+    salud.status,
+    salud.detail,
+    salud.status === "CONNECTED" ? "ok" : salud.status === "NOT_CONFIGURED" ? "warn" : "fail"
   );
 
   // ── Histórico: sin él no hay momentum ni tiempo estimado real ──

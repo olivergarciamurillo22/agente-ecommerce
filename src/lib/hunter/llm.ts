@@ -143,9 +143,49 @@ export async function ask(system: string, user: string, opts: AskOptions = {}): 
       temperature,
     });
     return typeof out === "string" && out.trim() ? out.trim() : null;
-  } catch {
+  } catch (e) {
+    // ══ UN FALLO DE MODELO NO PUEDE SER INVISIBLE ══
+    // Antes esto era un `catch {}` mudo. Consecuencia: con una clave
+    // caducada, sin saldo o con un nombre de modelo mal escrito, TODO el
+    // análisis caía al camino determinista y el panel seguía enseñando
+    // resultados con normalidad. Nadie se enteraba nunca de que la mitad
+    // cara del sistema llevaba semanas sin ejecutarse.
+    //
+    // Se registra en el mismo sitio que el resto de integraciones, para que
+    // salga en Sistema → Eventos. El import es perezoso a propósito: arrastra
+    // la base de datos y este módulo no debe llevarla siempre encima.
+    void registrarFallo(backend, model, e);
     return null;
   }
+}
+
+/** Deduplicación en memoria: un fallo por modelo y minuto, no mil líneas. */
+const ultimoAviso = new Map<string, number>();
+
+async function registrarFallo(backend: string, model: string, e: unknown): Promise<void> {
+  const clave = `${backend}|${model}`;
+  const ahora = Date.now();
+  if ((ultimoAviso.get(clave) ?? 0) > ahora - 60_000) return;
+  ultimoAviso.set(clave, ahora);
+  try {
+    const { logIntegrationEvent } = await import("../system/repo");
+    logIntegrationEvent("hunter", "hunter_llm_failed", "warning", sanitizarError(e, model, backend));
+  } catch {
+    // Si ni siquiera se puede registrar, no se tumba la búsqueda por ello.
+  }
+}
+
+/**
+ * Mensaje de error sin la clave dentro. Los SDK a veces incluyen la cabecera
+ * de autorización en el detalle del error, y esto acaba escrito en la base.
+ */
+export function sanitizarError(e: unknown, model: string, backend: string): string {
+  const bruto = e instanceof Error ? e.message : String(e);
+  const limpio = bruto
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "sk-<oculta>")
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer <oculto>")
+    .slice(0, 220);
+  return `${backend}/${model}: ${limpio}`;
 }
 
 /** Extrae el primer objeto JSON de una respuesta que puede traer texto alrededor. */
@@ -180,4 +220,63 @@ export function stringList(value: unknown, max = 12, maxLen = 160): string[] {
 export function __resetLlmClientForTests(): void {
   _openai = null;
   _openaiKeyUsed = "";
+}
+
+export interface LlmHealth {
+  backend: "openai" | "openrouter" | "none";
+  /** NOT_CONFIGURED · CONNECTED · ERROR. */
+  status: "NOT_CONFIGURED" | "CONNECTED" | "ERROR";
+  detail: string;
+  fastModel: string;
+  deepModel: string;
+}
+
+/**
+ * Comprueba que la clave FUNCIONA, no solo que está escrita.
+ *
+ * Antes el doctor decía CONNECTED con solo ver la variable no vacía. Con una
+ * clave caducada eso es una mentira tranquilizadora: el radar seguiría
+ * funcionando en modo determinista y el diagnóstico diría que todo va bien.
+ *
+ * Se usa `models.list()` a propósito: no genera ni un token, así que la
+ * comprobación no cuesta dinero.
+ */
+export async function llmHealth(): Promise<LlmHealth> {
+  const backend = llmBackend();
+  const base: LlmHealth = {
+    backend,
+    status: "NOT_CONFIGURED",
+    detail: "Sin OPENAI_API_KEY ni OPENROUTER_API_KEY el radar busca igual, con análisis determinista y sin resúmenes.",
+    fastModel: modelFor("fast"),
+    deepModel: modelFor("deep"),
+  };
+  if (backend === "none") return base;
+
+  try {
+    if (backend === "openai") {
+      const lista = await openaiClient().models.list();
+      const nombres = new Set((lista.data ?? []).map((m) => m.id));
+      // Que la clave valga no significa que el modelo pedido exista para esa
+      // cuenta. Un nombre mal escrito daría CONNECTED y luego fallaría en
+      // cada llamada, en silencio.
+      const faltan = [modelFor("fast"), modelFor("deep")].filter((m) => !nombres.has(m));
+      return {
+        ...base,
+        status: faltan.length > 0 ? "ERROR" : "CONNECTED",
+        detail: faltan.length > 0
+          ? `La clave funciona pero tu cuenta no tiene: ${faltan.join(", ")}. Ajusta WINNER_RADAR_MODEL_FAST/DEEP.`
+          : `rápido=${base.fastModel} · profundo=${base.deepModel}`,
+      };
+    }
+    // OpenRouter: se valida con el validador que Casamable ya tenía.
+    const { validateApiKey } = await import("../openrouter");
+    const r = await validateApiKey();
+    return {
+      ...base,
+      status: r.ok ? "CONNECTED" : "ERROR",
+      detail: r.ok ? `rápido=${base.fastModel} · profundo=${base.deepModel}` : (r.error ?? "la clave no valida"),
+    };
+  } catch (e) {
+    return { ...base, status: "ERROR", detail: sanitizarError(e, modelFor("fast"), backend) };
+  }
 }

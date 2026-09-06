@@ -13952,6 +13952,57 @@ async function main(): Promise<void> {
     assert.equal(etiquetas.filter((e) => e === "mascotas").length, 1, "y NO también como palabra clave");
   });
 
+  await test("RADAR · un fallo del modelo NO es invisible, y la clave no acaba en el registro", async () => {
+    const llm = await import("../src/lib/hunter/llm");
+
+    // El fallo que esto evita: `ask()` tenía un `catch {}` mudo. Con una
+    // clave caducada, sin saldo o con un modelo mal escrito, TODO el análisis
+    // caía al camino determinista y el panel seguía enseñando resultados con
+    // normalidad. La mitad cara del sistema podía llevar semanas sin
+    // ejecutarse sin que nadie se enterara.
+    const fuente = fs.readFileSync(path.join(process.cwd(), "src/lib/hunter/llm.ts"), "utf8");
+    // Se mira el catch DE `ask()`, no el del fichero entero: el de
+    // `extractJson` sí puede ser mudo, porque "no hay JSON" no es una avería
+    // que haya que avisar a nadie.
+    const cuerpoAsk = fuente.slice(fuente.indexOf("export async function ask("), fuente.indexOf("/** Extrae el primer objeto JSON"));
+    assert.match(cuerpoAsk, /catch \(e\)/, "el error de ask() se captura CON nombre");
+    assert.match(cuerpoAsk, /registrarFallo/, "y se registra");
+    assert.match(fuente, /hunter_llm_failed/, "en el mismo sitio que el resto de integraciones");
+
+    // Y lo que se registra NO puede llevar la clave: algunos SDK meten la
+    // cabecera de autorización en el detalle del error, y eso acabaría
+    // escrito en la base de datos.
+    const conClave = llm.sanitizarError(
+      new Error("401 Incorrect API key provided: sk-proj-ABCDEFGHIJKLMNOP. Bearer sk-proj-ABCDEFGHIJKLMNOP"),
+      "gpt-4o-mini",
+      "openai"
+    );
+    assert.ok(!/sk-proj-ABCDEFGHIJKLMNOP/.test(conClave), "la clave nunca aparece en el mensaje");
+    assert.match(conClave, /oculta|oculto/, "y se ve que se ha ocultado algo");
+    assert.ok(conClave.length <= 260, "el mensaje se recorta: un stack entero no cabe en un evento");
+
+    // Sin clave, la sonda dice NOT_CONFIGURED sin salir a la red.
+    const guardado = { ...process.env };
+    try {
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
+      const salud = await llm.llmHealth();
+      assert.equal(salud.status, "NOT_CONFIGURED");
+      assert.equal(salud.backend, "none");
+      assert.match(salud.detail, /busca igual/, "y deja claro que el radar sigue funcionando");
+    } finally {
+      for (const k of ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]) {
+        if (guardado[k] === undefined) delete process.env[k];
+        else process.env[k] = guardado[k];
+      }
+    }
+
+    // El doctor usa la sonda, no la mera presencia de la variable.
+    const doctor = fs.readFileSync(path.join(process.cwd(), "scripts/hunter-doctor.ts"), "utf8");
+    assert.match(doctor, /llmHealth\(\)/, "el doctor comprueba, no supone");
+    assert.ok(!/llmBackend\(\)/.test(doctor), "decir CONNECTED por ver la variable es una mentira tranquilizadora");
+  });
+
   await test("RADAR · la clave del modelo no se filtra y la privacidad se comprueba antes de enviar", async () => {
     const guardado = { ...process.env };
     try {
