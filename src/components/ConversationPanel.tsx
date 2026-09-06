@@ -21,6 +21,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { usePolling } from "./usePolling";
 import type { ConversationItem } from "./Dashboard";
 import MessageBubble, { DateSeparator } from "./MessageBubble";
 import Avatar from "./Avatar";
@@ -81,12 +82,29 @@ export default function ConversationPanel({
       }
     }
     load();
-    const interval = setInterval(load, 2000);
     return () => {
       mounted = false;
-      clearInterval(interval);
     };
   }, [conversation]);
+
+  // Refresco del hilo abierto. Sigue siendo cada 2 s —se está esperando la
+  // respuesta de un cliente y el retraso se nota— pero ahora se DETIENE con
+  // la pestaña de fondo y no encola peticiones si una tarda de más.
+  const conversationId = conversation?.id ?? null;
+  usePolling(
+    async () => {
+      if (conversationId === null) return;
+      try {
+        const res = await fetch(`/api/messages/${conversationId}`, { cache: "no-store" });
+        if (!res.ok) return;
+        const data = (await res.json()) as { messages: Message[] };
+        setMessages(data.messages);
+      } catch {
+        // siguiente ciclo
+      }
+    },
+    { intervalMs: 2000, enabled: conversationId !== null }
+  );
 
   // Al abrir/cambiar de conversación, arranca pegado al fondo.
   useEffect(() => {

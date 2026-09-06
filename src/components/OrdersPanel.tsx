@@ -18,6 +18,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
+import { usePolling } from "./usePolling";
 import type { ReactNode } from "react";
 import {
   Card,
@@ -330,9 +331,11 @@ export default function OrdersPanel() {
 
   useEffect(() => {
     refresh();
-    const interval = setInterval(refresh, 3000);
-    return () => clearInterval(interval);
   }, [refresh]);
+  // Antes refrescaba cada 3 s SIN parar nunca: 20 peticiones por minuto para
+  // una lista que cambia cuando entra un pedido, no veinte veces al minuto.
+  // Con la pestaña de fondo seguía pidiendo toda la tarde.
+  usePolling(refresh, { intervalMs: 10_000 });
 
   const drawerOpen = detail !== null;
   useEffect(() => {

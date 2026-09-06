@@ -8,6 +8,7 @@
 // ============================================================
 
 import { useCallback, useEffect, useState } from "react";
+import { usePolling } from "./usePolling";
 import type { ReactNode } from "react";
 import type { DockView } from "./NavRail";
 import { Card, ErrorState, formatEuro, formatInt, healthToUi, SectionTitle, Skeleton, StatusDot, STATUS_TEXT, timeAgo, type UiStatus } from "./ui";
@@ -109,9 +110,10 @@ export default function HomePanel({ onNavigate }: { onNavigate: (v: DockView) =>
 
   useEffect(() => {
     refresh();
-    const t = setInterval(refresh, 20_000);
-    return () => clearInterval(t);
   }, [refresh]);
+  // Inicio es la pantalla que más tiempo pasa abierta: su sondeo es el que
+  // más se beneficia de callarse cuando la pestaña está de fondo.
+  usePolling(refresh, { intervalMs: 20_000 });
 
   if (error && !data) return <ErrorState message={error} onRetry={refresh} />;
 

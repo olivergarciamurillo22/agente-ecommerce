@@ -8,18 +8,44 @@
 // vive en el hash de la URL.
 // ============================================================
 
-import { useCallback, useEffect, useState } from "react";
-import CommandPalette from "./CommandPalette";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { usePolling } from "./usePolling";
 import DashboardHeader from "./DashboardHeader";
-import FollowUpView from "./FollowUpView";
-import GrowthView from "./GrowthView";
 import HomePanel from "./HomePanel";
 import NavRail, { NAV_ITEMS, type DockView, type NavArea, type NavKey } from "./NavRail";
-import OrdersPanel from "./OrdersPanel";
-import ProductHunterEntry from "./hunter/ProductHunterEntry";
 import SafetyBanner from "./SafetyBanner";
-import SettingsView from "./SettingsView";
-import { healthToUi, type UiStatus } from "./ui";
+import { healthToUi, SkeletonRows, type UiStatus } from "./ui";
+
+// ============================================================
+// CADA PANTALLA SE DESCARGA CUANDO SE ABRE, NO ANTES.
+//
+// Antes el Dashboard importaba las seis de forma estática, así que abrir el
+// panel para mirar Inicio descargaba también Pedidos, Seguimiento, Growth
+// (que a su vez arrastra Ads, Finanzas y la Calculadora) y Ajustes: más de
+// 600 KB de componentes para ver una pantalla. Eso es lo que hacía que
+// "cargara lentísimo", sobre todo en móvil y con la conexión del NAS.
+//
+// HomePanel se queda estático a propósito: es lo primero que se ve siempre, y
+// cargarlo en diferido solo añadiría un parpadeo.
+// ============================================================
+const OrdersPanel = lazy(() => import("./OrdersPanel"));
+const FollowUpView = lazy(() => import("./FollowUpView"));
+const GrowthView = lazy(() => import("./GrowthView"));
+const SettingsView = lazy(() => import("./SettingsView"));
+const ProductHunterEntry = lazy(() => import("./hunter/ProductHunterEntry"));
+// La paleta solo aparece con ⌘K: no tiene sentido descargarla de entrada.
+const CommandPalette = lazy(() => import("./CommandPalette"));
+
+/** Esqueleto mientras llega la pantalla. Mantiene la altura para que no salte. */
+function PanelFallback() {
+  return (
+    <div className="h-full overflow-hidden px-4 md:px-8 py-6">
+      <div className="max-w-[1280px]">
+        <SkeletonRows rows={6} />
+      </div>
+    </div>
+  );
+}
 
 interface DashboardProps {
   phone: string | null;
@@ -167,10 +193,12 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
 
   useEffect(() => {
     refreshConversations();
-    const viendoChats = area === "followup" && followTab === "chats";
-    const interval = setInterval(refreshConversations, viendoChats ? 2000 : 30_000);
-    return () => clearInterval(interval);
-  }, [area, followTab, refreshConversations]);
+  }, [refreshConversations]);
+  // Mirando los chats hace falta ritmo (2 s) porque se está esperando la
+  // respuesta de un cliente; fuera de ahí, medio minuto sobra. Lo que sí
+  // cambia es que ahora se PARA con la pestaña en segundo plano.
+  const viendoChats = area === "followup" && followTab === "chats";
+  usePolling(refreshConversations, { intervalMs: viendoChats ? 2000 : 30_000 });
 
   useEffect(() => {
     let vivo = true;
@@ -238,6 +266,7 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
         />
         <SafetyBanner />
         <div className="flex-1 min-h-0 overflow-hidden">
+          <Suspense fallback={<PanelFallback />}>
           {area === "home" ? (
             <HomePanel onNavigate={changeView} />
           ) : area === "orders" ? (
@@ -261,9 +290,15 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
           ) : (
             <SettingsView />
           )}
+          </Suspense>
         </div>
       </div>
-      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} onNavigate={changeView} />
+      {/* Solo se monta (y se descarga) cuando se abre de verdad. */}
+      {paletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette open onClose={() => setPaletteOpen(false)} onNavigate={changeView} />
+        </Suspense>
+      )}
     </main>
   );
 }

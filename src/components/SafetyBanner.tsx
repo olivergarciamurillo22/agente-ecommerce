@@ -8,6 +8,7 @@
 // ============================================================
 
 import { useEffect, useRef, useState } from "react";
+import { usePolling } from "./usePolling";
 import { StatusDot, type UiStatus } from "./ui";
 
 interface SafetyStatus {
@@ -54,12 +55,23 @@ export default function SafetyBanner() {
       }
     }
     poll();
-    const interval = setInterval(poll, 5000);
     return () => {
       mounted = false;
-      clearInterval(interval);
     };
   }, []);
+  // Este banner está montado en TODAS las pantallas, así que su sondeo es el
+  // único que corre siempre. A 5 s eran 12 peticiones por minuto de fondo,
+  // en cualquier pantalla y aunque la pestaña estuviera oculta, solo para
+  // detectar un cambio de estado que ocurre muy de tarde en tarde.
+  usePolling(async () => {
+    try {
+      const res = await fetch("/api/safety", { cache: "no-store" });
+      if (!res.ok) return;
+      setS((await res.json()) as SafetyStatus);
+    } catch {
+      // siguiente ciclo
+    }
+  }, { intervalMs: 20_000 });
 
   useEffect(() => {
     if (!open) return;
