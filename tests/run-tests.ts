@@ -13669,6 +13669,26 @@ async function main(): Promise<void> {
     assert.match(dash, /hashOverride \?\? r\.hash/, "el hash del destino se respeta");
   });
 
+  await test("RADAR UX · lo que guardas tiene un sitio donde volver a encontrarlo", () => {
+    const saved = leerRadar("src/components/hunter/radar/RadarSaved.tsx");
+    const radar = leerRadar("src/components/hunter/radar/WinnerRadar.tsx");
+    // El agujero que esto tapa: se podía pulsar "Guardar" o "Vigilar" y
+    // luego NO había ninguna pantalla donde volver a verlo. Guardar algo que
+    // después no aparece en ninguna parte es peor que no ofrecer el botón:
+    // enseña que la herramienta no se acuerda de nada.
+    assert.match(radar, /vista === "guardados"/, "hay una vista propia");
+    assert.match(radar, /Tus productos/, "y una entrada para llegar a ella");
+    // Los seis estados del embudo, ninguno huérfano.
+    for (const estado of ["testing", "winner", "watching", "saved", "loser", "discarded"]) {
+      assert.match(saved, new RegExp(`estado: "${estado}"`), `falta el grupo ${estado}`);
+    }
+    // `new` NO sale: eso no es "guardado", es "aún no lo has mirado".
+    assert.ok(!/estado: "new"/.test(saved), "lo no decidido no cuenta como guardado");
+    // Y al decidir, la lista se actualiza sola: si no, guardas algo y la
+    // pantalla sigue enseñándolo como si no hubiera pasado nada.
+    assert.match(radar, /setGuardados\(\(prev\)/, "la lista se refresca al decidir");
+  });
+
   await test("RADAR UX · cerrar la ficha no tira los resultados de la búsqueda", () => {
     const dash = leerRadar("src/components/Dashboard.tsx");
     // La clave de remonte SOLO puede subir cuando cambia la pestaña pedida.
@@ -13687,9 +13707,13 @@ async function main(): Promise<void> {
     );
 
     const radar = leerRadar("src/components/hunter/radar/WinnerRadar.tsx");
-    // Y la ficha vuelve a los RESULTADOS, no al inicio: si volviera al
-    // principio, mirar un producto costaría repetir la búsqueda entera.
-    assert.match(radar, /setVista\("resultados"\)/, "cerrar la ficha devuelve a los resultados");
+    // Y la ficha vuelve A DONDE SE ABRIÓ, no al inicio ni a una pantalla al
+    // azar: si volviera al principio, mirar un producto costaría repetir la
+    // búsqueda entera; y si volviera siempre a los resultados, abrir un
+    // producto guardado te dejaría en los resultados de otra búsqueda.
+    assert.match(radar, /const \[volverA, setVolverA\]/, "se recuerda desde dónde se abrió la ficha");
+    assert.match(radar, /setVista\(volverA === "detalle" \? "resultados" : volverA\)/, "y se vuelve ahí");
+    assert.match(radar, /vistaRef/, "sin meter `vista` en las dependencias de `abrir`");
   });
 
   await test("RADAR UX · las pantallas usan las piezas del panel, no unas parecidas", () => {

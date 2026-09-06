@@ -19,12 +19,12 @@
 //    acaba pidiendo toda la tarde para pintar algo que nadie mira.
 // ============================================================
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePolling } from "@/components/usePolling";
 import { navigateHash } from "@/components/useBackable";
 import type { HunterFilters, ProductOpportunity, SearchRun } from "@/lib/hunter/types";
 import type { RadarReadiness } from "@/lib/hunter/providers/registry";
-import { IconClock, IconSearch } from "@/components/icons";
+import { IconCheck, IconClock, IconSearch } from "@/components/icons";
 import { SkeletonRows } from "@/components/ui";
 import RadarHome, { QUICK_CHIPS, type PlanPreview } from "./RadarHome";
 import RadarProgress, { type LiveRun } from "./RadarProgress";
@@ -35,10 +35,11 @@ import type { DetailPayload } from "./OpportunityDetail";
 // paga al abrir el módulo, y es lo único que se ve al abrirlo.
 const RadarResults = lazy(() => import("./RadarResults"));
 const RadarHistory = lazy(() => import("./RadarHistory"));
+const RadarSaved = lazy(() => import("./RadarSaved"));
 const RadarFilters = lazy(() => import("./RadarFilters"));
 const OpportunityDetail = lazy(() => import("./OpportunityDetail"));
 
-type Vista = "inicio" | "progreso" | "resultados" | "historial" | "detalle";
+type Vista = "inicio" | "progreso" | "resultados" | "historial" | "guardados" | "detalle";
 
 /** Mientras corre se pregunta cada 2 s; con la pestaña de fondo, nada. */
 const POLL_MS = 2000;
@@ -67,6 +68,7 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
   const [run, setRun] = useState<LiveRun | null>(null);
   const [ops, setOps] = useState<ProductOpportunity[]>([]);
   const [historial, setHistorial] = useState<SearchRun[]>([]);
+  const [guardados, setGuardados] = useState<ProductOpportunity[]>([]);
   const [detalle, setDetalle] = useState<DetailPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lanzando, setLanzando] = useState(false);
@@ -159,18 +161,31 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
   }, [prompt, filtrosManuales]);
 
   // --- Abrir ficha ---
+  // De dónde se abrió la ficha, para volver ahí y no a una pantalla al azar.
+  const [volverA, setVolverA] = useState<Vista>("resultados");
+  // `abrir` no puede depender de `vista`: se pasa a las tarjetas y recrearla
+  // en cada cambio de vista las volvería a renderizar todas. Una ref da el
+  // valor actual sin ensuciar las dependencias.
+  const vistaRef = useRef<Vista>("inicio");
+  vistaRef.current = vista;
+
   const abrir = useCallback(async (op: ProductOpportunity) => {
     const r = await api<DetailPayload>(`/api/hunter/opportunities?id=${encodeURIComponent(op.id)}`);
-    if (r.ok) {
-      setDetalle(r.data);
-      setVista("detalle");
-    } else setError(r.error);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    // Se anota desde DÓNDE se abre para poder volver ahí. Sin esto, mirar un
+    // producto guardado te dejaba en los resultados de otra búsqueda.
+    setVolverA((actual) => (vista === "detalle" ? actual : vista));
+    setDetalle(r.data);
+    setVista("detalle");
   }, []);
 
   const cerrarDetalle = useCallback(() => {
     setDetalle(null);
-    setVista("resultados");
-  }, []);
+    setVista(volverA === "detalle" ? "resultados" : volverA);
+  }, [volverA]);
 
   // --- Decidir ---
   const DECISION: Record<CardAction, string> = { test: "test", watch: "watch", save: "save", discard: "discard" };
@@ -184,9 +199,25 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
       return;
     }
     setOps((prev) => prev.map((o) => (o.id === op.id ? { ...o, status: r.data.opportunity.status } : o)));
+    setGuardados((prev) => {
+      const sinEl = prev.filter((o) => o.id !== op.id);
+      return [{ ...op, status: r.data.opportunity.status }, ...sinEl];
+    });
     setDetalle((d) => (d && d.opportunity.id === op.id ? { ...d, opportunity: { ...d.opportunity, status: r.data.opportunity.status } } : d));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const cargarGuardados = useCallback(async () => {
+    const r = await api<{ opportunities: ProductOpportunity[] }>(
+      "/api/hunter/opportunities?status=saved,watching,testing,winner,loser,discarded"
+    );
+    if (r.ok) setGuardados(r.data.opportunities ?? []);
+  }, []);
+
+  const abrirGuardados = useCallback(() => {
+    setVista("guardados");
+    void cargarGuardados();
+  }, [cargarGuardados]);
 
   const abrirHistorial = useCallback(async (r: SearchRun) => {
     const res = await api<{ run: LiveRun; opportunities: ProductOpportunity[] }>(`/api/hunter/search?id=${r.id}`);
@@ -277,8 +308,22 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
           )}
           <button
             type="button"
+            onClick={abrirGuardados}
+            aria-current={vista === "guardados"}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 h-8 text-[12.5px] transition-colors ${
+              vista === "guardados" ? "bg-brand-surface text-brand-text shadow-sm" : "text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text"
+            }`}
+          >
+            <IconCheck size={14} />
+            Tus productos
+          </button>
+          <button
+            type="button"
             onClick={() => setVista("historial")}
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 h-8 text-[12.5px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+            aria-current={vista === "historial"}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 h-8 text-[12.5px] transition-colors ${
+              vista === "historial" ? "bg-brand-surface text-brand-text shadow-sm" : "text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text"
+            }`}
           >
             <IconClock size={14} />
             Historial
@@ -320,6 +365,16 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
 
         {vista === "historial" && (
           <RadarHistory runs={historial} onOpen={abrirHistorial} onNewSearch={nuevaBusqueda} />
+        )}
+
+        {vista === "guardados" && (
+          <RadarSaved
+            opportunities={guardados}
+            why={why}
+            onOpen={abrir}
+            onAction={decidir}
+            onNewSearch={nuevaBusqueda}
+          />
         )}
 
         {filtrosAbiertos && preview && (
