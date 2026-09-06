@@ -23,10 +23,15 @@
 // ============================================================
 
 import { CallBudget, hunterFetch } from "../http";
+// Los constructores de enlace viven en `links.ts` porque también se usan en
+// el navegador y este módulo arrastra la base de datos.
+import { adLibraryPageUrl, adLibrarySearchUrl, captionDomain, normalizeDomain } from "../links";
 import { normalizeExternalAd } from "../normalize";
 import type { CapabilityStatus, HunterAd, ProviderCapability, ProviderHealth } from "../types";
 import type { AdSearchQuery, AdSearchResponse, IntelligenceProvider, ProviderResult } from "./types";
 import { noCapabilities, providerFail, providerOk } from "./types";
+
+export { adLibraryPageUrl, adLibrarySearchUrl, captionDomain, normalizeDomain };
 
 const PROVIDER = "meta_ad_library" as const;
 const GRAPH = "https://graph.facebook.com";
@@ -264,58 +269,4 @@ export function assertCommercialScope(country: string): string | null {
 function sanitizeGraphError(msg: string | null): string {
   if (!msg) return "error desconocido de la Ad Library";
   return msg.replace(/access_token=[^&\s]+/gi, "access_token=<oculto>").slice(0, 300);
-}
-
-/**
- * `ad_creative_link_captions` trae lo que el anuncio ENSEÑA como destino:
- * normalmente el dominio ("casamable.es"). Se normaliza a host limpio.
- */
-export function captionDomain(value: unknown): string | null {
-  const lista = Array.isArray(value) ? value : [];
-  for (const v of lista) {
-    if (typeof v !== "string") continue;
-    const dominio = normalizeDomain(v);
-    if (dominio) return dominio;
-  }
-  return null;
-}
-
-export function normalizeDomain(raw: string): string | null {
-  const t = raw.trim().toLowerCase();
-  if (!t) return null;
-  try {
-    const url = new URL(t.includes("://") ? t : `https://${t}`);
-    const host = url.hostname.replace(/^www\./, "");
-    // Un caption puede ser texto suelto ("Compra ya"): sin punto no es dominio.
-    return host.includes(".") && !host.includes(" ") ? host : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Enlace a la Biblioteca de Anuncios para que Pedro vea los anuncios de
- * verdad, en Meta, con un clic. Es pública y no lleva token.
- */
-export function adLibrarySearchUrl(term: string, country = "ES"): string {
-  const p = new URLSearchParams({
-    active_status: "active",
-    ad_type: "all",
-    country: country.toUpperCase(),
-    q: term.slice(0, 100),
-    search_type: "keyword_unordered",
-    media_type: "all",
-  });
-  return `https://www.facebook.com/ads/library/?${p.toString()}`;
-}
-
-/** Enlace a todos los anuncios de una página concreta. */
-export function adLibraryPageUrl(pageId: string, country = "ES"): string {
-  const p = new URLSearchParams({
-    active_status: "active",
-    ad_type: "all",
-    country: country.toUpperCase(),
-    view_all_page_id: pageId,
-  });
-  return `https://www.facebook.com/ads/library/?${p.toString()}`;
 }

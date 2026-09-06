@@ -59,13 +59,24 @@ Responde solo el JSON.`;
  */
 export async function buildSearchPlan(
   filters: HunterFilters,
-  opts: { prompt?: string | null; aiSuggestions?: string[]; maxQueries?: number; notes?: string[] } = {}
+  opts: {
+    prompt?: string | null;
+    aiSuggestions?: string[];
+    maxQueries?: number;
+    notes?: string[];
+    /**
+     * Salta la llamada al modelo capaz. Lo usa la VISTA PREVIA mientras Pedro
+     * escribe: la frase y los chips se construyen con código, así que se ven
+     * igual, y no se paga una llamada por cada pausa al teclear.
+     */
+    skipStrategy?: boolean;
+  } = {}
 ): Promise<SearchPlan> {
   let sugeridas = opts.aiSuggestions ?? [];
   let strategy: string[] = [];
   let aiUsed = false;
 
-  if (llmConfigured() && filters.keywords.length > 0) {
+  if (!opts.skipStrategy && llmConfigured() && filters.keywords.length > 0) {
     const datos = [
       `Nicho: ${filters.keywords.join(", ")}`,
       filters.categories.length ? `Categorías: ${filters.categories.join(", ")}` : null,

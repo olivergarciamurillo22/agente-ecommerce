@@ -407,6 +407,20 @@ export function getSnapshotAround(productId: string, daysAgo: number, toleranceD
   return row ? parse(row.signals_json, null as ProductSignals | null) : null;
 }
 
+/**
+ * Serie completa para el gráfico de actividad (§24). Se devuelve ordenada de
+ * más antigua a más nueva: es como se dibuja, y ordenarla en el navegador es
+ * un paso más donde equivocarse.
+ */
+export function listSnapshots(productId: string, limit = 60): Array<{ takenAt: number; signals: ProductSignals }> {
+  const rows = db()
+    .prepare("SELECT taken_at, signals_json FROM hunter_product_snapshots WHERE product_id = ? ORDER BY taken_at DESC LIMIT ?")
+    .all(productId, limit) as Array<{ taken_at: number; signals_json: string }>;
+  return rows
+    .map((r) => ({ takenAt: Number(r.taken_at), signals: parse(r.signals_json, emptySignals()) }))
+    .reverse();
+}
+
 export function countSnapshots(productId: string): number {
   const r = db().prepare("SELECT COUNT(*) AS n FROM hunter_product_snapshots WHERE product_id = ?").get(productId) as { n: number };
   return r?.n ?? 0;

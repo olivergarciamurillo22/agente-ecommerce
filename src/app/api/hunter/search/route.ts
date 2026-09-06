@@ -25,7 +25,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const auth = requireOwner(req);
   if (!auth.ok) return auth.response;
 
-  let body: { prompt?: string; filters?: Record<string, unknown>; dryRun?: boolean; maxQueries?: number };
+  let body: { prompt?: string; filters?: Record<string, unknown>; dryRun?: boolean; preview?: boolean; maxQueries?: number };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -41,6 +41,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       prompt: prompt || null,
       filters: body.filters as never,
       maxQueries: body.maxQueries,
+      // `preview` = mientras se escribe. Determinista y gratis.
+      preview: body.preview === true || req.nextUrl.searchParams.get("preview") === "1",
     });
     return NextResponse.json({
       ok: true,

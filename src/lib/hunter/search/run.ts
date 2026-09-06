@@ -24,8 +24,8 @@ import { logIntegrationEvent } from "../../system/repo";
 import { CallBudget } from "../http";
 import { clusterAds } from "../cluster";
 import { computeOpportunityEconomics } from "../economics";
-import { analyzeCreatives, classifyProduct, generateOpportunitySummary, interpretSearchIntent } from "../intelligence";
-import { adLibrarySearchUrl, normalizeDomain } from "../providers/meta-ad-library";
+import { analyzeCreatives, classifyProduct, generateOpportunitySummary, interpretSearchIntent, parseIntentDeterministic } from "../intelligence";
+import { adLibrarySearchUrl, normalizeDomain } from "../links";
 import { getCategoryPerformance, getInternalRates } from "../providers/internal";
 import { lookupSupplierCost } from "../providers/supplier";
 import { fixtureModeActive, providerMode, searchProviders } from "../providers/registry";
@@ -50,6 +50,8 @@ const MAX_IMAGES = 6;
 
 export interface StartSearchInput {
   prompt: string | null;
+  /** true = solo vista previa: ni estrategia con IA ni interpretación cara. */
+  preview?: boolean;
   filters?: Partial<HunterFilters>;
   maxQueries?: number;
   callBudget?: number;
@@ -134,7 +136,12 @@ export async function planSearch(input: StartSearchInput): Promise<{ run: Search
   let notas: string[] = [];
 
   if (input.prompt && input.prompt.trim()) {
-    const intent = await interpretSearchIntent(input.prompt);
+    // En vista previa se usa SOLO el analizador determinista: es instantáneo,
+    // no cuesta nada y cubre lo que Pedro escribe de verdad. La lectura fina
+    // del modelo se hace una vez, al lanzar la búsqueda.
+    const intent = input.preview
+      ? parseIntentDeterministic(input.prompt)
+      : await interpretSearchIntent(input.prompt);
     // Lo que Pedro fijó a mano MANDA sobre lo que interprete la IA.
     filters = { ...intent.filters, ...(input.filters ?? {}) };
     sugeridas = intent.suggestedQueries;
@@ -146,6 +153,7 @@ export async function planSearch(input: StartSearchInput): Promise<{ run: Search
     aiSuggestions: sugeridas,
     maxQueries: input.maxQueries,
     notes: notas,
+    skipStrategy: input.preview === true,
   });
   return { run: newSearchRun(input, plan), plan };
 }

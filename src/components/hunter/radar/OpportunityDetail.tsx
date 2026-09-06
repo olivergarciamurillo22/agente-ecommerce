@@ -1,288 +1,662 @@
 "use client";
 
-// Ficha de una oportunidad. Lo importante de esta pantalla no es que tenga
-// muchas pestañas, sino que SEPARA lo observado de lo inferido y lo estimado.
-// Mezclarlo en un párrafo bonito es como se toman decisiones caras con datos
-// que nadie ha comprobado.
+// ============================================================
+// WINNER RADAR — FICHA DE UN PRODUCTO.
+//
+// Se abre ENCIMA de los resultados, no en otra página: volver tiene que ser
+// un gesto, no una navegación. `useOverlayBack` hace que atrás y Escape la
+// cierren en vez de sacar de la aplicación.
+//
+// Siete pestañas, y todas responden a una pregunta distinta:
+//   Resumen        ¿qué es y qué hago con esto?
+//   Anuncios       ¿qué se está publicando de verdad?
+//   Creatividades  ¿qué ángulos funcionan?
+//   Competidores   ¿quién lo vende y desde cuándo?
+//   Evolución      ¿va a más o a menos?
+//   Economía       ¿me deja dinero?
+//   Cómo se calcula ¿de dónde sale cada número?
+//
+// La última no es un extra de auditoría: es la que permite NO fiarse. Un
+// score sin poder abrirlo es un oráculo, y aquí se decide con dinero real.
+// ============================================================
 
 import { useEffect, useState } from "react";
 import { useOverlayBack } from "@/components/useBackable";
-import type { ProductOpportunity, TestPlan } from "@/lib/hunter/types";
-import type { HunterAd } from "@/lib/hunter/types";
-import { Badge, ProvenanceTag, ScoreChip, Stat, money, pct } from "./radar-shared";
+import type { ProductOpportunity } from "@/lib/hunter/types";
+import { PRODUCT_FEATURE_LABEL } from "@/lib/hunter/types";
+import type { CreativeAnalysis } from "@/lib/hunter/intelligence";
+import { IconChevronRight, IconClose } from "@/components/icons";
+import {
+  Badge,
+  ProductCover,
+  ProvenanceTag,
+  ScoreBar,
+  ScoreBig,
+  Stat,
+  UNKNOWN,
+  VerdictChip,
+  miles,
+  money,
+  pct,
+  saturationWord,
+  scoreWord,
+} from "./radar-shared";
 
-type Tab = "resumen" | "ads" | "competidores" | "economia" | "ia" | "historico";
+type Pestana = "resumen" | "anuncios" | "creatividades" | "competidores" | "evolucion" | "economia" | "calculo";
+
+const PESTANAS: Array<{ id: Pestana; label: string }> = [
+  { id: "resumen", label: "Resumen" },
+  { id: "anuncios", label: "Anuncios" },
+  { id: "creatividades", label: "Creatividades" },
+  { id: "competidores", label: "Competidores" },
+  { id: "evolucion", label: "Evolución" },
+  { id: "economia", label: "Economía" },
+  { id: "calculo", label: "Cómo se calcula" },
+];
+
+export interface DetailPayload {
+  opportunity: ProductOpportunity;
+  why: string;
+  verdict: { recommendation: string; because: string; blockers: string[] };
+  ads: Array<{
+    id: string; advertiserName: string | null; platform: string; format: string | null;
+    adCopy: string | null; startedAt: number | null; active: boolean | null; activeDays: number | null;
+    previewUrl: string | null; landingUrl: string | null; imageUrl: string | null;
+  }>;
+  adCount: number;
+  competitors: Array<{ name: string; adCount: number; activeCount: number; oldestDays: number | null; countries: string[]; adLibraryUrl: string | null }>;
+  creatives: CreativeAnalysis;
+  history: Array<{ takenAt: number; signals: ProductOpportunity["signals"] }>;
+  testPlan: { recommendedPrice: number | null; targetCPA: number | null; breakEvenCPA: number | null; recommendedDailyBudget: number | null; testDurationDays: number | null; creativeAngles: string[]; rationale: string[] } | null;
+}
 
 export default function OpportunityDetail({
-  op,
+  data,
   onClose,
-  onDecide,
+  onAction,
 }: {
-  op: ProductOpportunity;
+  data: DetailPayload;
   onClose: () => void;
-  onDecide: (id: string, decision: string, reason?: string) => void;
+  onAction: (a: "test" | "watch" | "save" | "discard") => void;
 }) {
-  const [tab, setTab] = useState<Tab>("resumen");
-  // Atrás y Escape cierran la ficha, como espera cualquiera.
+  const [tab, setTab] = useState<Pestana>("resumen");
+  const op = data.opportunity;
   useOverlayBack(true, onClose);
-  const [plan, setPlan] = useState<TestPlan | null>(null);
-  const [ads, setAds] = useState<HunterAd[]>([]);
 
-  useEffect(() => {
-    void fetch(`/api/hunter/opportunities?id=${op.id}`)
-      .then((r) => r.json())
-      .then((b: { testPlan?: TestPlan; opportunity?: ProductOpportunity & { ads?: HunterAd[] } }) => {
-        if (b.testPlan) setPlan(b.testPlan);
-        if (b.opportunity && Array.isArray((b.opportunity as { ads?: HunterAd[] }).ads)) {
-          setAds((b.opportunity as { ads?: HunterAd[] }).ads ?? []);
-        }
-      })
-      .catch(() => undefined);
-  }, [op.id]);
-
-  const e = op.economics;
+  // Al cambiar de producto se vuelve a Resumen: dejar abierta «Competidores»
+  // del anterior confunde sobre qué se está mirando.
+  useEffect(() => setTab("resumen"), [op.id]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end md:items-center justify-center bg-black/40 p-0 md:p-6" onClick={onClose}>
+    <div className="fixed inset-0 z-40 flex justify-end bg-black/25 backdrop-blur-[1px]">
       <div
-        className="w-full md:max-w-4xl max-h-[92vh] overflow-y-auto rounded-t-2xl md:rounded-2xl bg-white p-5"
-        onClick={(ev) => ev.stopPropagation()}
+        className="flex h-full w-full max-w-[860px] flex-col bg-brand-bg shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-label={op.canonicalName}
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-[18px] font-semibold">{op.canonicalName}</h2>
-            <div className="mt-1 flex flex-wrap gap-1">{op.badges.map((b) => <Badge key={b} badge={b} />)}</div>
-          </div>
-          <button onClick={onClose} className="text-brand-muted text-[13px]">Cerrar</button>
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-2">
-          <ScoreChip label="Oportunidad" value={op.scores.opportunity} size="lg" />
-          <ScoreChip label="Mercado" value={op.scores.market} />
-          <ScoreChip label="Producto" value={op.scores.product} />
-          <ScoreChip label="Casamable" value={op.scores.casamable} />
-        </div>
-
-        {op.clusterConfidence < 0.6 && (
-          <p className="mt-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
-            La agrupación de anuncios es poco fiable ({Math.round(op.clusterConfidence * 100)} %): comprueba que todos
-            los anuncios sean de verdad el mismo producto antes de decidir.
-          </p>
-        )}
-
-        <nav className="mt-4 flex gap-1 border-b border-brand-line overflow-x-auto">
-          {([["resumen", "Resumen"], ["ads", `Anuncios (${op.adIds.length})`], ["competidores", "Competidores"], ["economia", "Economía"], ["ia", "IA"], ["historico", "Histórico"]] as const).map(
-            ([id, label]) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={`whitespace-nowrap px-3 py-2 text-[12px] font-medium border-b-2 -mb-px ${
-                  tab === id ? "border-brand-accent" : "border-transparent text-brand-muted"
-                }`}
-              >
-                {label}
-              </button>
-            )
-          )}
-        </nav>
-
-        <div className="mt-4">
-          {tab === "resumen" && (
-            <div className="space-y-4">
-              <Bloque titulo="Observado" nota="Lo dice la fuente, tal cual" tono="emerald" lineas={op.summary?.observed ?? []} />
-              <Bloque titulo="Inferido" nota="Lectura del mercado, no un hecho" tono="violet" lineas={op.summary?.inferred ?? []} />
-              <Bloque titulo="Estimado" nota="Cuentas con supuestos: compruébalos" tono="amber" lineas={op.summary?.estimated ?? []} />
-              {(op.summary?.risks.length ?? 0) > 0 && (
-                <Bloque titulo="Riesgos" nota="" tono="red" lineas={op.summary?.risks ?? []} />
-              )}
-              {op.summary && (
-                <p className="text-[11px] text-brand-muted">
-                  {op.summary.aiGenerated ? "Las lecturas las redactó un modelo a partir de los datos de arriba." : "Resumen generado sin IA."}
-                </p>
-              )}
+        {/* Cabecera */}
+        <div className="shrink-0 border-b border-brand-border bg-brand-surface">
+          <div className="flex items-start gap-4 px-5 py-4">
+            <div className="w-[104px] shrink-0">
+              <ProductCover name={op.canonicalName} imageUrl={op.heroImageUrl ?? op.images[0] ?? null} />
             </div>
-          )}
-
-          {tab === "ads" && (
-            <div className="space-y-2">
-              {ads.length === 0 && <p className="text-[12px] text-brand-muted">Los anuncios de respaldo no se han cargado en esta vista.</p>}
-              {ads.map((a) => (
-                <div key={a.id} className="rounded border border-brand-line p-3">
-                  <div className="flex justify-between text-[12px]">
-                    <span className="font-medium">{a.advertiserName ?? "anunciante desconocido"}</span>
-                    <span className="text-brand-muted">{a.platform} · {a.activeDays ?? "?"} días</span>
-                  </div>
-                  {a.adCopy && <p className="mt-1 text-[11px] text-brand-muted line-clamp-2">{a.adCopy}</p>}
-                  {a.previewUrl && (
-                    <a href={a.previewUrl} target="_blank" rel="noreferrer noopener" className="mt-1 inline-block text-[11px] underline">
-                      Ver el anuncio en la fuente
-                    </a>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-
-          {tab === "competidores" && (
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-              <Stat label="Anunciantes" value={op.signals.advertiserCount} />
-              <Stat label="Anuncios activos" value={op.signals.activeAds} />
-              <Stat label="Anuncios totales" value={op.signals.totalAds} />
-              <Stat label="Creatividades" value={op.signals.creativeCount} />
-              <Stat
-                label="Cuota del mayor"
-                value={op.signals.topAdvertiserShare === null ? "—" : pct(op.signals.topAdvertiserShare)}
-                hint={
-                  op.signals.topAdvertiserShare === null
-                    ? undefined
-                    : op.signals.topAdvertiserShare > 0.6
-                      ? "dominado por una marca: puede quedar hueco"
-                      : "repartido: mercado más maduro"
-                }
-              />
-              <Stat label="Países · plataformas" value={`${op.signals.countryCount} · ${op.signals.platformCount}`} />
-            </div>
-          )}
-
-          {tab === "economia" && (
-            <div>
-              {!e && (
-                <p className="text-[12px] text-brand-muted">
-                  Sin coste de proveedor no se puede calcular nada. Mételo a mano en la ficha y vuelve aquí:
-                  preferimos no enseñar un beneficio inventado.
-                </p>
-              )}
-              {e && (
-                <>
-                  <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-                    <Metrica label="Precio de venta" v={e.salePrice.value} p={e.salePrice.provenance} money />
-                    <Metrica label="Coste de proveedor" v={e.supplierCost.value} p={e.supplierCost.provenance} money />
-                    <Metrica label="CPA real" v={e.realCPA.value} p={e.realCPA.provenance} money />
-                    <Metrica label="Beneficio esperado" v={e.expectedProfit.value} p={e.expectedProfit.provenance} money />
-                    <Metrica label="Margen" v={e.margin.value === null ? null : e.margin.value * 100} p={e.margin.provenance} suffix=" %" />
-                    <Metrica label="CPA de equilibrio" v={e.breakEvenCPA.value} p={e.breakEvenCPA.provenance} money />
-                  </div>
-                  <div className="mt-4">
-                    <div className="text-[12px] font-medium mb-1">Supuestos usados</div>
-                    <ul className="space-y-1">
-                      {e.assumptions.map((a) => (
-                        <li key={a.key} className="flex items-center gap-2 text-[11px] text-brand-muted">
-                          <ProvenanceTag provenance={a.provenance} />
-                          <span>{a.label}: {a.value}{a.source ? ` · ${a.source}` : ""}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </>
-              )}
-
-              {plan && (
-                <div className="mt-5 rounded-lg border border-brand-line p-3">
-                  <div className="text-[12px] font-medium">Plan de prueba (no lanza nada)</div>
-                  <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
-                    <Stat label="Precio" value={money(plan.recommendedPrice)} />
-                    <Stat label="CPA objetivo" value={money(plan.targetCPA)} />
-                    <Stat label="Presupuesto/día" value={plan.recommendedDailyBudget ? `${plan.recommendedDailyBudget} €` : "—"} />
-                    <Stat label="Duración" value={plan.testDurationDays ? `${plan.testDurationDays} días` : "—"} />
-                  </div>
-                  <ul className="mt-2 space-y-0.5">
-                    {plan.rationale.map((r, i) => (
-                      <li key={i} className="text-[11px] text-brand-muted">· {r}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
-
-          {tab === "ia" && (
-            <div>
-              {op.features.length === 0 && (
-                <p className="text-[12px] text-brand-muted">
-                  Sin análisis de IA para este producto (o sin clave de modelo configurada).
-                </p>
-              )}
-              <div className="grid gap-2 md:grid-cols-2">
-                {op.features.map((f) => (
-                  <div key={f.key} className="rounded border border-brand-line p-2">
-                    <div className="flex justify-between text-[12px]">
-                      <span>{f.key}</span>
-                      <span className="font-medium">{f.value ?? "—"}</span>
-                    </div>
-                    {f.rationale && <p className="text-[10px] text-brand-muted">{f.rationale}</p>}
-                    <div className="mt-1"><ProvenanceTag provenance="AI_INFERENCE" /></div>
-                  </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <VerdictChip verdict={op.recommendation} size="lg" />
+                {op.badges.map((b) => (
+                  <Badge key={b} badge={b} />
                 ))}
               </div>
+              <h2 className="mt-2 text-[19px] font-semibold leading-snug tracking-tight">{op.canonicalName}</h2>
+              <p className="mt-1 text-[13px] leading-relaxed text-brand-muted">{data.verdict.because}</p>
             </div>
-          )}
+            <div className="shrink-0 text-right">
+              <ScoreBig value={op.scores.opportunity} />
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Cerrar"
+                className="mt-3 rounded-lg p-2 text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+              >
+                <IconClose size={18} />
+              </button>
+            </div>
+          </div>
 
-          {tab === "historico" && (
-            <p className="text-[12px] text-brand-muted">
-              {op.scores.momentum.score === null
-                ? "Todavía no hay fotos anteriores de este producto. El momentum aparecerá cuando el radar lo haya visto al menos dos veces con días de diferencia — no se inventa con una sola medición."
-                : `Momentum ${op.scores.momentum.score}/100 con ${Math.round(op.scores.momentum.confidence * 100)} % de confianza.`}
-            </p>
-          )}
+          <nav className="flex gap-0.5 overflow-x-auto px-3" aria-label="Secciones del producto">
+            {PESTANAS.map((p) => (
+              <button
+                key={p.id}
+                type="button"
+                onClick={() => setTab(p.id)}
+                aria-current={tab === p.id}
+                className={`whitespace-nowrap border-b-2 px-3 py-2.5 text-[13px] font-medium transition-colors ${
+                  tab === p.id
+                    ? "border-brand-gold text-brand-text"
+                    : "border-transparent text-brand-tertiary hover:text-brand-text"
+                }`}
+              >
+                {p.label}
+                {p.id === "anuncios" && data.adCount > 0 && (
+                  <span className="ml-1 text-brand-tertiary tabular-nums">({miles(data.adCount)})</span>
+                )}
+              </button>
+            ))}
+          </nav>
         </div>
 
-        <div className="mt-5 flex flex-wrap gap-2 border-t border-brand-line pt-4">
-          {(["save", "watch", "test", "winner", "loser"] as const).map((d) => (
-            <button key={d} onClick={() => onDecide(op.id, d)} className="rounded-lg border border-brand-line px-3 py-1.5 text-[12px]">
-              {{ save: "Guardar", watch: "Vigilar", test: "Testear", winner: "Ganador", loser: "Perdedor" }[d]}
+        {/* Contenido */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
+          {tab === "resumen" && <Resumen data={data} />}
+          {tab === "anuncios" && <Anuncios data={data} />}
+          {tab === "creatividades" && <Creatividades c={data.creatives} />}
+          {tab === "competidores" && <Competidores data={data} />}
+          {tab === "evolucion" && <Evolucion data={data} />}
+          {tab === "economia" && <Economia data={data} />}
+          {tab === "calculo" && <Calculo op={op} />}
+        </div>
+
+        {/* Acciones */}
+        <div className="shrink-0 border-t border-brand-border bg-brand-surface px-5 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => onAction("test")}
+              className="rounded-xl bg-brand-gold px-4 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft transition-colors"
+            >
+              Preparar test
             </button>
-          ))}
-          <DescartarConMotivo onDecide={(reason) => onDecide(op.id, "discard", reason)} />
+            <button
+              type="button"
+              onClick={() => onAction("watch")}
+              className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
+            >
+              Vigilar
+            </button>
+            <button
+              type="button"
+              onClick={() => onAction("save")}
+              className="rounded-xl border border-brand-border px-4 h-11 text-[14px] font-medium hover:bg-brand-surface-2 transition-colors"
+            >
+              Guardar
+            </button>
+            <div className="flex-1" />
+            {op.adLibraryUrl && (
+              <a
+                href={op.adLibraryUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 rounded-xl px-3 h-11 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+              >
+                Ver en Meta
+                <IconChevronRight size={14} />
+              </a>
+            )}
+            <button
+              type="button"
+              onClick={() => onAction("discard")}
+              className="rounded-xl px-3 h-11 text-[13px] text-brand-tertiary hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+            >
+              Descartar
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function Bloque({ titulo, nota, tono, lineas }: { titulo: string; nota: string; tono: string; lineas: string[] }) {
-  if (lineas.length === 0) return null;
-  const border = { emerald: "border-emerald-200", violet: "border-violet-200", amber: "border-amber-200", red: "border-red-200" }[tono] ?? "border-brand-line";
+// ------------------------------------------------------------
+
+function Seccion({ title, children, hint }: { title: string; children: React.ReactNode; hint?: string }) {
   return (
-    <div className={`rounded-lg border ${border} p-3`}>
-      <div className="text-[12px] font-semibold">{titulo}</div>
-      {nota && <div className="text-[10px] text-brand-muted">{nota}</div>}
-      <ul className="mt-1.5 space-y-0.5">
-        {lineas.map((l, i) => <li key={i} className="text-[12px]">· {l}</li>)}
-      </ul>
+    <section className="mb-6">
+      <h3 className="text-[12px] font-semibold uppercase tracking-[.10em] text-brand-tertiary">{title}</h3>
+      {hint && <p className="mt-0.5 text-[12px] text-brand-tertiary">{hint}</p>}
+      <div className="mt-2">{children}</div>
+    </section>
+  );
+}
+
+function Vacio({ children }: { children: React.ReactNode }) {
+  return <p className="text-[13px] text-brand-tertiary">{children}</p>;
+}
+
+function Resumen({ data }: { data: DetailPayload }) {
+  const op = data.opportunity;
+  const s = op.signals;
+  return (
+    <>
+      <Seccion title="Señales">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Anunciantes" value={miles(s.advertiserCount)} />
+          <Stat label="Anuncios activos" value={miles(s.activeAds)} hint={`de ${miles(s.totalAds)} vistos`} />
+          <Stat label="Creatividades" value={miles(s.creativeCount)} />
+          <Stat label="El más veterano" value={s.oldestActiveAdDays === null ? UNKNOWN : `${s.oldestActiveAdDays} días`} />
+        </div>
+      </Seccion>
+
+      <Seccion title="Puntuaciones">
+        <div className="rounded-xl border border-brand-border bg-brand-surface px-4 py-3">
+          <ScoreBar label="Mercado" value={op.scores.market.score} word={scoreWord(op.scores.market.score)} />
+          <ScoreBar label="Tendencia" value={op.scores.momentum.score} word={scoreWord(op.scores.momentum.score)} tone="good" />
+          <ScoreBar label="Saturación" value={op.scores.saturation.score} word={saturationWord(op.scores.saturation.score)} tone="warn" />
+          <ScoreBar label="Señal creativa" value={op.scores.creative_investment.score} word={scoreWord(op.scores.creative_investment.score)} />
+          <ScoreBar label="Producto" value={op.scores.product.score} word={scoreWord(op.scores.product.score)} />
+          <ScoreBar label="Encaje Casamable" value={op.scores.casamable.score} word={scoreWord(op.scores.casamable.score)} />
+        </div>
+      </Seccion>
+
+      {op.summary && (
+        <>
+          <Seccion title="Lo que hemos observado" hint="Contado sobre los anuncios. No es interpretación.">
+            <ul className="space-y-1 text-[13.5px] leading-relaxed">
+              {op.summary.observed.map((l, i) => (
+                <li key={i}>· {l}</li>
+              ))}
+            </ul>
+          </Seccion>
+          {op.summary.inferred.length > 0 && (
+            <Seccion title="Cómo lo leemos" hint="Interpretación, no medición.">
+              <ul className="space-y-1 text-[13.5px] leading-relaxed text-brand-muted">
+                {op.summary.inferred.map((l, i) => (
+                  <li key={i}>· {l}</li>
+                ))}
+              </ul>
+            </Seccion>
+          )}
+        </>
+      )}
+
+      {(data.verdict.blockers.length > 0 || (op.summary?.risks.length ?? 0) > 0) && (
+        <Seccion title="Riesgos y lo que falta">
+          <ul className="space-y-1 text-[13.5px] leading-relaxed text-amber-900">
+            {data.verdict.blockers.map((b, i) => (
+              <li key={`b${i}`}>· {b}</li>
+            ))}
+            {(op.summary?.risks ?? []).map((r, i) => (
+              <li key={`r${i}`}>· {r}</li>
+            ))}
+          </ul>
+        </Seccion>
+      )}
+
+      {op.landingDomain && (
+        <Seccion title="A dónde llevan los anuncios">
+          <a
+            href={`https://${op.landingDomain}`}
+            target="_blank"
+            rel="noreferrer noopener"
+            className="text-[13.5px] text-brand-info underline underline-offset-2"
+          >
+            {op.landingDomain}
+          </a>
+        </Seccion>
+      )}
+    </>
+  );
+}
+
+function Anuncios({ data }: { data: DetailPayload }) {
+  const [orden, setOrden] = useState<"antiguos" | "recientes" | "pagina">("antiguos");
+  if (data.ads.length === 0) return <Vacio>No hay anuncios guardados de este producto.</Vacio>;
+
+  const lista = [...data.ads].sort((a, b) => {
+    if (orden === "pagina") return (a.advertiserName ?? "").localeCompare(b.advertiserName ?? "");
+    // «Antiguos primero» es el orden útil: un anuncio que lleva meses vivo es
+    // la mejor prueba de que el producto vende.
+    if (orden === "antiguos") return (a.startedAt ?? Infinity) - (b.startedAt ?? Infinity);
+    return (b.startedAt ?? 0) - (a.startedAt ?? 0);
+  });
+
+  return (
+    <>
+      <div className="mb-3 flex items-center gap-2">
+        <span className="text-[12px] text-brand-tertiary">Ordenar por</span>
+        <select
+          value={orden}
+          onChange={(e) => setOrden(e.target.value as typeof orden)}
+          className="h-9 rounded-lg border border-brand-border bg-brand-surface px-2 text-[13px] cursor-pointer"
+        >
+          <option value="antiguos">Los que llevan más tiempo</option>
+          <option value="recientes">Los más nuevos</option>
+          <option value="pagina">Página</option>
+        </select>
+        {data.adCount > data.ads.length && (
+          <span className="text-[12px] text-brand-tertiary">
+            Mostrando {miles(data.ads.length)} de {miles(data.adCount)}
+          </span>
+        )}
+      </div>
+
+      <div className="grid gap-2.5 sm:grid-cols-2">
+        {lista.map((a) => (
+          <article key={a.id} className="rounded-xl border border-brand-border bg-brand-surface p-3">
+            <div className="flex items-start justify-between gap-2">
+              <span className="text-[13px] font-medium truncate">{a.advertiserName ?? "Sin nombre"}</span>
+              <span
+                className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[.06em] ${
+                  a.active ? "bg-emerald-50 text-emerald-800" : "bg-brand-surface-2 text-brand-tertiary"
+                }`}
+              >
+                {a.active ? "activo" : "parado"}
+              </span>
+            </div>
+            <div className="mt-0.5 text-[11px] tabular-nums text-brand-tertiary">
+              {a.startedAt ? new Date(a.startedAt * 1000).toLocaleDateString("es-ES") : "sin fecha"}
+              {a.activeDays !== null && ` · ${a.activeDays} días`}
+              {a.platform && ` · ${a.platform}`}
+            </div>
+            {a.adCopy && <p className="mt-2 text-[12.5px] leading-relaxed text-brand-muted line-clamp-4">{a.adCopy}</p>}
+            <div className="mt-2 flex flex-wrap gap-3 text-[12px]">
+              {a.previewUrl && (
+                <a href={a.previewUrl} target="_blank" rel="noreferrer noopener" className="text-brand-info underline underline-offset-2">
+                  Ver en Meta
+                </a>
+              )}
+              {a.landingUrl && (
+                <a
+                  href={a.landingUrl.includes("://") ? a.landingUrl : `https://${a.landingUrl}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="text-brand-info underline underline-offset-2"
+                >
+                  {a.landingUrl.replace(/^https?:\/\//, "").slice(0, 32)}
+                </a>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </>
+  );
+}
+
+function Creatividades({ c }: { c: CreativeAnalysis }) {
+  const vacio = c.hooks.length === 0 && c.angles.length === 0 && c.traits.length === 0;
+  if (vacio) return <Vacio>No hay suficiente texto de anuncios para leer los ángulos.</Vacio>;
+  return (
+    <>
+      {c.dominantFormat && (
+        <Seccion title="Formato dominante">
+          <p className="text-[15px] font-medium capitalize">{c.dominantFormat}</p>
+        </Seccion>
+      )}
+      {c.hooks.length > 0 && (
+        <Seccion title="Ganchos que más se repiten" hint="Primera frase de cada anuncio: es donde se juega la atención.">
+          <ul className="space-y-1.5">
+            {c.hooks.map((h, i) => (
+              <li key={i} className="rounded-lg border border-brand-border bg-brand-surface px-3 py-2 text-[13.5px] leading-relaxed">
+                «{h}»
+              </li>
+            ))}
+          </ul>
+        </Seccion>
+      )}
+      {c.angles.length > 0 && (
+        <Seccion title="Ángulos de venta">
+          <div className="flex flex-wrap gap-1.5">
+            {c.angles.map((a) => (
+              <span key={a} className="rounded-full bg-brand-surface-2 px-3 py-1 text-[12.5px] text-brand-muted">
+                {a}
+              </span>
+            ))}
+          </div>
+        </Seccion>
+      )}
+      {c.traits.length > 0 && (
+        <Seccion title="Rasgos observados">
+          <div className="flex flex-wrap gap-1.5">
+            {c.traits.map((t) => (
+              <span key={t} className="rounded-full bg-brand-surface-2 px-3 py-1 text-[12.5px] text-brand-muted">
+                {t}
+              </span>
+            ))}
+          </div>
+        </Seccion>
+      )}
+      {c.takeaways.length > 0 && (
+        <Seccion title="Qué copiaría">
+          <ul className="space-y-1 text-[13.5px] leading-relaxed">
+            {c.takeaways.map((t, i) => (
+              <li key={i}>· {t}</li>
+            ))}
+          </ul>
+        </Seccion>
+      )}
+      {!c.aiGenerated && (
+        <p className="text-[11px] text-brand-tertiary">
+          Análisis por patrones de texto, sin modelo. Con clave de IA la lectura es bastante más fina.
+        </p>
+      )}
+    </>
+  );
+}
+
+function Competidores({ data }: { data: DetailPayload }) {
+  if (data.competitors.length === 0) return <Vacio>No hay anunciantes identificados.</Vacio>;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[520px] text-[13px]">
+        <thead>
+          <tr className="border-b border-brand-border text-left text-[11px] uppercase tracking-[.08em] text-brand-tertiary">
+            <th className="pb-2 font-medium">Página</th>
+            <th className="pb-2 font-medium text-right">Anuncios</th>
+            <th className="pb-2 font-medium text-right">Activos</th>
+            <th className="pb-2 font-medium text-right">Antigüedad</th>
+            <th className="pb-2 font-medium">Países</th>
+            <th className="pb-2" />
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-brand-border">
+          {data.competitors.map((c) => (
+            <tr key={c.name}>
+              <td className="py-2 pr-3 font-medium">{c.name}</td>
+              <td className="py-2 text-right tabular-nums">{miles(c.adCount)}</td>
+              <td className="py-2 text-right tabular-nums">{miles(c.activeCount)}</td>
+              <td className="py-2 text-right tabular-nums text-brand-muted">
+                {c.oldestDays === null ? "—" : `${c.oldestDays} d`}
+              </td>
+              <td className="py-2 pl-3 text-brand-muted">{c.countries.join(", ") || "—"}</td>
+              <td className="py-2 pl-3 text-right">
+                {c.adLibraryUrl && (
+                  <a href={c.adLibraryUrl} target="_blank" rel="noreferrer noopener" className="text-brand-info underline underline-offset-2">
+                    Ver
+                  </a>
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
-function Metrica({ label, v, p, money: esMoneda, suffix }: { label: string; v: number | null; p: import("@/lib/hunter/provenance").MetricProvenance; money?: boolean; suffix?: string }) {
+function Evolucion({ data }: { data: DetailPayload }) {
+  const h = data.history;
+  const s = data.opportunity.signals;
+
+  if (h.length < 2) {
+    return (
+      <>
+        <Vacio>
+          Solo tenemos una foto de este producto. La tendencia necesita al menos dos: repite la búsqueda dentro de unos
+          días —o ponlo en Vigilar— y aquí saldrá la evolución.
+        </Vacio>
+        <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <Stat label="Anuncios activos hoy" value={miles(s.activeAds)} />
+          <Stat label="Anunciantes hoy" value={miles(s.advertiserCount)} />
+          <Stat label="Creatividades" value={miles(s.creativeCount)} />
+          <Stat label="Nuevos en 7 días" value={s.newAds7d === null ? UNKNOWN : miles(s.newAds7d)} />
+        </div>
+      </>
+    );
+  }
+
+  const primero = h[0].signals;
+  const ultimo = h[h.length - 1].signals;
+  const max = Math.max(...h.map((p) => p.signals.activeAds), 1);
+
+  return (
+    <>
+      <Seccion title="Actividad" hint={`${h.length} fotos guardadas`}>
+        <div className="flex h-24 items-end gap-1 rounded-xl border border-brand-border bg-brand-surface px-3 py-3">
+          {h.map((p) => (
+            <div
+              key={p.takenAt}
+              title={`${new Date(p.takenAt * 1000).toLocaleDateString("es-ES")}: ${p.signals.activeAds} anuncios activos`}
+              className="min-w-[3px] flex-1 rounded-sm bg-brand-gold/75"
+              style={{ height: `${Math.max(4, (p.signals.activeAds / max) * 100)}%` }}
+            />
+          ))}
+        </div>
+      </Seccion>
+
+      <Seccion title="Cambio en el periodo">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <Delta label="Anuncios activos" antes={primero.activeAds} ahora={ultimo.activeAds} />
+          <Delta label="Anunciantes" antes={primero.advertiserCount} ahora={ultimo.advertiserCount} />
+          <Delta label="Creatividades" antes={primero.creativeCount} ahora={ultimo.creativeCount} />
+        </div>
+      </Seccion>
+    </>
+  );
+}
+
+function Delta({ label, antes, ahora }: { label: string; antes: number; ahora: number }) {
+  const cambio = antes > 0 ? Math.round(((ahora - antes) / antes) * 100) : null;
+  const sube = ahora > antes;
   return (
     <div>
-      <div className="text-[11px] text-brand-muted">{label}</div>
-      <div className="text-[14px] font-medium">
-        {v === null ? "No disponible" : esMoneda ? money(v) : `${v.toFixed(0)}${suffix ?? ""}`}
+      <div className="text-[11px] uppercase tracking-[.08em] text-brand-tertiary">{label}</div>
+      <div className="mt-0.5 flex items-baseline gap-2">
+        <span className="text-[17px] font-semibold tabular-nums">{miles(ahora)}</span>
+        <span className="text-[12px] tabular-nums text-brand-tertiary">antes {miles(antes)}</span>
       </div>
-      <div className="mt-0.5"><ProvenanceTag provenance={p} /></div>
+      {cambio !== null && cambio !== 0 && (
+        <div className={`text-[12px] font-medium tabular-nums ${sube ? "text-emerald-700" : "text-brand-tertiary"}`}>
+          {sube ? "+" : ""}
+          {cambio} %
+        </div>
+      )}
     </div>
   );
 }
 
-/** Descartar SIEMPRE pide motivo: sin él, el dataset de decisiones no enseña nada. */
-function DescartarConMotivo({ onDecide }: { onDecide: (reason: string) => void }) {
-  const [abierto, setAbierto] = useState(false);
-  const RAZONES = [
-    ["too_saturated", "Demasiado saturado"], ["bad_margin", "Margen insuficiente"],
-    ["bad_supplier", "Proveedor malo"], ["weak_creative", "Creatividad floja"],
-    ["fragile", "Frágil"], ["regulated", "Regulado"], ["other", "Otro"],
-  ] as const;
-  if (!abierto) {
-    return <button onClick={() => setAbierto(true)} className="rounded-lg border border-brand-line px-3 py-1.5 text-[12px] text-brand-muted">Descartar</button>;
+function Economia({ data }: { data: DetailPayload }) {
+  const e = data.opportunity.economics;
+  const tp = data.testPlan;
+  if (!e) {
+    return (
+      <Vacio>
+        Sin coste de proveedor no se puede calcular nada de esto. Dropi no tiene API pública, así que ese dato hay que
+        meterlo a mano — y hasta que esté, cualquier margen que enseñáramos aquí sería inventado.
+      </Vacio>
+    );
   }
   return (
-    <div className="flex flex-wrap gap-1">
-      {RAZONES.map(([k, l]) => (
-        <button key={k} onClick={() => { onDecide(k); setAbierto(false); }} className="rounded border border-brand-line px-2 py-1 text-[11px]">
-          {l}
-        </button>
-      ))}
-    </div>
+    <>
+      <Seccion title="Por pedido" hint="Calculado con tus tasas reales de entrega y rehúse, no con medias del sector.">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <Stat
+            label="Precio de venta"
+            value={
+              <>
+                {money(e.salePrice.value)} <ProvenanceTag provenance={e.salePrice.provenance} />
+              </>
+            }
+          />
+          <Stat
+            label="Coste de proveedor"
+            value={
+              <>
+                {money(e.supplierCost.value)} <ProvenanceTag provenance={e.supplierCost.provenance} />
+              </>
+            }
+          />
+          <Stat
+            label="Beneficio esperado"
+            value={
+              <>
+                {money(e.expectedProfit.value)} <ProvenanceTag provenance={e.expectedProfit.provenance} />
+              </>
+            }
+          />
+          <Stat label="Margen" value={pct(e.margin.value)} />
+          <Stat label="CPA de equilibrio" value={money(e.breakEvenCPA.value)} hint="A partir de aquí se pierde dinero." />
+          <Stat label="CPA objetivo" value={money(tp?.targetCPA ?? null)} />
+        </div>
+      </Seccion>
+
+      {tp && (
+        <Seccion title="Si lo testeas">
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="Precio sugerido" value={money(tp.recommendedPrice)} />
+            <Stat label="Presupuesto diario" value={money(tp.recommendedDailyBudget)} />
+            <Stat label="Duración" value={tp.testDurationDays === null ? UNKNOWN : `${tp.testDurationDays} días`} />
+            <Stat label="Ángulos" value={miles(tp.creativeAngles.length)} />
+          </div>
+          {tp.rationale.length > 0 && (
+            <ul className="mt-3 space-y-1 text-[12.5px] leading-relaxed text-brand-muted">
+              {tp.rationale.map((r, i) => (
+                <li key={i}>· {r}</li>
+              ))}
+            </ul>
+          )}
+        </Seccion>
+      )}
+    </>
+  );
+}
+
+function Calculo({ op }: { op: ProductOpportunity }) {
+  const partes = op.scores.opportunity.parts;
+  return (
+    <>
+      <Seccion title="De qué se compone el score" hint="Media ponderada con penalizaciones duras, no un promedio simple.">
+        {partes.length === 0 ? (
+          <Vacio>No se ha podido calcular: {op.scores.opportunity.unavailableReason ?? "faltan datos"}.</Vacio>
+        ) : (
+          <table className="w-full text-[13px]">
+            <tbody className="divide-y divide-brand-border">
+              {partes.map((p) => (
+                <tr key={p.key}>
+                  <td className="py-1.5 pr-3">{p.label}</td>
+                  <td className="py-1.5 text-right tabular-nums font-medium">{p.value === null ? UNKNOWN : Math.round(p.value)}</td>
+                  <td className="py-1.5 pl-3 text-right tabular-nums text-brand-tertiary">×{p.weight}</td>
+                  <td className="py-1.5 pl-3 text-brand-tertiary">{p.observed ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </Seccion>
+
+      {op.features.length > 0 && (
+        <Seccion title="Lo que infirió la IA" hint="Leyendo el texto de los anuncios. Es una lectura, no una medición.">
+          <table className="w-full text-[13px]">
+            <tbody className="divide-y divide-brand-border">
+              {op.features.map((f) => (
+                <tr key={f.key}>
+                  <td className="py-1.5 pr-3">{PRODUCT_FEATURE_LABEL[f.key] ?? f.key}</td>
+                  <td className="py-1.5 text-right tabular-nums font-medium">{f.value === null ? UNKNOWN : Math.round(f.value)}</td>
+                  <td className="py-1.5 pl-3 text-brand-tertiary">{f.rationale ?? ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Seccion>
+      )}
+
+      <Seccion title="Fiabilidad">
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
+          <Stat label="Confianza" value={pct(op.scores.opportunity.confidence)} />
+          <Stat label="Agrupación" value={pct(op.clusterConfidence)} hint="Cuánto nos fiamos de que todo esto sea UN producto." />
+          <Stat label="Fuentes" value={op.providers.join(", ") || UNKNOWN} />
+        </div>
+      </Seccion>
+    </>
   );
 }

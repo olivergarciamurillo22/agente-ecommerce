@@ -15,7 +15,7 @@
 // pierden los productos buenos que llegaron un poco pronto.
 // ============================================================
 
-import { adLibrarySearchUrl } from "./providers/meta-ad-library";
+import { adLibrarySearchUrl } from "./links";
 import type { ProductOpportunity, Recommendation } from "./types";
 import { MIN_VIABLE_MARGIN, VERY_SATURATED_THRESHOLD } from "./scoring/weights";
 

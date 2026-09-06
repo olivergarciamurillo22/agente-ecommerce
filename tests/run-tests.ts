@@ -13424,18 +13424,43 @@ async function main(): Promise<void> {
   // ============ AI WINNER RADAR ============
   console.log("\n— AI Winner Radar —");
 
-  await test("RADAR · esquema 19 crea las tablas del radar de forma idempotente y sin tocar nada existente", () => {
+  await test("RADAR · las migraciones del radar son idempotentes y no tocan nada existente", () => {
     const raw = db.systemDbHandle();
     const antesPedidos = (raw.prepare("SELECT COUNT(*) n FROM orders").get() as { n: number }).n;
-    db.migrateHunter(raw);
-    db.migrateHunter(raw);
+    const columnasPedidos = (raw.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).length;
+
+    // Tres veces seguidas: es la garantía que exige el repo, y la que hace
+    // seguro reintentar un despliegue a medias.
+    for (let i = 0; i < 3; i++) {
+      db.migrateHunter(raw);
+      db.migrateHunterRunDetail(raw);
+    }
+
     for (const t of ["hunter_searches", "hunter_ads", "hunter_products", "hunter_product_ads",
       "hunter_product_snapshots", "hunter_product_sources", "hunter_decisions", "hunter_watchlist",
-      "hunter_alerts", "hunter_provider_runs", "hunter_cache", "hunter_presets"]) {
+      "hunter_alerts", "hunter_provider_runs", "hunter_cache", "hunter_presets",
+      "hunter_search_stages"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t), t);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 19);
+
+    // Las columnas de la 20 tienen que existir DE VERDAD: sin ellas el
+    // progreso por etapas se escribe en el vacío y la barra no se mueve.
+    const cols = new Set((raw.prepare("PRAGMA table_info(hunter_searches)").all() as Array<{ name: string }>).map((c) => c.name));
+    for (const c of ["title", "stage", "current_message", "estimate_seconds", "estimated_finish_at",
+      "duration_ms", "provider_mode", "coverage", "plan_json", "report_json"]) {
+      assert.ok(cols.has(c), `hunter_searches.${c}`);
+    }
+    const colsProd = new Set((raw.prepare("PRAGMA table_info(hunter_products)").all() as Array<{ name: string }>).map((c) => c.name));
+    for (const c of ["primary_provider", "images_json", "landing_domain"]) {
+      assert.ok(colsProd.has(c), `hunter_products.${c}`);
+    }
+
+    // Lo que este test protege NO es un número de esquema —que sube con
+    // cualquier migración ajena— sino que el radar sea ADITIVO: ni una fila
+    // ni una columna de `orders` se mueve.
     assert.equal((raw.prepare("SELECT COUNT(*) n FROM orders").get() as { n: number }).n, antesPedidos, "no toca pedidos");
+    assert.equal((raw.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).length, columnasPedidos,
+      "el radar no añade columnas a orders");
     assert.equal(raw.pragma("integrity_check", { simple: true }), "ok");
   });
 
@@ -13656,6 +13681,7 @@ async function main(): Promise<void> {
       sourceConfidence: 0.5, clusterConfidence: 0.8,
       signals: { ...emptySignals(), advertiserCount: 5, activeAds: 10 },
       scores: emptyScoreMap(), features: [], economics: null, badges: [], adIds: [], providers: [], summary: null,
+      primaryProvider: null, images: [], landingDomain: null, adLibraryUrl: null, recommendation: null,
     };
     const f = { ...defaultFilters(), priceMax: 50, momentumMin: 60, minMargin: 0.3 };
     const post = applyPostFilters(op, f);
@@ -13836,6 +13862,7 @@ async function main(): Promise<void> {
       currency: "EUR", firstSeenAt: null, lastSeenAt: null, status: "new", sourceConfidence: 0.6,
       clusterConfidence: 0.8, signals: { ...emptySignals(), creativeCount: 10 }, scores: emptyScoreMap(),
       features: [], economics, badges: [], adIds: [], providers: [], summary: null,
+      primaryProvider: null, images: [], landingDomain: null, adLibraryUrl: null, recommendation: null,
     });
     assert.equal(plan.recommendedPrice, 39.9, "empieza por el precio más alto observado");
     assert.ok(plan.breakEvenCPA !== null && plan.targetCPA !== null);
@@ -14083,6 +14110,418 @@ async function main(): Promise<void> {
     }
     assert.match(fs.readFileSync(path.join(process.cwd(), "src/app/api/orders/[orderId]/action/route.ts"), "utf8"), /auth\.user\.role === "agent"/);
   });
+
+  // ============ BEEPING · webhooks entrantes (descubiertos el 06-09-2026) ============
+  console.log("\n— Beeping · receptor de webhooks: fail-closed, idempotente y sin duplicar el polling —");
+  {
+    const beepingWh = await import("../src/lib/beeping/webhook");
+    const beepingSync = await import("../src/lib/beeping/sync");
+    const beepingClient = await import("../src/lib/beeping/client");
+
+    /** Credencial y lectura abiertas: el estado normal del NAS. Avisos NO. */
+    const ENV_BASE = {
+      BEEPING_BASIC_AUTH: "dGVzdDp0ZXN0",
+      BEEPING_ENABLED: "1",
+      BEEPING_NOTIFICATIONS_ENABLED: undefined,
+    };
+    const SECRETO = "s3cr3t-de-webhook";
+    const ENV_TOKEN = {
+      ...ENV_BASE,
+      BEEPING_WEBHOOK_AUTH_MODE: "token",
+      BEEPING_WEBHOOK_SECRET: SECRETO,
+      BEEPING_WEBHOOK_AUTH_HEADER: "authorization",
+    };
+    const AUTORIZADO = { authorization: `Bearer ${SECRETO}` };
+
+    /** Pedido de Beeping tal y como lo traería una entrega. */
+    const pedidoBeeping = (externalId: string, over: Record<string, unknown> = {}) => ({
+      external_id: externalId,
+      status: 4,
+      tracking_stage: 2,
+      tracking_number: "TRKB-100",
+      courier_id: 5,
+      date_tracking_update: "05-09-2026 10:00:00",
+      ...over,
+    });
+
+    const cuerpo = (event: string, order: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({ event, ...extra, data: order });
+
+    /** Transiciones del eje LOGÍSTICO. El de cierre escribe su propia fila. */
+    const historial = (orderId: number): number =>
+      (
+        db
+          .systemDbHandle()
+          .prepare("SELECT COUNT(*) AS n FROM order_status_history WHERE order_id = ? AND status_axis = 'tracking'")
+          .get(orderId) as { n: number }
+      ).n;
+
+    const ultimaFuente = (orderId: number): string =>
+      (
+        db
+          .systemDbHandle()
+          .prepare("SELECT source FROM order_status_history WHERE order_id = ? AND status_axis = 'tracking' ORDER BY id DESC LIMIT 1")
+          .get(orderId) as { source: string }
+      ).source;
+
+    // --- Autenticación: el endpoint es PÚBLICO, así que aquí se decide todo ---
+
+    await test("BEEPING WH · sin modo de auth declarado: 503 WEBHOOK_AUTH_NOT_CONFIGURED y CERO efectos", async () => {
+      const o = mkOrder("bwh-503", "97001", "34600970001");
+      await withEnv({ ...ENV_BASE, BEEPING_WEBHOOK_AUTH_MODE: undefined, BEEPING_WEBHOOK_SECRET: undefined }, () => {
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-503", { tracking_stage: 5 })),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 503);
+        assert.equal(r.body.error, "WEBHOOK_AUTH_NOT_CONFIGURED");
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.beeping_order_status, null, "un 503 no puede haber tocado NADA del pedido");
+      assert.equal(tras.closure_status, "unknown", "y menos aún el eje de cierre");
+      assert.equal(historial(o.id), 0);
+    });
+
+    await test("BEEPING WH · modo declarado pero SIN secreto: sigue cerrado (503), no se abre a medias", async () => {
+      await withEnv({ ...ENV_BASE, BEEPING_WEBHOOK_AUTH_MODE: "token", BEEPING_WEBHOOK_SECRET: undefined }, () => {
+        const r = beepingWh.processBeepingWebhook(cuerpo("order.updated", pedidoBeeping("bwh-503")), AUTORIZADO);
+        assert.equal(r.status, 503);
+      });
+    });
+
+    await test("BEEPING WH · hmac_sha256 SIN cabecera declarada: cerrado (el nombre lo pone Beeping, no se adivina)", async () => {
+      await withEnv(
+        { ...ENV_BASE, BEEPING_WEBHOOK_AUTH_MODE: "hmac_sha256", BEEPING_WEBHOOK_SECRET: SECRETO, BEEPING_WEBHOOK_AUTH_HEADER: undefined },
+        () => {
+          const r = beepingWh.processBeepingWebhook(cuerpo("order.updated", pedidoBeeping("bwh-503")), AUTORIZADO);
+          assert.equal(r.status, 503);
+        }
+      );
+    });
+
+    await test("BEEPING WH · token inválido, ausente o vacío: 401 y CERO efectos", async () => {
+      const o = mkOrder("bwh-401", "97002", "34600970002");
+      await withEnv(ENV_TOKEN, () => {
+        const body = cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-401", { tracking_stage: 5 }));
+        const intentos: Record<string, string | null>[] = [{}, { authorization: "Bearer otro-secreto" }, { authorization: "" }, { authorization: `Bearer ${SECRETO}x` }];
+        for (const h of intentos) {
+          const r = beepingWh.processBeepingWebhook(body, h);
+          assert.equal(r.status, 401, `debe rechazar ${JSON.stringify(h)}`);
+          assert.equal(r.body.error, "WEBHOOK_AUTH_INVALID");
+        }
+      });
+      assert.equal(db.getOrderById(o.id)!.beeping_order_status, null, "ningún intento fallido deja rastro en el pedido");
+      assert.equal(historial(o.id), 0);
+    });
+
+    await test("BEEPING WH · firma HMAC: se valida sobre los BYTES CRUDOS, no sobre un JSON reserializado", async () => {
+      // Cuerpo con espaciado raro: si alguien parseara y volviera a serializar
+      // antes de verificar, la firma dejaría de cuadrar y esto fallaría.
+      const raw = `{"event":"order.updated",  "data" : {"external_id":"bwh-hmac","status":4,"tracking_stage":2}}`;
+      const firma = crypto.createHmac("sha256", SECRETO).update(raw, "utf8").digest("hex");
+      assert.notEqual(JSON.stringify(JSON.parse(raw)), raw, "el cuerpo debe diferir de su reserialización");
+      await withEnv(
+        { ...ENV_BASE, BEEPING_WEBHOOK_AUTH_MODE: "hmac_sha256", BEEPING_WEBHOOK_SECRET: SECRETO, BEEPING_WEBHOOK_AUTH_HEADER: "x-beeping-signature" },
+        () => {
+          assert.notEqual(beepingWh.processBeepingWebhook(raw, { "x-beeping-signature": firma }).status, 401, "hex debe valer");
+          const b64 = crypto.createHmac("sha256", SECRETO).update(raw, "utf8").digest("base64");
+          assert.notEqual(beepingWh.processBeepingWebhook(raw, { "x-beeping-signature": `sha256=${b64}` }).status, 401, "base64 con prefijo también");
+          // Mismo cuerpo, firma de OTRO secreto: rechazada.
+          const mala = crypto.createHmac("sha256", "otro").update(raw, "utf8").digest("hex");
+          assert.equal(beepingWh.processBeepingWebhook(raw, { "x-beeping-signature": mala }).status, 401);
+          // Cuerpo alterado tras firmar: rechazado.
+          assert.equal(beepingWh.processBeepingWebhook(raw.replace("4", "5"), { "x-beeping-signature": firma }).status, 401);
+        }
+      );
+    });
+
+    await test("BEEPING WH · autenticado pero con BEEPING_ENABLED=0: 503, un webhook no enciende la integración", async () => {
+      await withEnv({ ...ENV_TOKEN, BEEPING_ENABLED: "0" }, () => {
+        const r = beepingWh.processBeepingWebhook(cuerpo("order.updated", pedidoBeeping("bwh-401")), AUTORIZADO);
+        assert.equal(r.status, 503);
+        assert.equal(r.body.error, "BEEPING_DISABLED");
+      });
+    });
+
+    // --- Contenido: lo que no se entiende NO se aplica a medias ---
+
+    await test("BEEPING WH · JSON malformado o que no es un objeto: 400 sin efectos", async () => {
+      await withEnv(ENV_TOKEN, () => {
+        for (const malo of ["{no es json", "", "[]", '"texto"', "null"]) {
+          assert.equal(beepingWh.processBeepingWebhook(malo, AUTORIZADO).status, 400, `debe rechazar ${JSON.stringify(malo)}`);
+        }
+      });
+    });
+
+    await test("BEEPING WH · evento fuera de los CUATRO del panel: 200 e ignorado, jamás aplicado", async () => {
+      const o = mkOrder("bwh-desc", "97003", "34600970003");
+      await withEnv(ENV_TOKEN, () => {
+        for (const ev of ["order.deleted", "shipment.created", "order.status.changed", ""]) {
+          const r = beepingWh.processBeepingWebhook(cuerpo(ev, pedidoBeeping("bwh-desc", { tracking_stage: 5 })), AUTORIZADO);
+          assert.equal(r.status, 200);
+          assert.equal(r.body.ignored, "unknown_event", `"${ev}" no está en el catálogo del panel`);
+        }
+      });
+      assert.equal(db.getOrderById(o.id)!.beeping_order_status, null, "un evento desconocido no toca el pedido");
+    });
+
+    await test("BEEPING WH · evento válido sin pedido legible: ignorado, NUNCA emparejado por nombre o teléfono", async () => {
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          JSON.stringify({ event: "order.updated", data: { nombre: "Cliente Test", telefono: "34600970003" } }),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 200);
+        assert.equal(r.body.ignored, "no_order_in_payload");
+      });
+    });
+
+    await test("BEEPING WH · pedido que no existe en la base local: 200 y registrado, sin inventar nada", async () => {
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(cuerpo("order.created", pedidoBeeping("bwh-inexistente")), AUTORIZADO);
+        assert.equal(r.status, 200);
+        assert.equal(r.body.ignored, "order_not_found");
+      });
+      const ev = db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM integration_events WHERE event_type = 'beeping_webhook_order_not_found'").get() as { n: number };
+      assert.ok(ev.n >= 1, "queda en el feed para que Pedro lo vea");
+    });
+
+    // --- Los CUATRO eventos del panel ---
+
+    await test("BEEPING WH · order.created adopta la foto SIN tocar el eje operativo ni el de cierre", async () => {
+      const o = mkOrder("bwh-created", "97010", "34600970010");
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          // 6 = "to be confirmed": aún retenido, no hay nada que trackear.
+          cuerpo("order.created", pedidoBeeping("bwh-created", { status: 6, tracking_stage: 1, tracking_number: null })),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 200);
+        assert.equal(r.body.event, "order.created");
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.beeping_order_status, 6, "la foto de Beeping sí se guarda");
+      assert.equal(tras.status, "pending_send", "el eje OPERATIVO (confirmación del cliente) no se toca jamás");
+      assert.equal(tras.closure_status, "unknown", "'por confirmar' no cierra nada");
+      assert.equal(historial(o.id), 0, "sin envío todavía: ninguna transición logística");
+    });
+
+    await test("BEEPING WH · order.status_changed (shipped) mueve el eje logístico con el catálogo del mapper", async () => {
+      const o = mkOrder("bwh-status", "97011", "34600970011");
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.status_changed", pedidoBeeping("bwh-status", { status: 4, tracking_stage: 1, tracking_number: "TRKB-11" })),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 200);
+        assert.equal(r.body.updated, true);
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.supplier_status_normalized, "shipped");
+      assert.equal(tras.tracking_number, "TRKB-11");
+      assert.equal(tras.carrier, "GLS", "courier_id 5 → GLS, del catálogo documentado");
+      assert.equal(tras.closure_status, "in_progress");
+      assert.equal(ultimaFuente(o.id), "webhook", "la fuente queda marcada como webhook, no como reconciliación");
+    });
+
+    await test("BEEPING WH · order.logistics_status_changed (delivered) cierra con la fecha DE LA FUENTE", async () => {
+      const o = mkOrder("bwh-log", "97012", "34600970012");
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-log", { status: 4, tracking_stage: 5, date_tracking_update: "05-09-2026 09:30:00" })),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 200);
+        assert.equal(r.body.closure_updated, true);
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.supplier_status_normalized, "delivered");
+      assert.equal(tras.closure_status, "delivered");
+      assert.equal(tras.closure_source, "beeping");
+      assert.equal(tras.closure_at, Date.UTC(2026, 8, 5, 9, 30, 0) / 1000, "la hora del HECHO en Beeping, jamás now()");
+    });
+
+    await test("BEEPING WH · order.updated NO pisa dirección corregida a mano ni notas internas", async () => {
+      const o = mkOrder("bwh-upd", "97013", "34600970013");
+      db.systemDbHandle()
+        .prepare("UPDATE orders SET address_line1 = ?, city = ?, dispatch_note = ? WHERE id = ?")
+        .run("Calle Corregida 99", "Valencia", "cliente pidió llamar antes", o.id);
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.updated", pedidoBeeping("bwh-upd", { status: 4, tracking_stage: 3, tracking_number: "TRKB-13" })),
+          AUTORIZADO
+        );
+        assert.equal(r.status, 200);
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.supplier_status_normalized, "out_for_delivery", "lo logístico sí se actualiza");
+      assert.equal(tras.tracking_number, "TRKB-13");
+      assert.equal(tras.address_line1, "Calle Corregida 99", "la dirección corregida a mano NO se toca");
+      assert.equal(tras.city, "Valencia");
+      assert.equal(tras.dispatch_note, "cliente pidió llamar antes", "la nota de expedición tampoco");
+      assert.equal(tras.status, "pending_send", "ni el eje operativo");
+    });
+
+    // --- Idempotencia y llegadas fuera de orden ---
+
+    await test("BEEPING WH · la MISMA entrega diez veces → el negocio se aplica UNA sola vez", async () => {
+      const o = mkOrder("bwh-dup", "97020", "34600970020");
+      const body = cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-dup", { status: 4, tracking_stage: 5 }));
+      const cabeceras = { ...AUTORIZADO, "x-beeping-delivery": "entrega-abc-123" };
+      let aplicados = 0;
+      let duplicados = 0;
+      await withEnv(ENV_TOKEN, () => {
+        for (let i = 0; i < 10; i++) {
+          const r = beepingWh.processBeepingWebhook(body, cabeceras);
+          assert.equal(r.status, 200);
+          if (r.body.duplicate === true) duplicados++;
+          else aplicados++;
+        }
+      });
+      assert.equal(aplicados, 1, "solo la primera entrega hace negocio");
+      assert.equal(duplicados, 9);
+      assert.equal(historial(o.id), 1, "UNA sola transición en el histórico");
+    });
+
+    await test("BEEPING WH · sin identificador de entrega, la huella determinista también deduplica", async () => {
+      const o = mkOrder("bwh-fp", "97021", "34600970021");
+      const body = cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-fp", { status: 4, tracking_stage: 5 }));
+      let aplicados = 0;
+      await withEnv(ENV_TOKEN, () => {
+        for (let i = 0; i < 10; i++) {
+          if (beepingWh.processBeepingWebhook(body, AUTORIZADO).body.duplicate !== true) aplicados++;
+        }
+      });
+      assert.equal(aplicados, 1, "misma huella = mismo evento, aunque Beeping no mande id de entrega");
+      assert.equal(historial(o.id), 1);
+    });
+
+    await test("BEEPING WH · el id de entrega NO se confunde con el id del pedido (congelaría el pedido)", async () => {
+      // Si se aceptara un `id` pelado como identificador de entrega, el primer
+      // evento de un pedido deduplicaría a TODOS los siguientes.
+      const o = mkOrder("bwh-idped", "97022", "34600970022");
+      await withEnv(ENV_TOKEN, () => {
+        const uno = beepingWh.processBeepingWebhook(
+          JSON.stringify({ event: "order.status_changed", id: 555, data: pedidoBeeping("bwh-idped", { status: 4, tracking_stage: 1 }) }),
+          AUTORIZADO
+        );
+        assert.notEqual(uno.body.duplicate, true);
+        const dos = beepingWh.processBeepingWebhook(
+          JSON.stringify({ event: "order.logistics_status_changed", id: 555, data: pedidoBeeping("bwh-idped", { status: 4, tracking_stage: 5 }) }),
+          AUTORIZADO
+        );
+        assert.notEqual(dos.body.duplicate, true, "un cambio REAL con el mismo `id` de pedido no puede tomarse por duplicado");
+      });
+      assert.equal(db.getOrderById(o.id)!.supplier_status_normalized, "delivered", "el segundo evento SÍ se aplicó");
+    });
+
+    await test("BEEPING WH · llegada FUERA DE ORDEN: un estado viejo no retrocede lo ya sabido", async () => {
+      const o = mkOrder("bwh-orden", "97023", "34600970023");
+      await withEnv(ENV_TOKEN, () => {
+        // 1) Entregado.
+        beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-orden", { status: 4, tracking_stage: 5, date_tracking_update: "05-09-2026 12:00:00" })),
+          { ...AUTORIZADO, "x-beeping-delivery": "orden-1" }
+        );
+        // 2) Llega DESPUÉS un "en tránsito" ANTERIOR (webhooks sin orden garantizado).
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-orden", { status: 4, tracking_stage: 2, date_tracking_update: "04-09-2026 08:00:00" })),
+          { ...AUTORIZADO, "x-beeping-delivery": "orden-2" }
+        );
+        assert.equal(r.status, 200, "se acepta la entrega (no es culpa de Beeping)…");
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.supplier_status_normalized, "delivered", "…pero el eje logístico NO retrocede");
+      assert.equal(tras.closure_status, "delivered");
+      assert.equal(tras.closure_at, Date.UTC(2026, 8, 5, 12, 0, 0) / 1000, "la fecha de cierre tampoco se reescribe hacia atrás");
+    });
+
+    await test("BEEPING WH · un cierre TERMINAL ya fijado por otra fuente no lo pisa Beeping", async () => {
+      const o = mkOrder("bwh-term", "97024", "34600970024");
+      const cancelAt = Math.floor(Date.UTC(2026, 8, 3, 10, 0, 0) / 1000);
+      assert.equal(db.setOrderClosure(o.id, "cancelled", "shopify", cancelAt), true);
+      await withEnv(ENV_TOKEN, () => {
+        beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-term", { status: 4, tracking_stage: 5 })),
+          { ...AUTORIZADO, "x-beeping-delivery": "terminal-1" }
+        );
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.closure_status, "cancelled", "cancelado en Shopify sigue mandando");
+      assert.equal(tras.closure_source, "shopify");
+      assert.equal(tras.closure_at, cancelAt);
+    });
+
+    // --- Convivencia con el polling ---
+
+    await test("BEEPING WH · webhook y polling con el MISMO cambio: un solo efecto, sin divergencia", async () => {
+      const o = mkOrder("bwh-poll", "97030", "34600970030");
+      const remoto = pedidoBeeping("bwh-poll", { status: 4, tracking_stage: 5, date_tracking_update: "05-09-2026 11:00:00" });
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(cuerpo("order.logistics_status_changed", remoto), {
+          ...AUTORIZADO,
+          "x-beeping-delivery": "poll-1",
+        });
+        assert.equal(r.body.closure_updated, true, "el webhook llega primero (near-real-time)");
+        // Y ahora la reconciliación pasa por encima con el MISMO estado.
+        const rep = beepingSync.applyBeepingOrderLocally(beepingClient.parseBeepingOrder(remoto)!);
+        assert.equal(rep.matched, true);
+        assert.equal(rep.updated, false, "el polling no vuelve a 'actualizar' lo que ya estaba");
+        assert.equal(rep.closureUpdated, false, "ni re-estampa el cierre");
+      });
+      assert.equal(historial(o.id), 1, "UNA transición en total entre las dos vías");
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.closure_status, "delivered");
+      assert.equal(tras.closure_at, Date.UTC(2026, 8, 5, 11, 0, 0) / 1000);
+    });
+
+    await test("BEEPING WH · el polling sigue existiendo: es la red que corrige lo que el webhook no trajo", async () => {
+      // Si el webhook nunca llega (endpoint cerrado, entrega perdida), la
+      // reconciliación tiene que poder aplicar el MISMO cambio ella sola.
+      const o = mkOrder("bwh-drift", "97031", "34600970031");
+      const rep = beepingSync.applyBeepingOrderLocally(
+        beepingClient.parseBeepingOrder(pedidoBeeping("bwh-drift", { status: 4, tracking_stage: 5 }))!
+      );
+      assert.equal(rep.matched, true);
+      assert.equal(rep.closureUpdated, true);
+      assert.equal(db.getOrderById(o.id)!.closure_status, "delivered");
+      assert.equal(ultimaFuente(o.id), "reconciliation", "y queda marcado como reconciliación, distinguible del webhook");
+    });
+
+    await test("BEEPING WH · un pedido enrutado a otro proveedor solo recibe la foto, nunca el tracking", async () => {
+      const o = mkOrder("bwh-otro", "97032", "34600970032");
+      db.systemDbHandle().prepare("UPDATE orders SET supplier_platform = 'dropea' WHERE id = ?").run(o.id);
+      await withEnv(ENV_TOKEN, () => {
+        const r = beepingWh.processBeepingWebhook(
+          cuerpo("order.logistics_status_changed", pedidoBeeping("bwh-otro", { status: 4, tracking_stage: 5 })),
+          AUTORIZADO
+        );
+        assert.equal(r.body.skipped_other_supplier, true);
+      });
+      const tras = db.getOrderById(o.id)!;
+      assert.equal(tras.beeping_order_status, 4, "la foto sí");
+      assert.equal(tras.supplier_status_normalized, "unknown", "el eje logístico lo lleva Dropea: dos fuentes no escriben lo mismo");
+      assert.equal(tras.closure_status, "unknown");
+    });
+
+    await test("BEEPING WH · la ruta pública existe y lee el cuerpo CRUDO antes de parsear", async () => {
+      const src = fs.readFileSync(path.join(process.cwd(), "src/app/api/webhooks/beeping/route.ts"), "utf8");
+      assert.match(src, /req\.text\(\)/, "hay que leer texto crudo, nunca req.json()");
+      assert.ok(!/req\.json\(\)/.test(src), "req.json() impediría verificar una firma sobre los bytes originales");
+      // El proxy ya la trata como pública por el prefijo /api/webhooks/.
+      const { proxy: proxyFn } = await import("../src/proxy");
+      const { NextRequest: NR } = await import("next/server");
+      assert.equal(proxyFn(new NR("http://localhost/api/webhooks/beeping")).status, 200, "debe llegar al handler sin sesión");
+    });
+
+    await test("BEEPING WH · el receptor NO tiene forma de escribir en Beeping ni de saltarse el mapper", async () => {
+      const src = fs.readFileSync(path.join(process.cwd(), "src/lib/beeping/webhook.ts"), "utf8");
+      for (const prohibido of ["markToSend", "cancelOrder", "updateOrder", "beepingRequest"]) {
+        assert.ok(!new RegExp(`\\b${prohibido}\\b`).test(src), `el receptor jamás importa ${prohibido}: es solo de entrada`);
+      }
+      assert.match(src, /applyBeepingOrderLocally/, "el negocio pasa por la MISMA función que el polling");
+    });
+  }
 
   // ============ Resumen ============
   console.log(`\n${passed} tests OK, ${failures.length} fallos\n`);

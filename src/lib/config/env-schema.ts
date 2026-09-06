@@ -21,6 +21,7 @@ export type Profile =
   | "whatsapp-baileys"
   | "whatsapp-cloud-pilot"
   | "retell-pilot"
+  | "winner-radar"
   | "nas-production";
 
 export const PROFILES: Profile[] = [
@@ -29,6 +30,7 @@ export const PROFILES: Profile[] = [
   "whatsapp-baileys",
   "whatsapp-cloud-pilot",
   "retell-pilot",
+  "winner-radar",
   "nas-production",
 ];
 
@@ -89,7 +91,7 @@ const domainShopify = (v: string) =>
     : "debe ser el dominio *.myshopify.com de la tienda";
 
 // Los cuatro perfiles que corren en el Mac (todos menos nas-production).
-const LOCAL_PROFILES: Profile[] = ["local-safe", "shopify-readonly", "whatsapp-baileys", "whatsapp-cloud-pilot", "retell-pilot"];
+const LOCAL_PROFILES: Profile[] = ["local-safe", "shopify-readonly", "whatsapp-baileys", "whatsapp-cloud-pilot", "retell-pilot", "winner-radar"];
 
 export const ENV_SCHEMA: EnvVarSpec[] = [
   // ── CORE ──
@@ -348,6 +350,31 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "BEEPING_WRITE_ENABLED", category: "BEEPING", secret: false, description: "1 = escrituras (mark-to-send/cancel/update). Capa aparte de la lectura; a 0 hasta el piloto real.", requiredFor: [], defaultValue: "0", validate: bool01 },
   { name: "BEEPING_AUTO_RELEASE_CONFIRMED", category: "BEEPING", secret: false, description: "1 = liberar automáticamente al confirmar. HOY SIEMPRE 0: el modo acordado es LIBERACIÓN MANUAL.", requiredFor: [], defaultValue: "0", validate: bool01, status: "FUTURE" },
   { name: "BEEPING_NOTIFICATIONS_ENABLED", category: "BEEPING", secret: false, description: "1 = la sync de Beeping puede encolar WhatsApps de postventa. A 0 en desarrollo (actualiza estados sin mandar nada).", requiredFor: [], defaultValue: "0", validate: bool01 },
+  // Webhooks entrantes: el panel los ofrece, la API no los documenta. Sin
+  // MODE + SECRET el endpoint responde 503 y no procesa nada.
+  {
+    name: "BEEPING_WEBHOOK_AUTH_MODE",
+    category: "BEEPING",
+    secret: false,
+    description: "Cómo autentica Beeping sus webhooks: `token` (secreto compartido en una cabecera) o `hmac_sha256` (firma del cuerpo crudo). SIN DEFINIR = endpoint cerrado (503). No lo pongas hasta confirmar cuál usa el panel con una entrega real.",
+    requiredFor: [],
+    validate: (v) => (v === "token" || v === "hmac_sha256" ? null : "debe ser `token` o `hmac_sha256`"),
+  },
+  {
+    name: "BEEPING_WEBHOOK_SECRET",
+    category: "BEEPING",
+    secret: true,
+    description: "Secreto compartido del webhook, el MISMO que se pegue en el panel de Beeping. Distinto de BEEPING_BASIC_AUTH: este solo verifica entregas entrantes.",
+    requiredFor: [],
+  },
+  {
+    name: "BEEPING_WEBHOOK_AUTH_HEADER",
+    category: "BEEPING",
+    secret: false,
+    description: "Cabecera donde llega la credencial. Default `authorization` en modo token; en `hmac_sha256` es OBLIGATORIA (el nombre lo elige Beeping y no está publicado).",
+    requiredFor: [],
+    defaultValue: "authorization",
+  },
 
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {
@@ -390,7 +417,7 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     category: "WINNER_RADAR",
     secret: true,
     description:
-      "Clave de WinningHunter (formato wh_...). Es la ÚNICA credencial nueva que el radar necesita para funcionar. Sin ella no hay fuente de anuncios.",
+      "Clave de WinningHunter (formato wh_...). OPCIONAL y ya NO necesaria: el radar funciona entero con Meta. Sirve para contrastar o si Meta se cae (WINNER_RADAR_PROVIDER=wh|all).",
     requiredFor: [],
   },
   {
@@ -398,8 +425,8 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     category: "WINNER_RADAR",
     secret: true,
     description:
-      "Token propio de la Ad Library de Meta. OPCIONAL y deliberadamente SEPARADO de los de WhatsApp y Meta Ads: revocar uno no debe tumbar los otros. Solo devuelve anuncios comerciales en UE/Reino Unido.",
-    requiredFor: [],
+      "FUENTE PRINCIPAL del Winner Radar. Token propio de la Biblioteca de Anuncios de Meta, deliberadamente SEPARADO de los de WhatsApp y Meta Ads: revocar uno no debe tumbar los otros. Solo devuelve anuncios comerciales en UE/Reino Unido (lo impone la DSA), así que España funciona y EE. UU. no.",
+    requiredFor: ["winner-radar"],
   },
   {
     name: "META_AD_LIBRARY_API_VERSION",
@@ -422,6 +449,49 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     secret: true,
     description: "Client secret de TikTok Research. Solo se usa en servidor para pedir el token; NUNCA se guarda en la base de datos.",
     requiredFor: [],
+  },
+  {
+    name: "OPENAI_API_KEY",
+    category: "WINNER_RADAR",
+    secret: true,
+    description:
+      "Clave de OpenAI para la capa de análisis del radar (interpretar la búsqueda, leer creatividades, redactar el informe). Si no está, se usa OPENROUTER_API_KEY; y si tampoco, el radar funciona igual con análisis determinista y sin resúmenes.",
+    requiredFor: [],
+  },
+  {
+    name: "WINNER_RADAR_PROVIDER",
+    category: "WINNER_RADAR",
+    secret: false,
+    description:
+      "Quién manda como fuente de anuncios: meta (por defecto) | wh (WinningHunter) | all. 'meta' no necesita ninguna suscripción de pago.",
+    requiredFor: [],
+    defaultValue: "meta",
+    validate: enumOf("meta", "wh", "all", "auto", "winninghunter"),
+  },
+  {
+    name: "WINNER_RADAR_ENABLED",
+    category: "WINNER_RADAR",
+    secret: false,
+    description: "0 apaga el módulo entero. Ausente o 1 = encendido; no rompe instalaciones anteriores.",
+    requiredFor: [],
+    defaultValue: "1",
+    validate: bool01,
+  },
+  {
+    name: "WINNER_RADAR_MODEL_FAST",
+    category: "WINNER_RADAR",
+    secret: false,
+    description: "Modelo barato para clasificar en volumen. Por defecto gpt-4o-mini. Solo tocar si hay motivo.",
+    requiredFor: [],
+    defaultValue: "gpt-4o-mini",
+  },
+  {
+    name: "WINNER_RADAR_MODEL_DEEP",
+    category: "WINNER_RADAR",
+    secret: false,
+    description: "Modelo capaz para planificar la búsqueda y redactar el informe. Se usa una o dos veces por búsqueda. Por defecto gpt-4o.",
+    requiredFor: [],
+    defaultValue: "gpt-4o",
   },
   {
     name: "HUNTER_FIXTURE_MODE",
