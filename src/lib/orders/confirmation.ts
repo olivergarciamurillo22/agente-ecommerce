@@ -43,7 +43,6 @@ import {
   setOrderCustomerReplied,
   appendOrderProposedAddress,
   setOrderShopifyTagged,
-  setMode,
   type OrderRow,
 } from "../db";
 import { tagOrderConfirmed } from "../shopify/admin";
