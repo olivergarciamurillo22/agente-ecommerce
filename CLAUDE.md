@@ -207,8 +207,55 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 `67f05c7` (esquema 15, cloud_api, TEST_MODE=1). NADA DE LO DE ABAJO ESTÁ
 DESPLEGADO.**
 
-**Candidato: `release/casamable-v4.2` @ `fdad99e` (esquema 18).** Acumula, en
-este orden:
+---
+
+### La rama viva: `feat/ai-winner-radar` @ `7934bef` (esquema 20)
+
+**Es la que hay que probar.** Contiene TODO lo de `release/casamable-v4.2` más
+el Winner Radar y el receptor de webhooks de Beeping. `744 tests`, typecheck
+limpio, build correcto.
+
+| | |
+|---|---|
+| Qué validar | `docs/deploy/PEDRO-VALIDAR-RADAR.md` |
+| Comprobar el radar | `npm run hunter:doctor` → debe decir `SE PUEDE BUSCAR` |
+| Esquema | 19 → 20, **aditiva**: solo tablas `hunter_*`, ni una columna de `orders` |
+| Desplegado | **NO.** Nada de esto ha tocado el NAS |
+
+**El Winner Radar es Meta-first.** La Biblioteca de Anuncios de Meta es la
+fuente principal (gratuita, `META_AD_LIBRARY_ACCESS_TOKEN`); WinningHunter
+quedó **opcional y apagado por defecto**, gobernado por
+`WINNER_RADAR_PROVIDER` (`meta` | `wh` | `all`). Detalle en
+`docs/product-hunter/README.md`.
+
+**Lo que NUNCA se ha probado con datos reales, y hay que probar:** el módulo
+entero se validó con `HUNTER_FIXTURE_MODE=1`. El token de Meta responde a la
+sonda del doctor, pero **no se ha completado una búsqueda real**. Tres partes
+siguen sin ejercitarse porque dependen de datos que aún no existen: la
+economía (sin coste de proveedor todo sale `null`), la tendencia (necesita dos
+búsquedas separadas en el tiempo) y el encaje Casamable (necesita cierres
+reales).
+
+**Dos huecos conocidos del encargo, no cerrados:** los errores de Meta se
+enseñan en crudo en vez de en cristiano con un «Ver detalles», y la saturación
+dice «Media» sin explicar por qué.
+
+**Trampa del clustering que costó encontrar:** los anuncios de un mismo nicho
+usan la MISMA fórmula de copy, así que compararlos por texto metía cuatro
+productos distintos en un solo cluster y el radar enseñaba una oportunidad
+gigante que no existía. Ahora, cuando los dos anuncios traen nombre, se
+comparan SOLO los nombres. No lo relajes sin leer los tests de
+`RADAR · la FÓRMULA del copy`.
+
+**Beeping:** el receptor de webhooks existe y está **cerrado a propósito**
+(503 sin modo de autenticación declarado). Beeping ofrece webhooks en su panel
+pero no los documenta, así que no sabemos cómo firma. Guía en
+`docs/deploy/PEDRO-BEEPING-WEBHOOK.md`.
+
+---
+
+**Base contenida en la rama: `release/casamable-v4.2` @ `fdad99e`
+(esquema 18).** Acumula, en este orden:
 
 1. **Hotfix de producción Retell/ops (`114a458`)** — firma de webhooks
    alineada con el SDK oficial (`calls/retell-webhook.ts`), watchdog

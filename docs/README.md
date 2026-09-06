@@ -30,14 +30,16 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 
 ## OPERATIONS
 
-- **Deploy vigente: [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)** (espacio de atención, esquema 15→18, incluye el paso nuevo de crear usuarios)
+- **AHORA MISMO — validar antes que desplegar: [deploy/PEDRO-VALIDAR-RADAR.md](deploy/PEDRO-VALIDAR-RADAR.md)** (rama `feat/ai-winner-radar`, esquema 20; NO es un despliegue)
+- Deploy vigente: [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md) (espacio de atención, esquema 15→18, incluye el paso nuevo de crear usuarios)
+- Webhooks de Beeping (cerrados a propósito): [deploy/PEDRO-BEEPING-WEBHOOK.md](deploy/PEDRO-BEEPING-WEBHOOK.md)
 - Deploy anterior: [DEPLOY-HOTFIX-02-09.md](DEPLOY-HOTFIX-02-09.md) (incluye rollback)
 - Piloto en curso: [REAL-PILOT-02-09.md](REAL-PILOT-02-09.md) (matriz única de evidencia)
 - NAS: [UGREEN-DXP2800-DEPLOY.md](UGREEN-DXP2800-DEPLOY.md)
 - Local: [LOCAL-ENV-SETUP.md](LOCAL-ENV-SETUP.md)
 - Panel Sistema: [SYSTEM-CONTROL-CENTER.md](SYSTEM-CONTROL-CENTER.md)
 - Atención al cliente (roles/acceso): [WORKSPACE-ACCESO.md](WORKSPACE-ACCESO.md)
-- **Cazador con IA: [product-hunter/README.md](product-hunter/README.md)** (empezar por PEDRO-API-KEYS.md)
+- **Winner Radar (encontrar productos): [product-hunter/README.md](product-hunter/README.md)** — Meta-first; credenciales en PEDRO-API-KEYS.md
 - **Cómo responde el bot (reglas de conversación): [CONVERSACION-REGLAS.md](CONVERSACION-REGLAS.md)**
 - Retención/PII: [DATA-RETENTION.md](DATA-RETENTION.md) · Errores: [ERROR-MODEL.md](ERROR-MODEL.md)
 - Colaboración git: [COLLABORATION.md](COLLABORATION.md)
