@@ -56,6 +56,47 @@ export function beepingNotificationsEnabled(): boolean {
   return process.env.BEEPING_NOTIFICATIONS_ENABLED === "1";
 }
 
+// --- Webhooks entrantes (el panel los ofrece; la API no los documenta) ---
+
+export type BeepingWebhookAuthMode = "token" | "hmac_sha256";
+
+export interface BeepingWebhookAuthConfig {
+  mode: BeepingWebhookAuthMode;
+  /** SECRETO. Nunca se registra ni se imprime, tampoco parcialmente. */
+  secret: string;
+  /** Cabecera a verificar, en minúsculas. */
+  header: string;
+}
+
+/**
+ * Autenticación del webhook entrante. `null` significa SIN CONFIGURAR, que
+ * es el estado de hoy y se traduce en 503 sin ningún efecto.
+ *
+ * Ni el modo ni la cabecera tienen default que valga: la documentación de
+ * Beeping no describe webhooks (46 endpoints publicados, ninguno de ellos),
+ * así que ambos se declaran a mano cuando Pedro confirme contra una entrega
+ * real qué manda el panel. Adivinarlos sería peor que no tenerlos: haría
+ * pasar por "verificado" un endpoint público que cierra pedidos.
+ */
+export function beepingWebhookAuth(): BeepingWebhookAuthConfig | null {
+  const mode = (process.env.BEEPING_WEBHOOK_AUTH_MODE ?? "").trim().toLowerCase();
+  if (mode !== "token" && mode !== "hmac_sha256") return null;
+
+  const secret = (process.env.BEEPING_WEBHOOK_SECRET ?? "").trim();
+  if (!secret) return null;
+
+  const header = (process.env.BEEPING_WEBHOOK_AUTH_HEADER ?? "").trim().toLowerCase();
+  // En modo firma no hay default posible: el nombre de la cabecera lo elige
+  // Beeping y no está publicado. Sin él, el endpoint sigue cerrado.
+  if (mode === "hmac_sha256" && !header) return null;
+
+  return { mode, secret, header: header || "authorization" };
+}
+
+export function beepingWebhookConfigured(): boolean {
+  return beepingWebhookAuth() !== null;
+}
+
 // --- Tienda: autodetección y caché en settings (cero config manual) ---
 
 const SHOP_ID_KEY = "beeping_shop_id";

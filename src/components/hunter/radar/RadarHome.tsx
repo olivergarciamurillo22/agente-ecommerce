@@ -148,11 +148,14 @@ export default function RadarHome({
           placeholder={ejemplo}
           className="w-full resize-none bg-transparent px-5 pt-4 pb-2 text-[16px] leading-relaxed outline-none placeholder:text-brand-tertiary"
         />
-        <div className="flex items-center justify-between gap-3 px-3 pb-3">
+        {/* En móvil se apila: el botón principal a lo ancho y los ajustes
+            debajo. En una sola fila de 390 px, "Buscar oportunidades" partía
+            en dos líneas y el botón quedaba deforme. */}
+        <div className="flex flex-col-reverse gap-2 px-3 pb-3 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
           <button
             type="button"
             onClick={onOpenFilters}
-            className="inline-flex items-center gap-1.5 rounded-lg px-2.5 h-9 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg px-2.5 h-11 sm:h-9 text-[13px] text-brand-muted hover:bg-brand-surface-2 hover:text-brand-text transition-colors"
           >
             <IconFilter size={16} />
             Ajustar búsqueda
@@ -161,7 +164,7 @@ export default function RadarHome({
             type="button"
             onClick={onSearch}
             disabled={!puedeBuscar}
-            className="inline-flex items-center gap-2 rounded-xl bg-brand-gold px-5 h-11 text-[14px] font-semibold text-white hover:bg-brand-gold-soft disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
+            className="inline-flex w-full sm:w-auto items-center justify-center gap-2 whitespace-nowrap rounded-xl bg-brand-gold px-5 h-12 sm:h-11 text-[15px] sm:text-[14px] font-semibold text-white hover:bg-brand-gold-soft disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
           >
             <IconSearch size={17} />
             Buscar oportunidades

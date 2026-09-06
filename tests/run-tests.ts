@@ -13616,6 +13616,287 @@ async function main(): Promise<void> {
     assert.equal(clusters.length, 2, "compartir UNA palabra no puede unir dos productos");
   });
 
+  /** Lector local: `src()` pertenece a otro bloque de este fichero. */
+  const leerRadar = (rel: string) => fs.readFileSync(path.join(process.cwd(), rel), "utf8");
+
+  await test("RADAR UX · el Cazador abre en el Radar, no en una pantalla de error", () => {
+    const dash = leerRadar("src/components/Dashboard.tsx");
+    const view = leerRadar("src/components/hunter/ProductHunterView.tsx");
+    // Abría en "Estado": una pantalla vacía de un backend que no existe. El
+    // módulo parecía roto desde el primer segundo.
+    assert.match(dash, /type HunterTab = "radar" \| "studio"/, "el shell solo conoce dos destinos del Cazador");
+    assert.match(dash, /return "radar";/, "y por defecto abre el Radar");
+    assert.ok(!/hunterTab \?\? "search"/.test(dash), "ya no cae en la pestaña heredada");
+    assert.match(view, /if \(tab === "radar"\)/, "el Radar se sirve a pantalla completa");
+  });
+
+  await test("RADAR UX · salir de la ficha es un botón con texto, no una X escondida", () => {
+    const det = leerRadar("src/components/hunter/radar/OpportunityDetail.tsx");
+    // Era un cajón que tapaba media pantalla y se cerraba con una X sin borde
+    // en la esquina. Eso no es un botón: es un adorno que resulta que
+    // funciona. Y siete pestañas con tablas no caben en un cajón.
+    assert.match(det, /Volver a los resultados/, "la salida está escrita con todas las letras");
+    assert.ok(!/fixed inset-0/.test(det), "la ficha es una pantalla, no una capa encima");
+    assert.match(det, /useOverlayBack/, "atrás y Escape siguen funcionando, pero no son la única salida");
+  });
+
+  await test("RADAR UX · el panel de filtros usa la MISMA forma que la ficha de pedido", () => {
+    const filtros = leerRadar("src/components/hunter/radar/RadarFilters.tsx");
+    const pedidos = leerRadar("src/components/OrdersPanel.tsx");
+    // No se inventa una capa nueva: se copia la que el panel ya usa y la
+    // gente ya sabe cerrar.
+    for (const [patron, motivo] of [
+      [/bg-black\/50/, "fondo oscurecido al 50 %, como el de Pedidos"],
+      [/md:w-\[480px\]/, "mismo ancho en escritorio"],
+      [/inset-x-0 bottom-0/, "hoja desde abajo en móvil"],
+      [/border border-brand-border p-2/, "el botón de cerrar lleva BORDE: sin él no se lee como botón"],
+    ] as Array<[RegExp, string]>) {
+      assert.match(filtros, patron, motivo);
+    }
+    assert.match(pedidos, /md:w-\[480px\]/, "y el patrón de referencia sigue existiendo");
+  });
+
+  await test("RADAR UX · el estado del sistema se puede ABRIR, no solo leer", () => {
+    const nav = leerRadar("src/components/NavRail.tsx");
+    const dash = leerRadar("src/components/Dashboard.tsx");
+    // Decía "Con avisos" y no llevaba a ninguna parte: para ver QUÉ aviso
+    // había que entrar en Ajustes y acertar con la pestaña. Un indicador que
+    // avisa de un problema y no deja abrirlo es peor que no tenerlo.
+    assert.match(nav, /onViewChange\("system"\)/, "el indicador es un botón que navega");
+    assert.match(nav, /aria-label=\{`Estado del sistema/, "y se anuncia como tal");
+    assert.match(dash, /case "system":[\s\S]{0,200}settingsTab: "system"/, "el destino abre Ajustes en Sistema");
+    assert.match(dash, /"#sistema": "system"/, "con enlace propio, para poder recargar sin perderlo");
+    assert.match(dash, /hashOverride \?\? r\.hash/, "el hash del destino se respeta");
+  });
+
+  await test("RADAR UX · no se usan tokens de color que no existen", () => {
+    // `brand-line` y `brand-fg` NUNCA han estado definidos en globals.css.
+    // Estaban en 33 sitios del radar generando bordes invisibles: la clase se
+    // escribe, Tailwind no genera nada y el borde simplemente no aparece.
+    const definidos = leerRadar("src/app/globals.css");
+    for (const f of fs.readdirSync(path.join(process.cwd(), "src/components/hunter/radar"))) {
+      if (!f.endsWith(".tsx")) continue;
+      const code = leerRadar(`src/components/hunter/radar/${f}`);
+      // Solo utilidades de COLOR: `brand-pulse` es una animación de
+      // globals.css, no un token, y no tiene por qué estar en la paleta.
+      for (const uso of code.match(/\b(?:bg|text|border|ring|fill|stroke|from|to|divide|accent)-brand-[a-z0-9-]+/g) ?? []) {
+        const token = uso.replace(/^[a-z]+-brand-/, "").replace(/\/\d+$/, "");
+        assert.ok(
+          definidos.includes(`--color-brand-${token}`),
+          `${f}: brand-${token} no está definido en globals.css`
+        );
+      }
+    }
+  });
+
+  await test("RADAR · Meta es la fuente principal y WinningHunter es OPCIONAL", async () => {
+    const guardado = { ...process.env };
+    try {
+      const reg = await import("../src/lib/hunter/providers/registry");
+      const limpiar = () => {
+        delete process.env.META_AD_LIBRARY_ACCESS_TOKEN;
+        delete process.env.WINNINGHUNTER_API_KEY;
+        delete process.env.WINNER_RADAR_PROVIDER;
+        delete process.env.HUNTER_FIXTURE_MODE;
+      };
+
+      // Solo Meta: se puede buscar. Es LA prueba de que el módulo ya no
+      // depende de una suscripción de pago para existir.
+      limpiar();
+      process.env.META_AD_LIBRARY_ACCESS_TOKEN = "tok";
+      let fuentes = reg.searchProviders();
+      assert.equal(fuentes.length, 1);
+      assert.equal(fuentes[0].id, "meta_ad_library", "sin WinningHunter el radar busca igual");
+
+      // Con las dos y modo por defecto: manda Meta.
+      limpiar();
+      process.env.META_AD_LIBRARY_ACCESS_TOKEN = "tok";
+      process.env.WINNINGHUNTER_API_KEY = "wh_x";
+      fuentes = reg.searchProviders();
+      assert.equal(fuentes.length, 1, "el modo por defecto no arrastra al agregador de pago");
+      assert.equal(fuentes[0].id, "meta_ad_library");
+
+      // Pedido explícitamente, WinningHunter sigue disponible.
+      process.env.WINNER_RADAR_PROVIDER = "wh";
+      assert.equal(reg.searchProviders()[0].id, "winninghunter", "sigue soportado si se pide");
+      process.env.WINNER_RADAR_PROVIDER = "all";
+      assert.equal(reg.searchProviders().length, 2, "'all' usa las dos, Meta primero");
+      assert.equal(reg.searchProviders()[0].id, "meta_ad_library");
+
+      // Se pide una fuente que no tiene clave: se usa la que hay en vez de
+      // dejar el radar muerto sin decir por qué.
+      limpiar();
+      process.env.META_AD_LIBRARY_ACCESS_TOKEN = "tok";
+      process.env.WINNER_RADAR_PROVIDER = "wh";
+      assert.equal(reg.searchProviders()[0].id, "meta_ad_library", "no se queda sin fuente por un modo mal puesto");
+
+      // Sin ninguna clave: cero fuentes y un siguiente paso concreto.
+      limpiar();
+      const readiness = await reg.radarReadiness();
+      assert.equal(readiness.canSearch, false);
+      assert.match(readiness.nextStep ?? "", /META_AD_LIBRARY_ACCESS_TOKEN/, "dice qué variable falta");
+      assert.ok(!/WINNINGHUNTER/.test(readiness.nextStep ?? ""), "ya no pide la clave de pago para empezar");
+    } finally {
+      for (const k of ["META_AD_LIBRARY_ACCESS_TOKEN", "WINNINGHUNTER_API_KEY", "WINNER_RADAR_PROVIDER", "HUNTER_FIXTURE_MODE"]) {
+        if (guardado[k] === undefined) delete process.env[k];
+        else process.env[k] = guardado[k];
+      }
+    }
+  });
+
+  await test("RADAR · sin histórico NO se promete un segundero: se da la horquilla", async () => {
+    const { estimateDuration, formatDuration, remainingSeconds, stageProgress, initialStages } =
+      await import("../src/lib/hunter/stages");
+
+    const sinHistorico = estimateDuration({ queries: 8, providers: 1, aiBudget: 12 });
+    assert.equal(sinHistorico.fromHistory, false);
+    assert.match(sinHistorico.label, /–/, "sin datos se da un rango, no una cifra exacta");
+
+    const conHistorico = estimateDuration({ queries: 8, providers: 1, aiBudget: 12, historicalSecondsPerQuery: 4 });
+    assert.equal(conHistorico.fromHistory, true);
+    assert.ok(!conHistorico.label.includes("–"), "con histórico sí se da una cifra");
+
+    // Si va MÁS LENTO de lo previsto, lo que queda SUBE. Una cuenta atrás
+    // clavada en "quedan 10 s" durante dos minutos destruye la confianza en
+    // todo lo demás de la pantalla.
+    const optimista = remainingSeconds({ startedAt: 0, now: 60, progress: 0.5, estimateSeconds: 100 });
+    const pesimista = remainingSeconds({ startedAt: 0, now: 120, progress: 0.5, estimateSeconds: 100 });
+    assert.ok((pesimista ?? 0) > (optimista ?? 0), "el tiempo restante se recalcula con el ritmo real");
+
+    // La barra no puede quedarse quieta ni pasarse de 100.
+    const etapas = initialStages();
+    assert.equal(stageProgress(etapas), 0);
+    etapas.forEach((e) => (e.status = "complete"));
+    assert.equal(Math.round(stageProgress(etapas) * 100), 100);
+    assert.equal(formatDuration(95), "1 min 35 s");
+  });
+
+  await test("RADAR · sin datos NUNCA se dice DESCARTAR: se dice vigilar y por qué", async () => {
+    const { decideVerdict } = await import("../src/lib/hunter/verdict");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const { emptyScoreMap } = await import("../src/lib/hunter/scoring/opportunity");
+
+    const base = {
+      id: "x", canonicalName: "Producto", category: null, description: null, heroImageUrl: null,
+      observedPriceMin: null, observedPriceMax: null, supplierCostMin: null, supplierCostMax: null,
+      currency: "EUR", firstSeenAt: null, lastSeenAt: null, status: "new" as const,
+      sourceConfidence: 0.5, clusterConfidence: 0.8, features: [], economics: null, badges: [],
+      adIds: [], providers: [], summary: null, primaryProvider: null, images: [],
+      landingDomain: null, adLibraryUrl: null, recommendation: null,
+    };
+
+    // Sin score calculable → VIGILAR con motivo, jamás DESCARTAR. Descartar
+    // por ignorancia es como se pierden los productos que llegaron pronto.
+    const sinDatos = decideVerdict({ ...base, signals: emptySignals(), scores: emptyScoreMap() } as never);
+    assert.equal(sinDatos.recommendation, "VIGILAR");
+    assert.match(sinDatos.because, /datos suficientes/i, "explica que faltan datos");
+
+    // Un solo anunciante tampoco es descartable: es que aún no se sabe.
+    const unSolo = decideVerdict({
+      ...base,
+      signals: { ...emptySignals(), advertiserCount: 1, activeAds: 3 },
+      scores: { ...emptyScoreMap(), opportunity: { score: 75, confidence: 0.8, parts: [], unavailableReason: null } },
+    } as never);
+    assert.equal(unSolo.recommendation, "VIGILAR");
+
+    // Margen por debajo del mínimo viable SÍ descarta, y dice la cifra.
+    const sinMargen = decideVerdict({
+      ...base,
+      signals: { ...emptySignals(), advertiserCount: 8, activeAds: 30 },
+      scores: { ...emptyScoreMap(), opportunity: { score: 90, confidence: 0.9, parts: [], unavailableReason: null } },
+      economics: { margin: { value: 0.02, provenance: "CALCULATED", source: null } },
+    } as never);
+    assert.equal(sinMargen.recommendation, "DESCARTAR");
+    assert.match(sinMargen.because, /margen/i);
+  });
+
+  await test("RADAR · el informe no repite el mismo producto con dos consejos distintos", async () => {
+    const { todayActions } = await import("../src/lib/hunter/report");
+    const { emptySignals } = await import("../src/lib/hunter/types");
+    const { emptyScoreMap } = await import("../src/lib/hunter/scoring/opportunity");
+
+    const prod = (id: string) => ({
+      id, canonicalName: `Producto ${id}`, category: null, description: null, heroImageUrl: null,
+      observedPriceMin: 30, observedPriceMax: 40, supplierCostMin: null, supplierCostMax: null,
+      currency: "EUR", firstSeenAt: null, lastSeenAt: null, status: "new" as const,
+      sourceConfidence: 0.5, clusterConfidence: 0.8,
+      signals: { ...emptySignals(), advertiserCount: 5, activeAds: 10 },
+      scores: emptyScoreMap(), features: [], economics: null, badges: [], adIds: [], providers: [],
+      summary: null, primaryProvider: null, images: [], landingDomain: null, adLibraryUrl: null,
+      recommendation: "VIGILAR" as const,
+    });
+    const run = {
+      progress: { sourcesQueried: 1, sourcesTotal: 1, sourcesFailed: [], adsAnalyzed: 40,
+        productsDetected: 2, candidatesDiscarded: 0, opportunities: 2 },
+    };
+
+    // El mismo producto en el podio Y en la lista de vigilancia: decir
+    // "busca proveedor de X" y tres líneas más abajo "vigila X siete días"
+    // no son dos tareas, son dos consejos contradictorios.
+    const a = prod("a");
+    const acciones = todayActions([a], [a, prod("b")], [], run as never);
+    const ids = acciones.map((x) => x.productId).filter(Boolean);
+    assert.equal(new Set(ids).size, ids.length, "un producto aparece como mucho una vez");
+    assert.ok(acciones.every((x) => x.because.length > 10), "cada acción dice POR QUÉ");
+  });
+
+  await test("RADAR · la frase del plan la escribe el código, y los chips no se duplican", async () => {
+    const { describeFilters, chipsFor } = await import("../src/lib/hunter/search/planner");
+    const { defaultFilters } = await import("../src/lib/hunter/search/filters");
+
+    const f = { ...defaultFilters(), country: "ES", categories: ["mascotas"], keywords: ["mascotas", "quitapelos"],
+      priceMin: 25, priceMax: 50, fragile: false, saturationMax: 40 };
+    const frase = describeFilters(f);
+    // Nada de JSON: es lo que Pedro lee para decidir si la búsqueda es la
+    // que quería, ANTES de gastar una sola llamada.
+    assert.ok(!/[{}\[\]"]/.test(frase), "es una frase, no una estructura de datos");
+    assert.match(frase, /mascotas/);
+    assert.match(frase, /España/);
+    assert.match(frase, /25 y 50/);
+    assert.match(frase, /no frágiles/);
+    assert.ok(frase.endsWith("."), "termina como una frase");
+
+    const chips = chipsFor(f);
+    const etiquetas = chips.map((c) => c.label.toLowerCase());
+    assert.equal(new Set(etiquetas).size, etiquetas.length, "sin chips repetidos");
+    assert.ok(etiquetas.includes("mascotas"), "la categoría sale");
+    assert.equal(etiquetas.filter((e) => e === "mascotas").length, 1, "y NO también como palabra clave");
+  });
+
+  await test("RADAR · la clave del modelo no se filtra y la privacidad se comprueba antes de enviar", async () => {
+    const guardado = { ...process.env };
+    try {
+      const llm = await import("../src/lib/hunter/llm");
+      delete process.env.OPENAI_API_KEY;
+      delete process.env.OPENROUTER_API_KEY;
+      assert.equal(llm.llmBackend(), "none");
+      assert.equal(llm.llmConfigured(), false, "sin clave el radar sigue funcionando, solo sin lectura fina");
+
+      process.env.OPENROUTER_API_KEY = "or-x";
+      assert.equal(llm.llmBackend(), "openrouter");
+      // OpenAI tiene prioridad: es la clave que Pedro añade para el radar.
+      process.env.OPENAI_API_KEY = "sk-x";
+      assert.equal(llm.llmBackend(), "openai");
+
+      // El cortafuegos lanza ANTES de que salga un carácter.
+      assert.throws(() => llm.assertNoPII("escribe a juan@casamable.es"), llm.PIILeakError);
+      assert.throws(() => llm.assertNoPII("llámame al 666 12 34 56"), llm.PIILeakError);
+      // Y NO se dispara con un timestamp: un falso positivo aquí deja sin
+      // análisis a productos perfectamente limpios.
+      assert.doesNotThrow(() => llm.assertNoPII("visto por última vez en 1757155200"));
+      assert.doesNotThrow(() => llm.assertNoPII("Cepillo quitapelos, 29,90 € con envío en 24-48 h"));
+
+      // Ninguna función expone la clave.
+      const fuente = fs.readFileSync(path.join(process.cwd(), "src/lib/hunter/llm.ts"), "utf8");
+      assert.ok(!/console\.(log|error|warn)\([^)]*apiKey/i.test(fuente), "la clave no se imprime nunca");
+    } finally {
+      for (const k of ["OPENAI_API_KEY", "OPENROUTER_API_KEY"]) {
+        if (guardado[k] === undefined) delete process.env[k];
+        else process.env[k] = guardado[k];
+      }
+    }
+  });
+
   await test("RADAR · la FÓRMULA del copy no agrupa productos distintos (bug real del 06-09)", async () => {
     const { clusterAds } = await import("../src/lib/hunter/cluster");
     const { normalizeExternalAd } = await import("../src/lib/hunter/normalize");

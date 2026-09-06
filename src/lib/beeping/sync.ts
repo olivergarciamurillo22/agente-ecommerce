@@ -27,6 +27,7 @@ import {
 } from "../db";
 import { logIntegrationEvent, recordSchedulerRun } from "../system/repo";
 import { processSupplierUpdate } from "../tracking/service";
+import type { TrackingSource } from "../tracking/types";
 import { listOrders, listShops } from "./client";
 import { beepingEnabled, beepingNotificationsEnabled, cacheBeepingShop, cachedBeepingShopId } from "./config";
 import { beepingCourierName, beepingRawStatusLabel, mapBeepingOrder, parseBeepingDate, toBeepingDate } from "./mapper";
@@ -101,28 +102,53 @@ function matchLocal(remote: BeepingOrder): OrderRow | null {
   return getOrderByShopifyId(remote.external_id) ?? getOrderByShopifyOrderNumber(remote.external_id);
 }
 
-/** Aplica UN pedido remoto a la base local. Exportada para tests/simulación. */
-export function applyBeepingOrderLocally(remote: BeepingOrder): {
+export interface BeepingApplyOptions {
+  /** De dónde viene el dato: el webhook (E-06-09) o la reconciliación. */
+  source?: TrackingSource;
+  /** Clave de la entrega, para que el histórico deduplique la transición. */
+  eventId?: string | null;
+  /**
+   * Fecha del hecho EN LA FUENTE, si el envoltorio del webhook la trae. Solo
+   * se usa cuando el propio pedido no la lleva: la del pedido es más
+   * específica. Nunca se sustituye por now().
+   */
+  occurredAt?: number | null;
+}
+
+export interface BeepingApplyResult {
   matched: boolean;
   updated: boolean;
   closureUpdated: boolean;
   reviewMarked: boolean;
   skippedOtherSupplier: boolean;
-} {
+  /** Número de pedido local, para poder registrar el evento con referencia. */
+  orderNumber: string | null;
+}
+
+/**
+ * Aplica UN pedido remoto a la base local.
+ *
+ * ÚNICO camino de negocio de Beeping: lo llaman tanto la reconciliación por
+ * polling como el receptor de webhooks. Que sea uno solo es lo que garantiza
+ * que las dos vías no puedan divergir ni duplicar efectos — las guardas
+ * (terminales, llegadas atrasadas, sellos de WhatsApp) viven aquí abajo una
+ * sola vez. Si añades una vía nueva, pasa por aquí.
+ */
+export function applyBeepingOrderLocally(remote: BeepingOrder, opts: BeepingApplyOptions = {}): BeepingApplyResult {
   const local = matchLocal(remote);
-  if (!local) return { matched: false, updated: false, closureUpdated: false, reviewMarked: false, skippedOtherSupplier: false };
+  if (!local) return { matched: false, updated: false, closureUpdated: false, reviewMarked: false, skippedOtherSupplier: false, orderNumber: null };
 
   // Un pedido enrutado a otro proveedor no se toca: dos fuentes escribiendo
   // el mismo eje logístico es exactamente el lío que no queremos.
   if (local.supplier_platform === "dropea" || local.supplier_platform === "dropi") {
     updateBeepingSnapshot(local.id, { orderStatus: remote.status, externalId: remote.external_id });
-    return { matched: true, updated: false, closureUpdated: false, reviewMarked: false, skippedOtherSupplier: true };
+    return { matched: true, updated: false, closureUpdated: false, reviewMarked: false, skippedOtherSupplier: true, orderNumber: local.shopify_order_number };
   }
 
   updateBeepingSnapshot(local.id, { orderStatus: remote.status, externalId: remote.external_id });
 
   const mapping = mapBeepingOrder(remote.status, remote.tracking_stage);
-  const occurredAt = parseBeepingDate(remote.date_tracking_update) ?? parseBeepingDate(remote.date);
+  const occurredAt = parseBeepingDate(remote.date_tracking_update) ?? parseBeepingDate(remote.date) ?? opts.occurredAt ?? null;
 
   let updated = false;
   // "To be confirmed" no aporta nada al eje logístico: no hay envío aún.
@@ -132,7 +158,8 @@ export function applyBeepingOrderLocally(remote: BeepingOrder): {
       normalizedOverride: mapping.tracking,
       trackingNumber: remote.tracking_number,
       carrier: beepingCourierName(remote.courier_id),
-      source: "reconciliation",
+      source: opts.source ?? "reconciliation",
+      eventId: opts.eventId ?? null,
       occurredAt,
       suppressNotifications: !beepingNotificationsEnabled(),
     });
@@ -163,7 +190,7 @@ export function applyBeepingOrderLocally(remote: BeepingOrder): {
     reviewMarked = true;
   }
 
-  return { matched: true, updated, closureUpdated, reviewMarked, skippedOtherSupplier: false };
+  return { matched: true, updated, closureUpdated, reviewMarked, skippedOtherSupplier: false, orderNumber: local.shopify_order_number };
 }
 
 /** La pasada completa de reconciliación. READ-ONLY hacia Beeping. */

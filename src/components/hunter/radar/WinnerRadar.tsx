@@ -237,21 +237,24 @@ export default function WinnerRadar({ toolbar }: { toolbar?: React.ReactNode } =
           En la ficha no aparece: esa pantalla trae su propia cabecera y su
           "volver", y dos filas de navegación apiladas hacen dudar de dónde
           estás y qué cierra cada cosa. */}
-      <div className={`sticky top-0 z-20 items-center justify-between gap-3 border-b border-brand-border bg-brand-bg/85 px-4 md:px-8 py-2.5 backdrop-blur ${vista === "detalle" ? "hidden" : "flex"}`}>
-        <div className="flex min-w-0 items-center gap-3">
+      <div className={`sticky top-0 z-20 items-center justify-between gap-2 border-b border-brand-border bg-brand-bg/85 px-4 md:px-8 py-2.5 backdrop-blur ${vista === "detalle" ? "hidden" : "flex"}`}>
+        {/* `min-w-0` + scroll horizontal: sin esto, en 390 px las pestañas y
+            la etiqueta de datos de ejemplo se montaban una encima de otra. */}
+        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto no-scrollbar">
           {toolbar}
           {/* El aviso de datos de ejemplo va en la BARRA, no solo en los
               resultados: si solo se ve al final, se puede pasar una búsqueda
               entera creyendo que los productos son reales. */}
           {readiness?.fixtureMode ? (
             <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-[.08em] text-amber-900">
-              Datos de ejemplo
+              <span className="hidden sm:inline">Datos de ejemplo</span>
+              <span className="sm:hidden">Ejemplo</span>
             </span>
           ) : readiness?.activeProvider === "meta_ad_library" ? (
             <span className="hidden lg:inline text-[11px] text-brand-tertiary">Biblioteca de Anuncios de Meta</span>
           ) : null}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1">
           {corriendo && vista !== "progreso" && (
             <button
               type="button"

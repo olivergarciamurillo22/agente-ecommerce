@@ -7,7 +7,7 @@
 import { getSetting, systemDbHandle } from "../db";
 import { countIntegrationEvents, getServiceHealth } from "../system/repo";
 import type { HealthStatus } from "../system/types";
-import { beepingAutoReleaseEnabled, beepingCredentialsPresent, beepingEnabled, beepingWriteEnabled, cachedBeepingShopName } from "./config";
+import { beepingAutoReleaseEnabled, beepingCredentialsPresent, beepingEnabled, beepingWebhookAuth, beepingWriteEnabled, cachedBeepingShopName } from "./config";
 
 export interface BeepingHealth {
   status: HealthStatus;
@@ -17,6 +17,11 @@ export interface BeepingHealth {
   /** SIEMPRE false hoy; el toggle vive bloqueado hasta el piloto real. */
   autoRelease: boolean;
   shopName: string | null;
+  /**
+   * Webhooks entrantes. `not_configured` es lo esperado hoy: el endpoint
+   * existe y responde 503 hasta saber cómo autentica Beeping.
+   */
+  webhook: { state: "not_configured" | "ready"; mode: string | null; lastReceivedAt: number | null };
   lastApiSuccessAt: number | null;
   lastApiErrorAt: number | null;
   lastApiError: string | null;
@@ -37,6 +42,7 @@ const WEEK = 7 * 86400;
 export function getBeepingHealth(): BeepingHealth {
   const health = getServiceHealth("beeping");
   const checkpoint = parseInt(getSetting("beeping_sync_checkpoint") ?? "", 10);
+  const webhookAuth = beepingWebhookAuth();
 
   const base: BeepingHealth = {
     status: "unknown",
@@ -45,6 +51,7 @@ export function getBeepingHealth(): BeepingHealth {
     writeEnabled: beepingWriteEnabled(),
     autoRelease: beepingAutoReleaseEnabled(),
     shopName: cachedBeepingShopName(),
+    webhook: { state: webhookAuth ? "ready" : "not_configured", mode: webhookAuth?.mode ?? null, lastReceivedAt: null },
     lastApiSuccessAt: health?.last_success_at ?? null,
     lastApiErrorAt: health?.last_error_at ?? null,
     lastApiError: health?.last_error_message ?? null,
@@ -75,6 +82,12 @@ export function getBeepingHealth(): BeepingHealth {
     base.ambiguousReleases = (
       db.prepare("SELECT COUNT(*) AS n FROM orders WHERE beeping_sync_status = 'release_unknown'").get() as { n: number }
     ).n;
+    // ¿Ha llegado alguna entrega de verdad? Distingue "configurado" de
+    // "configurado Y funcionando", que es lo que Pedro necesita ver.
+    const ultima = db
+      .prepare("SELECT MAX(created_at) AS t FROM integration_events WHERE integration = 'beeping' AND event_type LIKE 'beeping_webhook_%'")
+      .get() as { t: number | null } | undefined;
+    base.webhook.lastReceivedAt = ultima?.t ?? null;
   } catch {
     /* DB sin migrar todavía: se queda en ceros */
   }

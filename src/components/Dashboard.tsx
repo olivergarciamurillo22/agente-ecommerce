@@ -179,7 +179,11 @@ export default function Dashboard({ phone, provider }: DashboardProps) {
     // Antes esto era SIEMPRE replaceState, y por eso "atrás" no devolvía a la
     // sección anterior: te sacaba de la aplicación. En el móvil, donde atrás
     // es un gesto del sistema, eso hacía que el panel se sintiera roto.
-    if (!fromHistory) navigateHash(hashOverride ?? AREA_TO_HASH[r.area], "push");
+    // `r.hash` existía y no se leía: los destinos con enlace propio
+    // (#landing-studio, #sistema) dependían de que el llamador lo pasara a
+    // mano, así que al llegar por otro camino la URL se quedaba en la del
+    // área y recargar te dejaba en otra pestaña.
+    if (!fromHistory) navigateHash(hashOverride ?? r.hash ?? AREA_TO_HASH[r.area], "push");
   }, []);
 
   useEffect(() => {
