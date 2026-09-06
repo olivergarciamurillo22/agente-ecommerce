@@ -799,6 +799,14 @@ export function migrateOrderAttribution(db: Database.Database): void {
 }
 
 /** Migración 18: identidad, sesiones y auditoría. Solo crea tablas/índices. */
+/**
+ * Migración (SCHEMA_VERSION 19): AI Winner Radar. Vive en su propio fichero
+ * (`hunter/schema.ts`) porque son 12 tablas y meterlas aquí enterraría el
+ * resto del esquema. ADITIVA: ni una columna de las tablas existentes.
+ */
+export { migrateHunter } from "./hunter/schema";
+import { migrateHunter as migrateHunterSchema } from "./hunter/schema";
+
 export function migrateWorkspaceAuth(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -1488,6 +1496,7 @@ function build() {
   migrateCallAgentVersion(db);
   migrateOrderAttribution(db);
   migrateWorkspaceAuth(db);
+  migrateHunterSchema(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1657,7 +1666,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 18;
+export const SCHEMA_VERSION = 19;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
