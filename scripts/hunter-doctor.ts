@@ -126,7 +126,16 @@ async function main(): Promise<void> {
 
   console.log("\n════════ VEREDICTO ════════");
   if (readiness.canSearch) {
-    console.log(`  ● SE PUEDE BUSCAR — ${readiness.reason}\n`);
+    console.log(`  ● SE PUEDE BUSCAR — ${readiness.reason}`);
+    // Una fuente caída con otra viva no impide buscar, pero NO es "todo
+    // bien": la cobertura será parcial y hay que decirlo, no esconderlo tras
+    // un verde.
+    if (readiness.brokenProviders.length > 0) {
+      console.log(`  ◐ COBERTURA PARCIAL — no responden: ${readiness.brokenProviders.join(", ")}`);
+      console.log(`     ${readiness.nextStep ?? "Revisa esas credenciales."}\n`);
+      process.exit(1);
+    }
+    console.log("");
     process.exit(0);
   }
   console.log(`  ○ NO SE PUEDE BUSCAR — ${readiness.reason}`);
