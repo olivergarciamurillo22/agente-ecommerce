@@ -71,6 +71,7 @@ import {
 } from "./multi-order";
 import { logIntegrationEvent } from "../system/repo";
 import { assessOrderAddress } from "./address-quality";
+import { markOrderToSend } from "../suppliers/beeping";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -222,6 +223,9 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): void {
     );
     return;
   }
+  // Best-effort y en segundo plano: nunca retrasa WhatsApp ni revierte el
+  // estado local si Beeping falla.
+  void markOrderToSend(order.shopify_order_number);
   void tagOrderConfirmed(order.shopify_order_id).then((ok) => {
     if (ok) setOrderShopifyTagged(order.id);
   });
