@@ -173,6 +173,15 @@ adivina.
   Dropea…»). La columna `dispatch_cooldowns.channel` deja constancia de por
   cuál salió (o iba a salir).
 
+### Aviso de despacho al cliente (07-09, propuesta)
+
+Al ejecutarse el despacho por cualquiera de los dos canales se intenta el
+«recordatorio de envío» (`src/lib/orders/dispatch-notice.ts`, plantilla
+`dispatch_notice`), **apagado por defecto** (`DISPATCH_NOTICE_WHATSAPP_ENABLED=0`)
+y con el mapping deshabilitado hasta que Pedro apruebe el texto y Meta la
+apruebe: `docs/WHATSAPP-TEMPLATES.md` § Plantillas de recordatorio. El aviso
+del día de entrega ya existe (`reparto_hoy`); no hay fecha estimada en Beeping.
+
 ### Cómo desbloquea una persona un despacho retenido
 
 1. Resolver la causa: la escalada en la bandeja de atención (`/trabajo`), la
@@ -211,9 +220,9 @@ y seguiría siendo despreciable.
 
 Migraciones 23 (`migrateAutoDispatch`: `dispatch_cooldowns`,
 `intent_classifications`), 24 (`migrateDispatchChannels`: `dispatch_channels` +
-columna `dispatch_cooldowns.channel`) y 25 (`migrateAiCancellations`:
-`ai_cancellations`). Aditivas; cubiertas por el fixture realista
-`scripts/test-migration-v43.ts` (17→25).
+columna `dispatch_cooldowns.channel`) 25 (`migrateAiCancellations`:
+`ai_cancellations`) y 26 (`migrateDispatchNotice`: `orders.dispatch_notice_sent_at`).
+Aditivas; cubiertas por el fixture realista `scripts/test-migration-v43.ts` (17→26).
 
 ## Tests (`tests/run-tests.ts`, bloque «Auto-despacho tras cooldown + IA de intención»)
 

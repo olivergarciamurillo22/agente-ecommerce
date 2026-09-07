@@ -49,3 +49,78 @@ código las retiene con motivo visible (`template_not_ready`).**
 ```bash
 npm run whatsapp:templates:doctor   # donde estén META_WHATSAPP_ACCESS_TOKEN + BUSINESS_ACCOUNT_ID (el NAS)
 ```
+
+
+## Plantillas de recordatorio (envío + día de entrega) — PROPUESTA 07-09-2026, pendiente de Pedro
+
+**Nada de esto está activo ni enviado a Meta.** Una plantilla aprobada no se
+puede editar sin volver a revisión: Pedro aprueba primero el texto, luego se
+crea en WhatsApp Manager, luego el doctor la verifica, y solo entonces se
+habilita el mapping y el flag.
+
+### 1 · Recordatorio de ENVÍO → clave lógica `dispatch_notice` (nueva)
+
+- **Cuándo se dispara:** al pasar el pedido a despachado por el **router de
+  canal** (`executeDispatch` → `executed`, sea por Beeping mark-to-send o por
+  el confirm de Dropea). Es el evento `auto_dispatch_executed` del Bloque 7.
+- **Qué hay en ese momento:** la orden de preparar acaba de llegar al
+  almacén. **No existe todavía número de seguimiento** (Beeping lo devuelve
+  cuando el pedido pasa a `status = 4 Enviado`; Dropea, al recogerlo el
+  transportista). Por eso la plantilla **no lleva enlace**: prometerlo sería
+  mentir. El enlace llega con la plantilla ya existente `tracking_available`
+  (`pedido_confirmado_casamable`) cuando el polling ve el número.
+- **Nombre real propuesto:** `pedido_en_preparacion_casamable` · es · UTILITY · sin botones.
+- **Variables (3):** `{{1}}` nombre · `{{2}}` nº de pedido (`#1042`) · `{{3}}` importe (`34,99 €`).
+- **Texto propuesto (a aprobar por Pedro tal cual o corregido antes de crearlo en Meta):**
+
+> Hola {{1}}, tu pedido {{2}} de Casamable ya está en preparación y saldrá del almacén en las próximas horas 📦
+>
+> En cuanto el transportista lo recoja te enviaremos por aquí el número de seguimiento.
+>
+> Recuerda que es un pedido contra reembolso y deberás abonar {{3}} en efectivo al repartidor.
+>
+> Gracias por confiar en Casamable.
+
+- **Código:** `src/lib/orders/dispatch-notice.ts`, mismas reglas que
+  `tracking/notifications.ts`: gates de seguridad ANTES del claim, plantilla
+  real verificada y APPROVED (si no, `template_not_ready` sin consumir sello),
+  claim atómico del sello `orders.dispatch_notice_sent_at` (migración 26), todo
+  por el outbox, un aviso por pedido. Un fallo al encolar devuelve el sello.
+- **Estado hoy:** `DISPATCH_NOTICE_WHATSAPP_ENABLED=0` (default) y el mapping
+  `dispatch_notice` → `pedido_en_preparacion_casamable` con `enabled: false`
+  en `config/whatsapp-templates.json`. Con cualquiera de los dos cerrados no
+  sale nada. Checklist para activarla: (1) Pedro aprueba el texto; (2) se crea
+  en WhatsApp Manager con ese nombre; (3) Meta la aprueba; (4)
+  `npm run whatsapp:templates:doctor` en el NAS la ve APPROVED con 3
+  variables y 0 botones; (5) `enabled: true` en el mapping; (6)
+  `DISPATCH_NOTICE_WHATSAPP_ENABLED=1`.
+
+### 2 · Recordatorio del DÍA DE ENTREGA → ya existe como `out_for_delivery_cod` (`reparto_hoy`); una versión por «fecha estimada» NO es viable hoy
+
+**Informe de campos de fecha de entrega realmente disponibles (07-09):**
+
+| Fuente | Campos de fecha/estado que expone | ¿Fecha estimada de entrega? |
+|---|---|---|
+| Beeping `GET /api/get_orders` (`docs/BEEPING-API-CONTRACT.md` §5, `src/lib/beeping/types.ts`) | `date` (alta), `date_tracking_update` (último cambio), `tracking_stage` (1 sin estado · 2 en tránsito · **3 en reparto** · 4 punto de recogida · 5 entregado · 6 devuelto · 7 cancelado · 8 dañado), `tracking_number`, `courier_id` (1 = Correos Express, 3 = Correos, 5/9/10/11 = GLS) | **NO.** No hay ningún campo de fecha prevista, ETA ni ventana horaria |
+| Correos Express | **No hay integración directa en el repo** (solo aparece como `courier_id = 1` dentro de Beeping). Su API propia (con fecha prevista) exigiría contrato y credenciales nuevas | No disponible |
+| Dropea / Dropi (`docs/DROPEA-API-CONTRACT.md`, `DROPI-API-CONTRACT.md`) | estado y sub-estado del pedido, tracking; sin fecha prevista | **NO** |
+| Nuestro modelo (`SupplierUpdate`, `tracking/types.ts`) | `rawStatus`, `trackingNumber`, `trackingUrl`, `carrier`, `rawSubStatus` | No existe el campo: no se inventa |
+
+**Consecuencia:** el único dato real de «día de entrega» es `tracking_stage = 3`
+(**en reparto**), que llega el mismo día en que el repartidor sale con el
+paquete. Ese aviso **ya está implementado**: evento `OUT_FOR_DELIVERY` →
+plantilla `reparto_hoy` («tu pedido está hoy en reparto… recuerda abonar
+{{4}} en efectivo»), con el sello `out_for_delivery_notification_sent_at` y
+el polling de Beeping cada 5 min en reparto (`TRACKING_POLL_OUT_FOR_DELIVERY_MIN`).
+Está **PENDING en Meta** desde la edición del 01-09: en cuanto el doctor la vea
+APPROVED, sale sola. **No se crea una segunda plantilla para lo mismo.**
+
+Un recordatorio *anticipado* («mañana recibirás tu pedido») **queda
+pendiente del dato**: exigiría que Beeping exponga una fecha prevista o una
+integración directa con Correos Express/GLS. Hasta entonces no hay plantilla
+ni código para él, para no inventar una fecha. Si Pedro consigue ese dato,
+el texto propuesto para cuando exista sería:
+
+> Hola {{1}}, tu pedido {{2}} de Casamable tiene prevista la entrega para {{3}} por {{4}}. Recuerda tener {{5}} en efectivo para el repartidor. Si ese día no vas a estar, respóndenos a este mensaje.
+
+(5 variables: nombre, nº pedido, fecha, transportista, importe. **No crear en Meta todavía.**)

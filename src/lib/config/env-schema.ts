@@ -390,6 +390,16 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   },
   { name: "POST_CONFIRMATION_AI_MODEL", category: "AUTO_DISPATCH", secret: false, description: "Modelo para clasificar la intención. Comparte OPENAI_API_KEY con la validación de direcciones.", requiredFor: [], defaultValue: "gpt-4o-mini" },
   { name: "POST_CONFIRMATION_AI_TIMEOUT_MS", category: "AUTO_DISPATCH", secret: false, description: "Timeout (1000–60000). Al vencer se escala a persona (fail-closed).", requiredFor: [], defaultValue: "8000", validate: intPos },
+  {
+    name: "DISPATCH_NOTICE_WHATSAPP_ENABLED",
+    category: "AUTO_DISPATCH",
+    secret: false,
+    description: "1 = al despacharse el pedido por el router de canal (Beeping o Dropea) se envía la plantilla dispatch_notice ('tu pedido ya está en preparación'; sin enlace: el seguimiento va en tracking_available). Exige plantilla APPROVED en Meta, verificada por whatsapp:templates:doctor y mapping habilitado (hoy DESHABILITADO: propuesta pendiente de Pedro). 0 (default) = no se envía nada.",
+    requiredFor: [],
+    mustEqual: { "local-safe": "0" },
+    defaultValue: "0",
+    validate: bool01,
+  },
 
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {

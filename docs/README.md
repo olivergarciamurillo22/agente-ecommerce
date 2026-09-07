@@ -30,7 +30,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 
 ## OPERATIONS
 
-- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→25) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
+- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→26) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
 - Migración v4.3 (ensayo sintético + `migration:verify` sobre copia): [deploy/MIGRATION-v4.3.md](deploy/MIGRATION-v4.3.md) · identidad de build y `PRODUCTION_COMMIT`: [deploy/NAS-PRODUCTION.md](deploy/NAS-PRODUCTION.md)
 - Auditoría de números sin fuente (incluye el código del 07-09): [deploy/NUMEROS-SIN-FUENTE-v4.3.md](deploy/NUMEROS-SIN-FUENTE-v4.3.md) · hallazgos de casos borde: [deploy/HALLAZGOS-BORDES-07-09.md](deploy/HALLAZGOS-BORDES-07-09.md)
 - Deploy anterior: [DEPLOY-HOTFIX-02-09.md](DEPLOY-HOTFIX-02-09.md) (incluye rollback)

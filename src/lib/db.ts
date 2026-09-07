@@ -1161,6 +1161,8 @@ export interface OrderRow {
   delivered_notification_sent_at: number | null;
   delivery_attempt_notification_sent_at: number | null;
   pickup_point_notification_sent_at: number | null;
+  /** Sello del aviso de despacho ("recordatorio de envío", migración 26). */
+  dispatch_notice_sent_at: number | null;
   /** Nombre/dirección/enlace del punto de recogida que reporta el proveedor. */
   pickup_point_info: string | null;
   /** Autorización manual, pedido a pedido, para el piloto de proveedores. */
@@ -1744,6 +1746,7 @@ function build() {
   migrateAutoDispatch(db);
   migrateDispatchChannels(db);
   migrateAiCancellations(db);
+  migrateDispatchNotice(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1942,7 +1945,24 @@ export function migrateAiCancellations(db: Database.Database): void {
   `);
 }
 
-export const SCHEMA_VERSION = 25;
+/**
+ * Migración 26 (07-09-2026): aviso de despacho por WhatsApp —
+ * docs/WHATSAPP-TEMPLATES.md § Plantillas de recordatorio. Sello
+ * `orders.dispatch_notice_sent_at` (un aviso por pedido, claim atómico). ADITIVA.
+ */
+export function migrateDispatchNotice(db: Database.Database): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(orders)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (cols.size === 0) return; // sin tabla orders (fixtures sintéticos): nada que migrar
+  if (!cols.has("dispatch_notice_sent_at")) {
+    try {
+      db.exec("ALTER TABLE orders ADD COLUMN dispatch_notice_sent_at INTEGER");
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
+}
+
+export const SCHEMA_VERSION = 26;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

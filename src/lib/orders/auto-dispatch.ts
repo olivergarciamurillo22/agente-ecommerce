@@ -25,6 +25,7 @@ import { markOrderToSend, type BeepingMarkToSendResult } from "../suppliers/beep
 import { getOpenAddressAlert } from "./address-validation";
 import { resolveDispatchChannel, type DispatchChannel } from "./dispatch-channel";
 import { confirmDropeaOrder, type CreateOrderOutcome } from "../suppliers/dropea/create-order";
+import { notifyDispatchExecuted, type DispatchNoticeDeps } from "./dispatch-notice";
 
 /** Cooldown confirmado por Pedro (07-09-2026): 6 horas. Única fuente; env AUTO_DISPATCH_COOLDOWN_HOURS lo sobreescribe. */
 export const AUTO_DISPATCH_DEFAULT_HOURS = 6;
@@ -100,6 +101,8 @@ export interface DispatchExecution {
 
 /** Adaptadores inyectables (tests y simulación sin red). NUNCA se llaman los dos para el mismo pedido. */
 export interface DispatchDeps {
+  /** Aviso de despacho al cliente (apagado por defecto; docs/WHATSAPP-TEMPLATES.md). */
+  notice?: DispatchNoticeDeps;
   /** Adaptador Beeping: PUT /api/order/mark-to-send/{external_id} (feat/beeping-mark-to-send). */
   markToSend?: (externalId: string | number) => Promise<BeepingMarkToSendResult>;
   /** Adaptador Dropea: POST /dropshipper/orders/{id}/confirm (segundo paso del contrato; exige DROPEA_WRITE_ENABLED=1). */
@@ -144,6 +147,8 @@ export async function executeDispatch(orderId: number, via: "cooldown" | "manual
     db.prepare("INSERT INTO dispatch_cooldowns (order_id, status, scheduled_at, due_at, evaluated_at, executed_at, executed_via, outcome, channel) VALUES (?, 'executed', ?, ?, ?, ?, ?, ?, 'beeping') ON CONFLICT(order_id) DO UPDATE SET status = 'executed', evaluated_at = excluded.evaluated_at, executed_at = excluded.executed_at, executed_via = excluded.executed_via, outcome = excluded.outcome, channel = 'beeping', blocked_reason = NULL")
       .run(orderId, nowSec, nowSec, nowSec, nowSec, via, result.outcome);
     logIntegrationEvent("beeping", "auto_dispatch_executed", "info", `despacho ${via} por Beeping: mark-to-send ${result.outcome}`, order.shopify_order_number);
+    // Aviso de despacho ("recordatorio de envío"): best-effort, apagado por defecto.
+    try { notifyDispatchExecuted(order.id, "beeping", deps.notice); } catch { /* nunca rompe el despacho */ }
     return { status: "executed", reasons: [], channel: "beeping", result };
   }
 
@@ -161,6 +166,7 @@ export async function executeDispatch(orderId: number, via: "cooldown" | "manual
   db.prepare("INSERT INTO dispatch_cooldowns (order_id, status, scheduled_at, due_at, evaluated_at, executed_at, executed_via, outcome, channel) VALUES (?, 'executed', ?, ?, ?, ?, ?, ?, 'dropea') ON CONFLICT(order_id) DO UPDATE SET status = 'executed', evaluated_at = excluded.evaluated_at, executed_at = excluded.executed_at, executed_via = excluded.executed_via, outcome = excluded.outcome, channel = 'dropea', blocked_reason = NULL")
     .run(orderId, nowSec, nowSec, nowSec, nowSec, via, dropea.detail);
   logIntegrationEvent("dropea", "auto_dispatch_executed", "info", `despacho ${via} por Dropea: ${dropea.detail}`, order.shopify_order_number);
+  try { notifyDispatchExecuted(order.id, "dropea", deps.notice); } catch { /* nunca rompe el despacho */ }
   return { status: "executed", reasons: [], channel: "dropea", dropea };
 }
 

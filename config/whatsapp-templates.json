@@ -252,6 +252,21 @@
         }
       ],
       "fallback": "Plantilla aprobada en Meta"
+    },
+    {
+      "name": "dispatch_notice",
+      "language": "es",
+      "category": "UTILITY",
+      "use": "Recordatorio de ENVÍO: el pedido acaba de despacharse por el router de canal (Beeping o Dropea). En ese momento NO hay número de seguimiento (Beeping lo da al pasar a 'Enviado'), por eso no lleva enlace: el enlace va en tracking_available.",
+      "variables": [
+        "nombre",
+        "numero_pedido",
+        "importe"
+      ],
+      "draft_body": "Hola {{1}}, tu pedido {{2}} de Casamable ya está en preparación y saldrá del almacén en las próximas horas 📦\n\nEn cuanto el transportista lo recoja te enviaremos por aquí el número de seguimiento.\n\nRecuerda que es un pedido contra reembolso y deberás abonar {{3}} en efectivo al repartidor.\n\nGracias por confiar en Casamable.",
+      "buttons": [],
+      "fallback": "buildDispatchNoticeMessage (orders/dispatch-notice.ts)",
+      "status_07_09": "PROPUESTA_PENDIENTE_APROBACION_PEDRO — texto NO enviado a Meta. Pedro debe aprobar el texto ANTES de crearla en WhatsApp Manager (una plantilla aprobada no se puede editar sin volver a revisión)."
     }
   ],
   "_mappings_readme": [
@@ -355,6 +370,18 @@
         "importe"
       ],
       "note": "Solo fuera de ventana de 24h (confirmación por llamada o manual). NUNCA como primer mensaje (decisión de Pedro 01-09). Sin uso en código todavía."
+    },
+    {
+      "logicalKey": "dispatch_notice",
+      "providerTemplate": "pedido_en_preparacion_casamable",
+      "language": "es",
+      "params": [
+        "nombre",
+        "numero_pedido",
+        "importe"
+      ],
+      "enabled": false,
+      "note": "PROPUESTA 07-09 (docs/WHATSAPP-TEMPLATES.md § Recordatorios). El nombre real es tentativo: la plantilla NO existe todavía en la WABA. DESHABILITADO hasta que (1) Pedro apruebe el texto, (2) se cree y Meta la apruebe, (3) whatsapp:templates:doctor la verifique, (4) se ponga enabled:true y DISPATCH_NOTICE_WHATSAPP_ENABLED=1. Mientras tanto cualquier intento queda retenido con TEMPLATE_MAPPING_DISABLED, sin consumir sello."
     }
   ],
   "_unavailable_in_waba": {

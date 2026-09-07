@@ -1609,6 +1609,102 @@ async function main(): Promise<void> {
     });
   });
 
+  // ---------- AVISO DE DESPACHO ("recordatorio de envío", 07-09) ----------
+  const dispatchNotice = await import("../src/lib/orders/dispatch-notice");
+  const tplMod = await import("../src/lib/whatsapp/templates");
+
+  await test("AVISO DESPACHO · apagado por defecto: al despacharse el pedido no se envía nada ni se consume sello; la plantilla propuesta existe en el JSON y su mapping nace DESHABILITADO (pendiente de Pedro y de Meta)", async () => {
+    // Contrato local + mapping: propuesta, nunca activa por sí sola.
+    const cfg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/whatsapp-templates.json"), "utf8")) as { templates: Array<{ name: string; variables: string[]; draft_body: string }>; provider_mappings: Array<{ logicalKey: string; enabled?: boolean; params: string[] }> };
+    const tpl = cfg.templates.find((t) => t.name === "dispatch_notice")!;
+    assert.ok(tpl, "spec local dispatch_notice");
+    assert.deepEqual(tpl.variables, ["nombre", "numero_pedido", "importe"]);
+    assert.equal((tpl.draft_body.match(/\{\{\d\}\}/g) ?? []).length, 3, "tres huecos, sin enlace de seguimiento (no existe en el momento del despacho)");
+    assert.doesNotMatch(tpl.draft_body, /https?:\/\//, "sin URL: el seguimiento va en tracking_available");
+    const map = cfg.provider_mappings.find((m) => m.logicalKey === "dispatch_notice")!;
+    assert.equal(map.enabled, false, "DESHABILITADO hasta aprobación de Pedro + Meta + doctor");
+    assert.deepEqual(map.params, tpl.variables);
+    const r = tplMod.getTemplateReadiness("dispatch_notice");
+    assert.equal(r.ready, false);
+    assert.equal(r.blocker, "TEMPLATE_MAPPING_DISABLED");
+    // Flag apagado (default): despachar no avisa.
+    await withEnv({ ...DISPATCH_ON, DISPATCH_NOTICE_WHATSAPP_ENABLED: undefined }, async () => {
+      assert.equal(dispatchNotice.dispatchNoticeEnabled(), false);
+      const order = mkConfirmedForDispatch("60");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const due = dispatch.getDispatchCooldown(order.id)!.due_at;
+      let sends = 0;
+      const d = await dispatch.executeDispatch(order.id, "cooldown", due + 1, { markToSend: fakeMarkToSend, notice: { send: () => { sends++; return true; } } });
+      assert.equal(d.status, "executed");
+      assert.equal(sends, 0, "con el flag a 0 no se intenta enviar");
+      assert.equal(db.getOrderById(order.id)!.dispatch_notice_sent_at, null);
+      assert.equal(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='dispatch_notice_sent' AND order_ref=?").get(order.shopify_order_number), undefined);
+    });
+  });
+
+  await test("AVISO DESPACHO · con el flag a 1 pero la plantilla sin aprobar/verificar → RETENIDO con motivo visible y sin consumir el sello; con gates cerrados tampoco consume", async () => {
+    const order = mkConfirmedForDispatch("61");
+    handleOrderButtonReply(order.phone, "confirm_order");
+    await withEnv({ ...DISPATCH_ON, DISPATCH_NOTICE_WHATSAPP_ENABLED: "1", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: order.phone, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, async () => {
+      // Readiness REAL (mapping deshabilitado en el JSON).
+      const r = dispatchNotice.notifyDispatchExecuted(order.id, "beeping", { send: () => { throw new Error("no debería llegar a enviar"); } });
+      assert.equal(r.status, "skipped");
+      assert.match(r.reason, /TEMPLATE_MAPPING_DISABLED/);
+      assert.equal(db.getOrderById(order.id)!.dispatch_notice_sent_at, null, "sello NO consumido: saldrá cuando la plantilla esté lista");
+      assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='template_not_ready' AND order_ref=? AND message LIKE '%aviso de despacho%'").get(order.shopify_order_number));
+    });
+    // Gates cerrados (fuera de allowlist): ni aunque la plantilla estuviera lista.
+    await withEnv({ ...DISPATCH_ON, DISPATCH_NOTICE_WHATSAPP_ENABLED: "1", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600000000", APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, async () => {
+      const ready = { ready: true, blocker: null, detail: "simulada APPROVED", mapping: null, verified: null };
+      const r = dispatchNotice.notifyDispatchExecuted(order.id, "beeping", { readiness: () => ready, send: () => { throw new Error("no debería llegar a enviar"); } });
+      assert.equal(r.status, "skipped");
+      assert.match(r.reason, /gates/);
+      assert.equal(db.getOrderById(order.id)!.dispatch_notice_sent_at, null);
+    });
+  });
+
+  await test("AVISO DESPACHO · plantilla lista (simulada) y gates abiertos → se encola UNA vez al despachar por el router (Beeping y Dropea), el sello impide repetir, y un fallo al encolar devuelve el sello", async () => {
+    const ready = { ready: true, blocker: null, detail: "simulada APPROVED", mapping: null, verified: null };
+    for (const [suffix, channel] of [["62", "beeping"], ["63", "dropea"]] as const) {
+      const order = mkConfirmedForDispatch(suffix, channel);
+      await withEnv({ ...DISPATCH_ON, DISPATCH_NOTICE_WHATSAPP_ENABLED: "1", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: order.phone, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, async () => {
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const enviados: string[] = [];
+        const notice = { readiness: () => ready, send: (o: typeof order) => { enviados.push(o.shopify_order_number); return true; } };
+        const due = dispatch.getDispatchCooldown(order.id)!.due_at;
+        const d = await dispatch.executeDispatch(order.id, "cooldown", due + 1, {
+          markToSend: fakeMarkToSend,
+          confirmDropea: async () => ({ ok: true as const, externalOrderId: "DRP-INY", detail: "confirmado (inyectado)" }),
+          notice,
+        });
+        assert.equal(d.status, "executed", `${channel}: ${JSON.stringify(d)}`);
+        assert.equal(d.channel, channel);
+        assert.deepEqual(enviados, [order.shopify_order_number], `${channel}: un aviso`);
+        assert.ok(db.getOrderById(order.id)!.dispatch_notice_sent_at, "sello puesto");
+        assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='dispatch_notice_sent' AND order_ref=?").get(order.shopify_order_number));
+        // Repetir (p. ej. «despachar ahora» tras un reintento): el sello manda.
+        const again = dispatchNotice.notifyDispatchExecuted(order.id, channel, notice);
+        assert.equal(again.status, "skipped");
+        assert.match(again.reason, /ya se avisó/);
+        assert.equal(enviados.length, 1);
+      });
+    }
+    // Fallo al encolar → sello devuelto, sin evento de enviado.
+    const order = mkConfirmedForDispatch("64");
+    handleOrderButtonReply(order.phone, "confirm_order");
+    await withEnv({ DISPATCH_NOTICE_WHATSAPP_ENABLED: "1", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: order.phone, APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1", EMERGENCY_STOP: "0" }, async () => {
+      const r = dispatchNotice.notifyDispatchExecuted(order.id, "beeping", { readiness: () => ready, send: () => { throw new Error("outbox roto"); } });
+      assert.equal(r.status, "skipped");
+      assert.match(r.reason, /outbox roto/);
+      assert.equal(db.getOrderById(order.id)!.dispatch_notice_sent_at, null, "sello devuelto");
+      // Texto de respaldo: sin enlace, con importe y número de pedido.
+      const texto = dispatchNotice.buildDispatchNoticeMessage(db.getOrderById(order.id)!);
+      assert.match(texto, new RegExp(`#?${order.shopify_order_number}`));
+      assert.match(texto, /en preparación/);
+      assert.doesNotMatch(texto, /https?:\/\//);
+    });
+  });
+
   await test("INTENCIÓN · con el flag apagado (default) el texto libre post-confirmación va a persona de inmediato, sin followUp ni llamada", () => {
     const order = mkConfirmedForDispatch("13");
     handleOrderButtonReply(order.phone, "confirm_order");
@@ -9941,8 +10037,8 @@ async function main(): Promise<void> {
     );
     assert.equal(
       waTemplates.loadTemplateSpecs().length,
-      12,
-      "las 12 plantillas: 6 del plan original + 6 recuperadas del NAS (30-08): pedido_confirmado, " +
+      13,
+      "las 13 plantillas: 6 del plan original + 6 recuperadas del NAS (30-08) + dispatch_notice (propuesta 07-09, mapping deshabilitado): pedido_confirmado, " +
         "pedido_confirmado_casamable, reparto_hoy, entrega_fallida, retraso_pedido, pedido_cancelado"
     );
   });
@@ -13825,7 +13921,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 25;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25");
+      assert.match(db, /export const SCHEMA_VERSION = 26;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14342,7 +14438,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -14383,6 +14479,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 24");
     db.migrateAiCancellations(fixture);
     fixture.pragma("user_version = 25");
+    db.migrateDispatchNotice(fixture);
+    fixture.pragma("user_version = 26");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

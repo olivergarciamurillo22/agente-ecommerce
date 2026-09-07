@@ -79,7 +79,9 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     fixture.pragma("user_version = 24");
     migrations.migrateAiCancellations(fixture);
     fixture.pragma("user_version = 25");
-    // Segunda pasada: las ocho migraciones deben ser idempotentes.
+    migrations.migrateDispatchNotice(fixture);
+    fixture.pragma("user_version = 26");
+    // Segunda pasada: las nueve migraciones deben ser idempotentes.
     migrations.migrateWorkspaceAuth(fixture);
     migrations.migrateProductCandidates(fixture);
     migrations.migrateHunterPredictive(fixture);
@@ -88,6 +90,7 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     migrations.migrateAutoDispatch(fixture);
     migrations.migrateDispatchChannels(fixture);
     migrations.migrateAiCancellations(fixture);
+    migrations.migrateDispatchNotice(fixture);
     const durationMs = Math.round((performance.now() - started) * 100) / 100;
 
     const counts = Object.fromEntries(Object.keys(EXPECTED).map((table) => {
