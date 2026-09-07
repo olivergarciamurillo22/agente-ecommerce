@@ -3,11 +3,17 @@ export const ADLIB_FIELDS = [
   "ad_delivery_start_time", "ad_delivery_stop_time", "ad_creative_bodies",
   "ad_creative_link_captions", "ad_creative_link_titles", "publisher_platforms",
   "languages", "impressions", "estimated_audience_size",
+  // Descripción del enlace (07-09-2026): texto real del anuncio que el
+  // auditor cita como evidencia de ángulos. Si Meta lo rechaza, el sondeo
+  // campo a campo lo retira sin invalidar la consulta.
+  "ad_creative_link_descriptions",
 ] as const;
 
 export interface AdLibraryAd {
   id: string; pageId: string; pageName: string | null; snapshotUrl: string | null;
   bodies: string[]; captions: string[]; titles: string[]; platforms: string[]; languages: string[];
+  /** ad_creative_link_descriptions. Opcional: los tests antiguos no lo traen. */
+  descriptions?: string[];
   creationTime: string | null; startTime: string | null; stopTime: string | null;
   impressions: { lowerBound: number | null; upperBound: number | null } | null;
   audience: { lowerBound: number | null; upperBound: number | null } | null;

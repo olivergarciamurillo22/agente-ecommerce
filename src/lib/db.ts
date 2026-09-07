@@ -1750,6 +1750,7 @@ function build() {
   migrateAiCallLog(db);
   migrateDiscoveryRunState(db);
   migrateDiscoveryJobs(db);
+  migrateDiscoveryJobKinds(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -2031,7 +2032,27 @@ export function migrateDiscoveryJobs(db: Database.Database): void {
   `);
 }
 
-export const SCHEMA_VERSION = 29;
+/**
+ * Migracion 30 (07-09-2026): tipos de trabajo del Cazador — docs/HUNTER-AUDITOR.md.
+ * La cola nacio para la busqueda por palabra; el auditor anade dos tipos
+ * (auditar una tienda por URL, y buscar + auditar en cadena). `kind` los
+ * distingue y `params_json` lleva lo que no cabe en las columnas. ADITIVA:
+ * las filas existentes quedan como 'busqueda'.
+ */
+export function migrateDiscoveryJobKinds(db: Database.Database): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(discovery_jobs)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (cols.size === 0) return;
+  for (const [nombre, tipo] of [["kind", "TEXT NOT NULL DEFAULT 'busqueda'"], ["params_json", "TEXT"]] as const) {
+    if (cols.has(nombre)) continue;
+    try {
+      db.exec(`ALTER TABLE discovery_jobs ADD COLUMN ${nombre} ${tipo}`);
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
+}
+
+export const SCHEMA_VERSION = 30;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

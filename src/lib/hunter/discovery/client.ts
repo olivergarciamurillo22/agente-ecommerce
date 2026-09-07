@@ -26,6 +26,7 @@ function normalize(raw: unknown): AdLibraryAd | null {
     id: o.id, pageId: String(o.page_id), pageName: typeof o.page_name === "string" ? o.page_name.slice(0, 200) : null,
     snapshotUrl: typeof o.ad_snapshot_url === "string" ? o.ad_snapshot_url.slice(0, 2048) : null,
     bodies: strings(o.ad_creative_bodies), captions: strings(o.ad_creative_link_captions), titles: strings(o.ad_creative_link_titles),
+    descriptions: strings(o.ad_creative_link_descriptions),
     platforms: strings(o.publisher_platforms), languages: strings(o.languages),
     creationTime: typeof o.ad_creation_time === "string" ? o.ad_creation_time : null,
     startTime: typeof o.ad_delivery_start_time === "string" ? o.ad_delivery_start_time : null,
@@ -45,12 +46,17 @@ function parseUsage(headers: Headers): Record<string, unknown> | null {
 
 export class AdLibraryClient {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch, private readonly wait = sleep) {}
-  async page(params: { term: string; country: string; since: string; until: string; after?: string; fields?: readonly string[] }): Promise<AdLibraryPage> {
+  async page(params: { term: string; country: string; since: string; until: string; after?: string; fields?: readonly string[]; pageIds?: readonly string[] }): Promise<AdLibraryPage> {
     // GATE (safety.ts): aqui abajo, para que ningun camino nuevo lo esquive.
     if (!canRunDiscovery()) throw new DiscoveryHaltedError();
     const version = process.env.META_AD_LIBRARY_API_VERSION || process.env.META_GRAPH_API_VERSION || process.env.META_ADS_API_VERSION || META_ADS_DEFAULT_API_VERSION;
     const url = new URL(`https://graph.facebook.com/${version}/ads_archive`);
-    url.searchParams.set("search_terms", params.term); url.searchParams.set("ad_reached_countries", JSON.stringify([params.country]));
+    // Por page_id NUMÉRICO (search_page_ids, hasta 10 según la doc de Meta) o por
+    // texto (search_terms). Excluyentes: la doc no dice qué pasa si se combinan y
+    // en este repo search_page_ids NUNCA se ha probado en vivo (sin token válido).
+    if (params.pageIds && params.pageIds.length) url.searchParams.set("search_page_ids", JSON.stringify(params.pageIds.slice(0, 10)));
+    else url.searchParams.set("search_terms", params.term);
+    url.searchParams.set("ad_reached_countries", JSON.stringify([params.country]));
     url.searchParams.set("ad_type", "ALL"); url.searchParams.set("ad_active_status", "ACTIVE");
     url.searchParams.set("ad_delivery_date_min", params.since); url.searchParams.set("ad_delivery_date_max", params.until);
     url.searchParams.set("fields", (params.fields ?? ADLIB_FIELDS).join(",")); url.searchParams.set("limit", "100");
@@ -99,10 +105,11 @@ export class AdLibraryClient {
    * Un token inválido sí se propaga (no hay nada que salvar reintentando).
    */
   async search(params: {
-    term: string; country: string; since: string; until: string; fields?: readonly string[];
+    term: string; country: string; since: string; until: string; fields?: readonly string[]; pageIds?: readonly string[];
     budget?: DiscoveryBudget; maxPages?: number;
-  }): Promise<{ ads: AdLibraryAd[]; rateLimit: Record<string, unknown> | null; stopReason: StopReason; pages: number }> {
+  }): Promise<{ ads: AdLibraryAd[]; rateLimit: Record<string, unknown> | null; stopReason: StopReason; pages: number; error: string | null }> {
     const ads: AdLibraryAd[] = []; let after: string | undefined; let rateLimit: Record<string, unknown> | null = null;
+    let lastError: string | null = null;
     const budget = params.budget ?? null;
     const maxPages = params.maxPages ?? MAX_PAGES;
     let stopReason: StopReason = "completado";
@@ -118,6 +125,7 @@ export class AdLibraryClient {
         const error = asAdLibraryError(err);
         if (error.abortRun) throw error;
         stopReason = error.kind === "rate_limit" ? "rate_limit" : "error";
+        lastError = error.message;
         break;
       }
       pages++;
@@ -127,7 +135,7 @@ export class AdLibraryClient {
       if (!result.after) break;
       after = result.after;
     }
-    return { ads, rateLimit, stopReason, pages };
+    return { ads, rateLimit, stopReason, pages, error: lastError };
   }
 }
 
@@ -161,6 +169,7 @@ export async function probeAdLibraryFields(
         if (field === "ad_creative_bodies") return ad.bodies.length > 0;
         if (field === "ad_creative_link_captions") return ad.captions.length > 0;
         if (field === "ad_creative_link_titles") return ad.titles.length > 0;
+        if (field === "ad_creative_link_descriptions") return (ad.descriptions ?? []).length > 0;
         if (field === "publisher_platforms") return ad.platforms.length > 0;
         if (field === "languages") return ad.languages.length > 0;
         if (field === "impressions") return ad.impressions !== null;

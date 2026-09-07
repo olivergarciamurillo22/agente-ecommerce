@@ -32,7 +32,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 export async function POST(req: NextRequest): Promise<NextResponse> {
   const auth = requireOwner(req);
   if (!auth.ok) return auth.response;
-  let body: { seed?: string; country?: string; days?: number; minutes?: number };
+  let body: { seed?: string; country?: string; days?: number; minutes?: number; kind?: "busqueda" | "auditoria" | "cadena"; storeUrl?: string; facebookUrl?: string | null };
   try {
     body = (await req.json()) as typeof body;
   } catch {
@@ -44,8 +44,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 409 }
     );
   }
+  const kind = body.kind === "auditoria" || body.kind === "cadena" ? body.kind : "busqueda";
   const r = enqueueDiscoveryJob({
-    seed: body.seed ?? "",
+    kind,
+    seed: kind === "auditoria" ? (body.storeUrl ?? body.seed ?? "") : (body.seed ?? ""),
+    params: kind === "auditoria" ? { facebookUrl: body.facebookUrl ?? null } : {},
     country: body.country,
     days: body.days,
     minutes: body.minutes,

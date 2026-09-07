@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, EmptyState, SectionTitle } from "./ui";
+import StoreAuditView, { type StoreAuditReportView } from "./StoreAuditView";
 
 interface Signal {
   id: string;
@@ -77,15 +78,39 @@ interface SearchResult {
   elapsedSec: number;
 }
 
+interface WinnerCandidate {
+  pageId: string;
+  pageName: string | null;
+  groupCount: number;
+  competitor: Competitor;
+  score: { score: number; activeAds: number; daysActive: number | null; variants: number; momentum: string; why: string };
+  storeUrl: string | null;
+  audit: StoreAuditReportView | null;
+  auditStatus: "auditada" | "sin_tienda_resuelta" | "sin_tiempo" | "no_seleccionada";
+}
+
+interface WinnerHuntResult {
+  seed: string;
+  search: { terms: Array<{ term: string; origin: string; why: string }>; termsQueried: string[]; stopReason: string; requests: number; pages: number; rawAds: number; elapsedSec: number };
+  totalCompetitors: number;
+  candidates: WinnerCandidate[];
+  auditsRun: number;
+  stopReason: string;
+  criterion: string;
+  budgetSplit: { searchMinutes: number; auditMinutes: number; searchMaxRequests: number; maxAudits: number };
+  elapsedSec: number;
+}
+
 interface Job {
   id: number;
+  kind: "busqueda" | "auditoria" | "cadena";
   seed: string;
   country: string;
   days: number;
   minutes: number;
   status: "pendiente" | "corriendo" | "terminado" | "fallido" | "cancelado";
-  progress: Progress | null;
-  result: SearchResult | null;
+  progress: (Progress & { auditando?: string | null; auditsDone?: number; auditsTotal?: number }) | null;
+  result: SearchResult | StoreAuditReportView | WinnerHuntResult | null;
   error: string | null;
   stopReason: string | null;
 }
@@ -171,6 +196,11 @@ function FichaCompetidor({ c }: { c: Competitor }) {
 export default function CompetitionSearch() {
   const [estado, setEstado] = useState<Estado | null>(null);
   const [palabra, setPalabra] = useState("");
+  // Modo A: URL de una tienda. Modo B: la búsqueda por palabra con encadenado.
+  const [modo, setModo] = useState<"buscar" | "auditar">("buscar");
+  const [encadenar, setEncadenar] = useState(true);
+  const [urlTienda, setUrlTienda] = useState("");
+  const [urlFacebook, setUrlFacebook] = useState("");
   const [enviando, setEnviando] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const jobIdRef = useRef<number | null>(null);
@@ -202,7 +232,11 @@ export default function CompetitionSearch() {
       const res = await fetch("/api/hunter/competencia", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ seed: palabra }),
+        body: JSON.stringify(
+          modo === "auditar"
+            ? { kind: "auditoria", storeUrl: urlTienda, facebookUrl: urlFacebook.trim() || null }
+            : { kind: encadenar ? "cadena" : "busqueda", seed: palabra }
+        ),
       });
       const data = (await res.json()) as { ok: boolean; error?: string; job?: Job };
       if (!res.ok || !data.ok) {
@@ -211,6 +245,8 @@ export default function CompetitionSearch() {
       }
       jobIdRef.current = data.job?.id ?? null;
       setPalabra("");
+      setUrlTienda("");
+      setUrlFacebook("");
       await cargar();
     } catch (err) {
       setError(err instanceof Error ? err.message : "no se pudo lanzar la búsqueda");
@@ -221,7 +257,8 @@ export default function CompetitionSearch() {
 
   const job = estado?.job ?? null;
   const corriendo = job?.status === "pendiente" || job?.status === "corriendo";
-  const bloqueado = Boolean(estado?.paradaEmergencia) || !estado?.tokenConfigurado || corriendo || enviando || palabra.trim() === "";
+  const entradaVacia = modo === "auditar" ? urlTienda.trim() === "" : palabra.trim() === "";
+  const bloqueado = Boolean(estado?.paradaEmergencia) || !estado?.tokenConfigurado || corriendo || enviando || entradaVacia;
 
   return (
     <div className="space-y-4">
@@ -250,28 +287,74 @@ export default function CompetitionSearch() {
       ) : null}
 
       <Card>
-        <div className="flex flex-wrap items-center gap-2 p-4">
-          <input
-            value={palabra}
-            onChange={(e) => setPalabra(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !bloqueado) void lanzar();
-            }}
-            placeholder="organizador cocina"
-            aria-label="Palabra o frase para buscar"
-            className="h-11 min-w-[220px] flex-1 rounded-lg border border-brand-border bg-brand-surface px-3 text-[15px]"
-          />
-          <button
-            onClick={() => void lanzar()}
-            disabled={bloqueado}
-            className="h-11 rounded-lg bg-brand-text px-5 text-[14px] font-medium text-white disabled:opacity-40"
-          >
-            {corriendo ? "Buscando…" : "Buscar competencia"}
-          </button>
+        <div className="flex gap-1 border-b border-brand-border/60 px-4 pt-3">
+          {(["buscar", "auditar"] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setModo(m)}
+              className={`rounded-t-md px-3 py-1.5 text-[13px] ${modo === m ? "bg-brand-surface-2 font-semibold text-brand-text" : "text-brand-muted"}`}
+            >
+              {m === "buscar" ? "Buscar tiendas ganadoras" : "Auditar una tienda"}
+            </button>
+          ))}
         </div>
+        {modo === "buscar" ? (
+          <div className="flex flex-wrap items-center gap-2 p-4">
+            <input
+              value={palabra}
+              onChange={(e) => setPalabra(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !bloqueado) void lanzar();
+              }}
+              placeholder="organizador cocina"
+              aria-label="Palabra o frase para buscar"
+              className="h-11 min-w-[220px] flex-1 rounded-lg border border-brand-border bg-brand-surface px-3 text-[15px]"
+            />
+            <label className="flex items-center gap-2 text-[13px] text-brand-muted">
+              <input type="checkbox" checked={encadenar} onChange={(e) => setEncadenar(e.target.checked)} />
+              auditar en cadena las que destaquen
+            </label>
+            <button
+              onClick={() => void lanzar()}
+              disabled={bloqueado}
+              className="h-11 rounded-lg bg-brand-text px-5 text-[14px] font-medium text-white disabled:opacity-40"
+            >
+              {corriendo ? "Buscando…" : encadenar ? "Buscar y auditar" : "Buscar competencia"}
+            </button>
+          </div>
+        ) : (
+          <div className="grid gap-2 p-4 sm:grid-cols-[1fr_1fr_auto]">
+            <input
+              value={urlTienda}
+              onChange={(e) => setUrlTienda(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !bloqueado) void lanzar();
+              }}
+              placeholder="tienda.es"
+              aria-label="URL de la tienda"
+              className="h-11 rounded-lg border border-brand-border bg-brand-surface px-3 text-[15px]"
+            />
+            <input
+              value={urlFacebook}
+              onChange={(e) => setUrlFacebook(e.target.value)}
+              placeholder="facebook.com/latienda (opcional, si la web no lo enlaza)"
+              aria-label="URL de la página de Facebook"
+              className="h-11 rounded-lg border border-brand-border bg-brand-surface px-3 text-[13px]"
+            />
+            <button
+              onClick={() => void lanzar()}
+              disabled={bloqueado}
+              className="h-11 rounded-lg bg-brand-text px-5 text-[14px] font-medium text-white disabled:opacity-40"
+            >
+              {corriendo ? "Auditando…" : "Auditar tienda"}
+            </button>
+          </div>
+        )}
         {error ? <p className="px-4 pb-3 text-[13px] text-red-600">{error}</p> : null}
         <p className="px-4 pb-4 text-[12px] text-brand-tertiary">
-          La búsqueda tarda hasta 15 minutos y corre en el servidor: puedes cerrar esta pestaña y volver.
+          {modo === "buscar"
+            ? "Busca en la Ad Library hasta 15 minutos y, si encadenas, audita después las tiendas que destacan (catálogo público y ángulos con el texto real citado). Corre en el servidor: puedes cerrar y volver."
+            : "Lee el catálogo público si es Shopify, busca sus anuncios activos por nombre de marca y dominio, y cita los ángulos con el texto real. Lo que no se pueda completar se dice, no se inventa."}
         </p>
       </Card>
 
@@ -282,11 +365,13 @@ export default function CompetitionSearch() {
             {job?.progress ? (
               <>
                 <p className="mt-2 text-[13px] text-brand-text">
-                  {job.progress.fase === "buscando"
-                    ? `Término ${job.progress.termsDone} de ${job.progress.termsTotal}: «${job.progress.term}»`
-                    : job.progress.fase === "agrupando"
-                      ? "Agrupando por competidor…"
-                      : "Preparando los términos…"}
+                  {job.progress.auditando
+                    ? `Auditando ${job.progress.auditsDone ?? 0}/${job.progress.auditsTotal ?? "?"}: ${job.progress.auditando}`
+                    : job.progress.fase === "buscando"
+                      ? `Término ${job.progress.termsDone} de ${job.progress.termsTotal}: «${job.progress.term}»`
+                      : job.progress.fase === "agrupando"
+                        ? "Agrupando por competidor…"
+                        : "Preparando los términos…"}
                 </p>
                 <p className="mt-1 text-[13px] text-brand-muted">
                   {job.progress.ads} anuncios · {job.progress.requests} peticiones · quedan{" "}
@@ -315,20 +400,80 @@ export default function CompetitionSearch() {
         </Card>
       ) : null}
 
-      {job?.status === "terminado" && job.result ? (
+      {job?.status === "terminado" && job.result && job.kind === "auditoria" ? (
+        <Card>
+          <div className="p-4">
+            <SectionTitle>
+              Auditoría de {(job.result as StoreAuditReportView).brandName ?? (job.result as StoreAuditReportView).domain}
+            </SectionTitle>
+            <StoreAuditView r={job.result as StoreAuditReportView} />
+          </div>
+        </Card>
+      ) : null}
+
+      {job?.status === "terminado" && job.result && job.kind === "cadena" ? (
         <>
           <Card>
             <div className="p-4 text-[13px] text-brand-muted">
               <SectionTitle>
-                «{job.result.seed}» · {job.result.competitors.length} competidor(es)
+                «{(job.result as WinnerHuntResult).seed}» · {(job.result as WinnerHuntResult).candidates.length} candidata(s) a tienda ganadora de {(job.result as WinnerHuntResult).totalCompetitors} anunciantes
               </SectionTitle>
               <p className="mt-2">
-                {job.result.termsQueried.length} de {job.result.terms.length} términos · {job.result.rawAds} anuncios únicos ·{" "}
-                {job.result.requests} peticiones · {job.result.elapsedSec} s
+                Búsqueda: {(job.result as WinnerHuntResult).search.termsQueried.length} de {(job.result as WinnerHuntResult).search.terms.length} términos · {(job.result as WinnerHuntResult).search.rawAds} anuncios · {(job.result as WinnerHuntResult).search.requests} peticiones. Auditadas: {(job.result as WinnerHuntResult).auditsRun} (tope {(job.result as WinnerHuntResult).budgetSplit.maxAudits} por corrida).
               </p>
-              <p className="mt-1">Terminó porque {PARADA[job.result.stopReason] ?? job.result.stopReason}.</p>
+              <p className="mt-1 text-[12px] text-brand-tertiary">Criterio de «destaca»: {(job.result as WinnerHuntResult).criterion}. Es una ordenación por señales indirectas: sugiere, no demuestra.</p>
+              <p className="mt-1">Terminó porque {PARADA[(job.result as WinnerHuntResult).stopReason] ?? (job.result as WinnerHuntResult).stopReason}.</p>
+            </div>
+          </Card>
+          <div className="grid gap-3">
+            {(job.result as WinnerHuntResult).candidates.map((cand, i) => (
+              <div key={cand.pageId} className="rounded-lg border border-brand-border bg-brand-surface px-4 py-3">
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <strong className="text-[15px] text-brand-text">
+                    {i + 1}. {cand.pageName ?? cand.pageId}
+                    {cand.groupCount > 1 ? <span className="ml-1 text-[12px] font-normal text-brand-tertiary">({cand.groupCount} líneas de producto sumadas)</span> : null}
+                  </strong>
+                  <span className="text-[12px] text-brand-muted">
+                    señal {cand.score.score} · {cand.score.why}
+                  </span>
+                </div>
+                <p className="text-[12px] text-brand-tertiary">
+                  {cand.auditStatus === "auditada"
+                    ? `tienda: ${cand.storeUrl}`
+                    : cand.auditStatus === "sin_tienda_resuelta"
+                      ? "sin dominio declarado en sus anuncios: no se pudo leer la tienda, solo los ángulos"
+                      : cand.auditStatus === "sin_tiempo"
+                        ? "se acabó el tiempo antes de auditarla"
+                        : "fuera del tope de auditorías por corrida"}
+                </p>
+                {cand.audit ? (
+                  <div className="mt-2">
+                    <StoreAuditView r={cand.audit} compact />
+                  </div>
+                ) : null}
+              </div>
+            ))}
+            {(job.result as WinnerHuntResult).candidates.length === 0 ? (
+              <EmptyState title="Ningún anunciante destacó." hint="Con las señales que hay ninguno cumple el criterio. Prueba otra palabra o más días." />
+            ) : null}
+          </div>
+        </>
+      ) : null}
+
+      {job?.status === "terminado" && job.result && job.kind === "busqueda" ? (
+        <>
+          <Card>
+            <div className="p-4 text-[13px] text-brand-muted">
+              <SectionTitle>
+                «{(job.result as SearchResult).seed}» · {(job.result as SearchResult).competitors.length} competidor(es)
+              </SectionTitle>
+              <p className="mt-2">
+                {(job.result as SearchResult).termsQueried.length} de {(job.result as SearchResult).terms.length} términos · {(job.result as SearchResult).rawAds} anuncios únicos ·{" "}
+                {(job.result as SearchResult).requests} peticiones · {(job.result as SearchResult).elapsedSec} s
+              </p>
+              <p className="mt-1">Terminó porque {PARADA[(job.result as SearchResult).stopReason] ?? (job.result as SearchResult).stopReason}.</p>
               <div className="mt-3 flex flex-wrap gap-1.5">
-                {job.result.terms.map((t) => (
+                {(job.result as SearchResult).terms.map((t) => (
                   <span
                     key={t.term}
                     title={t.why}
@@ -342,23 +487,23 @@ export default function CompetitionSearch() {
           </Card>
 
           <div className="grid gap-3">
-            {job.result.competitors.map((c) => (
+            {(job.result as SearchResult).competitors.map((c) => (
               <FichaCompetidor key={c.candidateKey} c={c} />
             ))}
-            {job.result.competitors.length === 0 ? (
+            {(job.result as SearchResult).competitors.length === 0 ? (
               <EmptyState title="Ningún competidor encontrado." hint="Prueba con otra palabra, amplía los días o revisa los descartados por ruido." />
             ) : null}
           </div>
 
-          {job.result.discarded.length > 0 ? (
+          {(job.result as SearchResult).discarded.length > 0 ? (
             <Card>
               <div className="p-4">
-                <SectionTitle>Descartados por ruido ({job.result.discarded.length})</SectionTitle>
+                <SectionTitle>Descartados por ruido ({(job.result as SearchResult).discarded.length})</SectionTitle>
                 <p className="mt-1 text-[12px] text-brand-tertiary">
                   El filtro los apartó por su texto. Si alguno no debería estar aquí, dilo: la heurística se ajusta.
                 </p>
                 <ul className="mt-2 space-y-1 text-[13px] text-brand-muted">
-                  {job.result.discarded.slice(0, 10).map((c) => (
+                  {(job.result as SearchResult).discarded.slice(0, 10).map((c) => (
                     <li key={c.candidateKey}>
                       <span className="text-brand-text">{c.pageName ?? c.pageId}</span> — {c.noiseReason}
                     </li>

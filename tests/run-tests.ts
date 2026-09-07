@@ -14263,7 +14263,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 29;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29");
+      assert.match(db, /export const SCHEMA_VERSION = 30;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14780,7 +14780,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs, db.migrateDiscoveryJobKinds]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -15001,6 +15001,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 28");
     db.migrateDiscoveryJobs(fixture);
     fixture.pragma("user_version = 29");
+    db.migrateDiscoveryJobKinds(fixture);
+    fixture.pragma("user_version = 30");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
@@ -15376,8 +15378,9 @@ async function main(): Promise<void> {
       assert.equal(r.stopReason, "token_invalido");
       assert.deepEqual(r.termsQueried, [], "no se consulta ni un término con el token muerto");
       assert.equal(r.rawCount, 0);
-      // El sondeo son 14 campos; sin la guarda, además se habrían hecho las búsquedas.
-      assert.ok(llamadas <= 14, `${llamadas} llamadas: no se sigue consultando`);
+      // El sondeo son ADLIB_FIELDS.length campos; sin la guarda, además se habrían hecho las búsquedas.
+      const { ADLIB_FIELDS } = await import("../src/lib/hunter/discovery/types");
+      assert.ok(llamadas <= ADLIB_FIELDS.length, `${llamadas} llamadas: no se sigue consultando`);
       const fila = db.systemDbHandle().prepare("SELECT stop_reason FROM adlib_queries ORDER BY id DESC LIMIT 1").get() as { stop_reason: string };
       assert.equal(fila.stop_reason, "token_invalido", "queda constancia de POR QUÉ paró");
     });
@@ -15635,12 +15638,12 @@ async function main(): Promise<void> {
         return new Response(JSON.stringify({ data: [{ id: `${term}-a`, page_id: "pp", page_name: "Tienda", ad_creative_bodies: [`${term} para casa`], ad_delivery_start_time: "2026-08-01" }], paging: {} }), { headers: { "content-type": "application/json" } });
       }) as typeof fetch;
       const client = new AdLibraryClient("tok", fetcher, async () => {});
-      // 14 peticiones se van en el sondeo de campos: con 16 se corta enseguida.
+      // Las peticiones del sondeo de campos se van enteras: con dos más se corta enseguida.
       const r = await runWordSearch({
         seed: "buscador-corte-presupuesto",
         country: "ES", days: 30, token: "tok", client, maxTerms: 12,
         now: Math.floor(Date.now() / 1000),
-        budget: new DiscoveryBudget({ maxRequests: 16, deadlineAt: Date.now() + 60_000 }),
+        budget: new DiscoveryBudget({ maxRequests: (await import("../src/lib/hunter/discovery/types")).ADLIB_FIELDS.length + 2, deadlineAt: Date.now() + 60_000 }),
       });
       assert.equal(r.stopReason, "presupuesto_peticiones");
       assert.ok(r.termsQueried.length >= 1, "algo se llegó a consultar");
@@ -15740,7 +15743,7 @@ async function main(): Promise<void> {
       const terminada = jobs.getDiscoveryJob(primera.job.id)!;
       assert.equal(terminada.status, "terminado");
       assert.ok(terminada.result, "el resultado queda en la fila, no en memoria");
-      assert.equal(terminada.result?.competitors[0]?.pageId, "cola-comp");
+      assert.equal((terminada.result as { competitors: Array<{ pageId: string }> }).competitors[0]?.pageId, "cola-comp");
       assert.equal(terminada.stopReason, "completado");
       assert.ok(terminada.progress, "el progreso se fue guardando por el camino");
       assert.ok(peticiones > 0);
@@ -15841,6 +15844,403 @@ async function main(): Promise<void> {
         assert.match(((await post.json()) as { error: string }).error, /META_AD_LIBRARY_ACCESS_TOKEN/);
       });
       raw.prepare("DELETE FROM discovery_jobs").run();
+    });
+
+
+    // ------------------------------------------------------------
+    // AUDITOR DE TIENDAS (07-09-2026) — docs/HUNTER-AUDITOR.md
+    // Todo con red inyectada: la Ad Library, la tienda y sus catálogos son
+    // Response sintéticas. Ningún test sale a Internet ni a Meta.
+    // ------------------------------------------------------------
+
+    /** Una tienda Shopify falsa + una no-Shopify + una Ad Library falsa, todo por hostname. */
+    const auditorRed = () => {
+      const peticiones: string[] = [];
+      const productos = (n: number, offset = 0) =>
+        Array.from({ length: n }, (_, i) => ({
+          id: offset + i + 1,
+          title: `Barra de apoyo ${offset + i + 1}`,
+          handle: `barra-${offset + i + 1}`,
+          product_type: i % 2 ? "Baño" : "Movilidad",
+          vendor: "Tienda Uno",
+          tags: ["mayores"],
+          variants: [{ price: String(19.9 + i), compare_at_price: null, available: true }],
+          images: [{ src: "https://cdn.shopify.com/s/files/1/img.jpg" }],
+        }));
+      const portadaShopify = `<html><head><title>Tienda Uno™ | Ayudas para mayores</title>
+        <meta property="og:site_name" content="Tienda Uno™">
+        <script src="https://cdn.shopify.com/s/files/1/0000/captcha-bootstrap.js"></script>
+        </head><body><footer><a href="https://www.facebook.com/tiendauno">Facebook</a>
+        <a href="https://www.facebook.com/sharer/sharer.php?u=x">compartir</a></footer></body></html>`;
+      const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input instanceof Request ? input.url : input));
+        peticiones.push(url.host + url.pathname + (url.search ? "?" + url.searchParams.toString().slice(0, 60) : ""));
+        const ua = new Headers(init?.headers).get("user-agent") ?? "";
+        if (url.host === "graph.facebook.com") {
+          const term = url.searchParams.get("search_terms") ?? "";
+          const pageIds = url.searchParams.get("search_page_ids");
+          const data = pageIds
+            ? [{ id: "pid-1", page_id: "555000111", page_name: "Cualquier Nombre", ad_creative_bodies: ["Oferta -30% solo esta semana"], ad_creative_link_captions: ["otrodominio.es"], ad_delivery_start_time: "2026-08-01" }]
+            : term.includes("tienda uno")
+              ? [
+                  { id: `${term}-1`, page_id: "p-uno", page_name: "Tienda Uno", ad_snapshot_url: "https://www.facebook.com/ads/library/?id=1", ad_creative_bodies: ["Barra de apoyo con ventosa. Envío gratis y pago contra reembolso. Más de 2.000 clientes satisfechos."], ad_creative_link_captions: ["tiendauno.es"], ad_delivery_start_time: "2026-07-01" },
+                  { id: `${term}-2`, page_id: "p-uno", page_name: "Tienda Uno", ad_creative_bodies: ["Solo hoy: 30% de descuento en toda la web. Últimas unidades."], ad_creative_link_captions: ["tiendauno.es"], ad_delivery_start_time: "2026-08-25" },
+                  { id: `${term}-otro`, page_id: "p-otro", page_name: "Otra Marca", ad_creative_bodies: ["tienda uno de barras de apoyo baratas"], ad_creative_link_captions: ["otramarca.es"], ad_delivery_start_time: "2026-08-01" },
+                ]
+              : [];
+          return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+        }
+        if (url.host === "tiendauno.es") {
+          if (!/Casamable-Hunter-Auditor/.test(ua)) return new Response("UA no identificada", { status: 403 });
+          if (url.pathname === "/") return new Response(portadaShopify, { status: 200, headers: { "content-type": "text/html", "x-shopid": "1234" } });
+          if (url.pathname === "/products.json") {
+            const page = Number(url.searchParams.get("page") ?? "1");
+            return new Response(JSON.stringify({ products: page === 1 ? productos(250) : page === 2 ? productos(12, 250) : [] }), { headers: { "content-type": "application/json" } });
+          }
+          return new Response("", { status: 404 });
+        }
+        if (url.host === "noshopify.es") {
+          if (url.pathname === "/") return new Response("<html><head><title>No Shopify SL</title></head><body>Prestashop</body></html>", { headers: { "content-type": "text/html" } });
+          return new Response("Not found", { status: 404 });
+        }
+        if (url.host === "bloqueada.es") {
+          return new Response("<html><body>Just a moment... verify you are human</body></html>", { status: 403, headers: { "content-type": "text/html" } });
+        }
+        throw new Error(`red no permitida en test: ${url.host}`);
+      }) as typeof fetch;
+      return { fetcher, peticiones };
+    };
+
+    await test("AUDITOR · lee la portada y el catálogo público de una tienda Shopify (paginado, con UA propio) y resuelve el enlace a Facebook sin visitar Facebook", async () => {
+      const { readStore, STORE_READER_USER_AGENT, MAX_CATALOG_PAGES } = await import("../src/lib/hunter/audit/store");
+      assert.match(STORE_READER_USER_AGENT, /Casamable-Hunter-Auditor/);
+      const { fetcher, peticiones } = auditorRed();
+      const r = await readStore("tiendauno.es", fetcher);
+      assert.equal(r.profile.homepageStatus, "ok");
+      assert.equal(r.profile.isShopify, true, r.profile.shopifyHints.join(","));
+      assert.equal(r.profile.brandName, "Tienda Uno™");
+      assert.deepEqual(r.profile.facebookUrls, ["https://www.facebook.com/tiendauno"], "el enlace a sharer NO es la página");
+      assert.equal(r.catalog.status, "ok");
+      assert.equal(r.catalog.products.length, 262, "250 de la primera página + 12 de la segunda");
+      assert.equal(r.catalog.products[0].priceMin, 19.9);
+      assert.ok(peticiones.every((p) => !p.startsWith("facebook.com") && !p.startsWith("www.facebook.com")), "no se visita Facebook");
+      assert.ok(peticiones.filter((p) => p.includes("/products.json")).length <= MAX_CATALOG_PAGES);
+      // Una página corta (12 < 250) termina la paginación: 1 portada + 2 páginas.
+      assert.equal(r.requests, 3, peticiones.join(" | "));
+    });
+
+    await test("AUDITOR · una web que no es Shopify o que bloquea al lector se declara, no se inventa catálogo", async () => {
+      const { readStore } = await import("../src/lib/hunter/audit/store");
+      const { fetcher } = auditorRed();
+      const no = await readStore("https://noshopify.es/", fetcher);
+      assert.equal(no.profile.isShopify, false);
+      assert.equal(no.catalog.status, "no_shopify");
+      assert.equal(no.catalog.products.length, 0);
+      const bloq = await readStore("bloqueada.es", fetcher);
+      assert.equal(bloq.profile.homepageStatus, "no_accesible");
+      assert.match(bloq.profile.homepageReason ?? "", /anti-bot|HTTP 403/);
+      // Una URL que no lo es, tampoco sale a la red.
+      const mala = await readStore("no es una url", fetcher);
+      assert.equal(mala.requests, 0);
+    });
+
+    await test("AUDITOR · los ángulos salen del texto real: cada etiqueta lleva la frase literal citada y se marca como heurística", async () => {
+      const { extractAngles } = await import("../src/lib/hunter/audit/angles");
+      const ads = [
+        { id: "a1", pageId: "p", pageName: "P", bodies: ["Barra de apoyo con ventosa. Envío gratis y pago contra reembolso. Más de 2.000 clientes satisfechos."], captions: [], titles: [], startTime: "2026-08-01", snapshotUrl: null, countries: ["ES"] },
+        { id: "a2", pageId: "p", pageName: "P", bodies: ["Solo hoy: 30% de descuento. Últimas unidades."], captions: [], titles: ["Garantía de 2 años"], startTime: "2026-08-01", snapshotUrl: null, countries: ["ES"] },
+        { id: "a3", pageId: "p", pageName: "P", bodies: [], captions: [], titles: [], startTime: "2026-08-01", snapshotUrl: null, countries: ["ES"] },
+      ];
+      const r = extractAngles(ads as never);
+      assert.equal(r.adsAnalyzed, 3);
+      assert.equal(r.adsWithoutText, 1);
+      const ids = r.angles.map((a) => a.id);
+      for (const esperado of ["envio_pago", "prueba_social", "precio_oferta", "urgencia_escasez", "garantia_devolucion"] as const) assert.ok(ids.includes(esperado), `falta ${esperado} en ${ids.join(",")}`);
+      const social = r.angles.find((a) => a.id === "prueba_social")!;
+      assert.equal(social.evidence[0].adId, "a1");
+      assert.match(social.evidence[0].quote, /2\.000 clientes satisfechos/);
+      assert.equal(social.nature, "heuristica_sobre_texto_real");
+      const garantia = r.angles.find((a) => a.id === "garantia_devolucion")!;
+      assert.equal(garantia.evidence[0].field, "title");
+      // Sin texto no hay ángulo, y se cuenta.
+      assert.equal(extractAngles([]).angles.length, 0);
+    });
+
+    await test("AUDITOR · modo A completo con red inyectada: catálogo, anuncios atribuidos por nombre y dominio (no por coincidencia de texto), ángulos citados y la lista de lo que no se pudo", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runStoreAudit } = await import("../src/lib/hunter/audit/store-audit");
+      const { fetcher, peticiones } = auditorRed();
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const r = await runStoreAudit({ storeUrl: "https://tiendauno.es", token: "tok", now, client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher });
+      assert.equal(r.domain, "tiendauno.es");
+      assert.equal(r.brandName, "tienda uno");
+      assert.equal(r.catalog.status, "ok");
+      assert.equal(r.catalog.products, 262);
+      assert.equal(r.catalog.priceMin, 19.9);
+      assert.ok(r.catalog.topTypes.some((t) => t.type === "Movilidad"));
+      assert.equal(r.facebook.source, "web");
+      assert.deepEqual(r.facebook.slugs, ["tiendauno"]);
+      assert.equal(r.adLibrary.status, "ok", r.adLibrary.reason ?? "");
+      assert.ok(r.adLibrary.searchTerms.includes("tienda uno"), r.adLibrary.searchTerms.join(","));
+      // «Otra Marca» menciona "tienda uno" en su texto pero NO es la tienda: no se atribuye.
+      assert.equal(r.adLibrary.competitors.length, 1, "los dos anuncios (distintos entre sí) son UNA página");
+      assert.equal(r.adLibrary.competitors[0].pageName, "Tienda Uno");
+      assert.equal(r.adLibrary.activeAds, 2);
+      assert.ok(r.adLibrary.competitors[0].signals.some((s) => s.id === "dias_activo" && typeof s.value === "number" && s.value >= 60), "la fecha más antigua de la página manda");
+      assert.ok(r.adLibrary.matchedBy.includes("nombre_marca") && r.adLibrary.matchedBy.includes("dominio_declarado"), r.adLibrary.matchedBy.join(","));
+      assert.ok(r.angles && r.angles.angles.some((a) => a.id === "envio_pago" && a.evidence[0].quote.includes("contra reembolso")));
+      assert.ok(r.angles!.angles.every((a) => a.evidence.length >= 1 && a.nature === "heuristica_sobre_texto_real"));
+      assert.equal(r.incomplete.length, 0, JSON.stringify(r.incomplete));
+      assert.ok(r.notAvailable.some((l) => /gasto/.test(l)) && r.notAvailable.some((l) => /page_id/.test(l)));
+      assert.ok(peticiones.some((p) => p.startsWith("graph.facebook.com")) && !peticiones.some((p) => /^(www\.)?facebook\.com/.test(p)));
+    });
+
+    await test("AUDITOR · modo A sin Shopify ni Facebook: lo dice en `incomplete`, busca solo por marca y dominio, y un fallo de Meta NO se lee como «no anuncia»", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runStoreAudit } = await import("../src/lib/hunter/audit/store-audit");
+      const { fetcher } = auditorRed();
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const r = await runStoreAudit({ storeUrl: "noshopify.es", token: "tok", now, client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher });
+      assert.equal(r.catalog.status, "no_shopify");
+      assert.ok(r.incomplete.some((i) => i.part === "catálogo" && /no es Shopify/.test(i.reason)));
+      assert.ok(r.incomplete.some((i) => i.part === "página de Facebook"));
+      assert.equal(r.adLibrary.status, "sin_resultados");
+      assert.ok(r.incomplete.some((i) => i.part === "anuncios en la Ad Library" && /no devolvió anuncios/.test(i.reason)));
+      assert.equal(r.angles, null);
+
+      // El enlace pegado por el usuario se usa como alias cuando la web no lo trae.
+      const conLink = await runStoreAudit({ storeUrl: "noshopify.es", facebookUrl: "https://www.facebook.com/NoShopify.Oficial", token: "tok", now, client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher });
+      assert.equal(conLink.facebook.source, "usuario");
+      assert.deepEqual(conLink.facebook.slugs, ["noshopify.oficial"]);
+      assert.ok(conLink.adLibrary.searchTerms.includes("noshopify oficial"));
+
+      // Meta devuelve HTTP 400 (p. ej. un campo rechazado): estado «error», no «sin_resultados».
+      const roto = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.host === "graph.facebook.com") return new Response(JSON.stringify({ error: { message: "(#100) Tried accessing nonexisting field", code: 100 } }), { status: 400, headers: { "content-type": "application/json" } });
+        return fetcher(input, init);
+      }) as typeof fetch;
+      const fallo = await runStoreAudit({ storeUrl: "https://tiendauno.es", token: "tok", now, client: new AdLibraryClient("tok", roto, async () => {}), fetcher });
+      assert.equal(fallo.adLibrary.status, "error");
+      assert.match(fallo.adLibrary.reason ?? "", /no se puede afirmar que la tienda no anuncie/);
+      assert.match(fallo.adLibrary.reason ?? "", /HTTP 400/);
+    });
+
+    await test("AUDITOR · un page_id numérico pegado (view_all_page_id=… o facebook.com/123…) consulta por search_page_ids y casa por page_id; nunca por búsqueda de texto", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runStoreAudit, facebookPageId, facebookSlugs } = await import("../src/lib/hunter/audit/store-audit");
+      assert.equal(facebookPageId(["https://www.facebook.com/ads/library/?active_status=active&view_all_page_id=555000111"]), "555000111");
+      assert.equal(facebookPageId(["https://www.facebook.com/profile.php?id=555000111"]), "555000111");
+      assert.equal(facebookPageId(["https://www.facebook.com/555000111/"]), "555000111");
+      assert.equal(facebookPageId(["https://www.facebook.com/tiendauno"]), null);
+      assert.deepEqual(facebookSlugs(["https://www.facebook.com/555000111"]), [], "un número no es alias");
+      const { fetcher, peticiones } = auditorRed();
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const r = await runStoreAudit({ storeUrl: "noshopify.es", facebookUrl: "https://www.facebook.com/ads/library/?view_all_page_id=555000111", token: "tok", now, client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher });
+      assert.equal(r.adLibrary.status, "ok", r.adLibrary.reason ?? "");
+      assert.deepEqual(r.adLibrary.matchedBy, ["page_id"]);
+      assert.deepEqual(r.adLibrary.searchTerms, ["page_id 555000111"]);
+      assert.equal(r.adLibrary.competitors[0].pageId, "555000111");
+      const meta = peticiones.filter((p) => p.startsWith("graph.facebook.com"));
+      assert.equal(meta.length, 1, "una sola consulta, por page_id; sin búsqueda de texto después");
+      assert.ok(meta[0].includes("search_page_ids=%5B%22555000111%22%5D") || meta[0].includes("search_page_ids="), meta[0]);
+      assert.match(r.facebook.note, /search_page_ids/);
+    });
+
+    await test("AUDITOR · con EMERGENCY_STOP no se lee ni la tienda ni la Ad Library: cero peticiones, y la cadena tampoco arranca", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runStoreAudit } = await import("../src/lib/hunter/audit/store-audit");
+      const { readStore } = await import("../src/lib/hunter/audit/store");
+      const { runWinnerHunt } = await import("../src/lib/hunter/audit/winner-hunt");
+      const { fetcher, peticiones } = auditorRed();
+      await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+        const tienda = await readStore("tiendauno.es", fetcher);
+        assert.equal(tienda.profile.homepageStatus, "no_accesible");
+        assert.match(tienda.profile.homepageReason ?? "", /EMERGENCY_STOP/);
+        await assert.rejects(() => runStoreAudit({ storeUrl: "tiendauno.es", token: "tok", client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher }), /EMERGENCY_STOP/);
+        await assert.rejects(() => runWinnerHunt({ seed: "parada", token: "tok", client: new AdLibraryClient("tok", fetcher, async () => {}), fetcher }), /EMERGENCY_STOP/);
+      });
+      assert.equal(peticiones.length, 0, peticiones.join(" | "));
+    });
+
+    await test("AUDITOR · modo B: el criterio de «destaca» está escrito y se aplica; las auditorías reutilizan los anuncios ya bajados (cero cuota extra), respetan el reparto del presupuesto y el tope por corrida", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runWinnerHunt, scoreCandidate, aggregateByPage, STANDOUT_CRITERION, MAX_AUDITS_PER_RUN, SEARCH_TIME_SHARE, SEARCH_REQUEST_SHARE } = await import("../src/lib/hunter/audit/winner-hunt");
+      assert.match(STANDOUT_CRITERION, /activos ≥ 2/);
+      assert.equal(MAX_AUDITS_PER_RUN, 5);
+      const grupo = (pageId: string, activeAds: number, dias: number | null, variantes: number, extra: Record<string, unknown> = {}) => ({ pageId, pageName: pageId, candidateKey: pageId + ":" + Math.random(), noise: false, activeAds, momentum: { status: "sin_historico" }, signals: [...(dias === null ? [] : [{ id: "dias_activo", value: dias }]), { id: "variantes_creativas", value: variantes }], ...extra }) as never;
+      const pagina = (g: unknown) => aggregateByPage([g as never])[0];
+      assert.equal(scoreCandidate(pagina(grupo("a", 1, 60, 1))), null, "1 activo no destaca");
+      assert.equal(scoreCandidate(pagina(grupo("b", 3, 3, 1))), null, "nuevo y sin testear no destaca");
+      assert.equal(aggregateByPage([grupo("c", 9, 60, 1, { noise: true })]).length, 0, "el ruido nunca destaca");
+      const s = scoreCandidate(pagina(grupo("d", 3, 30, 2, { momentum: { status: "fuerte" } })))!;
+      assert.equal(s.score, 3 * 3 + 30 / 10 + 2 * 2 + 5);
+      assert.match(s.why, /3 activos, 30 días activa, 2 textos distintos, momentum fuerte/);
+      // Dos grupos de la MISMA página (dos líneas de producto) se suman: la unidad es la tienda.
+      const sumada = aggregateByPage([grupo("e", 1, 40, 1), grupo("e", 1, 5, 1)]);
+      assert.equal(sumada.length, 1);
+      assert.equal(sumada[0].activeAds, 2);
+      assert.equal(sumada[0].daysActive, 40, "el grupo más veterano manda");
+      assert.equal(sumada[0].groups.length, 2);
+      assert.ok(scoreCandidate(sumada[0]), "sumados, destacan; por separado ninguno llegaba a 2 activos");
+
+      const { fetcher, peticiones } = auditorRed();
+      // La Ad Library de la cadena: la tienda uno destaca (2 activos, 68 días), la dos no (1 activo), la tres es ruido.
+      const adlib = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.host !== "graph.facebook.com") return fetcher(input, init);
+        peticiones.push("graph.facebook.com" + url.pathname);
+        const term = url.searchParams.get("search_terms") ?? "";
+        const data = [
+          // Ids FIJOS: el mismo anuncio aparece en varios términos y solo cuenta una vez.
+          { id: "u1", page_id: "p-uno", page_name: "Tienda Uno", ad_creative_bodies: [`${term}: envío gratis y pago contra reembolso`], ad_creative_link_captions: ["tiendauno.es"], ad_delivery_start_time: "2026-07-01" },
+          { id: "u2", page_id: "p-uno", page_name: "Tienda Uno", ad_creative_bodies: [`solo hoy 30% de descuento en ${term}`], ad_creative_link_captions: ["tiendauno.es"], ad_delivery_start_time: "2026-08-25" },
+          { id: "d1", page_id: "p-dos", page_name: "Tienda Dos", ad_creative_bodies: [`${term} de calidad`], ad_creative_link_captions: ["tiendados.es"], ad_delivery_start_time: "2026-06-01" },
+          { id: "r", page_id: "academia", page_name: "Academia", ad_creative_bodies: ["Curso y webinar de formacion online"], ad_delivery_start_time: "2026-08-01" },
+        ];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const progreso: Array<string | null | undefined> = [];
+      const r = await runWinnerHunt({ seed: "cadena-test-barra", token: "tok", now, minutes: 10, maxRequests: 100, maxTerms: 3, client: new AdLibraryClient("tok", adlib, async () => {}), fetcher, onProgress: (p) => progreso.push(p.auditando) });
+      assert.equal(r.criterion, STANDOUT_CRITERION);
+      assert.equal(r.budgetSplit.searchMinutes, 10 * SEARCH_TIME_SHARE);
+      assert.equal(r.budgetSplit.searchMaxRequests, Math.floor(100 * SEARCH_REQUEST_SHARE));
+      assert.equal(r.budgetSplit.maxAudits, MAX_AUDITS_PER_RUN);
+      assert.equal(r.totalCompetitors, 2, "dos páginas: la academia es ruido");
+      assert.equal(r.candidates.length, 1, "Tienda Dos tiene 1 activo: no destaca · " + JSON.stringify(r.candidates.map((c) => c.pageName)));
+      const cand = r.candidates[0];
+      assert.equal(cand.pageName, "Tienda Uno");
+      assert.ok(cand.groupCount >= 1);
+      assert.equal(cand.score.activeAds, 2, "los dos anuncios de la página cuentan aunque el buscador los separe por línea de producto");
+      assert.equal(cand.storeUrl, "tiendauno.es", "la tienda sale del dominio declarado en sus anuncios");
+      assert.equal(cand.auditStatus, "auditada");
+      assert.equal(r.auditsRun, 1);
+      assert.ok(cand.audit && cand.audit.catalog.status === "ok" && cand.audit.catalog.products > 0);
+      assert.equal(cand.audit!.adLibrary.matchedBy[0], "page_id");
+      assert.ok(cand.audit!.angles!.angles.some((a) => a.id === "envio_pago"));
+      assert.ok(progreso.includes("Tienda Uno"), "el progreso nombra la auditoría en curso");
+      // Las auditorías NO volvieron a Meta: tantas peticiones a graph como consultas del buscador.
+      const meta = peticiones.filter((p) => p.startsWith("graph.facebook.com")).length;
+      assert.equal(meta, r.search.requests, `meta=${meta} búsqueda=${r.search.requests}`);
+    });
+
+    await test("AUDITOR · modo B sin tiempo o sin dominio: la candidata queda marcada (sin_tiempo / sin_tienda_resuelta) y el tope de auditorías por corrida se respeta", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runWinnerHunt, AUDIT_RESERVE_MS } = await import("../src/lib/hunter/audit/winner-hunt");
+      const { fetcher } = auditorRed();
+      const muchos = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.host !== "graph.facebook.com") return fetcher(input, init);
+        const term = url.searchParams.get("search_terms") ?? "";
+        // Siete anunciantes que destacan; solo el primero declara dominio.
+        const data = Array.from({ length: 7 }, (_, i) => [
+          { id: `${term}-${i}-a`, page_id: `p${i}`, page_name: `Marca ${i}`, ad_creative_bodies: [`${term} con envío rápido ${i}`], ad_creative_link_captions: i === 0 ? ["tiendauno.es"] : [], ad_delivery_start_time: "2026-07-01" },
+          { id: `${term}-${i}-b`, page_id: `p${i}`, page_name: `Marca ${i}`, ad_creative_bodies: [`oferta de ${term} hoy ${i}`], ad_creative_link_captions: i === 0 ? ["tiendauno.es"] : [], ad_delivery_start_time: "2026-08-01" },
+        ]).flat();
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const r = await runWinnerHunt({ seed: "cadena-test-tope", token: "tok", now, minutes: 10, maxRequests: 100, maxTerms: 2, maxAudits: 2, client: new AdLibraryClient("tok", muchos, async () => {}), fetcher });
+      assert.equal(r.candidates.length, 7);
+      assert.equal(r.auditsRun, 2, "tope explícito por corrida");
+      assert.equal(r.candidates.filter((c) => c.auditStatus === "no_seleccionada").length, 5);
+      const conTienda = r.candidates.find((c) => c.pageId === "p0")!;
+      assert.equal(conTienda.auditStatus, "auditada");
+      const sinTienda = r.candidates.find((c) => c.auditStatus === "sin_tienda_resuelta");
+      assert.ok(sinTienda, "sin dominio declarado no hay tienda que leer, pero sí ángulos");
+      assert.equal(sinTienda!.storeUrl, null);
+      assert.ok(sinTienda!.audit!.angles!.adsAnalyzed >= 2);
+      assert.ok(sinTienda!.audit!.incomplete.some((i) => i.part === "catálogo"));
+
+      // Sin tiempo para auditar: un presupuesto tan corto que la reserva no cabe.
+      const corto = await runWinnerHunt({ seed: "cadena-test-corto", token: "tok", now, minutes: AUDIT_RESERVE_MS / 60_000 / 2, maxRequests: 100, maxTerms: 1, client: new AdLibraryClient("tok", muchos, async () => {}), fetcher });
+      assert.equal(corto.auditsRun, 0);
+      assert.equal(corto.stopReason, "deadline");
+      assert.ok(corto.candidates.some((c) => c.auditStatus === "sin_tiempo"));
+    });
+
+    await test("AUDITOR · la cola distingue búsqueda, auditoría y cadena; el vigilante despacha por tipo y la ruta del panel acepta los tres", async () => {
+      const raw = db.systemDbHandle();
+      raw.prepare("DELETE FROM discovery_jobs").run();
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { enqueueDiscoveryJob, latestDiscoveryJob } = await import("../src/lib/hunter/discovery/jobs");
+      const { runDiscoveryWorkerTick } = await import("../src/lib/hunter/discovery/worker");
+      const { fetcher } = auditorRed();
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+
+      // Sin URL válida, una auditoría no se encola.
+      const mala = enqueueDiscoveryJob({ kind: "auditoria", seed: "no es url", country: "ES", days: 30, minutes: 5 });
+      assert.equal(mala.ok, false);
+      assert.match(!mala.ok ? mala.detail : "", /URL de una tienda/);
+
+      const audR = enqueueDiscoveryJob({ kind: "auditoria", seed: "https://tiendauno.es", params: { facebookUrl: null }, country: "ES", days: 30, minutes: 5 });
+      assert.ok(audR.ok, !audR.ok ? audR.detail : "");
+      const aud = audR.ok ? audR.job : null!;
+      assert.equal(aud.kind, "auditoria");
+      assert.equal(aud.params.storeUrl, "https://tiendauno.es");
+      const atendida = await runDiscoveryWorkerTick({ client, token: "tok", fetcher });
+      assert.equal(atendida?.id, aud.id);
+      const hecha = latestDiscoveryJob()!;
+      assert.equal(hecha.status, "terminado", hecha.error ?? "");
+      assert.equal(hecha.kind, "auditoria");
+      const informe = hecha.result as { domain: string; catalog: { status: string }; adLibrary: { activeAds: number } };
+      assert.equal(informe.domain, "tiendauno.es");
+      assert.equal(informe.catalog.status, "ok");
+      assert.equal(informe.adLibrary.activeAds, 2);
+      const ultimoEvento = () => (raw.prepare("SELECT message FROM integration_events WHERE event_type='discovery_job_terminada' ORDER BY id DESC LIMIT 1").get() as { message: string } | undefined)?.message ?? "";
+      assert.match(ultimoEvento(), /auditoría de tiendauno\.es/);
+
+      raw.prepare("DELETE FROM discovery_jobs").run();
+      const cadena = enqueueDiscoveryJob({ kind: "cadena", seed: "cola-cadena-barra", country: "ES", days: 30, minutes: 5 });
+      assert.ok(cadena.ok && cadena.job.kind === "cadena");
+      await runDiscoveryWorkerTick({ client, token: "tok", fetcher });
+      const fin = latestDiscoveryJob()!;
+      assert.equal(fin.status, "terminado", fin.error ?? "");
+      const res = fin.result as { candidates: unknown[]; criterion: string; auditsRun: number };
+      assert.ok(Array.isArray(res.candidates) && typeof res.criterion === "string");
+      assert.ok(!("adsByCandidate" in (fin.result as object)), "los anuncios crudos no se persisten en la fila");
+      assert.match(ultimoEvento(), /cadena "cola-cadena-barra"/);
+
+      // La ruta: kind auditoria exige URL; kind cadena encola cadena; por defecto, búsqueda.
+      raw.prepare("DELETE FROM discovery_jobs").run();
+      const { NextRequest } = await import("next/server");
+      const route = await import("../src/app/api/hunter/competencia/route");
+      const sessions = await import("../src/lib/auth/session");
+      raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-aud@test','Dueña Auditora','owner','x')").run();
+      const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-aud@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: "tok", EMERGENCY_STOP: "0" }, async () => {
+        const sinUrl = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ kind: "auditoria", storeUrl: "" }) }));
+        assert.equal(sinUrl.status, 409, "sin URL no se encola, con motivo");
+        const ok = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ kind: "auditoria", storeUrl: "tiendauno.es", facebookUrl: "https://www.facebook.com/tiendauno" }) }));
+        assert.equal(ok.status, 200);
+        const creado = (await ok.json()) as { job: { kind: string; params: { storeUrl: string; facebookUrl: string | null } } };
+        assert.equal(creado.job.kind, "auditoria");
+        assert.equal(creado.job.params.facebookUrl, "https://www.facebook.com/tiendauno");
+        raw.prepare("DELETE FROM discovery_jobs").run();
+        const cad = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ kind: "cadena", seed: "ruta cadena" }) }));
+        assert.equal(((await cad.json()) as { job: { kind: string } }).job.kind, "cadena");
+        raw.prepare("DELETE FROM discovery_jobs").run();
+        const bus = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ seed: "ruta busqueda" }) }));
+        assert.equal(((await bus.json()) as { job: { kind: string } }).job.kind, "busqueda");
+      });
+      raw.prepare("DELETE FROM discovery_jobs").run();
+    });
+
+    await test("AUDITOR · la migración 30 es aditiva: las filas antiguas de la cola pasan a ser búsquedas y el panel las sigue leyendo", async () => {
+      const Database = (await import("better-sqlite3")).default;
+      const raw = new Database(":memory:");
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs]) m(raw);
+      raw.prepare("INSERT INTO discovery_jobs(seed,country,days,minutes,status,created_at) VALUES('vieja','ES',30,15,'terminado',1)").run();
+      db.migrateDiscoveryJobKinds(raw);
+      db.migrateDiscoveryJobKinds(raw); // idempotente
+      const cols = (raw.prepare("PRAGMA table_info(discovery_jobs)").all() as Array<{ name: string }>).map((c) => c.name);
+      assert.ok(cols.includes("kind") && cols.includes("params_json"));
+      const fila = raw.prepare("SELECT kind, params_json FROM discovery_jobs WHERE seed='vieja'").get() as { kind: string; params_json: string | null };
+      assert.equal(fila.kind, "busqueda");
+      assert.equal(fila.params_json, null);
+      raw.close();
     });
 
     await test("MOMENTUM · deja de ser una etiqueta: la traza dice los conteos, la diferencia, contra qué fecha se compara y con qué regla", async () => {

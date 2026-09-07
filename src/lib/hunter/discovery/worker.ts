@@ -20,6 +20,8 @@ import {
   type DiscoveryJobView,
 } from "./jobs";
 import { runWordSearch } from "./word-search";
+import { runStoreAudit } from "../audit/store-audit";
+import { runWinnerHunt } from "../audit/winner-hunt";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -34,6 +36,8 @@ export interface DiscoveryWorkerDeps {
   client?: AdLibraryClient;
   token?: string;
   now?: number;
+  /** Para leer tiendas ajenas en las auditorías. Inyectable en tests. */
+  fetcher?: typeof fetch;
 }
 
 /**
@@ -56,17 +60,44 @@ export async function runDiscoveryWorkerTick(deps: DiscoveryWorkerDeps = {}): Pr
   }
 
   try {
-    const result = await runWordSearch({
-      seed: job.seed,
-      country: job.country,
-      days: job.days,
-      minutes: job.minutes,
-      token,
-      now: deps.now,
-      client: deps.client,
-      onProgress: (p) => recordJobProgress(job.id, p),
-    });
-    finishDiscoveryJob(job.id, result);
+    if (job.kind === "auditoria") {
+      const result = await runStoreAudit({
+        storeUrl: job.params.storeUrl ?? job.seed,
+        facebookUrl: job.params.facebookUrl ?? null,
+        country: job.country,
+        days: job.days,
+        token,
+        now: deps.now,
+        client: deps.client,
+        fetcher: deps.fetcher,
+      });
+      finishDiscoveryJob(job.id, { ...result, seed: job.seed, stopReason: result.adLibrary.stopReason ?? "completado" }, undefined, `auditoría de ${result.domain}: catálogo ${result.catalog.status}, ${result.adLibrary.activeAds} anuncios activos, ${result.incomplete.length} parte(s) sin completar`);
+    } else if (job.kind === "cadena") {
+      const result = await runWinnerHunt({
+        seed: job.seed,
+        country: job.country,
+        days: job.days,
+        minutes: job.minutes,
+        token,
+        now: deps.now,
+        client: deps.client,
+        fetcher: deps.fetcher,
+        onProgress: (p) => recordJobProgress(job.id, p),
+      });
+      finishDiscoveryJob(job.id, { ...result }, undefined, `cadena "${result.seed}": ${result.totalCompetitors} competidores, ${result.candidates.length} candidatas, ${result.auditsRun} auditadas, parada ${result.stopReason}`);
+    } else {
+      const result = await runWordSearch({
+        seed: job.seed,
+        country: job.country,
+        days: job.days,
+        minutes: job.minutes,
+        token,
+        now: deps.now,
+        client: deps.client,
+        onProgress: (p) => recordJobProgress(job.id, p),
+      });
+      finishDiscoveryJob(job.id, { ...result }, undefined, `búsqueda "${result.seed}": ${result.competitors.length} competidor(es), ${result.rawAds} anuncios, parada ${result.stopReason}`);
+    }
   } catch (err) {
     failDiscoveryJob(job.id, err instanceof Error ? err.message : String(err));
   }

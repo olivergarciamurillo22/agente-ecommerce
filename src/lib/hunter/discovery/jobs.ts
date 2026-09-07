@@ -19,10 +19,24 @@ import { logIntegrationEvent } from "../../system/repo";
 import { DISCOVERY_HALTED_MESSAGE } from "./errors";
 import type { WordSearchProgress, WordSearchResult } from "./word-search";
 
+/**
+ * Tipos de trabajo (07-09-2026, docs/HUNTER-AUDITOR.md):
+ *  busqueda  · buscador por palabra (lo de siempre)
+ *  auditoria · modo A: auditar una tienda por su URL
+ *  cadena    · modo B: buscar por palabra y auditar en cadena las que destacan
+ */
+export type DiscoveryJobKind = "busqueda" | "auditoria" | "cadena";
+export interface DiscoveryJobParams {
+  storeUrl?: string;
+  facebookUrl?: string | null;
+}
+
 export type DiscoveryJobStatus = "pendiente" | "corriendo" | "terminado" | "fallido" | "cancelado";
 
 export interface DiscoveryJobRow {
   id: number;
+  kind: DiscoveryJobKind;
+  params_json: string | null;
   seed: string;
   country: string;
   days: number;
@@ -40,6 +54,8 @@ export interface DiscoveryJobRow {
 
 export interface DiscoveryJobView {
   id: number;
+  kind: DiscoveryJobKind;
+  params: DiscoveryJobParams;
   seed: string;
   country: string;
   days: number;
@@ -49,8 +65,9 @@ export interface DiscoveryJobView {
   createdAt: number;
   startedAt: number | null;
   finishedAt: number | null;
-  progress: WordSearchProgress | null;
-  result: WordSearchResult | null;
+  progress: (WordSearchProgress & { auditando?: string | null; auditsDone?: number; auditsTotal?: number }) | null;
+  /** Busqueda: WordSearchResult. Auditoria y cadena: sus informes (ver audit/). */
+  result: WordSearchResult | Record<string, unknown> | null;
   error: string | null;
   stopReason: string | null;
 }
@@ -70,6 +87,8 @@ function parse<T>(raw: string | null): T | null {
 export function toJobView(row: DiscoveryJobRow): DiscoveryJobView {
   return {
     id: row.id,
+    kind: (row.kind ?? "busqueda") as DiscoveryJobKind,
+    params: parse<DiscoveryJobParams>(row.params_json) ?? {},
     seed: row.seed,
     country: row.country,
     days: row.days,
@@ -79,8 +98,8 @@ export function toJobView(row: DiscoveryJobRow): DiscoveryJobView {
     createdAt: row.created_at,
     startedAt: row.started_at,
     finishedAt: row.finished_at,
-    progress: parse<WordSearchProgress>(row.progress_json),
-    result: parse<WordSearchResult>(row.result_json),
+    progress: parse<DiscoveryJobView["progress"]>(row.progress_json),
+    result: parse<DiscoveryJobView["result"]>(row.result_json),
     error: row.error,
     stopReason: row.stop_reason,
   };
@@ -97,13 +116,21 @@ export type EnqueueOutcome =
  */
 export function enqueueDiscoveryJob(input: {
   seed: string;
+  kind?: DiscoveryJobKind;
+  params?: DiscoveryJobParams;
   country?: string;
   days?: number;
   minutes?: number;
   requestedBy?: string | null;
 }): EnqueueOutcome {
-  const seed = (input.seed ?? "").trim().slice(0, 120);
-  if (!seed) return { ok: false, reason: "palabra_vacia", detail: "escribe una palabra o una frase corta para buscar" };
+  const kind: DiscoveryJobKind = input.kind ?? "busqueda";
+  const seed = (input.seed ?? "").trim().slice(0, 200);
+  if (!seed) {
+    return { ok: false, reason: "palabra_vacia", detail: kind === "auditoria" ? "pega la URL de la tienda que quieres auditar" : "escribe una palabra o una frase corta para buscar" };
+  }
+  if (kind === "auditoria" && !/^(https?:\/\/)?[a-z0-9.-]+\.[a-z]{2,}/i.test(seed)) {
+    return { ok: false, reason: "palabra_vacia", detail: "eso no parece la URL de una tienda (ejemplo: tienda.es)" };
+  }
   if (!canRunDiscovery()) return { ok: false, reason: "parada_emergencia", detail: DISCOVERY_HALTED_MESSAGE };
   const db = systemDbHandle();
   const activa = db.prepare("SELECT * FROM discovery_jobs WHERE status IN ('pendiente','corriendo') ORDER BY id DESC LIMIT 1").get() as DiscoveryJobRow | undefined;
@@ -113,11 +140,13 @@ export function enqueueDiscoveryJob(input: {
   const minutes = Math.min(MAX_SEARCH_MINUTES, Math.max(1, Math.round(input.minutes ?? 15)));
   const days = Math.min(90, Math.max(1, Math.round(input.days ?? 30)));
   const country = (input.country ?? "ES").toUpperCase().slice(0, 2);
+  const params: DiscoveryJobParams = { ...(input.params ?? {}) };
+  if (kind === "auditoria") params.storeUrl = seed;
   const info = db
-    .prepare("INSERT INTO discovery_jobs (seed, country, days, minutes, status, requested_by) VALUES (?, ?, ?, ?, 'pendiente', ?)")
-    .run(seed, country, days, minutes, input.requestedBy ?? null);
+    .prepare("INSERT INTO discovery_jobs (seed, country, days, minutes, status, requested_by, kind, params_json) VALUES (?, ?, ?, ?, 'pendiente', ?, ?, ?)")
+    .run(seed, country, days, minutes, input.requestedBy ?? null, kind, Object.keys(params).length ? JSON.stringify(params) : null);
   const row = db.prepare("SELECT * FROM discovery_jobs WHERE id = ?").get(Number(info.lastInsertRowid)) as DiscoveryJobRow;
-  logIntegrationEvent("meta_ads", "discovery_job_encolada", "info", `búsqueda de competencia encolada: "${seed}" (${country}, ${days} d, ${minutes} min)`, null);
+  logIntegrationEvent("meta_ads", "discovery_job_encolada", "info", `trabajo del Cazador encolado (${kind}): "${seed}" (${country}, ${days} d, ${minutes} min)`, null);
   return { ok: true, job: toJobView(row) };
 }
 
@@ -150,7 +179,7 @@ export function claimNextDiscoveryJob(nowSec = Math.floor(Date.now() / 1000)): D
   return claimed ? toJobView(claimed) : null;
 }
 
-export function recordJobProgress(id: number, progress: WordSearchProgress): void {
+export function recordJobProgress(id: number, progress: NonNullable<DiscoveryJobView["progress"]>): void {
   try {
     systemDbHandle().prepare("UPDATE discovery_jobs SET progress_json = ? WHERE id = ?").run(JSON.stringify(progress), id);
   } catch {
@@ -158,11 +187,13 @@ export function recordJobProgress(id: number, progress: WordSearchProgress): voi
   }
 }
 
-export function finishDiscoveryJob(id: number, result: WordSearchResult, nowSec = Math.floor(Date.now() / 1000)): void {
+export function finishDiscoveryJob(id: number, result: { seed: string; stopReason: string } & Record<string, unknown>, nowSec = Math.floor(Date.now() / 1000), summary?: string): void {
   systemDbHandle()
     .prepare("UPDATE discovery_jobs SET status = 'terminado', finished_at = ?, result_json = ?, stop_reason = ? WHERE id = ?")
-    .run(nowSec, JSON.stringify(result).slice(0, 2_000_000), result.stopReason, id);
-  logIntegrationEvent("meta_ads", "discovery_job_terminada", "info", `búsqueda "${result.seed}": ${result.competitors.length} competidor(es), ${result.rawAds} anuncios, parada ${result.stopReason}`, null);
+    // Los anuncios por candidato NO se persisten aquí: ya viven en
+    // adlib_candidate_snapshots y duplicarlos hincharía la fila.
+    .run(nowSec, JSON.stringify({ ...result, adsByCandidate: undefined }).slice(0, 2_000_000), result.stopReason, id);
+  logIntegrationEvent("meta_ads", "discovery_job_terminada", "info", summary ?? `trabajo "${result.seed}" terminado, parada ${result.stopReason}`, null);
 }
 
 export function failDiscoveryJob(id: number, error: string, nowSec = Math.floor(Date.now() / 1000)): void {

@@ -19,7 +19,7 @@ import { expandSearchTerm, type ExpandedTerm } from "./expansion";
 import { DiscoveryRepository } from "./repository";
 import { runDiscovery } from "./service";
 import { competitorSignals, type CompetitorReport } from "./signals";
-import type { DiscoverySnapshot } from "./types";
+import type { AdLibraryAd, DiscoverySnapshot } from "./types";
 
 export const DEFAULT_SEARCH_MINUTES = 15;
 export const DEFAULT_MAX_REQUESTS = 400;
@@ -48,6 +48,12 @@ export interface WordSearchResult {
   /** Los descartados por el filtro de ruido, con su motivo (para poder revisarlo). */
   discarded: CompetitorReport[];
   elapsedSec: number;
+  /**
+   * Los anuncios de cada competidor, por clave. Los necesita el modo B del
+   * auditor para citar ángulos SIN volver a la Ad Library. No se persiste en
+   * el resultado del trabajo (ya vive en adlib_candidate_snapshots.ads_json).
+   */
+  adsByCandidate?: Record<string, AdLibraryAd[]>;
 }
 
 export interface WordSearchInput {
@@ -135,6 +141,7 @@ export async function runWordSearch(input: WordSearchInput): Promise<WordSearchR
     competitors: informes.filter((c) => !c.noise).sort(orden),
     discarded: informes.filter((c) => c.noise).sort(orden),
     elapsedSec: Math.round((Date.now() - started) / 1000),
+    adsByCandidate: Object.fromEntries(run.snapshots.map((s) => [s.key, s.ads])),
   };
   input.onProgress?.({ fase: "terminado", term: null, termsDone: run.termsQueried.length, termsTotal: terms.length, ads: run.rawCount, requests: run.requests, remainingSec: Math.round(budget.remainingMs() / 1000) });
   return result;

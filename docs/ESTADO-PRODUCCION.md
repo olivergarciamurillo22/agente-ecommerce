@@ -42,10 +42,10 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 ## 3 · Qué falta para mover producción
 
 > **07-09-2026:** el candidato vigente pasa a ser **`release/casamable-v4.3`
-> (esquema 29)**, que contiene íntegro el candidato de abajo (`v4.2` @
+> (esquema 30)**, que contiene íntegro el candidato de abajo (`v4.2` @
 > `fdad99e`, merge de `origin/release/casamable-v4.2` @ `4e07ff5`) más el
 > workspace, Hunter + Landing Studio (19), predictivo (20) y discovery (21).
-> El salto de esquema desde producción (15) es **15 → 29** (22 = validacion de direcciones, 23 = auto-despacho, 24 = canal de despacho, 25 = auto-cancelacion IA, 26 = aviso de despacho, 27 = tope diario de IA, 28 = estado de corrida de discovery, 29 = cola de busquedas; 07-09), todo aditivo y
+> El salto de esquema desde producción (15) es **15 → 30** (22 = validacion de direcciones, 23 = auto-despacho, 24 = canal de despacho, 25 = auto-cancelacion IA, 26 = aviso de despacho, 27 = tope diario de IA, 28 = estado de corrida de discovery, 29 = cola de busquedas, 30 = tipos de trabajo de la cola: auditoria de tienda y cadena; 07-09), todo aditivo y
 > ensayado con el fixture realista (`scripts/test-migration-v43.ts`). Guía
 > de release: `docs/deploy/RELEASE-v4.3.md`. Lo que corre en el NAS no se ha
 > podido confirmar desde el repo: hace falta `PRODUCTION_COMMIT`.

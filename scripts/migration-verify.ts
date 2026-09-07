@@ -154,7 +154,7 @@ function print(report: MigrationVerifyReport): void {
   console.log("\n  Esto verifica la MECÁNICA sobre esta copia. No sustituye a correrlo sobre una copia REAL de producción.\n");
 }
 
-/** Tablas que aparecieron DESPUÉS del esquema 17 (migraciones 18→29). Se quitan para fabricar un "17 realista". */
+/** Tablas que aparecieron DESPUÉS del esquema 17 (migraciones 18→30). Se quitan para fabricar un "17 realista". */
 const TABLES_AFTER_17 = [
   "users", "sessions", "audit_log", "work_items", "confirmation_resends",
   "product_candidates", "candidate_events",
@@ -171,7 +171,7 @@ const TABLES_AFTER_17 = [
 /**
  * Fixture REALISTA en esquema 17: se construye con el código real de hoy
  * (build() + insertOrderIfNew/getOrCreateConversation/insertMessage), luego
- * se rebaja: se eliminan las tablas de las migraciones 18→29 y se estampa
+ * se rebaja: se eliminan las tablas de las migraciones 18→30 y se estampa
  * user_version=17. Datos sintéticos, forma real. Solo para probar la
  * MECÁNICA de la herramienta; no sustituye una copia de producción.
  */

@@ -68,6 +68,7 @@
     "hunter:discovery": "tsx scripts/hunter-discovery.ts",
     "hunter:discovery:doctor": "tsx scripts/hunter-discovery-doctor.ts",
     "hunter:search": "tsx scripts/hunter-search.ts",
+    "hunter:audit": "tsx scripts/hunter-audit.ts",
     "landing:build": "tsx scripts/landing-build.ts",
     "landing:sections": "tsx scripts/landing-sections.ts",
     "landing:lint": "tsx scripts/landing-lint.ts",
