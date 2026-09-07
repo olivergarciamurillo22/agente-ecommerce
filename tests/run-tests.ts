@@ -1458,6 +1458,175 @@ async function main(): Promise<void> {
     assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
   });
 
+
+  // ============ BORDES (Bloque 5, 07-09-2026): sin cambio de comportamiento ============
+  console.log("\n— Casos borde: codificación, dobles, vacíos y fallos a mitad de lote —");
+
+  await test("BORDE dirección · acentos mal codificados (mojibake), invisibles, emojis decorativos y símbolos raros NO tumban la capa 1; solo el texto sin contenido es sospechoso", async () => {
+    // Mojibake típico (UTF-8 leído como latin1), ordinales, apóstrofes catalanes,
+    // zero-width, NUL, comillas asiáticas y emojis decorativos: todo es una
+    // dirección real para la capa 1 (solo bloquea basura evidente).
+    const legibles: Array<[string, string]> = [
+      ["50", "Calle AlcalÃ¡ 123, 2Âº B"],
+      ["51", "C/ NÃºÃ±ez de Balboa 45"],
+      ["52", "Carrer d'Aragó 234 àtic 1ª"],
+      ["53", "Calle​Mayor​5"],
+      ["54", "Calle Mayor 5 "],
+      ["55", "🏠 Calle Mayor 5 🏠"],
+      ["56", "Calle Mayor 5 (portal rojo) 【piso 2】"],
+      ["57", "Cl. Mayor, 5 – 2.º B"],
+      ["58", "Calle Mayor n° 5"],
+    ];
+    for (const [suffix, texto] of legibles) {
+      assert.equal(addrAssess.assessShippingAddress(texto).status, "VALID", texto);
+      assert.equal(addrAssess.isFillerAddress(texto), false, texto);
+      const order = mkAddrOrder(suffix, { address_line1: texto });
+      const l1 = addrVal.runAddressValidationLayer1(order);
+      assert.equal(l1.verdict, "correcta", `${texto}: ${l1.problems.join(",")}`);
+      assert.equal(addrVal.hasOpenAddressAlert(order.id), false, texto);
+    }
+    // Sin contenido real: solo emoji, solo espacios, solo invisibles → sospechosa/incorrecta.
+    for (const [suffix, texto] of [["59", "👍"], ["60", "   "], ["61", "​​"]] as const) {
+      assert.equal(addrAssess.assessShippingAddress(texto).status, "SUSPICIOUS", JSON.stringify(texto));
+      const order = mkAddrOrder(suffix, { address_line1: texto });
+      const l1 = addrVal.runAddressValidationLayer1(order);
+      assert.equal(l1.verdict, "incorrecta", JSON.stringify(texto));
+      assert.ok(addrVal.hasOpenAddressAlert(order.id), "abre alerta");
+      const out = await addrVal.runAddressValidationLayer2(order, { env: AI_ON, complete: async () => { throw new Error("no debería llamarse"); } });
+      assert.equal(out.status, "no_ejecutada", "la capa 2 no gasta una llamada en texto vacío");
+    }
+    // CP con espacios alrededor o salto de línea: se recorta y es coherente.
+    // CP con espacio interior ("28 001") es formato inválido: abre alerta, no bloquea (estrictez documentada).
+    assert.equal(addrAssess.checkSpanishPostalCode(" 28001 ", "Madrid", "Madrid").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("28001\n", "Madrid", "Madrid").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("28 001", "Madrid", "Madrid").existence, "formato_invalido");
+    assert.equal(addrAssess.checkSpanishPostalCode("２８００１", "Madrid", "Madrid").existence, "formato_invalido", "dígitos de ancho completo no son un CP");
+    // Provincia con mayúsculas, espacios o acento mal codificado: la coherencia no se rompe por eso.
+    assert.equal(addrAssess.checkSpanishPostalCode("28001", "MADRID ", "Madrid").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("08001", "BARCELONA", "Barcelona").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("15001", "La Coruña", "Coruña").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("15001", "A Coruña", "A Coruña").coherence, "coherente");
+    assert.notEqual(addrAssess.checkSpanishPostalCode("28001", "MadrÃ­d", "Madrid").coherence, "incoherente", "una provincia ilegible no se declara incoherente: sin_confirmar o coherente por ciudad");
+    // El hash de caché ignora espacios y mayúsculas: "Calle Mayor 5" y " calle  mayor 5 " no disparan dos llamadas.
+    const a = addrVal.addressHash({ id: 0, shopify_order_number: "x", phone: "34600000000", customer_name: "x", proposed_address: null, address_line1: "Calle Mayor 5", address_line2: null, city: "Madrid", province: "Madrid", postal_code: "28001" });
+    const b = addrVal.addressHash({ id: 0, shopify_order_number: "x", phone: "34600000000", customer_name: "x", proposed_address: null, address_line1: " calle  MAYOR 5 ", address_line2: null, city: "madrid", province: "Madrid ", postal_code: "28001" });
+    const c = addrVal.addressHash({ id: 0, shopify_order_number: "x", phone: "34600000000", customer_name: "x", proposed_address: null, address_line1: "Calle Mayor 6", address_line2: null, city: "Madrid", province: "Madrid", postal_code: "28001" });
+    assert.equal(a, b);
+    assert.notEqual(a, c);
+  });
+
+  await test("BORDE cooldown · doble confirmación (segundo '1', segundo botón, 'ok' repetido) es INERTE: un solo cooldown con la misma hora, un solo evento, nadie escalado, cero llamadas a la IA", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const order = mkConfirmedForDispatch("30");
+      assert.equal(handleOrderButtonReply(order.phone, "confirm_order").reply, msgs.MSG_CONFIRMED);
+      const first = dispatch.getDispatchCooldown(order.id)!;
+      assert.equal(first.status, "scheduled");
+      const llamadasIa: string[] = [];
+      for (const repetido of ["1", "1️⃣", "ok", "confirmo", "  1  "]) {
+        const r = handleOrderReply(order.phone, repetido);
+        assert.equal(r.followUp, undefined, `${repetido}: un '1' repetido no es una duda, no va a la IA`);
+        if (r.followUp) llamadasIa.push(repetido);
+      }
+      const r2 = handleOrderButtonReply(order.phone, "confirm_order");
+      assert.equal(r2.followUp, undefined);
+      const rows = db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM dispatch_cooldowns WHERE order_id=?").get(order.id) as { n: number };
+      assert.equal(rows.n, 1, "una sola fila de cooldown por pedido");
+      const after = dispatch.getDispatchCooldown(order.id)!;
+      assert.equal(after.due_at, first.due_at, "la hora de vencimiento no se mueve al repetir la confirmación");
+      assert.equal(after.scheduled_at, first.scheduled_at);
+      const eventos = db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM integration_events WHERE event_type='auto_dispatch_scheduled' AND order_ref=?").get(order.shopify_order_number) as { n: number };
+      assert.equal(eventos.n, 1, "un solo evento de programación");
+      const convoId = db.getConversationIdByPhone(order.phone);
+      assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN", "una confirmación repetida jamás escala a persona");
+      const audit = db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM intent_classifications WHERE order_id=?").get(order.id) as { n: number };
+      assert.equal(audit.n, 0, "sin llamadas a la IA de intención");
+      assert.equal(llamadasIa.length, 0);
+      assert.equal(db.getOrderById(order.id)!.status, "confirmed");
+    });
+  });
+
+  await test("BORDE intención · texto vacío, solo espacios o solo emoji tras confirmar: nunca auto-responde; la IA (si está encendida) recibe el texto tal cual y falla cerrado a persona; el cooldown queda retenido", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const casos: Array<[string, string]> = [["31", ""], ["32", "   "], ["33", "👍"], ["34", "🙏🙏"], ["35", "​"]];
+      for (const [suffix, texto] of casos) {
+        const order = mkConfirmedForDispatch(suffix);
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const r = handleOrderReply(order.phone, texto);
+        assert.equal(r.handled, true, JSON.stringify(texto));
+        assert.equal(r.reply, undefined, "una sola respuesta, vía followUp");
+        assert.ok(r.followUp, JSON.stringify(texto));
+        let recibido: string | null = null;
+        // El modelo "no sabe qué decir": 'otro' con confianza alta. Aunque
+        // inventara una FAQ con 0,99, el texto que sale sería el fijo; aquí se
+        // comprueba el camino realista: persona.
+        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, texto, {
+          env: INTENT_ON, faq: FAQ,
+          complete: async (args) => { recibido = args.user; return JSON.stringify({ intencion: "otro", duda_conocida_id: null, confianza: 0.97, respuesta_sugerida: null }); },
+        });
+        assert.equal(recibido, texto, "el texto llega al modelo sin transformar (vacío incluido: no se inventa contenido)");
+        assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION, JSON.stringify(texto));
+        assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
+        const audit = db.systemDbHandle().prepare("SELECT message, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as { message: string; auto_replied: number; escalated: number };
+        assert.deepEqual(audit, { message: texto, auto_replied: 0, escalated: 1 });
+        const row = dispatch.getDispatchCooldown(order.id)!;
+        beepingCalls.length = 0;
+        assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked", `${JSON.stringify(texto)}: retenido`);
+        assert.equal(beepingCalls.length, 0);
+      }
+      // Mismo texto vacío con la IA apagada: persona de inmediato, sin followUp (comportamiento de siempre).
+      const order = mkConfirmedForDispatch("36");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      await withEnv({ POST_CONFIRMATION_AI_ENABLED: "0" }, async () => {
+        const r = handleOrderReply(order.phone, "👍");
+        assert.equal(r.followUp, undefined);
+        assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
+      });
+    });
+  });
+
+  await test("BORDE lote · OpenAI falla A MITAD del lote de la capa 2 (excepción síncrona y rechazo): el pedido fallido queda 'dudosa' con alerta, los siguientes se evalúan igual y el tick siguiente no repite ninguno", async () => {
+    // Tres pedidos "más recientes que todo" para que el lote (limit 3) sea exactamente este.
+    const a = mkAddrOrder("62", { address_line1: "Calle Alcalá 10, 1º A" });
+    const b = mkAddrOrder("63", { address_line1: "Calle Fallo 20, 2º B" });
+    const c = mkAddrOrder("64", { address_line1: "Calle Alcalá 30, 3º C" });
+    const d = mkAddrOrder("65", { address_line1: "Calle Fallo 40, 4º D" });
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() + 104 WHERE id=?").run(a.id);
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() + 103 WHERE id=?").run(b.id);
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() + 102 WHERE id=?").run(c.id);
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() + 101 WHERE id=?").run(d.id);
+    const pendientes = addrVal.listOrdersPendingAiValidation(4).map((o) => o.id);
+    assert.deepEqual(pendientes, [a.id, b.id, c.id, d.id], "el lote es exactamente estos cuatro, en orden");
+    const vistos: string[] = [];
+    let n = 0;
+    const complete: typeof addrAi.openAiCompleter = (args) => {
+      vistos.push(args.user);
+      n++;
+      if (/Calle Fallo 20/.test(args.user)) throw new Error("boom síncrono a mitad de lote"); // excepción ANTES de devolver promesa
+      if (/Calle Fallo 40/.test(args.user)) return Promise.reject(new Error("ECONNRESET a mitad de lote"));
+      return okCompleter(args);
+    };
+    const done = await addrVal.runPendingAddressAiValidations(4, { env: AI_ON, complete });
+    assert.equal(done, 4, "los cuatro se evalúan (los fallidos cuentan como evaluados: fail-closed, no como pendientes)");
+    assert.equal(n, 4, "el lote no se corta en el fallo");
+    for (const [order, esperado] of [[a, "correcta"], [b, "dudosa"], [c, "correcta"], [d, "dudosa"]] as const) {
+      const fila = addrVal.listAddressValidations(order.id).find((r) => r.layer === 2)!;
+      assert.equal(fila.verdict, esperado, `${order.id}`);
+      assert.equal(addrVal.hasOpenAddressAlert(order.id), esperado === "dudosa", `${order.id}: alerta solo en los fallidos`);
+    }
+    assert.match(addrVal.listAddressValidations(b.id).find((r) => r.layer === 2)!.problems_json, /sin_confirmar:fallo_llamada_ia/);
+    assert.match(addrVal.listAddressValidations(d.id).find((r) => r.layer === 2)!.problems_json, /sin_confirmar:fallo_llamada_ia/);
+    // Tick siguiente: ninguno de los cuatro vuelve a llamar (caché por dirección), tampoco los fallidos.
+    assert.equal(addrVal.listOrdersPendingAiValidation(4).some((o) => [a.id, b.id, c.id, d.id].includes(o.id)), false, "ya no están pendientes");
+    for (const order of [a, b, c, d]) {
+      const again = await addrVal.runAddressValidationLayer2(db.getOrderById(order.id)!, { env: AI_ON, complete: async () => { throw new Error("no debería llamarse: caché"); } });
+      assert.equal(again.status, "cache", `${order.id}: ni los fallidos vuelven a llamar solos`);
+    }
+    assert.equal(vistos.length, 4);
+    assert.equal(addrVal.listAddressValidations(b.id).filter((r) => r.layer === 2).length, 1, "un fallo no se reintenta solo: la corrección de la dirección (nuevo hash) es lo que reabre la evaluación");
+    // Limpieza: devolver created_at real para no alterar el orden de otros tests.
+    db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() WHERE id IN (?,?,?,?)").run(a.id, b.id, c.id, d.id);
+  });
+
   // Limpieza: estos pedidos confirmados NO deben desplazar a los de tests
   // posteriores fuera de la ventana de getOrdersForSupplierEvaluation (LIMIT 50).
   db.systemDbHandle().prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE '9399%' OR shopify_order_id LIKE '9299%'").run();
