@@ -1182,17 +1182,22 @@ async function main(): Promise<void> {
   console.log("\n— Auto-despacho tras cooldown + IA de intención —");
   const dispatch = await import("../src/lib/orders/auto-dispatch");
   const intentAi = await import("../src/lib/orders/intent-ai");
+  const dispatchChannel = await import("../src/lib/orders/dispatch-channel");
   const { resolvePostConfirmationText } = await import("../src/lib/orders/confirmation");
   const FAQ = intentAi.loadPostConfirmationFaq();
-  const DISPATCH_ON = { AUTO_DISPATCH_COOLDOWN_ENABLED: "1", AUTO_DISPATCH_COOLDOWN_HOURS: "8" };
+  // Sin AUTO_DISPATCH_COOLDOWN_HOURS: se prueba el default real (6 h, Pedro 07-09).
+  const DISPATCH_ON = { AUTO_DISPATCH_COOLDOWN_ENABLED: "1", AUTO_DISPATCH_COOLDOWN_HOURS: undefined as string | undefined };
   const INTENT_ON = { POST_CONFIRMATION_AI_ENABLED: "1", OPENAI_API_KEY: "sk-test-no-real", POST_CONFIRMATION_AI_TIMEOUT_MS: "1500" };
   const beepingCalls: string[] = [];
   const fakeMarkToSend = async (id: string | number) => { beepingCalls.push(String(id)); return { outcome: "sent" as const }; };
-  const mkConfirmedForDispatch = (suffix: string) => {
+  const mkConfirmedForDispatch = (suffix: string, channel: "beeping" | "dropea" | null = "beeping") => {
     const phone = `346000006${suffix.padStart(2, "0")}`;
     const created = mkOrder(`9399${suffix.padStart(2, "0")}`, `1499${suffix.padStart(2, "0")}`, phone);
     db.systemDbHandle().prepare("UPDATE orders SET address_line1='Calle Alcalá 123, 2º B', city='Madrid', province='Madrid', postal_code='28001' WHERE id=?").run(created.id);
+    // Líneas de producto con SKU: las necesita el router de canal (dispatch_channels).
+    db.systemDbHandle().prepare("UPDATE orders SET raw_payload=? WHERE id=?").run(JSON.stringify({ line_items: [{ title: "Organizador", sku: `SKU-DISPATCH-${suffix}`, product_id: 7000 + Number(suffix), variant_id: 8000 + Number(suffix), quantity: 1 }] }), created.id);
     db.claimOrderInitialSend(created.id);
+    if (channel) dispatchChannel.upsertDispatchChannel({ sku: `SKU-DISPATCH-${suffix}`, channel });
     return db.getOrderById(created.id)!;
   };
 
@@ -1206,7 +1211,7 @@ async function main(): Promise<void> {
     assert.equal(dispatch.autoDispatchEnabled({}), false);
   });
 
-  await test("COOLDOWN · al confirmar con el interruptor activo se programa el temporizador (8 h) en vez de marcar al momento", async () => {
+  await test("COOLDOWN · al confirmar con el interruptor activo se programa el temporizador (6 h, AUTO_DISPATCH_DEFAULT_HOURS) en vez de marcar al momento", async () => {
     await withEnv({ ...DISPATCH_ON, BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "p@e.com", BEEPING_ACCOUNT_PASSWORD: "s" }, async () => {
       const order = mkConfirmedForDispatch("1");
       const realFetch = globalThis.fetch; let inmediatas = 0;
@@ -1218,12 +1223,13 @@ async function main(): Promise<void> {
         assert.equal(inmediatas, 0, "con cooldown activo NO se marca para enviar al confirmar");
         const row = dispatch.getDispatchCooldown(order.id)!;
         assert.equal(row.status, "scheduled");
-        assert.ok(row.due_at >= before + 8 * 3600 - 2 && row.due_at <= before + 8 * 3600 + 60, "vence a las 8 h");
+        assert.equal(dispatch.AUTO_DISPATCH_DEFAULT_HOURS, 6, "cooldown confirmado por Pedro: 6 h");
+        assert.ok(row.due_at >= before + 6 * 3600 - 2 && row.due_at <= before + 6 * 3600 + 60, "vence a las 6 h");
       } finally { globalThis.fetch = realFetch; }
     });
   });
 
-  await test("COOLDOWN · a las 8 h sin incidencias el despacho se ejecuta (una sola vez)", async () => {
+  await test("COOLDOWN · a las 6 h sin incidencias el despacho se ejecuta (una sola vez)", async () => {
     await withEnv(DISPATCH_ON, async () => {
       const order = mkConfirmedForDispatch("2");
       handleOrderButtonReply(order.phone, "confirm_order");
@@ -1344,6 +1350,103 @@ async function main(): Promise<void> {
         beepingCalls.length = 0;
         assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked", `${suffix}: cooldown retenido`);
       }
+    });
+  });
+
+  await test("CANAL · la tabla dispatch_channels nace vacía y sin canal configurado un pedido NUNCA se despacha solo (ningún adaptador se llama)", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("20", null);
+      assert.equal(dispatchChannel.resolveDispatchChannel(order).channel, null);
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      let beeping = 0, dropea = 0;
+      const r = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, {
+        markToSend: async () => { beeping++; return { outcome: "sent" as const }; },
+        confirmDropea: async () => { dropea++; return { ok: true, externalOrderId: "x", detail: "no debería" }; },
+      });
+      assert.equal(r.status, "blocked");
+      assert.equal(r.channel, null);
+      assert.match(r.reasons.join(" "), /pendiente de configurar canal de despacho/);
+      assert.match(r.reasons.join(" "), /SKU-DISPATCH-20/, "dice qué producto falta por configurar");
+      assert.deepEqual([beeping, dropea], [0, 0], "cero llamadas a cualquier canal");
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.status, "blocked", "visible en el panel como DESPACHO RETENIDO");
+      // Manual tampoco: una persona no puede forzar un canal que no existe.
+      const manual = await dispatch.dispatchNow(order.id, "Pedro", { markToSend: async () => { beeping++; return { outcome: "sent" as const }; }, confirmDropea: async () => { dropea++; return { ok: true, externalOrderId: "x", detail: "no" }; } });
+      assert.equal(manual.status, "blocked");
+      assert.deepEqual([beeping, dropea], [0, 0]);
+    });
+  });
+
+  await test("CANAL · producto en Beeping → mark-to-send de Beeping y NUNCA Dropea", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("21", "beeping");
+      assert.equal(dispatchChannel.resolveDispatchChannel(order).channel, "beeping");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      let beeping = 0, dropea = 0;
+      const r = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, {
+        markToSend: async () => { beeping++; return { outcome: "sent" as const }; },
+        confirmDropea: async () => { dropea++; return { ok: true, externalOrderId: "x", detail: "no debería" }; },
+      });
+      assert.equal(r.status, "executed");
+      assert.equal(r.channel, "beeping");
+      assert.deepEqual([beeping, dropea], [1, 0]);
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.channel, "beeping");
+    });
+  });
+
+  await test("CANAL · producto en Dropea → confirm de Dropea (contrato real POST /orders/{id}/confirm) y NUNCA Beeping; con la llave de escritura cerrada queda RETENIDO", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("22", "dropea");
+      assert.equal(dispatchChannel.resolveDispatchChannel(order).channel, "dropea");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      let beeping = 0, dropea = 0;
+      // Adaptador real inyectado como éxito: despacha por Dropea.
+      const ok = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, {
+        markToSend: async () => { beeping++; return { outcome: "sent" as const }; },
+        confirmDropea: async () => { dropea++; return { ok: true, externalOrderId: "DRP-1", detail: "pedido confirmado en Dropea" }; },
+      });
+      assert.equal(ok.status, "executed");
+      assert.equal(ok.channel, "dropea");
+      assert.deepEqual([beeping, dropea], [0, 1]);
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.channel, "dropea");
+      // Sin inyección: el adaptador REAL (confirmDropeaOrder) exige que el pedido exista en Dropea
+      // y DROPEA_WRITE_ENABLED=1 (0 por política) → retenido, jamás se salta la llave.
+      const order2 = mkConfirmedForDispatch("23", "dropea");
+      handleOrderButtonReply(order2.phone, "confirm_order");
+      const row2 = dispatch.getDispatchCooldown(order2.id)!;
+      const real = await dispatch.executeDispatch(order2.id, "cooldown", row2.due_at + 1, { markToSend: async () => { beeping++; return { outcome: "sent" as const }; } });
+      assert.equal(real.status, "blocked");
+      assert.equal(real.channel, "dropea");
+      assert.match(real.reasons.join(" "), /Dropea/);
+      assert.equal(beeping, 0, "que Dropea falle jamás desvía el pedido a Beeping");
+      assert.equal(process.env.DROPEA_WRITE_ENABLED ?? "0", "0", "la llave de escritura de Dropea sigue cerrada por política");
+    });
+  });
+
+  await test("CANAL · un pedido con líneas en canales distintos NO se despacha (nunca por dos canales)", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("24", "beeping");
+      dispatchChannel.upsertDispatchChannel({ sku: "SKU-OTRO-24", channel: "dropea" });
+      db.systemDbHandle().prepare("UPDATE orders SET raw_payload=? WHERE id=?").run(JSON.stringify({ line_items: [
+        { title: "A", sku: "SKU-DISPATCH-24", product_id: 1, variant_id: 1, quantity: 1 },
+        { title: "B", sku: "SKU-OTRO-24", product_id: 2, variant_id: 2, quantity: 1 },
+      ] }), order.id);
+      const res = dispatchChannel.resolveDispatchChannel(db.getOrderById(order.id)!);
+      assert.equal(res.channel, null);
+      assert.match(res.reason, /canales distintos/);
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      let beeping = 0, dropea = 0;
+      const r = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, {
+        markToSend: async () => { beeping++; return { outcome: "sent" as const }; },
+        confirmDropea: async () => { dropea++; return { ok: true, externalOrderId: "x", detail: "no" }; },
+      });
+      assert.equal(r.status, "blocked");
+      assert.deepEqual([beeping, dropea], [0, 0]);
+      // Prioridad de claves: variante > SKU > producto; y un SKU se compara sin distinguir mayúsculas.
+      assert.equal(dispatchChannel.matchLineToChannel({ title: "x", sku: "sku-dispatch-24", productId: null, variantId: null, quantity: 1, isService: false } as never, dispatchChannel.listDispatchChannels())?.channel, "beeping");
     });
   });
 
@@ -13394,7 +13497,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 23;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23");
+      assert.match(db, /export const SCHEMA_VERSION = 24;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13917,6 +14020,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 22");
     db.migrateAutoDispatch(fixture);
     fixture.pragma("user_version = 23");
+    db.migrateDispatchChannels(fixture);
+    fixture.pragma("user_version = 24");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

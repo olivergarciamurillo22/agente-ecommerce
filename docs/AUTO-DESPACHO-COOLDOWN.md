@@ -9,7 +9,7 @@ post-confirmación va a una persona.
 ## Objetivo de negocio
 
 Hoy un pedido confirmado no se despacha solo. Con esto: el cliente confirma,
-pasan 8 h sin que diga nada que suene a cancelación, y el pedido se marca
+pasan 6 h (`AUTO_DISPATCH_DEFAULT_HOURS`, confirmado por Pedro el 07-09) sin que diga nada que suene a cancelación, y el pedido se marca
 para enviar automáticamente. Si en ese margen escribe algo, la IA distingue
 «cancelación o duda seria» (se para el despacho y va a persona) de «pregunta
 simple de la FAQ» (se responde con un texto fijo y el cooldown sigue).
@@ -58,10 +58,10 @@ se lee del fichero (caché por mtime).
 ## Pieza 2 · Cooldown de auto-despacho (`src/lib/orders/auto-dispatch.ts`)
 
 - Al confirmarse el pedido (`confirmOrder`, con `AUTO_DISPATCH_COOLDOWN_ENABLED=1`)
-  se programa una fila en `dispatch_cooldowns` con `due_at = ahora + 8 h`
+  se programa una fila en `dispatch_cooldowns` con `due_at = ahora + 6 h`
   (`AUTO_DISPATCH_COOLDOWN_HOURS`). **No** se llama al hook inmediato.
 - El scheduler (`runSchedulerTick`, paso 6) evalúa los vencidos. Se despacha
-  (`markOrderToSend`, `suppliers/beeping.ts`) **solo si TODAS**:
+  **por el canal del producto** (ver «Router de canal») **solo si TODAS**:
   1. no hay escalada a persona abierta (`work_items` sin resolver para ese
      pedido, salvo la propia `ALERTA_DIRECCION`, que cuenta aparte);
   2. no hay solicitud de cancelación del cliente sin resolver;
@@ -78,12 +78,53 @@ se lee del fichero (caché por mtime).
   `executed_at`, `executed_via` (`cooldown`|`manual`), `blocked_reason`,
   `outcome`; más eventos `auto_dispatch_scheduled/blocked/executed/manual`.
 
+### Router de canal: Beeping O Dropea, según el producto, nunca ambos
+
+Aclaración explícita de Pedro (07-09): cada producto se despacha por un solo
+canal, y **quién lo decide es Pedro, producto a producto**. El sistema no
+adivina.
+
+- **Configuración:** tabla `dispatch_channels` (migración 24), una fila por
+  SKU, variante o producto de Shopify → `channel: beeping | dropea`. **Nace
+  vacía** y sigue vacía hasta que Pedro la rellene:
+  `npm run dispatch:channels -- --list` ·
+  `--set --sku ORG-01 --channel beeping --apply` (dry-run sin `--apply`) ·
+  `--unset --sku ORG-01 --apply`. Ningún producto actual (organizador, etc.)
+  tiene canal asignado: no se ha asumido nada.
+- **Resolución por pedido** (`src/lib/orders/dispatch-channel.ts`): todas las
+  líneas de producto físico deben resolver al mismo canal (prioridad variante
+  > SKU > producto; el SKU no distingue mayúsculas). Sin fila para alguna
+  línea, o con líneas en canales distintos → `null`.
+- **Al vencer el cooldown**, tras las cuatro condiciones de arriba:
+  - `beeping` → `markOrderToSend` (`suppliers/beeping.ts`, `PUT
+    /api/order/mark-to-send/{external_id}`, contrato documentado y probado).
+  - `dropea` → `confirmDropeaOrder` (`suppliers/dropea/create-order.ts`).
+    **Contrato real encontrado**: `POST /dropshipper/orders/{id}/confirm`
+    (`docs/DROPEA-API-CONTRACT.md` §4, «Confirmar → llega al proveedor»), ya
+    implementado con clave de idempotencia y claim. Exige que el pedido
+    exista ya en Dropea (adoptado desde su app oficial:
+    `supplier_external_order_id`) y `DROPEA_WRITE_ENABLED=1`. **Esa llave está
+    a 0 por política** (`CLAUDE.md` §2, `env-schema` la fuerza a 0 en todos
+    los perfiles locales): mientras siga así, un producto en `dropea` queda
+    **RETENIDO** con el motivo `Dropea: … (write_disabled)`. Nunca se salta la
+    llave ni se desvía el pedido a Beeping. Dropi PRO no tiene API pública
+    (`docs/DROPI-API-CONTRACT.md`): no hay adaptador posible, y un producto
+    de Dropi solo puede marcarse a mano desde su panel.
+  - `null` (sin configurar o mezclado) → **no se despacha**: `blocked` con
+    `pendiente de configurar canal de despacho: <SKUs que faltan>`, insignia
+    DESPACHO RETENIDO, y «Despachar ahora» también lo rechaza hasta que
+    exista el canal.
+- **Nunca dos canales para el mismo pedido**: el router elige uno o ninguno;
+  el fallo de un adaptador jamás desvía al otro (test «CANAL · producto en
+  Dropea…»). La columna `dispatch_cooldowns.channel` deja constancia de por
+  cuál salió (o iba a salir).
+
 ### Cómo desbloquea una persona un despacho retenido
 
 1. Resolver la causa: la escalada en la bandeja de atención (`/trabajo`), la
    cancelación en Acciones, o la `ALERTA_DIRECCION` en la ficha.
 2. En la ficha del pedido, bloque violeta «DESPACHO RETENIDO» → **«Despachar
-   ahora»**. No espera otro ciclo de 8 h. Las condiciones se vuelven a
+   ahora»**. No espera otro ciclo de 6 h. Las condiciones se vuelven a
    comprobar (fail-closed): si sigue abierta una, se rechaza con el motivo
    (HTTP 409). Queda en `audit_log` (`dispatch_now`) con nombre y resultado.
    Por API: `POST /api/orders/:id/action` `{ "action": "dispatch_now" }`.
@@ -97,7 +138,7 @@ cooldown apagado, cerrarla libera el hook inmediato que se retuvo.
 | Variable | Default | Uso |
 |---|---|---|
 | `AUTO_DISPATCH_COOLDOWN_ENABLED` | `0` | 1 activa el cooldown (local-safe exige 0) |
-| `AUTO_DISPATCH_COOLDOWN_HOURS` | `8` | horas de espera (1–168) |
+| `AUTO_DISPATCH_COOLDOWN_HOURS` | `6` | horas de espera (1–168); la constante citable es `AUTO_DISPATCH_DEFAULT_HOURS` en `auto-dispatch.ts` |
 | `POST_CONFIRMATION_AI_ENABLED` | `0` | 1 activa la IA de intención (local-safe exige 0; **no activar sin FAQ aprobada**) |
 | `POST_CONFIRMATION_AI_MODEL` | `gpt-4o-mini` | modelo |
 | `POST_CONFIRMATION_AI_TIMEOUT_MS` | `8000` | timeout; al vencer → persona |
@@ -114,9 +155,10 @@ y seguiría siendo despreciable.
 
 ## Esquema
 
-Migración 23 (`migrateAutoDispatch`): `dispatch_cooldowns`,
-`intent_classifications`. Aditiva; cubierta por el fixture realista
-`scripts/test-migration-v43.ts` (17→23).
+Migraciones 23 (`migrateAutoDispatch`: `dispatch_cooldowns`,
+`intent_classifications`) y 24 (`migrateDispatchChannels`: `dispatch_channels` +
+columna `dispatch_cooldowns.channel`). Aditivas; cubiertas por el fixture realista
+`scripts/test-migration-v43.ts` (17→24).
 
 ## Tests (`tests/run-tests.ts`, bloque «Auto-despacho tras cooldown + IA de intención»)
 
@@ -124,11 +166,15 @@ Cancelación detectada → escalada y cooldown retenido · duda conocida con
 confianza alta → auto-respuesta con texto fijo y el cooldown sigue y
 despacha · duda no reconocida / otro / confianza < 0,75 / id desconocida /
 JSON inválido / fallo / timeout → persona (7 casos) · despacho automático a
-las 8 h sin incidencias → se ejecuta una sola vez · bloqueado por
+las 6 h sin incidencias → se ejecuta una sola vez · bloqueado por
 `ALERTA_DIRECCION` abierta → no se ejecuta, visible en panel, «despachar
 ahora» rechazado hasta cerrarla y aceptado después · flags apagados →
-comportamiento anterior · FAQ con 4-6 entradas y estado pendiente de
-aprobación. Todo sin red (completer y mark-to-send inyectados).
+comportamiento anterior · FAQ con 4-6 entradas y estado pendiente de aprobación ·
+**router de canal**: sin canal nunca se despacha (ni manual); Beeping → solo Beeping;
+Dropea → solo Dropea (éxito inyectado despacha; adaptador real con llave cerrada
+queda retenido); líneas en canales distintos → retenido; en ningún caso se
+llaman los dos adaptadores. Todo sin red (completer, mark-to-send y confirm de
+Dropea inyectados).
 
 ## Fuera de alcance
 

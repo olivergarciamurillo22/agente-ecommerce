@@ -30,7 +30,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 
 ## OPERATIONS
 
-- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→23) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
+- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→24) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
 - Deploy anterior: [DEPLOY-HOTFIX-02-09.md](DEPLOY-HOTFIX-02-09.md) (incluye rollback)
 - Piloto en curso: [REAL-PILOT-02-09.md](REAL-PILOT-02-09.md) (matriz única de evidencia)
 - NAS: [UGREEN-DXP2800-DEPLOY.md](UGREEN-DXP2800-DEPLOY.md)

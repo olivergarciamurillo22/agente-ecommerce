@@ -11,7 +11,7 @@ código). Si un comando de aquí no existe, es un fallo a corregir.
 | Proyecto de Compose | **`repo-v3c`** (declarado en `docker-compose.yml` con `name:`) |
 | Contenedor | `casamable-agent` |
 | Carpeta persistente | `/volume1/docker/CasamableAgent` (`auth/`, `data/`, `backups/`) |
-| Esquema esperado | **23** con `release/casamable-v4.3` (era 18 con `7fd8014`, 05-09) |
+| Esquema esperado | **24** con `release/casamable-v4.3` (era 18 con `7fd8014`, 05-09) |
 | Proveedor de WhatsApp | `cloud_api` |
 
 ### ¿Qué commit corre ahora mismo? (`PRODUCTION_COMMIT`)

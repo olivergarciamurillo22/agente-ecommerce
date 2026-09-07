@@ -1056,6 +1056,43 @@ export function migrateAutoDispatch(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración 24 (07-09-2026): canal de despacho por producto —
+ * docs/AUTO-DESPACHO-COOLDOWN.md § Router de canal.
+ *  - dispatch_channels: Pedro indica, producto a producto (SKU, variante o
+ *    producto de Shopify), si se despacha por Beeping O por Dropea. Nace
+ *    VACÍA a propósito: el sistema no adivina el canal de ningún producto.
+ *    Sin fila (o con líneas que apunten a canales distintos) el auto-despacho
+ *    NO se ejecuta (fail-closed, "canal sin configurar").
+ *  - dispatch_cooldowns.channel: por qué canal salió (o iba a salir) el pedido.
+ * ADITIVA.
+ */
+export function migrateDispatchChannels(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dispatch_channels (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      shopify_sku TEXT,
+      shopify_variant_id TEXT,
+      shopify_product_id TEXT,
+      channel TEXT NOT NULL CHECK(channel IN ('beeping','dropea')),
+      note TEXT,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      CHECK (shopify_sku IS NOT NULL OR shopify_variant_id IS NOT NULL OR shopify_product_id IS NOT NULL)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_channels_sku ON dispatch_channels(shopify_sku) WHERE shopify_sku IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_channels_variant ON dispatch_channels(shopify_variant_id) WHERE shopify_variant_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_dispatch_channels_product ON dispatch_channels(shopify_product_id) WHERE shopify_product_id IS NOT NULL;
+  `);
+  const cols = new Set((db.prepare("PRAGMA table_info(dispatch_cooldowns)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (!cols.has("channel")) {
+    try {
+      db.exec("ALTER TABLE dispatch_cooldowns ADD COLUMN channel TEXT");
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1705,6 +1742,7 @@ function build() {
   migrateHunterDiscovery(db);
   migrateAddressValidation(db);
   migrateAutoDispatch(db);
+  migrateDispatchChannels(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1874,7 +1912,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 23;
+export const SCHEMA_VERSION = 24;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {
