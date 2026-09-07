@@ -357,6 +357,42 @@ export function formatAddressOneLine(o: {
     .join(", ");
 }
 
+/**
+ * La MISMA dirección que formatAddressForMessage, pero en UNA línea, apta
+ * como variable de plantilla de Meta (incidente 07-09: la plantilla
+ * confirmacion_pedido_cod ganó {{5}} dirección). Meta rechaza en un parámetro
+ * saltos de línea, tabuladores y más de 4 espacios seguidos; aquí no salen.
+ * Si el cliente ya propuso una corrección (proposed_address), esa es la que
+ * se le pide confirmar: mismo criterio que la capa 1 de validación.
+ * Devuelve "" si no hay dirección: el builder de plantillas NO envía huecos.
+ */
+export function formatAddressForTemplate(o: {
+  address_line1: string | null;
+  address_line2: string | null;
+  city: string | null;
+  province: string | null;
+  postal_code: string | null;
+  country: string | null;
+  proposed_address?: string | null;
+}): string {
+  const propuesta = (o.proposed_address ?? "").trim();
+  const partes = propuesta
+    ? [propuesta]
+    : [
+        addrField(o.address_line1),
+        addrField(o.address_line2),
+        [addrField(o.postal_code), addrField(o.city)].filter(Boolean).join(" "),
+        [addrField(o.province), foreignCountry(o.country)].filter(Boolean).join(", "),
+      ];
+  return partes
+    .filter((l): l is string => Boolean(l && l.trim()))
+    .join(", ")
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
 /** Dirección multilínea para el mensaje de WhatsApp. */
 export function formatAddressForMessage(o: {
   address_line1: string | null;

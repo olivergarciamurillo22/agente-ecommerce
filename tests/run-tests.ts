@@ -10370,12 +10370,12 @@ async function main(): Promise<void> {
   });
 
   await test("META · plantillas: el catálogo valida nombre y número de variables", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €", "Calle Mayor 5, 28001 Madrid"]);
     assert.equal(m.kind, "template");
     assert.throws(() => waTemplates.buildTemplateMessage("plantilla_inventada", []), /desconocida/);
     assert.throws(
       () => waTemplates.buildTemplateMessage("order_confirmation_request", ["solo-una"]),
-      /esperaba 4/
+      /esperaba 5/
     );
     assert.equal(
       waTemplates.loadTemplateSpecs().length,
@@ -10386,7 +10386,7 @@ async function main(): Promise<void> {
   });
 
   await test("BUG1 · buildTemplateMessage incluye los payloads de botón del catálogo, en orden", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €", "Calle Mayor 5, 28001 Madrid"]);
     assert.equal(m.kind, "template");
     if (m.kind !== "template") throw new Error("unreachable");
     assert.deepEqual(
@@ -10405,7 +10405,7 @@ async function main(): Promise<void> {
   });
 
   await test("BUG1 · buildMetaPayload de una plantilla manda un componente button/quick_reply POR CADA botón, con su payload", () => {
-    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €"]);
+    const m = waTemplates.buildTemplateMessage("order_confirmation_request", ["Ana", "#123", "Limpiador", "29,99 €", "Calle Mayor 5, 28001 Madrid"]);
     const payload = metaProv.buildMetaPayload("34600000000", m) as {
       template: { components: Array<{ type: string; sub_type?: string; index?: string; parameters: Array<Record<string, string>> }> };
     };
@@ -10434,7 +10434,7 @@ async function main(): Promise<void> {
   // incidente) como hará el doctor.
   db.setSetting(
     "wa_tpl_verified:order_confirmation_request",
-    JSON.stringify({ provider: "confirmacion_pedido_cod", language: "es", status: "APPROVED", paramCount: 4, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
+    JSON.stringify({ provider: "confirmacion_pedido_cod", language: "es", status: "APPROVED", paramCount: 5, buttonCount: 3, buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"], category: "UTILITY", verifiedAt: 1756700000 })
   );
 
   await test("HOTFIX BUG 2 · buildConfirmationOutbound usa la misma plantilla dentro y fuera de ventana", () => {
@@ -10450,11 +10450,54 @@ async function main(): Promise<void> {
     assert.equal(fuera.message.templateName, "confirmacion_pedido_cod", "V3: viaja el nombre REAL aprobado en la WABA, no el borrador local");
     assert.deepEqual(
       fuera.message.bodyParams,
-      ["Cliente", `#${orden.shopify_order_number}`, "Limpiador Ultrasónico", "19,99 €"],
-      "nombre, número de pedido, producto e importe, en ese orden"
+      ["Cliente", `#${orden.shopify_order_number}`, "Limpiador Ultrasónico", "19,99 €", "Calle Real 10, 36201 Vigo, Pontevedra"],
+      "nombre, número de pedido, producto, importe y dirección (5ª desde el 07-09), en ese orden"
     );
     assert.deepEqual(fuera.message, dentro.message, "una sola fuente de verdad para la primera confirmación");
     assert.doesNotMatch(fuera.fallbackText, /Está todo correcto/, "el panel tampoco representa la plantilla como el mensaje antiguo");
+  });
+
+  await test("INCIDENTE 07-09 · confirmacion_pedido_cod tiene 5 variables: el contrato local (spec + mapping) y el envío real cuadran en aridad y orden, y la dirección va en una línea", async () => {
+    const cat = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/whatsapp-templates.json"), "utf8")) as {
+      templates: Array<{ name: string; variables: string[]; draft_body: string }>;
+      provider_mappings: Array<{ logicalKey: string; providerTemplate: string; params: string[]; note: string }>;
+    };
+    const spec = cat.templates.find((x) => x.name === "order_confirmation_request")!;
+    const mapping = cat.provider_mappings.find((x) => x.logicalKey === "order_confirmation_request")!;
+    const ORDEN = ["nombre", "numero_pedido", "producto", "importe", "direccion"];
+    assert.deepEqual(mapping.params, ORDEN, "{{1}} nombre → {{2}} nº pedido → {{3}} producto → {{4}} importe → {{5}} dirección");
+    assert.deepEqual(spec.variables, ORDEN, "la spec local declara las mismas 5, en el mismo orden");
+    assert.equal(mapping.providerTemplate, "confirmacion_pedido_cod");
+    assert.match(spec.draft_body, /\{\{5\}\}/, "el borrador local refleja la línea de dirección de la plantilla aprobada");
+    assert.match(mapping.note, /07-09-2026/, "la nota fecha el cambio de 4 a 5 y cita el incidente");
+    assert.match(mapping.note, /5 variables/);
+
+    // Con la verificación cacheada en 4 (la del 01-09), el envío queda BLOQUEADO con motivo, no sale con hueco.
+    const semilla = db.getSetting("wa_tpl_verified:order_confirmation_request")!;
+    db.setSetting("wa_tpl_verified:order_confirmation_request", JSON.stringify({ ...JSON.parse(semilla), paramCount: 4 }));
+    const r4 = waTemplates.getTemplateReadiness("order_confirmation_request");
+    assert.equal(r4.ready, false);
+    assert.equal(r4.blocker, "TEMPLATE_ARITY_MISMATCH");
+    assert.match(r4.detail, /tiene 4 variable\(s\) y el mapping envía 5/);
+    db.setSetting("wa_tpl_verified:order_confirmation_request", semilla);
+    assert.equal(waTemplates.getTemplateReadiness("order_confirmation_request").ready, true, "con la WABA en 5 y el mapping en 5, listo");
+
+    // La 5ª variable: una línea, sin saltos, con el mismo origen que la capa 1 (propuesta del cliente si existe).
+    const { formatAddressForTemplate } = await import("../src/lib/orders/normalize");
+    const base = { address_line1: "Calle juan cruz n6", address_line2: "2º B", city: "Madrid", province: "Madrid", postal_code: "28001", country: "España" };
+    assert.equal(formatAddressForTemplate(base), "Calle juan cruz n6, 2º B, 28001 Madrid, Madrid");
+    assert.equal(formatAddressForTemplate({ ...base, address_line2: "  \n  ", country: "Portugal" }), "Calle juan cruz n6, 28001 Madrid, Madrid, Portugal", "sin saltos de línea; país solo si no es España");
+    assert.equal(formatAddressForTemplate({ ...base, proposed_address: "Avenida\tNueva 3\n28002 Madrid" }), "Avenida Nueva 3 28002 Madrid", "la propuesta del cliente manda, saneada");
+    assert.equal(formatAddressForTemplate({ address_line1: "-", address_line2: null, city: null, province: null, postal_code: null, country: null }), "", "sin dirección → vacío (el builder no envía huecos)");
+    assert.doesNotMatch(formatAddressForTemplate({ ...base, address_line1: "Calle      con      huecos 1" }), /\s{2,}/, "Meta rechaza más de 4 espacios seguidos");
+
+    // Pedido sin dirección: fail-closed con bloqueante visible, nunca una plantilla con hueco.
+    const vacio = db.getOrderById(mkMulti("972509", "7509", "34600177509").id)!;
+    db.systemDbHandle().prepare("UPDATE orders SET address_line1=NULL, address_line2=NULL, city=NULL, province=NULL, postal_code=NULL WHERE id=?").run(vacio.id);
+    assert.throws(() => interactive.buildConfirmationOutbound(db.getOrderById(vacio.id)!), (e: unknown) => e instanceof waTemplates.TemplateNotReadyError && e.blocker === "TEMPLATE_PARAM_EMPTY" && /direccion/.test(e.message));
+    // Y el panel enseña la dirección que el cliente va a confirmar.
+    const conDir = interactive.buildConfirmationOutbound(db.getOrderById(mkMulti("972510", "7510", "34600177510").id)!);
+    assert.match(conDir.fallbackText, /Calle Real 10, 36201 Vigo, Pontevedra/);
   });
 
   await test("HOTFIX BUG 2 · el literal de la confirmación antigua no existe en src", () => {
@@ -13228,7 +13271,7 @@ async function main(): Promise<void> {
         provider: "confirmacion_pedido_cod",
         language: "es",
         status: "APPROVED",
-        paramCount: 4,
+        paramCount: 5, // 5 desde el 07-09-2026 ({{5}} dirección); antes 4
         buttonCount: 3,
         buttonTypes: ["QUICK_REPLY", "QUICK_REPLY", "QUICK_REPLY"],
         category: "UTILITY",
@@ -13254,7 +13297,7 @@ async function main(): Promise<void> {
       );
     });
 
-    await test("132001 VERDE: verificada 'confirmacion_pedido_cod' (es, 4 vars) → el mensaje sale con el nombre REAL de la WABA, jamás el borrador local ni 'pedido' (la plantilla de ejemplo de Meta, origen del incidente)", () => {
+    await test("132001 VERDE: verificada 'confirmacion_pedido_cod' (es, 5 vars) → el mensaje sale con el nombre REAL de la WABA, jamás el borrador local ni 'pedido' (la plantilla de ejemplo de Meta, origen del incidente)", () => {
       verificar();
       const o = mkOrder("v3wa-1", "94101", "34600994101");
       const spec = buildConfirmationOutbound(o, false); // fuera de ventana → plantilla
@@ -13264,9 +13307,10 @@ async function main(): Promise<void> {
       assert.notEqual(m.templateName, "order_confirmation_request", "el nombre del borrador local JAMÁS sale");
       assert.notEqual(m.templateName, "pedido", "ni la plantilla de ejemplo de Meta — era el mapping erróneo que causó el 132001");
       assert.equal(m.language, "es");
-      assert.equal(m.bodyParams.length, 4);
+      assert.equal(m.bodyParams.length, 5, "5 variables desde el 07-09: la última es la dirección");
       assert.equal(m.bodyParams[0], "Cliente", "nombre de pila");
       assert.equal(m.bodyParams[1], "#94101", "número de pedido, con # — {{2}} de la plantilla real");
+      assert.ok(m.bodyParams[4].length > 0 && !/[\r\n]/.test(m.bodyParams[4]), "{{5}} dirección en una línea");
       assert.equal((m.buttonPayloads ?? []).length, 3, "payloads locales para los 3 botones reales");
     });
 
@@ -13442,7 +13486,7 @@ async function main(): Promise<void> {
       // Y coinciden con lo que el sender real adjunta a mano (notify-delay.ts).
       const notify = fs.readFileSync(path.join(process.cwd(), "src/lib/orders/notify-delay.ts"), "utf8");
       assert.match(notify, /`delay_ok:\$\{order\.id\}`, `delay_cancel:\$\{order\.id\}`/);
-      const c = tpl.buildApprovedTemplateMessage("order_confirmation_request", { nombre: "Ana", numero_pedido: "#1", producto: "X", importe: "1 €" });
+      const c = tpl.buildApprovedTemplateMessage("order_confirmation_request", { nombre: "Ana", numero_pedido: "#1", producto: "X", importe: "1 €", direccion: "Calle Mayor 5, 28001 Madrid" });
       assert.deepEqual(c.buttonPayloads, ["confirm_order", "change_address", "delivery_note"]);
       assert.equal(tpl.getTemplateReadiness("order_delay_restock").ready, true, "readiness cuadra con la WABA real (2 botones)");
       // D · disabled → no construye nada enviable

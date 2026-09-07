@@ -15,6 +15,7 @@
 import type { OrderRow } from "../db";
 import { BUTTON_PAYLOADS } from "../orders/confirmation";
 import { shortProductLine } from "../orders/multi-order";
+import { formatAddressForTemplate } from "../orders/normalize";
 import { buildApprovedTemplateMessage } from "./templates";
 import type { OutboundWhatsAppMessage } from "./provider";
 
@@ -59,6 +60,7 @@ export function buildConfirmationOutbound(order: OrderRow, _withinSessionWindow 
       `Casamable · confirmación del pedido #${order.shopify_order_number}\n` +
       `📦 ${shortProductLine(order)}\n` +
       `💶 Contra reembolso: ${money(order)}\n` +
+      `📍 ¿Es correcta la dirección ${formatAddressForTemplate(order) || "(sin dirección)"}?\n` +
       `[Botones: Confirmar pedido · Cambiar dirección · Dejar una nota]`,
   };
 }
@@ -74,6 +76,9 @@ function confirmationTemplate(order: OrderRow): Extract<OutboundWhatsAppMessage,
     numero_pedido: `#${order.shopify_order_number}`,
     producto: shortProductLine(order),
     importe: money(order),
+    // {{5}} desde el 07-09-2026: la plantilla real pide confirmar la dirección.
+    // Vacía → TEMPLATE_PARAM_EMPTY (fail-closed, con rastro): jamás un hueco.
+    direccion: formatAddressForTemplate(order),
   });
 }
 
