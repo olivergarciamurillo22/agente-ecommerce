@@ -14397,7 +14397,9 @@ async function main(): Promise<void> {
       assert.equal(pesado.shippingTier, "hasta_3kg");
       const tramo = (s: typeof ligero) => s.reasons.find((r) => r.factor === "tramo_envio")!.points;
       assert.equal(tramo(pesado), tramo(ligero), "sin penalización por peso dentro de los tramos confirmados");
-      assert.equal(tramo(ligero), hunterScore.WEIGHT_SHIPPING);
+      assert.equal(tramo(ligero), 0, "el tramo ya no puntúa (07-09): sus 20 puntos pasaron a margen y CPA");
+      assert.deepEqual([hunterScore.WEIGHT_MARGIN, hunterScore.WEIGHT_CPA, hunterScore.WEIGHT_SHIPPING, hunterScore.WEIGHT_VARIANTS, hunterScore.WEIGHT_TICKET, hunterScore.WEIGHT_REPURCHASE], [40, 35, 0, 10, 10, 5]);
+      assert.equal(40 + 35 + 0 + 10 + 10 + 5, 100, "la escala sigue en 100");
       assert.equal(Math.round((ligero.unitMarginEur - pesado.unitMarginEur) * 100) / 100, 0.14, "la diferencia real de coste sí se ve en el margen");
     });
     await test("Hunter · limpia tres títulos spam reales", () => {

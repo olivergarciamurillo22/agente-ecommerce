@@ -88,17 +88,36 @@ del repositorio prevalecen.
 **Penalización por peso: eliminada (decisión de Pedro, 07-09).** Con la tarifa
 casi plana el salto entre tramos es de céntimos y ese coste ya entra en
 `margen_unitario` vía `outboundShippingCost`; restar puntos además era contar
-dos veces. El factor `tramo_envio` conserva sus 20 puntos para cualquier paquete
-dentro de un tramo confirmado (la escala sigue en 100 y los umbrales 80/60/40 no
-cambian) y solo es 0 cuando no hay tramo. Redistribuir esos 20 puntos es una
-decisión de pesos pendiente de Pedro.
+dos veces.
+
+**Pesos redistribuidos (decisión de Pedro, 07-09, segunda pasada).** Con
+0,20 € de rango entre 1 y 4 kg el tramo dejó de ser una variable
+discriminante: ponderarlo con 20 puntos sobreponderaba una señal muerta. Esos
+20 puntos pasan a lo que decide si un producto aguanta anuncios — el margen
+neto por enviado y el CPA máximo soportable — repartidos 10/10 para conservar
+la proporción previa entre ambos:
+
+| Factor | Antes | Ahora |
+|---|---|---|
+| `margen_unitario` (margen/12 € × peso) | 30 | **40** |
+| `cpa_maximo` (CPA máx./7,77 € × peso) | 25 | **35** |
+| `tramo_envio` | 20 | **0** (se sigue calculando: >4 kg = sin tramo = sin score) |
+| `variantes` | 10 | 10 |
+| `ticket` | 10 | 10 |
+| `recompra` | 5 | 5 |
+
+Escala 100 y umbrales 80/60/40 sin cambios. Efecto práctico: un producto con
+margen y CPA justos ya no recibe 20 puntos "gratis" por pesar poco; el
+veredicto depende de la economía real.
 
 **Impacto en el caso de ejemplo** (fixture organizador, 190 g, coste 3,29 €, PVP 34,99 €):
 
-| Caso | Antes (4,08 € envío, sin picking) | Tras tramos reales (3,80 €) | Tras tramos + picking 1,40 € en el scoring |
-|---|---|---|---|
-| 1 ud | margen 10,72 € · CPA máx. 10,72 · break-even 38,3 % · score 91,8 (prioritario) | 11,00 € · 11,00 · 37,7 % · 92,5 (prioritario) | **9,60 € · 9,60 · 40,9 % · 89,0 (prioritario)** |
-| pack 2 uds (coste 6,58 €, 380 g) | 7,43 € · 7,43 · 45,9 % · 82,5 (prioritario) | 7,71 € · 7,71 · 45,2 % · 84,1 (prioritario) | **6,31 € · 6,31 · 48,4 % · 76,1 (probar)** |
+| Caso | Antes (4,08 € envío, sin picking, tramo 20 pt) | Tras tramos reales (3,80 €) | Tras picking 1,40 € en el scoring | **Tras redistribuir pesos (40/35/0)** |
+|---|---|---|---|---|
+| 1 ud | margen 10,72 € · CPA máx. 10,72 · break-even 38,3 % · score 91,8 (prioritario) | 11,00 € · 11,00 · 37,7 % · 92,5 (prioritario) | 9,60 € · 9,60 · 40,9 % · 89,0 (prioritario) | **9,60 € · 9,60 · 40,9 % · 87,0 (prioritario)** |
+| pack 2 uds (coste 6,58 €, 380 g) | 7,43 € · 7,43 · 45,9 % · 82,5 (prioritario) | 7,71 € · 7,71 · 45,2 % · 84,1 (prioritario) | 6,31 € · 6,31 · 48,4 % · 76,1 (probar) | **6,31 € · 6,31 · 48,4 % · 69,5 (probar)** |
 
-El pack de 2 baja de «prioritario» a «probar» al contar el picking: antes el
-scoring lo sobrevaloraba en 1,40 € por envío.
+El pack de 2 bajó de «prioritario» a «probar» al contar el picking (antes el
+scoring lo sobrevaloraba en 1,40 € por envío) y pierde otros 6,6 puntos al
+dejar de cobrar el tramo: su margen (6,31 €) y su CPA máximo (6,31 € frente a
+7,77 € históricos) son justos, y ahora el score lo dice.

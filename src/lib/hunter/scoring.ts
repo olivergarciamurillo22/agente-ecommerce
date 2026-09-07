@@ -25,19 +25,21 @@ export const PICKING_EUR = 1.4;
 // con la tarifa real de devolución del contrato Beeping/Correos Express.
 export const REFUSAL_COST_EUR = 9.37;
 
-// Pesos del scoring: ESTIMACIÓN INTERNA (criterio de ingeniería), no datos de Pedro.
-// El margen y el CPA mandan porque determinan cuánto se puede invertir sin perder dinero.
-export const WEIGHT_MARGIN = 30;
-export const WEIGHT_CPA = 25;
-// Tramo de envío. DECISIÓN 07-09-2026 (Pedro): con la tarifa real casi plana
-// (3,80–4,00 € entre 1 y 4 kg, ver SHIPPING_TIERS) la penalización de peso ya
-// no tiene base de coste, y el coste del tramo YA entra en margen_unitario
-// (outboundShippingCost). Penalizar además por peso era contar dos veces. El
-// factor se conserva con sus 20 puntos para todo paquete dentro de un tramo
-// confirmado — así la escala sigue siendo 100 y los umbrales de veredicto no
-// cambian — y vuelve a ser 0 solo cuando NO hay tramo (fuera de 4 kg: sin
-// puntuar, fail-closed). Redistribuir esos 20 puntos es decisión de Pedro.
-export const WEIGHT_SHIPPING = 20;
+// Pesos del scoring (suman 100). DECISIÓN de Pedro, 07-09-2026: el tramo de
+// envío dejó de discriminar (0,20 € de rango entre 1 y 4 kg, y ese coste ya
+// entra en margen_unitario vía outboundShippingCost), así que sus 20 puntos
+// pasan a lo que de verdad decide si un producto aguanta anuncios: el margen
+// neto por enviado y el CPA máximo soportable. Reparto 10/10 para conservar
+// la proporción previa entre ambos (30:25 → 40:35). El resto no cambia.
+// La escala sigue en 100 y los umbrales de veredicto (80/60/40) no cambian.
+// Los propios pesos son criterio de ingeniería, no dato de Pedro.
+export const WEIGHT_MARGIN = 40;
+export const WEIGHT_CPA = 35;
+// Tramo de envío: 0 puntos desde el 07-09-2026. El tramo sigue calculándose
+// (shippingTier/shippingEur en el resultado) porque decide si el paquete es
+// enviable (>4 kg = sin tramo confirmado = sin score, fail-closed) y su coste
+// va al margen; simplemente ya no puntúa por sí mismo.
+export const WEIGHT_SHIPPING = 0;
 // Menos variantes reducen errores, stock inmovilizado y complejidad de fulfillment.
 export const WEIGHT_VARIANTS = 10;
 // Un ticket sano deja absorber incidencias sin puntuar demanda inexistente.
@@ -115,7 +117,7 @@ export function scoreCandidate(f: CandidateFacts, manualNote: string | null = nu
   const add = (factor: string, points: number, detail: string) => reasons.push({ factor, points: round2(points), detail });
   add("margen_unitario", Math.max(0, Math.min(WEIGHT_MARGIN, margin / 12 * WEIGHT_MARGIN)), `${round2(margin)} € por enviado`);
   add("cpa_maximo", Math.max(0, Math.min(WEIGHT_CPA, be.cpaBreakEven / HISTORIC_CPA_EUR * WEIGHT_CPA)), `${round2(be.cpaBreakEven)} € frente a ${HISTORIC_CPA_EUR} € históricos`);
-  add("tramo_envio", WEIGHT_SHIPPING, `${shipment.eur} € (${shipment.tier.replace("_", " ")}) + picking ${PICKING_EUR} € · coste ya en el margen; tarifa casi plana: sin penalización por peso`);
+  add("tramo_envio", WEIGHT_SHIPPING, `${shipment.eur} € (${shipment.tier.replace("_", " ")}) + picking ${PICKING_EUR} € · informativo: el coste ya está en el margen y el tramo no puntúa (07-09)`);
   const variantCount = f.variants?.length ?? 0;
   add("variantes", variantCount <= 1 ? WEIGHT_VARIANTS : variantCount <= 3 ? 6 : 2, `${variantCount} variantes`);
   add("ticket", price >= TICKET_MIN_EUR && price <= TICKET_MAX_EUR ? WEIGHT_TICKET : 5, `PVP propuesto ${price} €`);
