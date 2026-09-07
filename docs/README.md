@@ -42,6 +42,11 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 - Colaboración git: [COLLABORATION.md](COLLABORATION.md)
 - QA visual pendiente: [UI-V3-VISUAL-QA.md](UI-V3-VISUAL-QA.md)
 
+## CONTEXTOS DE SESIÓN (el más reciente manda sobre los anteriores; ninguno manda sobre SOURCE OF TRUTH)
+
+- [CONTEXTO-2026-09-06.md](CONTEXTO-2026-09-06.md) — consolidación de ramas en `release/casamable-v4.3`, constantes del Hunter, aislamiento de `platform-companies`, bloqueadores de despliegue y cola de tareas
+- Los contextos del 01-09 y del 03-09 viven en las ramas `docs/contexto-2026-09-01` y `docs/contexto-2026-09-03` de `origin`, sin mergear en la canónica
+
 ## ARCHIVE
 
 - [archive/sesiones-2026-08/](archive/sesiones-2026-08/) — contextos, planes e informes de agosto (superados; solo auditoría)
