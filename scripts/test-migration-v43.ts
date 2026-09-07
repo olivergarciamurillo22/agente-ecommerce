@@ -81,7 +81,9 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     fixture.pragma("user_version = 25");
     migrations.migrateDispatchNotice(fixture);
     fixture.pragma("user_version = 26");
-    // Segunda pasada: las nueve migraciones deben ser idempotentes.
+    migrations.migrateAiCallLog(fixture);
+    fixture.pragma("user_version = 27");
+    // Segunda pasada: las diez migraciones deben ser idempotentes.
     migrations.migrateWorkspaceAuth(fixture);
     migrations.migrateProductCandidates(fixture);
     migrations.migrateHunterPredictive(fixture);
@@ -91,6 +93,7 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     migrations.migrateDispatchChannels(fixture);
     migrations.migrateAiCancellations(fixture);
     migrations.migrateDispatchNotice(fixture);
+    migrations.migrateAiCallLog(fixture);
     const durationMs = Math.round((performance.now() - started) * 100) / 100;
 
     const counts = Object.fromEntries(Object.keys(EXPECTED).map((table) => {
@@ -100,7 +103,7 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     for (const [table, expected] of Object.entries(EXPECTED)) {
       if (counts[table as keyof typeof EXPECTED] !== expected) throw new Error(`${table}: se esperaban ${expected} filas`);
     }
-    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots", "address_validations", "address_alerts", "dispatch_cooldowns", "intent_classifications", "dispatch_channels", "ai_cancellations"]) {
+    for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots", "address_validations", "address_alerts", "dispatch_cooldowns", "intent_classifications", "dispatch_channels", "ai_cancellations", "ai_call_log"]) {
       if (!fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) throw new Error(`falta ${table}`);
     }
     const integrity = String(fixture.pragma("integrity_check", { simple: true }));

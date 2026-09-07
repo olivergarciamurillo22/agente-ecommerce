@@ -1960,6 +1960,120 @@ async function main(): Promise<void> {
     db.systemDbHandle().prepare("UPDATE orders SET created_at = unixepoch() WHERE id IN (?,?,?,?)").run(a.id, b.id, c.id, d.id);
   });
 
+  // ============ TOPE DIARIO DE LLAMADAS A OPENAI (Bloque C, 07-09-2026) ============
+  await test("COSTE IA · el tope se lee de settings > env > default, cuenta INTENTOS del día de Madrid y no mezcla los dos tipos", async () => {
+    const budget = await import("../src/lib/system/ai-budget");
+    const raw = db.systemDbHandle();
+    raw.prepare("DELETE FROM ai_call_log").run();
+    assert.equal(budget.aiDailyLimit("address", {}), budget.AI_DAILY_LIMIT_DEFAULT, "sin configurar, el default");
+    assert.equal(budget.aiDailyLimit("address", { OPENAI_DAILY_CALL_LIMIT: "40" }), 40);
+    assert.equal(budget.aiDailyLimit("address", { OPENAI_DAILY_CALL_LIMIT: "40", OPENAI_DAILY_CALL_LIMIT_ADDRESS: "7" }), 7, "el tope por tipo gana al general");
+    assert.equal(budget.aiDailyLimit("intent", { OPENAI_DAILY_CALL_LIMIT: "40", OPENAI_DAILY_CALL_LIMIT_ADDRESS: "7" }), 40, "el de direcciones no afecta al de intención");
+    db.setSetting("openai_daily_call_limit_address", "3");
+    assert.equal(budget.aiDailyLimit("address", { OPENAI_DAILY_CALL_LIMIT_ADDRESS: "7" }), 3, "settings gana al entorno: se puede subir sin desplegar");
+    db.setSetting("openai_daily_call_limit_address", "");
+
+    // Se cuentan intentos, por tipo, y solo los de hoy.
+    budget.recordAiCall("address", null);
+    budget.recordAiCall("address", null);
+    budget.recordAiCall("intent", null);
+    assert.equal(budget.aiCallsToday("address"), 2);
+    assert.equal(budget.aiCallsToday("intent"), 1);
+    raw.prepare("UPDATE ai_call_log SET created_at = unixepoch() - 3*86400 WHERE kind='address'").run();
+    assert.equal(budget.aiCallsToday("address"), 0, "lo de hace tres días no consume la cuota de hoy");
+    assert.equal(budget.aiBudget("address", { OPENAI_DAILY_CALL_LIMIT: "2" }).exhausted, false);
+    budget.recordAiCall("address", null);
+    budget.recordAiCall("address", null);
+    const agotado = budget.aiBudget("address", { OPENAI_DAILY_CALL_LIMIT: "2" });
+    assert.equal(agotado.exhausted, true);
+    assert.equal(agotado.used, 2);
+    assert.equal(agotado.remaining, 0);
+    assert.match(agotado.reason ?? "", /tope diario/);
+    assert.equal(budget.aiBudget("address", { OPENAI_DAILY_CALL_LIMIT: "0" }).exhausted, false, "0 = sin tope");
+    // Resumen de coste: el techo se declara, no se adivina.
+    const resumen = budget.aiBudgetSummary({ OPENAI_DAILY_CALL_LIMIT: "500" });
+    assert.equal(resumen.kinds.length, 2);
+    assert.equal(resumen.maxDailyCostEur, Math.round(1000 * budget.AI_COST_PER_CALL_EUR * 10000) / 10000);
+    raw.prepare("DELETE FROM ai_call_log").run();
+  });
+
+  await test("COSTE IA · agotada la cuota, NINGUNA de las dos capas llama a la API: direcciones queda 'dudosa' con alerta (o se omite si se configura) e intención escala a persona", async () => {
+    const budget = await import("../src/lib/system/ai-budget");
+    const addr = await import("../src/lib/orders/address-validation");
+    const raw = db.systemDbHandle();
+    raw.prepare("DELETE FROM ai_call_log").run();
+    const TOPE_1 = { ADDRESS_AI_VALIDATION_ENABLED: "1", OPENAI_API_KEY: "sk-test-no-real", OPENAI_DAILY_CALL_LIMIT: "1" };
+
+    // Primera llamada: hay cuota, se llama de verdad (completer inyectado).
+    const uno = mkAddrOrder("80", { address_line1: "Calle Alcalá 200, 1º A" });
+    let llamadas = 0;
+    const ok = await addr.runAddressValidationLayer2(uno, {
+      env: TOPE_1,
+      complete: async () => { llamadas++; return JSON.stringify({ veredicto: "correcta", problemas: [], confianza: 0.95 }); },
+    });
+    assert.equal(ok.status, "evaluada");
+    assert.equal(llamadas, 1);
+    assert.equal(budget.aiCallsToday("address"), 1, "el intento queda registrado");
+
+    // Segunda: cuota agotada → NO se llama y el veredicto es 'dudosa' (default de Pedro).
+    const dos = mkAddrOrder("81", { address_line1: "Calle Alcalá 202, 2º B" });
+    const sinCuota = await addr.runAddressValidationLayer2(dos, {
+      env: TOPE_1,
+      complete: async () => { llamadas++; throw new Error("no debería llamarse: cuota agotada"); },
+    });
+    assert.equal(llamadas, 1, "la API no se toca con la cuota agotada");
+    assert.equal(sinCuota.status, "evaluada");
+    if (sinCuota.status === "evaluada") {
+      assert.equal(sinCuota.result.verdict, "dudosa", "nunca 'correcta' sin haber podido validar");
+      assert.deepEqual(sinCuota.result.problems, ["sin_confirmar:limite_diario_ia"]);
+      assert.equal(sinCuota.result.fromModel, false);
+      assert.ok(sinCuota.alert, "abre ALERTA_DIRECCION: una persona lo mira");
+    }
+    assert.ok(addr.hasOpenAddressAlert(dos.id));
+    assert.equal(budget.aiCallsToday("address"), 1, "un rechazo por cuota NO consume cuota");
+    assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='ai_daily_limit_reached' AND order_ref=?").get(dos.shopify_order_number));
+
+    // Modo 'omitir': ni alerta ni retención; se queda el veredicto de la capa 1.
+    const tres = mkAddrOrder("82", { address_line1: "Calle Alcalá 204, 3º C" });
+    const omitido = await addr.runAddressValidationLayer2(tres, {
+      env: { ...TOPE_1, OPENAI_LIMIT_ADDRESS_FALLBACK: "omitir" },
+      complete: async () => { llamadas++; throw new Error("no debería llamarse"); },
+    });
+    assert.deepEqual(omitido, { status: "no_ejecutada", reason: "limite_diario" });
+    assert.equal(addr.hasOpenAddressAlert(tres.id), false, "en modo omitir no se abre alerta ni se retiene el despacho");
+    assert.equal(llamadas, 1);
+
+    // Intención: agotada la cuota, escala a persona como cualquier otro fail-closed.
+    raw.prepare("DELETE FROM ai_call_log").run();
+    const INTENT_TOPE = { POST_CONFIRMATION_AI_ENABLED: "1", OPENAI_API_KEY: "sk-test-no-real", OPENAI_DAILY_CALL_LIMIT_INTENT: "1" };
+    let intentos = 0;
+    const completer: import("../src/lib/orders/intent-ai").IntentAiCompleter = async () => {
+      intentos++;
+      return JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "tiempo_entrega", confianza: 0.95, respuesta_sugerida: null });
+    };
+    const primera = await intentAi.classifyPostConfirmationMessage("cuando llega?", { env: INTENT_TOPE, faq: FAQ, complete: completer });
+    assert.ok(primera.autoReply, "con cuota, responde la FAQ");
+    assert.equal(intentos, 1);
+    const segunda = await intentAi.classifyPostConfirmationMessage("cuando llega?", { env: INTENT_TOPE, faq: FAQ, complete: completer });
+    assert.equal(intentos, 1, "sin cuota no se llama a OpenAI");
+    assert.equal(segunda.autoReply, null);
+    assert.equal(segunda.escalationReason, "limite_diario_ia");
+    assert.equal(segunda.fromModel, false);
+    // Y el flujo completo manda a persona, como cualquier otro fail-closed.
+    const order = mkConfirmedForDispatch("90");
+    handleOrderButtonReply(order.phone, "confirm_order");
+    const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "cuando llega?", { env: INTENT_TOPE, faq: FAQ, complete: completer });
+    assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION);
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
+
+    // Un fallo de red TAMBIÉN consume cuota: contar solo los éxitos dejaría pasar el bucle malo.
+    raw.prepare("DELETE FROM ai_call_log").run();
+    await intentAi.classifyPostConfirmationMessage("hola", { env: { ...INTENT_TOPE, OPENAI_DAILY_CALL_LIMIT_INTENT: "5" }, faq: FAQ, complete: async () => { throw new Error("ECONNRESET"); } });
+    assert.equal(budget.aiCallsToday("intent"), 1, "el intento fallido cuenta");
+    raw.prepare("DELETE FROM ai_call_log").run();
+    raw.prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE '9299%' OR shopify_order_id LIKE '9399%'").run();
+  });
+
   // Limpieza: estos pedidos confirmados NO deben desplazar a los de tests
   // posteriores fuera de la ventana de getOrdersForSupplierEvaluation (LIMIT 50).
   db.systemDbHandle().prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE '9399%' OR shopify_order_id LIKE '9299%'").run();
@@ -13999,7 +14113,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 26;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26");
+      assert.match(db, /export const SCHEMA_VERSION = 27;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14516,7 +14630,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -14731,6 +14845,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 25");
     db.migrateDispatchNotice(fixture);
     fixture.pragma("user_version = 26");
+    db.migrateAiCallLog(fixture);
+    fixture.pragma("user_version = 27");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

@@ -1747,6 +1747,7 @@ function build() {
   migrateDispatchChannels(db);
   migrateAiCancellations(db);
   migrateDispatchNotice(db);
+  migrateAiCallLog(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1962,7 +1963,26 @@ export function migrateDispatchNotice(db: Database.Database): void {
   }
 }
 
-export const SCHEMA_VERSION = 26;
+/**
+ * Migración 27 (07-09-2026): tope diario de llamadas a OpenAI — docs/COSTE-IA.md.
+ * Una fila por INTENTO de llamada; el tope es un COUNT sobre esta tabla desde
+ * la medianoche de Madrid (mismo patrón que el tope diario de llamadas de
+ * teléfono). Tabla-log en vez de contador en `settings` porque el bot y el
+ * panel son procesos distintos y un leer-sumar-escribir se pisaría. ADITIVA.
+ */
+export function migrateAiCallLog(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_call_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL CHECK(kind IN ('address','intent')),
+      order_id INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_call_log_kind_time ON ai_call_log(kind, created_at DESC);
+  `);
+}
+
+export const SCHEMA_VERSION = 27;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

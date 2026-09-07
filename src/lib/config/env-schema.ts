@@ -401,6 +401,12 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     validate: bool01,
   },
 
+  // ── TOPE DIARIO DE LLAMADAS A OPENAI — docs/COSTE-IA.md ──
+  { name: "OPENAI_DAILY_CALL_LIMIT", category: "ADDRESS_AI", secret: false, description: "Tope diario de llamadas a OpenAI POR TIPO (direcciones e intención) si no hay tope específico. Default 500 por tipo (~0,05 EUR/día en el peor caso). 0 o negativo = sin tope. Se cuenta por intentos desde la medianoche de Madrid en la tabla ai_call_log; la clave de settings gana a esta variable.", requiredFor: [], defaultValue: "500", validate: intPos },
+  { name: "OPENAI_DAILY_CALL_LIMIT_ADDRESS", category: "ADDRESS_AI", secret: false, description: "Tope diario solo para la capa 2 de direcciones. Vacío = usa OPENAI_DAILY_CALL_LIMIT.", requiredFor: [] },
+  { name: "OPENAI_DAILY_CALL_LIMIT_INTENT", category: "AUTO_DISPATCH", secret: false, description: "Tope diario solo para la clasificación de intención post-confirmación. Vacío = usa OPENAI_DAILY_CALL_LIMIT.", requiredFor: [] },
+  { name: "OPENAI_LIMIT_ADDRESS_FALLBACK", category: "ADDRESS_AI", secret: false, description: "Qué hace la capa 2 de direcciones al agotarse el tope: 'dudosa' (default, decisión de Pedro: abre ALERTA_DIRECCION y retiene el auto-despacho de esos pedidos) u 'omitir' (declara no_ejecutada y manda el veredicto determinista de la capa 1, como cuando la IA está apagada).", requiredFor: [], defaultValue: "dudosa" },
+
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {
     name: "META_ADS_ACCESS_TOKEN",

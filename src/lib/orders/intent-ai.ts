@@ -22,6 +22,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ADDRESS_AI_DEFAULT_MODEL } from "./address-ai";
+import { aiBudget, recordAiCall } from "../system/ai-budget";
 
 export const INTENT_AI_MIN_CONFIDENCE = 0.75;
 export const INTENT_AI_DEFAULT_TIMEOUT_MS = 8000;
@@ -193,6 +194,12 @@ export async function classifyPostConfirmationMessage(
   const escalate = (reason: string, raw: string, intent: PostConfirmationIntent = "otro", confidence: number | null = null, faqId: string | null = null): IntentClassification => ({
     intent, faqId, confidence, autoReply: null, escalationReason: reason, model, raw: raw.slice(0, 2000), fromModel: false,
   });
+
+  // TOPE DIARIO (docs/COSTE-IA.md): al agotarse se escala a persona, que es
+  // exactamente lo que hace cualquier otro fail-closed de esta capa.
+  const presupuesto = aiBudget("intent", env);
+  if (presupuesto.exhausted) return escalate("limite_diario_ia", presupuesto.reason ?? "");
+  recordAiCall("intent", null);
 
   let raw = "";
   let timer: ReturnType<typeof setTimeout> | undefined;

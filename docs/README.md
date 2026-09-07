@@ -30,7 +30,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 
 ## OPERATIONS
 
-- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→26) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
+- **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→27) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
 - **Semáforo pre-despliegue (un solo comando): [deploy/PREDESPLIEGUE.md](deploy/PREDESPLIEGUE.md)** · resumen de incidencias abiertas: [deploy/RESUMEN-OPERATIVO.md](deploy/RESUMEN-OPERATIVO.md) · Migración v4.3 (ensayo sintético + `migration:verify` sobre copia): [deploy/MIGRATION-v4.3.md](deploy/MIGRATION-v4.3.md) · identidad de build y `PRODUCTION_COMMIT`: [deploy/NAS-PRODUCTION.md](deploy/NAS-PRODUCTION.md)
 - Auditoría de números sin fuente (incluye el código del 07-09): [deploy/NUMEROS-SIN-FUENTE-v4.3.md](deploy/NUMEROS-SIN-FUENTE-v4.3.md) · hallazgos de casos borde: [deploy/HALLAZGOS-BORDES-07-09.md](deploy/HALLAZGOS-BORDES-07-09.md)
 - Deploy anterior: [DEPLOY-HOTFIX-02-09.md](DEPLOY-HOTFIX-02-09.md) (incluye rollback)
@@ -40,7 +40,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 - Panel Sistema: [SYSTEM-CONTROL-CENTER.md](SYSTEM-CONTROL-CENTER.md)
 - Atención al cliente (roles/acceso): [WORKSPACE-ACCESO.md](WORKSPACE-ACCESO.md)
 - **Cómo responde el bot (reglas de conversación): [CONVERSACION-REGLAS.md](CONVERSACION-REGLAS.md)**
-- Validación de direcciones (determinista + IA, ALERTA_DIRECCION): [VALIDACION-DIRECCION-IA.md](VALIDACION-DIRECCION-IA.md)
+- Validación de direcciones (determinista + IA, ALERTA_DIRECCION): [VALIDACION-DIRECCION-IA.md](VALIDACION-DIRECCION-IA.md) · coste y tope diario de las llamadas a OpenAI: [COSTE-IA.md](COSTE-IA.md)
 - Auto-despacho tras cooldown + IA de intención (apagado por defecto; FAQ aprobada 07-09; auto-cancelación por IA): [AUTO-DESPACHO-COOLDOWN.md](AUTO-DESPACHO-COOLDOWN.md)
 - Retención/PII: [DATA-RETENTION.md](DATA-RETENTION.md) · Errores: [ERROR-MODEL.md](ERROR-MODEL.md)
 - Colaboración git: [COLLABORATION.md](COLLABORATION.md)

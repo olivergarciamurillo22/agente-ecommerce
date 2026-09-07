@@ -21,8 +21,9 @@
 import { createHash } from "node:crypto";
 import { getOrCreateConversation, systemDbHandle, type OrderRow } from "../db";
 import { logIntegrationEvent } from "../system/repo";
+import { addressLimitFallback, aiBudget, recordAiCall } from "../system/ai-budget";
 import { assessOrderAddressLayer1, type AddressLayer1Result, type AddressVerdict } from "./address-assessment";
-import { addressAiEnabled, evaluateAddressWithAi, type AddressAiCompleter, type AddressAiResult } from "./address-ai";
+import { addressAiEnabled, addressAiModel, evaluateAddressWithAi, type AddressAiCompleter, type AddressAiResult } from "./address-ai";
 
 export const ADDRESS_ALERT_REASON = "ALERTA_DIRECCION";
 
@@ -172,7 +173,7 @@ export function runAddressValidationLayer1(order: AddressOrder): Layer1Outcome {
 }
 
 export type Layer2Outcome =
-  | { status: "no_ejecutada"; reason: "ia_desactivada" | "capa1_ya_detecto_problema" }
+  | { status: "no_ejecutada"; reason: "ia_desactivada" | "capa1_ya_detecto_problema" | "limite_diario" }
   | { status: "cache"; hash: string; row: AddressValidationRow }
   | { status: "evaluada"; hash: string; result: AddressAiResult; alert: AddressAlertRow | null };
 
@@ -195,6 +196,22 @@ export async function runAddressValidationLayer2(order: AddressOrder, deps: Laye
   if (cached) return { status: "cache", hash, row: cached };
   const layer1 = getAddressValidation(order.id, hash, 1) ?? (() => { runAddressValidationLayer1(order); return getAddressValidation(order.id, hash, 1); })();
   if (layer1 && layer1.verdict !== "correcta") return { status: "no_ejecutada", reason: "capa1_ya_detecto_problema" };
+
+  // TOPE DIARIO (docs/COSTE-IA.md): al agotarse NO se llama a la API.
+  const presupuesto = aiBudget("address", env);
+  if (presupuesto.exhausted) {
+    logIntegrationEvent("whatsapp", "ai_daily_limit_reached", "warning", `${presupuesto.reason}; capa 2 de direcciones sin llamar (modo '${addressLimitFallback(env)}')`, order.shopify_order_number);
+    if (addressLimitFallback(env) === "omitir") return { status: "no_ejecutada", reason: "limite_diario" };
+    // Fail-closed estricto: nunca "correcta" sin haberla podido validar.
+    const sinCuota: AddressAiResult = {
+      layer: 2, verdict: "dudosa", problems: ["sin_confirmar:limite_diario_ia"], confidence: null,
+      model: addressAiModel(env), raw: presupuesto.reason ?? "", fromModel: false,
+    };
+    recordValidation(order.id, hash, 2, sinCuota.verdict, sinCuota.problems, null, sinCuota.model, sinCuota.raw);
+    const alerta = openAddressAlert(order, 2, "dudosa", sinCuota.problems);
+    return { status: "evaluada", hash, result: sinCuota, alert: alerta };
+  }
+  recordAiCall("address", order.id);
 
   const l1 = assessOrderAddressLayer1(order);
   const result = await evaluateAddressWithAi(
