@@ -20,7 +20,8 @@ export type ActionType =
   | "NEEDS_CALL"
   | "ADDRESS_CORRECTION"
   | "SUPPLIER_ERROR"
-  | "TRACKING_INCIDENT";
+  | "TRACKING_INCIDENT"
+  | "CANCEL_HELP";
 
 /** Orden de urgencia: lo que pierde dinero o molesta clientes, primero. */
 const URGENCIA: Record<ActionType, number> = {
@@ -30,6 +31,7 @@ const URGENCIA: Record<ActionType, number> = {
   NEEDS_CALL: 4,
   ADDRESS_CORRECTION: 5,
   SUPPLIER_ERROR: 6,
+  CANCEL_HELP: 1,
 };
 
 export interface ActionItem {
@@ -69,18 +71,20 @@ export function getActionCenter(nowSec = Math.floor(Date.now() / 1000)): ActionC
   const filas = db
     .prepare(
       `SELECT id, shopify_order_number, customer_name, phone, status, total_price, currency,
-              possible_duplicate, cancellation_requested_at, needs_call_at, proposed_address,
+              possible_duplicate, cancellation_requested_at, needs_call_at, proposed_address, last_error,
               supplier_sync_status, supplier_last_error, supplier_status_normalized,
               COALESCE(ordered_at, created_at) AS since_base, updated_at
        FROM orders
        WHERE status NOT IN ('ignored_old')`
     )
     .all() as Array<
-    Pick<OrderRow, "id" | "shopify_order_number" | "customer_name" | "phone" | "status" | "total_price" | "currency" | "possible_duplicate" | "cancellation_requested_at" | "needs_call_at" | "proposed_address" | "supplier_sync_status" | "supplier_last_error" | "supplier_status_normalized" | "updated_at"> & { since_base: number }
+    Pick<OrderRow, "id" | "shopify_order_number" | "customer_name" | "phone" | "status" | "total_price" | "currency" | "possible_duplicate" | "cancellation_requested_at" | "needs_call_at" | "proposed_address" | "supplier_sync_status" | "supplier_last_error" | "supplier_status_normalized" | "updated_at" | "last_error"> & { since_base: number }
   >;
 
   for (const o of filas) {
     const base = { orderId: o.id, orderNumber: o.shopify_order_number, customer: cliente(o) };
+
+    if(o.last_error==="pide_ayuda_tras_cancelar"&&noResuelto(o.id,"CANCEL_HELP"))items.push({...base,type:"CANCEL_HELP",problem:"El cliente pide ayuda tras cancelar.",whatToDo:"Abrir la conversación y atender personalmente su consulta.",sinceAt:o.updated_at,urgency:URGENCIA.CANCEL_HELP});
 
     if (o.cancellation_requested_at && noResuelto(o.id, "CANCEL_REQUEST")) {
       items.push({
@@ -153,7 +157,7 @@ export function getActionCenter(nowSec = Math.floor(Date.now() / 1000)): ActionC
 
   items.sort((a, b) => a.urgency - b.urgency || a.sinceAt - b.sinceAt);
 
-  const counts = { CANCEL_REQUEST: 0, POSSIBLE_DUPLICATE: 0, NEEDS_CALL: 0, ADDRESS_CORRECTION: 0, SUPPLIER_ERROR: 0, TRACKING_INCIDENT: 0 } as Record<ActionType, number>;
+  const counts = { CANCEL_REQUEST: 0, CANCEL_HELP:0, POSSIBLE_DUPLICATE: 0, NEEDS_CALL: 0, ADDRESS_CORRECTION: 0, SUPPLIER_ERROR: 0, TRACKING_INCIDENT: 0 } as Record<ActionType, number>;
   for (const i of items) counts[i.type]++;
   return { generatedAt: nowSec, items, counts, total: items.length };
 }

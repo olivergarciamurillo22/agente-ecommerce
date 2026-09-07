@@ -67,6 +67,7 @@ import { externalActionsLocked, logOnce } from "../safety";
 import { callsBlockedReason, setCallsBlocked } from "./config";
 import { technicalResultFromDisconnection } from "./results";
 import { parseCallResult, RESULT_OUTCOMES, type CallResult } from "./results";
+import { guardRealClient } from "../real-client-guard";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
 
@@ -296,6 +297,13 @@ export async function dialDueAttempts(deps: Required<CallTickDeps>): Promise<{
     // DNC otra vez tras el claim (carrera: pudo entrar mientras tanto).
     if (isDncPhone(order.phone)) {
       transitionCallAttempt(attempt.id, ["reserved"], "cancelled", { reason: "dnc (carrera)" });
+      out.cancelled++;
+      continue;
+    }
+
+    const antiReal = guardRealClient(order.phone, "scheduler");
+    if (!antiReal.allowed) {
+      transitionCallAttempt(attempt.id, ["reserved"], "cancelled", { reason: `anti_cliente_real: ${antiReal.reason}` });
       out.cancelled++;
       continue;
     }

@@ -16,7 +16,7 @@ import { systemDbHandle } from "../../../lib/db";
 import { getMetaAdsHealth } from "../../../lib/meta-ads/health";
 import { getCampaignEconomics } from "../../../lib/meta-ads/attribution-match";
 import { listMetaAdsDaily, type MetaAdsDailyDbRow } from "../../../lib/meta-ads/repo";
-import { syncMetaAdsInsights } from "../../../lib/meta-ads/sync";
+import { resolveMetaAdsRange, syncMetaAdsInsights } from "../../../lib/meta-ads/sync";
 import { getEconomicsWindowRange } from "../../../lib/system/unit-economics";
 import { businessDay, startOfBusinessDay } from "../../../lib/time";
 
@@ -40,6 +40,19 @@ function parseDays(raw: string | null): number {
   const n = raw ? parseInt(raw, 10) : 7;
   if (!Number.isFinite(n)) return 7;
   return Math.min(90, Math.max(1, n));
+}
+
+function selectedRange(url: URL): { days: number; fromDay: string; toDay: string } {
+  const desde = url.searchParams.get("desde") ?? undefined;
+  const hasta = url.searchParams.get("hasta") ?? undefined;
+  if (desde || hasta) {
+    const range = resolveMetaAdsRange({ since: desde, until: hasta }, new Date());
+    const days = Math.round((Date.parse(`${range.until}T12:00:00Z`) - Date.parse(`${range.since}T12:00:00Z`)) / 86_400_000) + 1;
+    return { days, fromDay: range.since, toDay: range.until };
+  }
+  const days = parseDays(url.searchParams.get("days"));
+  const nowMs = Date.now();
+  return { days, fromDay: businessDay(nowMs - (days - 1) * 86_400_000), toDay: businessDay(nowMs) };
 }
 
 function aggregateCampaigns(rows: MetaAdsDailyDbRow[]): CampaignAgg[] {
@@ -84,14 +97,15 @@ function dailySeries(rows: MetaAdsDailyDbRow[]): Array<{ day: string; spend: num
 
 export async function GET(req: Request) {
   try {
-    const days = parseDays(new URL(req.url).searchParams.get("days"));
+    const range = selectedRange(new URL(req.url));
+    const { days, fromDay, toDay } = range;
     const nowMs = Date.now();
-    const toDay = businessDay(nowMs);
-    const fromDay = businessDay(nowMs - (days - 1) * 86400 * 1000);
     // Ventana epoch [fromS, toS): desde la medianoche (Madrid) del primer día
     // del rango hasta ahora mismo — la misma ventana para pedidos y economía.
-    const fromS = startOfBusinessDay(nowMs - (days - 1) * 86400 * 1000);
-    const toS = Math.floor(nowMs / 1000) + 1;
+    const fromS = startOfBusinessDay(Date.parse(`${fromDay}T12:00:00Z`));
+    const toS = toDay === businessDay(nowMs)
+      ? Math.floor(nowMs / 1000) + 1
+      : startOfBusinessDay(Date.parse(`${toDay}T12:00:00Z`) + 86_400_000);
 
     const health = getMetaAdsHealth();
     const accountRows = listMetaAdsDaily({ fromDay, toDay, level: "account" });
@@ -150,14 +164,14 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => null)) as { action?: string } | null;
+    const body = (await req.json().catch(() => null)) as { action?: string; desde?: string; hasta?: string; days?: number } | null;
     if (body?.action !== "sync") {
       return NextResponse.json({ ok: false, error: "acción no soportada" }, { status: 400 });
     }
     // Read-only hacia Meta; escribe solo snapshots locales (meta_ads_daily
     // + puente daily_ad_spend). 7 días de lookback: Meta ajusta cifras
     // retroactivamente los primeros días.
-    const report = await syncMetaAdsInsights({ lookbackDays: 7 });
+    const report = await syncMetaAdsInsights({ lookbackDays: body.days ?? 7, since: body.desde, until: body.hasta });
     return NextResponse.json({ ok: !report.skipped && report.errors.length === 0, report });
   } catch (err) {
     return NextResponse.json(

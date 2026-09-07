@@ -17,17 +17,19 @@ import PipelineBoard from "./PipelineBoard";
 import SearchView from "./SearchView";
 import LandingStudio from "../landing-studio/LandingStudio";
 import WinnerRadar from "./radar/WinnerRadar";
+import HunterEconomicsView from "./HunterEconomicsView";
 
-type HunterTab = "radar" | "search" | "saved" | "compare" | "studio";
+type HunterTab = "radar" | "search" | "saved" | "compare" | "economics" | "studio";
 
 /**
  * Tres cosas distintas conviven en el Cazador y sin separarlas parecen una
  * lista arbitraria de pestañas: ENCONTRAR productos (el Radar), TRABAJAR los
  * candidatos guardados (el pipeline heredado) y PUBLICAR la landing.
  */
-const SECCIONES: ReadonlyArray<{ id: "radar" | "candidatos" | "studio"; label: string }> = [
+const SECCIONES: ReadonlyArray<{ id: "radar" | "candidatos" | "economics" | "studio"; label: string }> = [
   { id: "radar", label: "Radar" },
   { id: "candidatos", label: "Mis candidatos" },
+  { id: "economics", label: "Economics" },
   { id: "studio", label: "Landing Studio" },
 ];
 
@@ -107,6 +109,12 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "radar"
   const openResult = useCallback((r: AdLibraryResult) => setDetail({ id: r.id, initial: r }), []);
   const openCandidate = useCallback((c: WinningProductCandidate) => setDetail({ id: c.id, initial: c }), []);
   const closeDetail = useCallback(() => setDetail(null), []);
+  const generateLanding = useCallback((candidate: WinningProductCandidate) => {
+    window.sessionStorage.setItem("casamable.landing-studio.pending-candidate", candidate.id);
+    setDetail(null);
+    setTab("studio");
+    window.history.replaceState(null, "", "#landing-studio");
+  }, []);
 
   const cambiarPestana = useCallback((next: HunterTab) => {
     setTab(next);
@@ -145,7 +153,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "radar"
     return (
       <>
         <WinnerRadar toolbar={tiraSecciones} />
-        <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />
+        <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} onGenerateLanding={generateLanding} />
       </>
     );
   }
@@ -193,6 +201,8 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "radar"
 
             {tab === "studio" ? (
               <LandingStudio />
+            ) : tab === "economics" ? (
+              <HunterEconomicsView />
             ) : !availability.available ? (
               <Card>
                 <EmptyState
@@ -234,7 +244,7 @@ export default function ProductHunterView({ initialTab }: { initialTab?: "radar"
       </div>
       </div>
 
-      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} />
+      <CandidateDetail target={detail} onClose={closeDetail} onChanged={onChanged} compareIds={compareIds} onToggleCompare={toggleCompare} onGenerateLanding={generateLanding} />
     </div>
   );
 }

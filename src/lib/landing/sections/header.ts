@@ -1,0 +1,2 @@
+import type { ProductCandidate } from "../../hunter/types";import {esc}from"../escape";
+export function header(c:ProductCandidate):string{const p=c.scoring?.proposedPriceEur;return `<section class="header" data-bloque="cabecera"><div class="wrap header__row"><strong>Casamable</strong><!-- CHECKOUT: configurar variante antes de activar --><button class="btn" type="button">${esc(c.name??"Ver producto")}${p?` · ${p.toFixed(2).replace(".",",")} €`:""}</button></div></section>`;}

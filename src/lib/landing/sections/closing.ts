@@ -1,0 +1,2 @@
+import type { ProductCandidate } from "../../hunter/types";
+export function closing(c:ProductCandidate):string { const p=c.scoring?.proposedPriceEur; const label=p?`${p.toFixed(2).replace(".",",")} €`:"precio por confirmar"; return `<section class="closing closing--dark" data-bloque="cta-final"><div class="wrap"><h2 class="closing__title">¿Lo vemos juntos?</h2><p>Revisa los datos y confirma solo cuando lo tengas claro.</p><!-- CHECKOUT: configurar variante antes de activar --><button type="button" class="btn">Continuar — ${label}</button></div></section>`; }

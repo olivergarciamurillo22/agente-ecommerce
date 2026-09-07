@@ -40,10 +40,14 @@ import {
   appendOrderProposedAddress,
   incrementOrderClarify,
   setOrderShopifyTagged,
+  markCancelledOrderHelpRequested,
+  getConversationIdByPhone,
+  setMode,
   type OrderRow,
 } from "../db";
 import { tagOrderConfirmed } from "../shopify/admin";
 import { orderActionAllowed } from "../safety";
+import { markOrderToSend } from "../suppliers/beeping";
 import {
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
@@ -198,6 +202,9 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): ConfirmO
     );
     return { confirmed: true, blocker: null };
   }
+  // Best-effort y en segundo plano: nunca retrasa WhatsApp ni revierte el
+  // estado local si Beeping falla. (feat/beeping-mark-to-send, 1207b90)
+  void markOrderToSend(order.shopify_order_number);
   void tagOrderConfirmed(order.shopify_order_id).then((ok) => {
     if (ok) setOrderShopifyTagged(order.id);
   });
@@ -766,6 +773,20 @@ export function handleOrderButtonReply(phone: string, payload: string): OrderRep
         : "Tu solicitud ha quedado registrada para revisión.",
       authorized: order.pilot_authorized === 1,
     };
+  }
+
+  // Botón "Necesito ayuda" de la plantilla de cancelación (36deb87): el bot
+  // calla y la conversación pasa a una persona.
+  const cancelHelp = /^cancel_help:(\d+)$/.exec(p);
+  if (cancelHelp) {
+    const order = getOrderById(Number(cancelHelp[1]));
+    if (!order || order.phone !== phone) return { handled: false };
+    const conversationId = getConversationIdByPhone(phone);
+    if (conversationId === null) return { handled: false };
+    setMode(conversationId, "HUMAN");
+    markCancelledOrderHelpRequested(order.id);
+    logIntegrationEvent("whatsapp", "cancelled_order_help_requested", "warning", "pide_ayuda_tras_cancelar", order.shopify_order_number);
+    return { handled: true, authorized: order.pilot_authorized === 1 };
   }
 
   // Payload desconocido: no se adivina nada. Visible en logs, sin respuesta.

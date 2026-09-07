@@ -102,6 +102,7 @@ async function main(): Promise<void> {
     add(pin ? "warn" : "ok", "Versión del agente", pin ?? `fijada en ${retellAgentVersion()}`);
     add((process.env.RETELL_API_KEY ?? "").trim() ? "ok" : "warn", "RETELL_API_KEY", (process.env.RETELL_API_KEY ?? "").trim() ? "presente" : "ausente: no se pueden crear ni verificar llamadas");
     add(retellFromNumber() ? "ok" : "warn", "Número saliente", retellFromNumber() || "ausente");
+    add("warn", "Saldo Retell", "UNAVAILABLE_API: comprobar manualmente en Billing; no se aplican umbrales inventados");
   } catch (err) {
     add("warn", "Llamadas", `no se pudo comprobar: ${err instanceof Error ? err.message : "error"}`);
   }

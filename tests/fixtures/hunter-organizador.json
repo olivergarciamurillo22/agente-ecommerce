@@ -1,0 +1,18 @@
+{
+  "sourceUrl": "https://casamable.example/organizador-ropa-compresible",
+  "sourceDomain": "casamable.example",
+  "fetchedAt": 1788480000,
+  "name": "Organizador de Ropa Compresible",
+  "category": "hogar",
+  "unitCostEur": 3.29,
+  "salePriceEur": null,
+  "sourceCurrency": "EUR",
+  "sourceCost": 3.29,
+  "weightGrams": 190,
+  "lengthCm": 26,
+  "widthCm": 20,
+  "heightCm": 5,
+  "variants": null,
+  "specs": { "material": "por confirmar" },
+  "claims": null
+}

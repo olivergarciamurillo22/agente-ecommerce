@@ -857,6 +857,127 @@ export function migrateWorkspaceAuth(db: Database.Database): void {
   `);
 }
 
+/** Migración 19: candidatos del Hunter y auditoría inmutable de sus cambios. */
+export function migrateProductCandidates(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS product_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_url TEXT NOT NULL UNIQUE,
+      source_domain TEXT NOT NULL,
+      fetched_at INTEGER,
+      nombre_limpio TEXT,
+      categoria TEXT,
+      coste_unitario_eur REAL,
+      pvp_entrada_eur REAL,
+      moneda_origen TEXT,
+      coste_origen REAL,
+      peso_gramos REAL,
+      largo_cm REAL,
+      ancho_cm REAL,
+      alto_cm REAL,
+      variantes_json TEXT,
+      specs_json TEXT,
+      claims_json TEXT,
+      pvp_propuesto_eur REAL,
+      tramo_envio TEXT,
+      envio_eur REAL,
+      margen_unitario_eur REAL,
+      cpa_maximo_eur REAL,
+      break_even_entrega_pct REAL,
+      score REAL,
+      veredicto TEXT,
+      motivos_json TEXT,
+      estado TEXT NOT NULL DEFAULT 'nuevo'
+        CHECK(estado IN ('nuevo','descartado','en_prueba','ganador')),
+      nota_manual TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_product_candidates_score
+      ON product_candidates(score DESC, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS candidate_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id INTEGER NOT NULL REFERENCES product_candidates(id) ON DELETE CASCADE,
+      event_type TEXT NOT NULL,
+      previous_state TEXT,
+      next_state TEXT,
+      previous_score REAL,
+      next_score REAL,
+      details_json TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_candidate_events_candidate
+      ON candidate_events(candidate_id, created_at DESC);
+  `);
+}
+
+/** Migracion 20: ejecuciones auditables del Hunter predictivo. */
+export function migrateHunterPredictive(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hunter_predictive_estimates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      product_query TEXT NOT NULL,
+      competitor_url TEXT,
+      search_available INTEGER NOT NULL CHECK(search_available IN (0,1)),
+      search_mechanism TEXT,
+      wholesale_json TEXT,
+      retail_json TEXT,
+      viability_json TEXT,
+      verdict TEXT CHECK(verdict IS NULL OR verdict IN ('descartar','investigar','candidato_fuerte')),
+      reason TEXT,
+      consulted_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      promoted_candidate_id INTEGER REFERENCES product_candidates(id) ON DELETE SET NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_predictive_expiry
+      ON hunter_predictive_estimates(expires_at DESC, created_at DESC);
+  `);
+}
+
+/** Migracion 21: consultas y snapshots historicos de Ad Library. */
+export function migrateHunterDiscovery(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS adlib_queries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      terms_json TEXT NOT NULL,
+      country TEXT NOT NULL,
+      days INTEGER NOT NULL,
+      fields_json TEXT NOT NULL,
+      result_count INTEGER NOT NULL,
+      passed_noise_count INTEGER NOT NULL,
+      group_count INTEGER NOT NULL,
+      rate_limit_json TEXT,
+      queried_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS adlib_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_key TEXT NOT NULL UNIQUE,
+      page_id TEXT NOT NULL,
+      page_name TEXT,
+      fingerprint TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE TABLE IF NOT EXISTS adlib_candidate_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      query_id INTEGER NOT NULL REFERENCES adlib_queries(id) ON DELETE CASCADE,
+      candidate_id INTEGER NOT NULL REFERENCES adlib_candidates(id) ON DELETE CASCADE,
+      captured_at INTEGER NOT NULL,
+      active_ads INTEGER NOT NULL,
+      oldest_active_at INTEGER,
+      momentum TEXT NOT NULL,
+      previous_active_ads INTEGER,
+      noise INTEGER NOT NULL CHECK(noise IN (0,1)),
+      noise_reason TEXT,
+      ads_json TEXT NOT NULL,
+      UNIQUE(query_id, candidate_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_adlib_snapshots_candidate_date
+      ON adlib_candidate_snapshots(candidate_id, captured_at DESC);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1500,6 +1621,9 @@ function build() {
   // Migración 20: etapas, ETA e informe de cada búsqueda. Aditiva sobre las
   // tablas del radar; ninguna tabla del negocio se toca.
   migrateHunterRunDetailSchema(db);
+  migrateProductCandidates(db);
+  migrateHunterPredictive(db);
+  migrateHunterDiscovery(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1669,7 +1793,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 20;
+export const SCHEMA_VERSION = 21;
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
@@ -2402,6 +2526,17 @@ export function getNeedsCallOrdersByPhone(phone: string): OrderRow[] {
     .all(phone) as OrderRow[];
 }
 
+/** Pedido más reciente que todavía puede requerir atención postventa. */
+export function getLatestCustomerOrderByPhone(phone: string): OrderRow | null {
+  return (
+    (ctx().db.prepare(
+      `SELECT * FROM orders
+       WHERE phone = ? AND status NOT IN ('cancelled','ignored_old','error')
+       ORDER BY created_at DESC, id DESC LIMIT 1`
+    ).get(phone) as OrderRow | undefined) ?? null
+  );
+}
+
 /** Confirmados recientes todavía gestionables: cubre cancelaciones post-confirmación. */
 export function getRecentConfirmedOrdersByPhone(phone: string, maxAgeDays = 30): OrderRow[] {
   return ctx()
@@ -2895,6 +3030,11 @@ export function markOrderNeedsCall(id: number): boolean {
     )
     .run(id);
   return info.changes > 0;
+}
+
+/** Marca trabajo humano tras una cancelación sin alterar el cierre logístico. */
+export function markCancelledOrderHelpRequested(id:number):boolean {
+  return ctx().db.prepare("UPDATE orders SET last_error='pide_ayuda_tras_cancelar', updated_at=unixepoch() WHERE id=?").run(id).changes>0;
 }
 
 /** Descartar del flujo. Un pedido confirmado no se cancela por aquí. */

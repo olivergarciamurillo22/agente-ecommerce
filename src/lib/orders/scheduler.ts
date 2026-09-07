@@ -35,6 +35,7 @@ import {
   touchOrder,
 } from "../db";
 import { sendWhatsAppMessage, sendWhatsAppInteractive, whatsappReady } from "../whatsapp";
+import { guardRealClient } from "../real-client-guard";
 import { whatsappProviderName } from "../whatsapp/provider";
 import { buildConfirmationOutbound, firstName } from "../whatsapp/interactive";
 import { buildApprovedTemplateMessage, TemplateNotReadyError } from "../whatsapp/templates";
@@ -45,6 +46,7 @@ import {
   orderActionAllowed,
   orderTooOld,
   canSendRealWhatsApp,
+  logRolloutBlocked,
   canWriteToShopify,
   insideSendWindow,
   nextWindowOpen,
@@ -125,10 +127,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       continue;
     }
     if (!orderActionAllowed(order)) {
-      logOnce(
-        `test-skip-${order.id}`,
-        `[TEST MODE] Pedido #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-      );
+      logRolloutBlocked(order);
       continue;
     }
     if (markOrderNeedsCall(order.id)) {
@@ -152,10 +151,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         continue;
       }
       if (!orderActionAllowed(order)) {
-        logOnce(
-          `test-skip-${order.id}`,
-          `[TEST MODE] Pedido #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-        );
+        logRolloutBlocked(order);
         continue;
       }
 
@@ -229,7 +225,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       }
       const message = interactive ? interactive.fallbackText : buildConfirmationMessage(order);
       const autorizado = order.pilot_authorized === 1;
-      if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
+      if (!guardRealClient(order.phone, "scheduler").allowed || !canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         // Simulación (safe mode / flags cerrados): NO transicionar estado.
         logBlockedSend(`sim-init-${order.id}`, order.phone, message);
         continue;
@@ -265,10 +261,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
         continue;
       }
       if (!orderActionAllowed(order)) {
-        logOnce(
-          `test-skip-rem-${order.id}`,
-          `[TEST MODE] Recordatorio #${order.shopify_order_number} ignorado: fuera de allowlist y sin autorizar`
-        );
+        logRolloutBlocked(order);
         continue;
       }
       const message = buildReminderMessage(order);
@@ -305,7 +298,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
           continue; // sin claim: cuando la plantilla esté verificada, saldrá
         }
       }
-      if (!canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
+      if (!guardRealClient(order.phone, "scheduler").allowed || !canSendRealWhatsApp(order.phone, { orderAuthorized: autorizado })) {
         logBlockedSend(`sim-rem-${order.id}`, order.phone, message);
         continue;
       }

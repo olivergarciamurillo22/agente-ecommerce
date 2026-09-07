@@ -1,0 +1,2 @@
+import type { ProductCandidate } from "../../hunter/types";import{esc}from"../escape";
+export function hardProof(c:ProductCandidate):string{const entries=Object.entries(c.specs??{});if(!entries.length)return"";return `<section class="proof proof--dark" data-bloque="prueba-dura"><div class="wrap"><h2 class="proof__title">Datos del producto</h2><div class="proof__grid">${entries.slice(0,6).map(([k,v])=>`<article><h3>${esc(k)}</h3><p>${esc(v)}</p></article>`).join("")}</div></div></section>`;}

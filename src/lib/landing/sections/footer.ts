@@ -1,0 +1,1 @@
+export function footer():string{return `<section class="footer" data-bloque="footer"><div class="wrap"><p>Casamable · Información legal por completar</p><strong aria-hidden="true">CASAMABLE</strong></div></section>`;}

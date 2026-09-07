@@ -41,7 +41,16 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 
 ## 3 · Qué falta para mover producción
 
-**Candidato vigente: `release/casamable-v4.2` @ `fdad99e` (esquema 18).**
+> **07-09-2026:** el candidato vigente pasa a ser **`release/casamable-v4.3`
+> (esquema 21)**, que contiene íntegro el candidato de abajo (`v4.2` @
+> `fdad99e`, merge de `origin/release/casamable-v4.2` @ `4e07ff5`) más el
+> workspace, Hunter + Landing Studio (19), predictivo (20) y discovery (21).
+> El salto de esquema desde producción (15) es **15 → 21**, todo aditivo y
+> ensayado con el fixture realista (`scripts/test-migration-v43.ts`). Guía
+> de release: `docs/deploy/RELEASE-v4.3.md`. Lo que corre en el NAS no se ha
+> podido confirmar desde el repo: hace falta `PRODUCTION_COMMIT`.
+
+**Candidato del 05-09 (integrado en v4.3): `release/casamable-v4.2` @ `fdad99e` (esquema 18).**
 Contiene el hotfix de Retell/ops, la integración móvil, el espacio de
 atención al cliente con roles y auditoría, y los tres arreglos de conducta
 del bot en WhatsApp del 05-09 (`docs/CONVERSACION-REGLAS.md`).

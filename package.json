@@ -49,6 +49,9 @@
     "notify:delay-ultras": "tsx scripts/notify-delay-ultras.ts",
     "whatsapp:templates:doctor": "tsx scripts/whatsapp-templates-doctor.ts",
     "retell:doctor": "tsx scripts/retell-doctor.ts",
+    "doctor:v43": "tsx scripts/doctor-v43.ts",
+    "trace": "tsx scripts/trace.ts",
+    "fixture:pedido": "tsx scripts/fixture-pedido.ts",
     "calls:simulate": "tsx scripts/calls-simulate.ts",
     "beeping:auth:init": "tsx scripts/beeping-auth-init.ts",
     "beeping:doctor": "tsx scripts/beeping-doctor.ts",
@@ -60,7 +63,16 @@
     "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts",
     "users:create": "tsx scripts/users-create.ts",
     "hunter:doctor": "tsx scripts/hunter-doctor.ts",
-    "hunter:providers:test": "tsx scripts/hunter-providers-test.ts"
+    "hunter:providers:test": "tsx scripts/hunter-providers-test.ts",
+    "hunter:add": "tsx scripts/hunter-add.ts",
+    "hunter:score": "tsx scripts/hunter-score.ts",
+    "hunter:predictivo": "tsx scripts/hunter-predictivo.ts",
+    "hunter:discovery": "tsx scripts/hunter-discovery.ts",
+    "hunter:discovery:doctor": "tsx scripts/hunter-discovery-doctor.ts",
+    "landing:build": "tsx scripts/landing-build.ts",
+    "landing:sections": "tsx scripts/landing-sections.ts",
+    "landing:lint": "tsx scripts/landing-lint.ts",
+    "landing:e2e": "tsx scripts/landing-e2e.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",

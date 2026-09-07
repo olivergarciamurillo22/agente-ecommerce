@@ -105,6 +105,22 @@ export function rolloutAllows(phone: string): boolean {
   return rolloutBucket(normalized) < pct;
 }
 
+/** Registra una decisión de rampa una sola vez por pedido y configuración. No cambia el gate. */
+export function logRolloutBlocked(order:{id:number;shopify_order_number:string;phone:string}):void {
+  const percent=whatsappRolloutPercent(),bucket=rolloutBucket(order.phone);
+  const message=`Pedido #${order.shopify_order_number} bloqueado por rampa: porcentaje ${percent||"pilot"}, bucket ${bucket}`;
+  logOnce(`rollout-block-${order.id}-${percent}-${bucket}`,`[RAMPA] ${message}`);
+  try{
+    // Import perezoso para conservar el arranque fail-closed de safety.ts.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const{systemDbHandle}=require("./db") as typeof import("./db");const db=systemDbHandle();
+    db.prepare(`INSERT INTO integration_events(integration,event_type,severity,order_ref,message)
+      SELECT 'whatsapp','rollout_blocked','info',?,?
+      WHERE NOT EXISTS(SELECT 1 FROM integration_events WHERE event_type='rollout_blocked' AND order_ref=? AND message=?)`)
+      .run(order.shopify_order_number,message,order.shopify_order_number,message);
+  }catch{/* la observabilidad nunca abre la rampa ni rompe el scheduler */}
+}
+
 /**
  * ¿Puede el sistema actuar sobre este teléfono?
  * Con TEST_MODE=1 (default) SOLO los de TEST_PHONE_ALLOWLIST son elegibles
