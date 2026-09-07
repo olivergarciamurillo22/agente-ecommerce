@@ -15497,6 +15497,61 @@ async function main(): Promise<void> {
       assert.equal(fila.stop_reason, "presupuesto_peticiones", "queda escrito por qué paró");
     });
 
+    await test("BUSCADOR · EMERGENCY_STOP para el Cazador: ninguna búsqueda se ejecuta, se reintenta ni se encola, y falla con un motivo legible (no en silencio)", async () => {
+      const safety = await import("../src/lib/safety");
+      const { AdLibraryClient, probeAdLibraryFields } = await import("../src/lib/hunter/discovery/client");
+      const { runDiscovery } = await import("../src/lib/hunter/discovery/service");
+      const { runWordSearch } = await import("../src/lib/hunter/discovery/word-search");
+      const { DiscoveryHaltedError, DISCOVERY_HALTED_MESSAGE } = await import("../src/lib/hunter/discovery/errors");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+
+      // Sin la variable puesta el gate está CERRADO (fail-closed, como el resto).
+      await withEnv({ EMERGENCY_STOP: undefined }, () => {
+        assert.equal(safety.canRunDiscovery(), false, "sin EMERGENCY_STOP explícito a 0, no se sale a Internet");
+      });
+      await withEnv({ EMERGENCY_STOP: "0" }, () => assert.equal(safety.canRunDiscovery(), true));
+
+      let peticiones = 0;
+      const fetcher = (async () => {
+        peticiones++;
+        return new Response(JSON.stringify({ data: [], paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      let esperas = 0;
+      const client = new AdLibraryClient("tok", fetcher, async () => { esperas++; });
+
+      await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+        // 1 · La búsqueda por palabra falla antes incluso de expandir.
+        await assert.rejects(
+          () => runWordSearch({ seed: "gate-emergencia", country: "ES", days: 30, token: "tok", client }),
+          (err: unknown) => err instanceof DiscoveryHaltedError && /EMERGENCY_STOP/.test((err as Error).message)
+        );
+        // 2 · La corrida de discovery, igual.
+        await assert.rejects(() => runDiscovery({ terms: ["gate-emergencia"], country: "ES", days: 30, token: "tok", client }), DiscoveryHaltedError);
+        // 3 · El sondeo de campos, igual.
+        await assert.rejects(() => probeAdLibraryFields(client, { term: "x", country: "ES", since: "2026-08-01", until: "2026-09-05" }), DiscoveryHaltedError);
+        // 4 · Y el cinturón de abajo: ni una petición suelta se escapa.
+        await assert.rejects(() => client.page({ term: "x", country: "ES", since: "2026-08-01", until: "2026-09-05" }), DiscoveryHaltedError);
+        // 5 · search() NO se traga la parada como si fuera un corte cualquiera.
+        await assert.rejects(() => client.search({ term: "x", country: "ES", since: "2026-08-01", until: "2026-09-05", budget: new DiscoveryBudget({ maxRequests: 10 }) }), DiscoveryHaltedError);
+
+        assert.equal(peticiones, 0, "CERO llamadas salientes con la parada activa");
+        assert.equal(esperas, 0, "y ni un reintento: no se espera para volver a intentarlo");
+        const err = new DiscoveryHaltedError();
+        assert.equal(err.retryable, false);
+        assert.equal(err.abortRun, true);
+        assert.equal(err.kind, "parada_emergencia");
+        assert.equal(err.message, DISCOVERY_HALTED_MESSAGE);
+        assert.match(err.message, /EMERGENCY_STOP=0/, "el mensaje dice cómo desbloquearlo");
+      });
+
+      // Con la parada levantada, el mismo cliente sí busca.
+      await withEnv({ EMERGENCY_STOP: "0" }, async () => {
+        const r = await client.search({ term: "gate-emergencia", country: "ES", since: "2026-08-01", until: "2026-09-05" });
+        assert.equal(r.stopReason, "completado");
+        assert.ok(peticiones >= 1, "ahora sí sale");
+      });
+    });
+
     await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {
       const config = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/hunter-discovery-terms.json"), "utf8")) as { source: string; buyer_note: string; terms: string[] };
       assert.equal(config.source, "docs/nicho-abuelos-pain-points.md");

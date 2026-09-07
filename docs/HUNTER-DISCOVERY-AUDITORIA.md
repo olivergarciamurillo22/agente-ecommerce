@@ -5,8 +5,9 @@ módulo existente (`src/lib/hunter/**` y sus scripts), no solo lo nuevo. Lo que
 sigue son defectos **reproducidos**, cada uno con su fichero, su escenario de
 fallo y su estado.
 
-Los ocho primeros están **arreglados y con test**. Los cuatro últimos son
-**decisiones o límites** que quedan anotados, no arreglados.
+Los **nueve primeros están arreglados y con test**. Los **tres últimos** son
+decisiones que Pedro tiene que tomar: no se han resuelto a propósito, porque no
+son criterio técnico.
 
 ---
 
@@ -78,17 +79,24 @@ anunciantes. Medido: 1.000 anuncios de un mismo `page_id` ≈ 6,5 s; 3.000 ≈ 6
 de CPU síncrona, con SQLite síncrono al lado. Ahora se tokeniza una vez por
 anuncio y se compara solo dentro del mismo anunciante.
 
+### 9 · El discovery salía a Internet sin ningún interruptor de parada
+**Gravedad: alta. Arreglado el 07-09 (aprobado por Pedro).** `safety.ts` solo
+gobernaba WhatsApp y las escrituras en Shopify: `EMERGENCY_STOP` paraba el bot
+pero el Cazador seguía llamando a Meta, con su cuota y su token.
+
+Ahora hay `canRunDiscovery()` en `safety.ts`, junto a los demás gates, y se
+comprueba en cuatro sitios: la búsqueda por palabra, la corrida de discovery,
+el sondeo de campos y **cada petición suelta** del cliente, para que ningún
+camino nuevo lo esquive. Con la parada activa no se ejecuta, no se reintenta y
+no se encola: lanza `DiscoveryHaltedError` con el motivo y cómo levantarla.
+A diferencia de WhatsApp, **no** exige `APP_MODE=production` ni allowlist:
+investigar competencia debe funcionar en local. Ojo con la semántica heredada
+del repo: la variable sin poner cuenta como PARADA (solo `EMERGENCY_STOP=0`
+abre el paso).
+
 ---
 
 ## Anotados, no arreglados (son decisiones)
-
-### 9 · El discovery sale a Internet sin ningún gate
-`src/lib/safety.ts` solo gobierna WhatsApp y las escrituras en Shopify. Una
-búsqueda no pasa por `EMERGENCY_STOP` ni por modo seguro: un botón pulsable en
-bucle multiplicaría las llamadas contra un token compartido. **Mitigado en
-parte** por el presupuesto de la corrida, pero no hay interruptor de
-emergencia. Decisión pendiente: añadir la búsqueda a los gates o darle su
-propia llave, como se hizo con las llamadas de teléfono.
 
 ### 10 · `META_AD_LIBRARY_ACCESS_TOKEN` no está en el catálogo de variables
 `env:doctor` y `readiness` no saben que el discovery la necesita. Se puede
@@ -103,6 +111,81 @@ anterior como razón legible, al estilo de las razones del scoring.
 `ad_active_status=ACTIVE` está fijo y la antigüedad se calcula sobre los
 anuncios activos. Un anunciante que pausa y relanza aparece más «joven» de lo
 que es. Es un límite de la señal, no un bug: hay que decirlo al enseñarla.
+
+---
+
+## Las tres decisiones que quedan para Pedro
+
+Ninguna es un bug ni criterio técnico mío: las tres cambian **qué promete el
+producto** o **qué se considera parte de producción**, y eso no lo decide quien
+escribe el código. Están sin resolver a propósito.
+
+### Decisión 1 · ¿El Cazador es parte de producción o una herramienta aparte?
+
+**Qué es.** `META_AD_LIBRARY_ACCESS_TOKEN` no está declarada en
+`src/lib/config/env-schema.ts`, que es la fuente única de verdad sobre
+variables. Consecuencia: `npm run env:doctor`, `npm run readiness` y
+`npm run deploy:precheck` **no saben** que el discovery la necesita. Para esos
+tres comandos, el Cazador no existe.
+
+**Por qué lo decides tú.** Declararla obliga a elegir su `requiredFor`, y eso
+es una declaración de intenciones, no un detalle:
+
+| Opción | Qué significa | Efecto |
+|---|---|---|
+| No declararla (hoy) | el Cazador es una herramienta de investigación, fuera del sistema de producción | el despliegue nunca se bloquea por el Cazador; tampoco avisa de que le falta el token |
+| Declararla sin `requiredFor` | existe y está documentada, pero es opcional | `env:doctor` la lista y dice si falta; ningún veredicto cambia |
+| Declararla como requerida en `nas-production` | el Cazador es parte del producto desplegado | **un despliegue con el token caducado saldría BLOQUEADO** en `deploy:precheck` |
+
+**Qué pasa si se deja como está.** El token puede caducar (como ya pasó el
+02-09) y nadie se entera hasta que alguien lanza una búsqueda y no encuentra
+nada. La comprobación pre-despliegue dará verde con el Cazador roto. Mi
+recomendación, si sirve: la opción intermedia, declararla sin `requiredFor`.
+Pero elegir entre las tres es tuyo.
+
+### Decisión 2 · ¿El momentum se enseña como etiqueta o como cuenta?
+
+**Qué es.** Hoy el momentum de un competidor se guarda como una palabra:
+`fuerte`, `debil`, `sin_historico` o `sin_datos`. La regla que hay detrás
+(cinco anuncios activos o más, y al menos dos más que la última vez) está en el
+código, pero **no viaja con el dato**. En pantalla se lee «fuerte» y hay que
+creérselo.
+
+**Por qué lo decides tú.** No es cómo se calcula, es **qué se le enseña a
+quien mira**. Convertirlo en una razón legible («12 anuncios activos, cuatro
+más que hace tres días») significa exponer también la antigüedad del snapshot
+anterior, y ahí aparece la parte incómoda: si la comparación es contra una
+corrida de hace dos meses, «fuerte» dice muy poco. Enseñar la traza es
+enseñar cuándo la señal es floja. Es la misma decisión que ya tomamos en el
+scoring del Hunter, donde cada punto lleva su razón, pero aquí no la he tomado
+por ti.
+
+**Qué pasa si se deja como está.** El buscador enseña una etiqueta que parece
+un veredicto y es una comparación con una fecha que no se ve. Riesgo real:
+tomar una decisión de producto sobre un «fuerte» calculado contra un dato
+viejo. No es incorrecto, es opaco.
+
+### Decisión 3 · ¿Qué es «lleva X días activo» cuando el anunciante pausa y relanza?
+
+**Qué es.** Las consultas piden `ad_active_status=ACTIVE`, fijo, y la
+antigüedad se calcula sobre la fecha de inicio del anuncio activo más antiguo.
+Un competidor que pausa una campaña y la relanza aparece **más joven de lo que
+es**: su anuncio «nuevo» empezó ayer, aunque lleve meses vendiendo ese
+producto.
+
+**Por qué lo decides tú.** Arreglarlo no es un cambio de código pequeño ni
+gratis: exige consultar también los anuncios inactivos (`ALL` en vez de
+`ACTIVE`), lo que **multiplica los resultados y el consumo de cuota** dentro de
+un presupuesto de quince minutos, y obliga a decidir qué se cuenta: ¿la fecha
+del primer anuncio que le vimos alguna vez, aunque estuviera parado tres meses?
+Eso ya no es «lleva X días activo», es otra métrica distinta. La pregunta de
+negocio, que no es mía, es cuál de las dos te sirve para decidir si testear un
+producto.
+
+**Qué pasa si se deja como está.** La señal subestima a los competidores que
+rotan creativos, que suelen ser precisamente los más profesionales. Hoy está
+mitigado diciéndolo: la señal lleva escrito su límite y se marca como señal, no
+como dato. Pero un número que subestima sigue siendo un número que subestima.
 
 ---
 

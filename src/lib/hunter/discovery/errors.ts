@@ -20,7 +20,7 @@
 //   10 / 200-299 · permiso que la app no tiene → NO se reintenta
 // ============================================================
 
-export type AdLibraryErrorKind = "rate_limit" | "token_invalido" | "permiso" | "transitorio" | "fatal";
+export type AdLibraryErrorKind = "rate_limit" | "token_invalido" | "permiso" | "transitorio" | "fatal" | "parada_emergencia";
 
 const RATE_LIMIT_CODES = new Set([4, 17, 32, 613, 80004]);
 const TOKEN_CODES = new Set([102, 190, 463, 467]);
@@ -68,16 +68,34 @@ export class AdLibraryError extends Error {
   readonly status: number;
   readonly code: number | null;
 
-  constructor(status: number, code: number | null, message: string) {
+  constructor(status: number, code: number | null, message: string, kindOverride?: AdLibraryErrorKind) {
     // El texto conserva la forma anterior para no romper diagnósticos ya escritos.
     super(message);
     this.name = "AdLibraryError";
     this.status = status;
     this.code = code;
+    if (kindOverride) {
+      this.kind = kindOverride;
+      // Una parada de emergencia no se reintenta NUNCA y corta la corrida.
+      this.retryable = false;
+      this.abortRun = true;
+      return;
+    }
     const clase = classifyAdLibraryError(status, code, message);
     this.kind = clase.kind;
     this.retryable = clase.retryable;
     this.abortRun = clase.abortRun;
+  }
+}
+
+export const DISCOVERY_HALTED_MESSAGE =
+  "EMERGENCY_STOP activo: el Cazador no sale a Internet. Ninguna busqueda se ejecuta, se reintenta ni se encola hasta que se desactive (EMERGENCY_STOP=0).";
+
+/** La parada de emergencia, como error explicito y reconocible. */
+export class DiscoveryHaltedError extends AdLibraryError {
+  constructor(message: string = DISCOVERY_HALTED_MESSAGE) {
+    super(0, null, message, "parada_emergencia");
+    this.name = "DiscoveryHaltedError";
   }
 }
 

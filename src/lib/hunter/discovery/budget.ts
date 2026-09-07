@@ -24,6 +24,7 @@ export type StopReason =
   | "rate_limit"
   | "token_invalido"
   | "permiso"
+  | "parada_emergencia"
   | "error";
 
 export interface DiscoveryBudgetOptions {

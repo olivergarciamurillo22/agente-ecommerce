@@ -1,6 +1,7 @@
 import { META_ADS_DEFAULT_API_VERSION } from "../../meta-ads/config";
 import { ADLIB_FIELDS, type AdLibraryAd, type AdLibraryPage } from "./types";
-import { AdLibraryError, asAdLibraryError, backoffMs } from "./errors";
+import { AdLibraryError, DiscoveryHaltedError, asAdLibraryError, backoffMs } from "./errors";
+import { canRunDiscovery } from "../../safety";
 import { DiscoveryBudget, mergeRateLimits, type StopReason } from "./budget";
 
 const TIMEOUT_MS = 20_000;
@@ -45,6 +46,8 @@ function parseUsage(headers: Headers): Record<string, unknown> | null {
 export class AdLibraryClient {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch, private readonly wait = sleep) {}
   async page(params: { term: string; country: string; since: string; until: string; after?: string; fields?: readonly string[] }): Promise<AdLibraryPage> {
+    // GATE (safety.ts): aqui abajo, para que ningun camino nuevo lo esquive.
+    if (!canRunDiscovery()) throw new DiscoveryHaltedError();
     const version = process.env.META_AD_LIBRARY_API_VERSION || process.env.META_GRAPH_API_VERSION || process.env.META_ADS_API_VERSION || META_ADS_DEFAULT_API_VERSION;
     const url = new URL(`https://graph.facebook.com/${version}/ads_archive`);
     url.searchParams.set("search_terms", params.term); url.searchParams.set("ad_reached_countries", JSON.stringify([params.country]));
@@ -137,6 +140,9 @@ export async function probeAdLibraryFields(
   wait: (ms: number) => Promise<void> = sleep,
   budget?: DiscoveryBudget
 ): Promise<FieldProbe[]> {
+  // Con la parada activa no se sondea nada: falla explicito, no 14 errores
+  // indistinguibles de un token caducado.
+  if (!canRunDiscovery()) throw new DiscoveryHaltedError();
   const probes: FieldProbe[] = [];
   for (const field of ADLIB_FIELDS) {
     // El sondeo son 14 peticiones reales: cuentan contra el presupuesto igual

@@ -1,7 +1,8 @@
 import { AdLibraryClient, probeAdLibraryFields } from "./client";
 import { DiscoveryBudget, mergeRateLimits, type StopReason } from "./budget";
-import { asAdLibraryError } from "./errors";
+import { DiscoveryHaltedError, asAdLibraryError } from "./errors";
 import { groupAds } from "./grouping";
+import { canRunDiscovery } from "../../safety";
 import { DiscoveryRepository } from "./repository";
 import type { DiscoverySnapshot } from "./types";
 
@@ -56,6 +57,9 @@ export async function runDiscovery(input: {
   /** Se llama tras cada término: sirve para enseñar progreso en vivo. */
   onProgress?: (p: { term: string; index: number; total: number; ads: number; requests: number }) => void;
 }): Promise<DiscoveryRunResult> {
+  // GATE: se comprueba ANTES de tocar nada. Falla con su motivo; no devuelve
+  // una corrida vacia que parezca "no hay competencia".
+  if (!canRunDiscovery()) throw new DiscoveryHaltedError();
   const now = input.now ?? Math.floor(Date.now() / 1000);
   const until = new Date(now * 1000).toISOString().slice(0, 10);
   const since = new Date((now - input.days * 86400) * 1000).toISOString().slice(0, 10);
@@ -110,7 +114,11 @@ export async function runDiscovery(input: {
     } catch (err) {
       // Token inválido o permiso: no hay nada que salvar consultando más.
       const error = asAdLibraryError(err);
-      stopReason = error.kind === "token_invalido" ? "token_invalido" : error.kind === "permiso" ? "permiso" : "error";
+      stopReason =
+        error.kind === "token_invalido" ? "token_invalido"
+        : error.kind === "permiso" ? "permiso"
+        : error.kind === "parada_emergencia" ? "parada_emergencia"
+        : "error";
       break;
     }
   }

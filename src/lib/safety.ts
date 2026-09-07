@@ -32,6 +32,21 @@ export function emergencyStop(): boolean {
   return process.env.EMERGENCY_STOP !== "0";
 }
 
+/**
+ * GATE DE DESCUBRIMIENTO (07-09-2026): las búsquedas en la Ad Library de Meta
+ * son llamadas salientes reales, con cuota y con un token que se puede quemar.
+ * Hasta hoy no respetaban ningún interruptor: EMERGENCY_STOP paraba WhatsApp y
+ * Shopify, pero el Cazador seguía saliendo a Internet.
+ *
+ * A diferencia de WhatsApp, aquí NO se exige APP_MODE=production ni allowlist:
+ * buscar competencia es una herramienta de investigación que debe funcionar en
+ * local. El único freno es la parada de emergencia, y es explícita: quien la
+ * encuentre cerrada recibe un error con su motivo, nunca un resultado vacío.
+ */
+export function canRunDiscovery(): boolean {
+  return !emergencyStop();
+}
+
 /** TEST_MODE: por defecto ACTIVADO. Solo "0" explícito lo desactiva. */
 export function testMode(): boolean {
   return process.env.TEST_MODE !== "0";

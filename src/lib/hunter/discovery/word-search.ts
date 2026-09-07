@@ -12,6 +12,8 @@
 // ============================================================
 
 import { AdLibraryClient } from "./client";
+import { canRunDiscovery } from "../../safety";
+import { DiscoveryHaltedError } from "./errors";
 import { DiscoveryBudget, type StopReason } from "./budget";
 import { expandSearchTerm, type ExpandedTerm } from "./expansion";
 import { DiscoveryRepository } from "./repository";
@@ -73,6 +75,8 @@ export function countriesSeenFor(snapshot: DiscoverySnapshot, repository: Discov
 }
 
 export async function runWordSearch(input: WordSearchInput): Promise<WordSearchResult> {
+  // GATE: lo primero de todo, antes incluso de expandir la palabra.
+  if (!canRunDiscovery()) throw new DiscoveryHaltedError();
   const started = Date.now();
   const country = input.country ?? "ES";
   const days = input.days ?? 30;
