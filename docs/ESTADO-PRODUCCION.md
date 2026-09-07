@@ -13,7 +13,7 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 | | |
 |---|---|
 | Rama desplegada | `feat/casamable-control-center-v2` |
-| Commit desplegado | `67f05c7` (según Pedro, 02-09) — pendiente de confirmar con `PRODUCTION_COMMIT=` |
+| Commit desplegado | **INCÓGNITA (07-09).** Los docs dicen `67f05c7` (02-09) y el runbook del 05-09 preparaba `fdad99e`; ninguno está confirmado. Cómo confirmarlo: `docs/deploy/NAS-PRODUCTION.md` § PRODUCTION_COMMIT. Desde el próximo despliegue, `/api/health/live` devuelve `build` |
 | Esquema SQLite | **15** |
 | Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
 | NAS | UGREEN DXP2800, `192.168.2.109` |

@@ -36,10 +36,17 @@ FROM node:22-bookworm-slim AS runner
 
 WORKDIR /app
 
+# SHA del commit con el que se construye la imagen (07-09-2026). Lo pasa el
+# script de despliegue: `--build-arg GIT_SHA=$(git rev-parse HEAD)`. Sin él
+# la imagen se identifica como "sin_confirmar" y /api/health lo enseña tal
+# cual — mejor una incógnita explícita que un commit supuesto.
+ARG GIT_SHA=sin_confirmar
 ENV NODE_ENV=production \
     PORT=3000 \
     TZ=Europe/Madrid \
-    NEXT_TELEMETRY_DISABLED=1
+    NEXT_TELEMETRY_DISABLED=1 \
+    CASAMABLE_BUILD_SHA=${GIT_SHA}
+LABEL org.opencontainers.image.revision="${GIT_SHA}"
 
 # tzdata: sin ella TZ se ignora y las fechas locales de SQLite
 # (contadores "hoy" del panel) y la ventana horaria se desviarían.

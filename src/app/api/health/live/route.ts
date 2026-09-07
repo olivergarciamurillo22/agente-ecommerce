@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getConnectionState } from "@/lib/db";
 import { whatsappProviderName } from "@/lib/whatsapp/provider";
 import { getShopifyHealth, getWhatsAppHealth } from "@/lib/system/health-integrations";
+import { buildInfo } from "@/lib/system/build-info";
+import { SCHEMA_VERSION } from "@/lib/db";
 
 // ============================================================
 // LIVENESS para el healthcheck de Docker.
@@ -50,6 +52,9 @@ export async function GET(): Promise<NextResponse> {
         whatsapp: wa.connectionStatus, // "configured" | "not_configured" — real, no la sesión de Baileys
         phone: null, // cloud_api no tiene una sesión con número propio que enseñar aquí
         shopifyWebhookBadSignature24h: getShopifyHealth().webhookBadSignature24h,
+        // Identidad del build (07-09): SHA incrustado en la imagen o "sin_confirmar".
+        build: buildInfo().sha,
+        schemaVersion: SCHEMA_VERSION,
         time: new Date().toISOString(),
       });
     }
@@ -63,6 +68,9 @@ export async function GET(): Promise<NextResponse> {
       // (lo consulta el healthcheck de Docker) y publicaba el número entero.
       phone: conn.phone ? `***${String(conn.phone).slice(-4)}` : null,
       shopifyWebhookBadSignature24h: getShopifyHealth().webhookBadSignature24h,
+      // Identidad del build (07-09): SHA incrustado en la imagen o "sin_confirmar".
+      build: buildInfo().sha,
+      schemaVersion: SCHEMA_VERSION,
       time: new Date().toISOString(),
     });
   } catch (err) {

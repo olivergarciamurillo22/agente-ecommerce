@@ -8529,6 +8529,28 @@ async function main(): Promise<void> {
     assert.ok(bodyLive.shopifyWebhookBadSignature24h >= 1);
   });
 
+  await test("PRODUCTION_COMMIT · /api/health y /api/health/live exponen el SHA del build; sin build arg dicen 'sin_confirmar', nunca un commit inventado", async () => {
+    const { buildInfo, BUILD_SHA_UNKNOWN } = await import("../src/lib/system/build-info");
+    assert.deepEqual(buildInfo({}), { sha: BUILD_SHA_UNKNOWN, confirmed: false });
+    assert.deepEqual(buildInfo({ CASAMABLE_BUILD_SHA: "8A864BE" }), { sha: "8a864be", confirmed: true });
+    assert.deepEqual(buildInfo({ CASAMABLE_BUILD_SHA: "no-es-un-sha" }), { sha: BUILD_SHA_UNKNOWN, confirmed: false }, "un valor raro no se enseña como commit");
+    await withEnv({ CASAMABLE_BUILD_SHA: undefined }, async () => {
+      const live = await import("../src/app/api/health/live/route");
+      const body = (await (await live.GET()).json()) as { build: string; schemaVersion: number };
+      assert.equal(body.build, BUILD_SHA_UNKNOWN);
+      assert.equal(body.schemaVersion, db.SCHEMA_VERSION);
+    });
+    await withEnv({ CASAMABLE_BUILD_SHA: "c0762d7" }, async () => {
+      const pub = await import("../src/app/api/health/route");
+      const body = (await (await pub.GET()).json()) as { build: string };
+      assert.equal(body.build, "c0762d7");
+    });
+    // La imagen y el compose llevan el mecanismo, y el script del NAS lo comprueba.
+    assert.match(fs.readFileSync(path.join(process.cwd(), "Dockerfile"), "utf8"), /ARG GIT_SHA=sin_confirmar[\s\S]*CASAMABLE_BUILD_SHA=\$\{GIT_SHA\}/);
+    assert.match(fs.readFileSync(path.join(process.cwd(), "docker-compose.yml"), "utf8"), /GIT_SHA: \$\{GIT_SHA:-sin_confirmar\}/);
+    assert.match(fs.readFileSync(path.join(process.cwd(), "scripts/nas-verify-v43.sh"), "utf8"), /"\$live_build" != "\$GIT_SHA"/);
+  });
+
   await test("BUG salud: con cloud_api activo, /api/health/live informa de la Cloud API, no de la sesión de Baileys", async () => {
     const mod = await import("../src/app/api/health/live/route");
     // Baileys pudo dejar connection_state en "connected" de una sesión vieja

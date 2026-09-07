@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { getConnectionState } from "@/lib/db";
 import { whatsappProviderName } from "@/lib/whatsapp/provider";
 import { getShopifyHealth, getWhatsAppHealth } from "@/lib/system/health-integrations";
+import { buildInfo } from "@/lib/system/build-info";
+import { SCHEMA_VERSION } from "@/lib/db";
 
 // Endpoint de salud para un monitor externo (UptimeRobot, BetterStack…).
 // Cubre el caso que el watchdog por WhatsApp NO puede cubrir: que el contenedor
@@ -32,6 +34,9 @@ export async function GET(): Promise<NextResponse> {
           // Mismo aviso informativo que en la rama Baileys (BUG2): un HMAC
           // rechazado no puede volver a pasar días invisible.
           shopifyWebhookBadSignature24h: getShopifyHealth().webhookBadSignature24h,
+          // Identidad del build (07-09): SHA incrustado en la imagen o "sin_confirmar".
+          build: buildInfo().sha,
+          schemaVersion: SCHEMA_VERSION,
           time: new Date().toISOString(),
         },
         { status: connected ? 200 : 503 }
@@ -55,6 +60,9 @@ export async function GET(): Promise<NextResponse> {
         // de HMAC solo dejaba un warning en integration_events que nadie
         // miraba, y así pasaron días perdiendo cancelaciones sin enterarse.
         shopifyWebhookBadSignature24h: getShopifyHealth().webhookBadSignature24h,
+        // Identidad del build (07-09): SHA incrustado en la imagen o "sin_confirmar".
+        build: buildInfo().sha,
+        schemaVersion: SCHEMA_VERSION,
         time: new Date().toISOString(),
       },
       { status: connected ? 200 : 503 }

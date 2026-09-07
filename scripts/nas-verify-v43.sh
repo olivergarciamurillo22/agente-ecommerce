@@ -46,6 +46,10 @@ test -s "$rescue_dir/data/messages.db"
 test -n "$(find "$rescue_dir/auth" -mindepth 1 -print -quit)"
 pass "backup DB íntegro y auth en $rescue_dir"
 
+# Identidad del build (07-09): el SHA del checkout viaja dentro de la imagen y
+# lo devuelve /api/health/live como `build`. Así nunca vuelve a ser una incógnita.
+GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo sin_confirmar)"; export GIT_SHA
+printf 'INFO · construyendo commit %s\n' "$GIT_SHA"
 docker compose -p "$PROJECT" build "$SERVICE"
 pass "imagen construida"
 docker compose -p "$PROJECT" up -d --no-build --force-recreate "$SERVICE"
@@ -56,6 +60,14 @@ pass "doctor:v43"
 
 expect_http 307 GET "$BASE_URL/"
 expect_http 200 GET "$BASE_URL/api/health"
+# El contenedor en marcha tiene que ser EXACTAMENTE el commit que acabamos de
+# construir: /api/health/live devuelve `build` con el SHA incrustado.
+live_build="$(curl -sS "$BASE_URL/api/health/live" | sed -n 's/.*"build":"\([^"]*\)".*/\1/p')"
+if [ "$live_build" != "$GIT_SHA" ]; then
+  printf 'FAIL · el contenedor dice build=%s y el checkout es %s\n' "${live_build:-vacío}" "$GIT_SHA"
+  exit 1
+fi
+pass "el contenedor en marcha es exactamente el commit $GIT_SHA (PRODUCTION_COMMIT)"
 expect_http 200 GET "$BASE_URL/login"
 expect_http 401 POST "$BASE_URL/api/webhooks/retell/call-events"
 

@@ -11,8 +11,31 @@ código). Si un comando de aquí no existe, es un fallo a corregir.
 | Proyecto de Compose | **`repo-v3c`** (declarado en `docker-compose.yml` con `name:`) |
 | Contenedor | `casamable-agent` |
 | Carpeta persistente | `/volume1/docker/CasamableAgent` (`auth/`, `data/`, `backups/`) |
-| Esquema esperado | **18** (desde `7fd8014`, 05-09) |
+| Esquema esperado | **21** con `release/casamable-v4.3` (era 18 con `7fd8014`, 05-09) |
 | Proveedor de WhatsApp | `cloud_api` |
+
+### ¿Qué commit corre ahora mismo? (`PRODUCTION_COMMIT`)
+
+Desde el repo **no se puede saber**: ni la imagen ni el health lo exponían
+(07-09-2026). Hay dos maneras, y solo la primera vale hoy:
+
+1. **Hoy, en el NAS (Pedro):** en la carpeta del checkout con el que se
+   construyó la imagen, `git rev-parse HEAD`, y contrastarlo con la fecha de
+   creación de la imagen: `docker inspect casamable-agent --format
+   '{{.Config.Image}} {{.Created}}'` frente a `git log -1 --format=%ci`. Si el
+   checkout se movió después de construir, el commit real es el del reflog
+   (`git reflog`) anterior a esa fecha. Pegar el resultado en
+   `PRODUCTION_COMMIT=` de `docs/REAL-PILOT-02-09.md` y en
+   `ESTADO-PRODUCCION.md`.
+2. **A partir del próximo despliegue, automático:** `scripts/nas-verify-v43.sh`
+   exporta `GIT_SHA=$(git rev-parse HEAD)` antes de `docker compose build`, el
+   `Dockerfile` lo incrusta (`CASAMABLE_BUILD_SHA`, etiqueta
+   `org.opencontainers.image.revision`) y `/api/health/live` lo devuelve como
+   `build` junto a `schemaVersion`. El script FALLA si el contenedor en marcha
+   no coincide con el checkout. Comprobación manual desde cualquier sitio:
+   `curl -s https://agente.casamable.es/api/health/live` → `"build":"<sha>"`.
+   Si dice `"sin_confirmar"`, la imagen se construyó sin el build arg: la
+   incógnita es explícita, nunca un commit supuesto.
 
 **Por qué importa el proyecto de Compose.** Por defecto Compose nombra el
 proyecto según la carpeta desde la que se ejecuta. Producción nació bajo
