@@ -1,5 +1,6 @@
-import { ADLIB_FIELDS } from "./types";
 import { AdLibraryClient, probeAdLibraryFields } from "./client";
+import { DiscoveryBudget, mergeRateLimits, type StopReason } from "./budget";
+import { asAdLibraryError } from "./errors";
 import { groupAds } from "./grouping";
 import { DiscoveryRepository } from "./repository";
 import type { DiscoverySnapshot } from "./types";
@@ -12,17 +13,132 @@ export function predictiveInputFor(snapshot: DiscoverySnapshot): { productQuery:
   return text ? { productQuery: text.slice(0, 200), sourceAdUrl: ad.snapshotUrl } : null;
 }
 
-export async function runDiscovery(input: { terms: string[]; country: string; days: number; token: string; now?: number; client?: AdLibraryClient; repository?: DiscoveryRepository }) {
-  const now = input.now ?? Math.floor(Date.now() / 1000); const until = new Date(now * 1000).toISOString().slice(0, 10);
-  const since = new Date((now - input.days * 86400) * 1000).toISOString().slice(0, 10); const client = input.client ?? new AdLibraryClient(input.token);
-  const fieldProbes = await probeAdLibraryFields(client, { term: input.terms[0], country: input.country, since, until });
+export interface DiscoveryRunResult {
+  snapshots: DiscoverySnapshot[];
+  rawCount: number;
+  groupCount: number;
+  passedNoiseCount: number;
+  rateLimit: Record<string, unknown> | null;
+  fieldProbes: Awaited<ReturnType<typeof probeAdLibraryFields>>;
+  /** Por qué terminó la corrida. "completado" = se agotaron los términos. */
+  stopReason: StopReason;
+  /** Términos que llegaron a consultarse (puede ser menos que los pedidos). */
+  termsQueried: string[];
+  requests: number;
+  pages: number;
+}
+
+/**
+ * Una corrida de descubrimiento. Cambios del 07-09
+ * (docs/HUNTER-DISCOVERY-AUDITORIA.md):
+ *
+ *  - PERSISTE LO PARCIAL. Antes, cualquier error en el término 17 de 26 tiraba
+ *    la corrida entera sin guardar una fila y sin dejar rastro, después de
+ *    haber gastado la cuota. Ahora el bucle captura, anota el motivo de parada
+ *    y guarda lo que haya.
+ *  - PARA EN SECO CON UN TOKEN INVÁLIDO. Antes el sondeo se tragaba los 14
+ *    errores, se quedaba con la lista de campos vacía y seguía consultando
+ *    hasta morir. Un token caducado ahora se detecta en el sondeo.
+ *  - AUDITA LO QUE DE VERDAD PIDIÓ. Antes guardaba la constante entera de
+ *    campos, no los que sobrevivieron al sondeo: el registro mentía.
+ *  - PRESUPUESTO. Fecha límite y tope de peticiones compartidos por toda la
+ *    corrida, más la cuota que Meta declara en sus cabeceras.
+ */
+export async function runDiscovery(input: {
+  terms: string[];
+  country: string;
+  days: number;
+  token: string;
+  now?: number;
+  client?: AdLibraryClient;
+  repository?: DiscoveryRepository;
+  budget?: DiscoveryBudget;
+  /** Se llama tras cada término: sirve para enseñar progreso en vivo. */
+  onProgress?: (p: { term: string; index: number; total: number; ads: number; requests: number }) => void;
+}): Promise<DiscoveryRunResult> {
+  const now = input.now ?? Math.floor(Date.now() / 1000);
+  const until = new Date(now * 1000).toISOString().slice(0, 10);
+  const since = new Date((now - input.days * 86400) * 1000).toISOString().slice(0, 10);
+  const client = input.client ?? new AdLibraryClient(input.token);
+  const budget = input.budget ?? new DiscoveryBudget();
+
+  const seed = input.terms[0];
+  const fieldProbes = await probeAdLibraryFields(client, { term: seed, country: input.country, since, until });
   const fields = fieldProbes.filter((field) => field.status !== "error").map((field) => field.field);
-  if (!fields.includes("id")) fields.unshift("id"); if (!fields.includes("page_id")) fields.unshift("page_id");
-  const all = []; let rateLimit: Record<string, unknown> | null = null;
-  for (const term of input.terms) {
-    const result = await client.search({ term, country: input.country, since, until, fields }); all.push(...result.ads); rateLimit = result.rateLimit ?? rateLimit;
+  if (!fields.includes("id")) fields.unshift("id");
+  if (!fields.includes("page_id")) fields.unshift("page_id");
+
+  // Si TODOS los campos fallaron, no es que Meta rechace campos opcionales: es
+  // que la consulta no funciona (token caducado o sin permiso sobre
+  // /ads_archive). Seguir solo sirve para quemar la cuota.
+  const errores = fieldProbes.filter((f) => f.status === "error");
+  if (errores.length === fieldProbes.length && fieldProbes.length > 0) {
+    const motivo = asAdLibraryError(new Error(errores[0].error ?? "error")).abortRun ? "token_invalido" : "error";
+    const guardado = (input.repository ?? new DiscoveryRepository()).saveRun({
+      terms: [], country: input.country, days: input.days, fields, rawCount: 0, groups: [], rateLimit: null, now,
+      stopReason: motivo, requests: budget.requests,
+    });
+    return {
+      snapshots: guardado, rawCount: 0, groupCount: 0, passedNoiseCount: 0, rateLimit: null, fieldProbes,
+      stopReason: motivo as StopReason, termsQueried: [], requests: budget.requests, pages: 0,
+    };
   }
-  const unique = [...new Map(all.map((ad) => [ad.id, ad])).values()]; const groups = groupAds(unique, now);
-  const snapshots = (input.repository ?? new DiscoveryRepository()).saveRun({ terms: input.terms, country: input.country, days: input.days, fields: ADLIB_FIELDS, rawCount: unique.length, groups, rateLimit, now });
-  return { snapshots, rawCount: unique.length, groupCount: groups.length, passedNoiseCount: groups.filter((g) => !g.noise).length, rateLimit, fieldProbes };
+
+  const all = [];
+  const termsQueried: string[] = [];
+  let rateLimit: Record<string, unknown> | null = null;
+  let stopReason: StopReason = "completado";
+  let pages = 0;
+
+  for (const [index, term] of input.terms.entries()) {
+    const freno = budget.check();
+    if (freno) {
+      stopReason = freno;
+      break;
+    }
+    try {
+      const result = await client.search({ term, country: input.country, since, until, fields, budget });
+      all.push(...result.ads);
+      termsQueried.push(term);
+      pages += result.pages;
+      rateLimit = mergeRateLimits(rateLimit, result.rateLimit);
+      input.onProgress?.({ term, index, total: input.terms.length, ads: all.length, requests: budget.requests });
+      if (result.stopReason !== "completado") {
+        stopReason = result.stopReason;
+        break;
+      }
+    } catch (err) {
+      // Token inválido o permiso: no hay nada que salvar consultando más.
+      const error = asAdLibraryError(err);
+      stopReason = error.kind === "token_invalido" ? "token_invalido" : error.kind === "permiso" ? "permiso" : "error";
+      break;
+    }
+  }
+
+  const unique = [...new Map(all.map((ad) => [ad.id, ad])).values()];
+  const groups = groupAds(unique, now, input.country);
+  const snapshots = (input.repository ?? new DiscoveryRepository()).saveRun({
+    terms: termsQueried.length ? termsQueried : input.terms,
+    country: input.country,
+    days: input.days,
+    fields, // los que de verdad se pidieron, no la constante entera
+    rawCount: unique.length,
+    groups,
+    rateLimit,
+    now,
+    stopReason,
+    requests: budget.requests,
+  });
+  return {
+    snapshots,
+    rawCount: unique.length,
+    groupCount: groups.length,
+    passedNoiseCount: groups.filter((g) => !g.noise).length,
+    rateLimit,
+    fieldProbes,
+    stopReason,
+    termsQueried,
+    requests: budget.requests,
+    pages,
+  };
 }

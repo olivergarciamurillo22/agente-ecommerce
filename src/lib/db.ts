@@ -1748,6 +1748,7 @@ function build() {
   migrateAiCancellations(db);
   migrateDispatchNotice(db);
   migrateAiCallLog(db);
+  migrateDiscoveryRunState(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1982,7 +1983,26 @@ export function migrateAiCallLog(db: Database.Database): void {
   `);
 }
 
-export const SCHEMA_VERSION = 27;
+/**
+ * Migracion 28 (07-09-2026): estado de la corrida de discovery —
+ * docs/HUNTER-DISCOVERY-AUDITORIA.md. Sin esto, una corrida que se corta por
+ * cuota o por token caducado es indistinguible de una que termino bien.
+ * ADITIVA (dos columnas nullable sobre adlib_queries).
+ */
+export function migrateDiscoveryRunState(db: Database.Database): void {
+  const cols = new Set((db.prepare("PRAGMA table_info(adlib_queries)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (cols.size === 0) return; // sin la tabla (fixtures sinteticos): nada que migrar
+  for (const [nombre, tipo] of [["stop_reason", "TEXT"], ["requests_used", "INTEGER"]] as const) {
+    if (cols.has(nombre)) continue;
+    try {
+      db.exec(`ALTER TABLE adlib_queries ADD COLUMN ${nombre} ${tipo}`);
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
+}
+
+export const SCHEMA_VERSION = 28;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

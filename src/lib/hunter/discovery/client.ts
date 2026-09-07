@@ -1,9 +1,13 @@
 import { META_ADS_DEFAULT_API_VERSION } from "../../meta-ads/config";
 import { ADLIB_FIELDS, type AdLibraryAd, type AdLibraryPage } from "./types";
+import { AdLibraryError, asAdLibraryError, backoffMs } from "./errors";
+import { DiscoveryBudget, mergeRateLimits, type StopReason } from "./budget";
 
 const TIMEOUT_MS = 20_000;
 const PAGE_DELAY_MS = 1_000;
 const MAX_PAGES = 20;
+/** Reintentos ante rate limit o fallo temporal. El camino SIN error no cambia. */
+const MAX_RETRIES = 3;
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const strings = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").map((x) => x.slice(0, 2000)) : [];
 const bound = (v: unknown): number | null => { const n = Number(v); return Number.isFinite(n) ? n : null; };
@@ -50,17 +54,77 @@ export class AdLibraryClient {
     if (params.after) url.searchParams.set("after", params.after);
     const response = await this.fetcher(url, { headers: { authorization: `Bearer ${this.token}`, accept: "application/json" }, signal: AbortSignal.timeout(TIMEOUT_MS) });
     const payload = await response.json() as { data?: unknown[]; paging?: { cursors?: { after?: string }; next?: string }; error?: { message?: string; code?: number } };
-    if (!response.ok) throw new Error(`Meta ads_archive HTTP ${response.status}${payload.error?.code ? ` code ${payload.error.code}` : ""}: ${(payload.error?.message ?? "error").slice(0, 250)}`);
+    if (!response.ok) {
+      // Mismo texto que antes (hay diagnósticos escritos que lo citan), pero
+      // ahora clasificado: quien lo recibe sabe si esperar, parar o rendirse.
+      throw new AdLibraryError(
+        response.status,
+        typeof payload.error?.code === "number" ? payload.error.code : null,
+        `Meta ads_archive HTTP ${response.status}${payload.error?.code ? ` code ${payload.error.code}` : ""}: ${(payload.error?.message ?? "error").slice(0, 250)}`
+      );
+    }
     return { ads: (payload.data ?? []).map(normalize).filter((x): x is AdLibraryAd => x !== null), after: payload.paging?.next && payload.paging.cursors?.after ? payload.paging.cursors.after : null, rateLimit: parseUsage(response.headers) };
   }
-  async search(params: { term: string; country: string; since: string; until: string; fields?: readonly string[] }): Promise<{ ads: AdLibraryAd[]; rateLimit: Record<string, unknown> | null }> {
-    const ads: AdLibraryAd[] = []; let after: string | undefined; let rateLimit: Record<string, unknown> | null = null;
-    for (let page = 0; page < MAX_PAGES; page++) {
-      if (page > 0) await this.wait(PAGE_DELAY_MS);
-      const result = await this.page({ ...params, after }); ads.push(...result.ads); rateLimit = result.rateLimit ?? rateLimit;
-      if (!result.after) break; after = result.after;
+  /**
+   * Una petición con reintentos ante rate limit o fallo temporal. Un token
+   * inválido o un permiso que falta NO se reintentan: se propagan para que la
+   * corrida pare de inmediato en vez de quemar la cuota.
+   */
+  private async pageWithRetry(params: Parameters<AdLibraryClient["page"]>[0], budget: DiscoveryBudget | null): Promise<AdLibraryPage> {
+    let ultimo: AdLibraryError | null = null;
+    for (let intento = 0; intento <= MAX_RETRIES; intento++) {
+      try {
+        budget?.spend();
+        return await this.page(params);
+      } catch (err) {
+        const error = asAdLibraryError(err);
+        ultimo = error;
+        if (!error.retryable || intento === MAX_RETRIES) throw error;
+        const espera = backoffMs(intento);
+        // No tiene sentido esperar más de lo que queda de presupuesto.
+        if (budget && budget.remainingMs() < espera) throw error;
+        await this.wait(espera);
+      }
     }
-    return { ads, rateLimit };
+    throw ultimo ?? new AdLibraryError(0, null, "sin respuesta de Meta");
+  }
+
+  /**
+   * Pagina un término hasta agotarlo, el tope de páginas o el presupuesto.
+   * NUNCA lanza por rate limit: devuelve lo obtenido con su `stopReason`, que
+   * es lo que permite persistir una corrida parcial en vez de perderla entera.
+   * Un token inválido sí se propaga (no hay nada que salvar reintentando).
+   */
+  async search(params: {
+    term: string; country: string; since: string; until: string; fields?: readonly string[];
+    budget?: DiscoveryBudget; maxPages?: number;
+  }): Promise<{ ads: AdLibraryAd[]; rateLimit: Record<string, unknown> | null; stopReason: StopReason; pages: number }> {
+    const ads: AdLibraryAd[] = []; let after: string | undefined; let rateLimit: Record<string, unknown> | null = null;
+    const budget = params.budget ?? null;
+    const maxPages = params.maxPages ?? MAX_PAGES;
+    let stopReason: StopReason = "completado";
+    let pages = 0;
+    for (let page = 0; page < maxPages; page++) {
+      const freno = budget?.check() ?? null;
+      if (freno) { stopReason = freno; break; }
+      if (page > 0) await this.wait(PAGE_DELAY_MS);
+      let result: AdLibraryPage;
+      try {
+        result = await this.pageWithRetry({ ...params, after }, budget);
+      } catch (err) {
+        const error = asAdLibraryError(err);
+        if (error.abortRun) throw error;
+        stopReason = error.kind === "rate_limit" ? "rate_limit" : "error";
+        break;
+      }
+      pages++;
+      ads.push(...result.ads);
+      rateLimit = mergeRateLimits(rateLimit, result.rateLimit);
+      budget?.observeRateLimit(result.rateLimit);
+      if (!result.after) break;
+      after = result.after;
+    }
+    return { ads, rateLimit, stopReason, pages };
   }
 }
 

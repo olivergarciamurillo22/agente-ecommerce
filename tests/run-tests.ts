@@ -14123,7 +14123,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 27;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27");
+      assert.match(db, /export const SCHEMA_VERSION = 28;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14640,7 +14640,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -14857,6 +14857,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 26");
     db.migrateAiCallLog(fixture);
     fixture.pragma("user_version = 27");
+    db.migrateDiscoveryRunState(fixture);
+    fixture.pragma("user_version = 28");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
@@ -15176,6 +15178,165 @@ async function main(): Promise<void> {
       const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
       const groups = groupAds([{ id: "noise1", pageId: "noise-page", pageName: "Academia", snapshotUrl: null, bodies: ["Curso y webinar de software"], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }]);
       assert.equal(groups[0].noise, true); assert.match(groups[0].noiseReason ?? "", /servicio, app o contenido/);
+    });
+
+    // ===== Auditoría del discovery (07-09-2026): los bugs, con su prueba =====
+    await test("Hunter Discovery · BUG: un 429 a mitad ya no tira la corrida entera — se reintenta con backoff y, si insiste, se guarda lo obtenido con el motivo de parada", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      const waits: number[] = [];
+      let llamadas = 0;
+      const fetcher = (async () => {
+        llamadas++;
+        if (llamadas === 1) {
+          return new Response(JSON.stringify({ data: [{ id: "ok1", page_id: "p1", ad_creative_bodies: ["Organizador de cocina para casa"] }], paging: { cursors: { after: "C2" }, next: "https://n" } }), { headers: { "content-type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ error: { message: "User request limit reached", code: 17 } }), { status: 400, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async (ms) => { waits.push(ms); });
+      const budget = new DiscoveryBudget({ maxRequests: 50 });
+      const r = await client.search({ term: "organizador", country: "ES", since: "2026-08-01", until: "2026-09-05", budget });
+      assert.equal(r.ads.length, 1, "lo obtenido antes del corte NO se pierde");
+      assert.equal(r.stopReason, "rate_limit");
+      assert.equal(r.pages, 1);
+      // 1 pausa entre páginas + 3 reintentos con backoff creciente.
+      assert.ok(waits.length >= 4, JSON.stringify(waits));
+      assert.ok(waits[waits.length - 1] > waits[1], "el backoff crece");
+      assert.equal(llamadas, 5, "1 página buena + 1 intento + 3 reintentos");
+    });
+
+    await test("Hunter Discovery · BUG: un token caducado (code 190) aborta en el sondeo en vez de seguir consultando con la lista de campos vacía", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { classifyAdLibraryError, AdLibraryError } = await import("../src/lib/hunter/discovery/errors");
+      const { runDiscovery } = await import("../src/lib/hunter/discovery/service");
+      // La clasificación, primero: cada código dice qué hacer.
+      assert.deepEqual(
+        ["rate_limit", "token_invalido", "permiso", "transitorio", "fatal"].map((k) => k),
+        ["rate_limit", "token_invalido", "permiso", "transitorio", "fatal"]
+      );
+      assert.equal(classifyAdLibraryError(400, 17).kind, "rate_limit");
+      assert.equal(classifyAdLibraryError(400, 17).retryable, true);
+      assert.equal(classifyAdLibraryError(429, null).kind, "rate_limit");
+      assert.equal(classifyAdLibraryError(400, 190).kind, "token_invalido");
+      assert.equal(classifyAdLibraryError(400, 190).retryable, false, "reintentar un token caducado solo quema cuota");
+      assert.equal(classifyAdLibraryError(400, 190).abortRun, true);
+      assert.equal(classifyAdLibraryError(403, null).kind, "permiso");
+      assert.equal(classifyAdLibraryError(500, null).retryable, true);
+      assert.equal(new AdLibraryError(400, 190, "OAuthException").abortRun, true);
+
+      let llamadas = 0;
+      const fetcher = (async () => {
+        llamadas++;
+        return new Response(JSON.stringify({ error: { message: "Error validating access token: Session has expired", code: 190 } }), { status: 400, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("caducado", fetcher, async () => {});
+      const r = await runDiscovery({ terms: ["auditoria-token-1", "auditoria-token-2"], country: "ES", days: 14, token: "caducado", client, now: Math.floor(Date.now() / 1000) });
+      assert.equal(r.stopReason, "token_invalido");
+      assert.deepEqual(r.termsQueried, [], "no se consulta ni un término con el token muerto");
+      assert.equal(r.rawCount, 0);
+      // El sondeo son 14 campos; sin la guarda, además se habrían hecho las búsquedas.
+      assert.ok(llamadas <= 14, `${llamadas} llamadas: no se sigue consultando`);
+      const fila = db.systemDbHandle().prepare("SELECT stop_reason FROM adlib_queries ORDER BY id DESC LIMIT 1").get() as { stop_reason: string };
+      assert.equal(fila.stop_reason, "token_invalido", "queda constancia de POR QUÉ paró");
+    });
+
+    await test("Hunter Discovery · BUG: el presupuesto para la corrida (fecha límite, tope de peticiones y cuota de Meta) en vez de dejarla correr hasta que Meta corte", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      // Dos servidores: uno callado sobre la cuota y otro que declara 91 % de uso.
+      const pagina = (usage: boolean) => new Response(JSON.stringify({ data: [{ id: `a${Math.random()}`, page_id: "p1", ad_creative_bodies: ["Producto fisico"] }], paging: { cursors: { after: "C" }, next: "https://n" } }), { headers: usage ? { "content-type": "application/json", "x-app-usage": JSON.stringify({ call_count: 91 }) } : { "content-type": "application/json" } });
+      const client = new AdLibraryClient("tok", (async () => pagina(false)) as typeof fetch, async () => {});
+      const clienteCuota = new AdLibraryClient("tok", (async () => pagina(true)) as typeof fetch, async () => {});
+      // Tope de peticiones.
+      const porPeticiones = new DiscoveryBudget({ maxRequests: 3 });
+      const r1 = await client.search({ term: "t", country: "ES", since: "2026-08-01", until: "2026-09-05", budget: porPeticiones });
+      assert.equal(r1.stopReason, "presupuesto_peticiones");
+      assert.equal(porPeticiones.requests, 3);
+      // Fecha límite: ya vencida.
+      const vencido = new DiscoveryBudget({ deadlineAt: Date.now() - 1 });
+      const r2 = await client.search({ term: "t", country: "ES", since: "2026-08-01", until: "2026-09-05", budget: vencido });
+      assert.equal(r2.stopReason, "deadline");
+      assert.equal(r2.ads.length, 0, "ni una petición pasada la hora");
+      // Cuota declarada por Meta: la cabecera deja de archivarse y frena.
+      const porCuota = new DiscoveryBudget({ maxUsagePercent: 85, maxRequests: 100 });
+      const r3 = await clienteCuota.search({ term: "t", country: "ES", since: "2026-08-01", until: "2026-09-05", budget: porCuota });
+      assert.equal(r3.stopReason, "cuota_meta");
+      assert.ok(porCuota.usagePercent >= 91);
+      assert.ok(porCuota.requests < 20, "para mucho antes del tope de páginas");
+    });
+
+    await test("Hunter Discovery · BUG: dos productos distintos del mismo anunciante ya no comparten clave (antes colisionaban y el UNIQUE tiraba la corrida) y el país entra en la clave", async () => {
+      const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+      const base = { pageId: "misma-pagina", pageName: "Tienda", snapshotUrl: null, captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: "2026-08-01", stopTime: null, impressions: null, audience: null };
+      // Comparten 30+ tokens alfabéticamente iniciales y difieren en el final:
+      // exactamente el caso que colisionaba con la huella de 30 tokens.
+      // 30 tokens comunes (los primeros en orden alfabético: la huella vieja
+      // solo hasheaba esos) + 40 propios de cada uno, para que el parecido
+      // (30/110 = 0,27) quede POR DEBAJO del umbral y sean dos grupos.
+      const comunes = Array.from({ length: 30 }, (_, i) => `aaa${String(i).padStart(2, "0")}`).join(" ");
+      const propios = (p: string) => Array.from({ length: 40 }, (_, i) => `${p}${String(i).padStart(2, "0")}`).join(" ");
+      const uno = { ...base, id: "x1", bodies: [`${comunes} ${propios("zza")}`] };
+      const dos = { ...base, id: "x2", bodies: [`${comunes} ${propios("zzb")}`] };
+      const grupos = groupAds([uno, dos], Math.floor(Date.now() / 1000), "ES");
+      assert.equal(grupos.length, 2, "son dos productos distintos");
+      assert.notEqual(grupos[0].key, grupos[1].key, "EL BUG: antes compartían candidate_key y el segundo INSERT tiraba la corrida entera");
+      assert.notEqual(grupos[0].fingerprint, grupos[1].fingerprint);
+      // El país forma parte de la clave: dos países no se pisan el histórico.
+      const es = groupAds([uno], Math.floor(Date.now() / 1000), "ES")[0];
+      const pt = groupAds([uno], Math.floor(Date.now() / 1000), "PT")[0];
+      assert.notEqual(es.key, pt.key);
+      assert.match(es.key, /^ES:misma-pagina:/);
+      // Y guardarlos juntos ya no rompe: se prueba contra la base real.
+      const { DiscoveryRepository } = await import("../src/lib/hunter/discovery/repository");
+      const guardado = new DiscoveryRepository().saveRun({ terms: ["auditoria-colision"], country: "ES", days: 14, fields: ["id"], rawCount: 2, groups: grupos, rateLimit: null, now: Math.floor(Date.now() / 1000), stopReason: "completado", requests: 7 });
+      assert.equal(guardado.length, 2);
+      const fila = db.systemDbHandle().prepare("SELECT requests_used, stop_reason FROM adlib_queries WHERE terms_json=? ORDER BY id DESC LIMIT 1").get(JSON.stringify(["auditoria-colision"])) as { requests_used: number; stop_reason: string };
+      assert.equal(fila.requests_used, 7);
+      assert.equal(fila.stop_reason, "completado");
+    });
+
+    await test("Hunter Discovery · BUG: el filtro de ruido ya no tira el vocabulario COD español ('pago seguro contra reembolso' era basura para el filtro anterior)", async () => {
+      const { noiseOf } = await import("../src/lib/hunter/discovery/grouping");
+      const ad = (texto: string, pageName = "Tienda pequeña", audiencia: number | null = null) => ({
+        id: "n", pageId: "p", pageName, snapshotUrl: null, bodies: [texto], captions: [], titles: [],
+        platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null,
+        audience: audiencia === null ? null : { lowerBound: audiencia, upperBound: audiencia },
+      });
+      // Lo que ANTES se descartaba y es justo lo que buscamos.
+      for (const texto of ["Pago seguro contra reembolso", "Envío seguro y rápido a toda España", "Servicio de atención al cliente 24h", "Paga al recibir, envío asegurado"]) {
+        assert.equal(noiseOf([ad(texto)]).noise, false, `NO es ruido: ${texto}`);
+      }
+      // Lo que sí debe seguir siendo ruido.
+      for (const texto of ["Curso y webinar de software", "Apúntate a nuestra masterclass de formación", "Contrata tu seguro de coche al mejor precio", "Descarga la app y prueba la suscripción mensual", "Buscamos personal: ofertas de trabajo"]) {
+        assert.equal(noiseOf([ad(texto)]).noise, true, `SÍ es ruido: ${texto}`);
+      }
+      // Marca grande por NOMBRE del anunciante, no solo por audiencia estimada.
+      assert.equal(noiseOf([ad("Organizador de cocina", "Amazon España")]).noise, true);
+      assert.match(noiseOf([ad("Organizador de cocina", "Amazon España")]).noiseReason ?? "", /marca establecida/);
+      assert.equal(noiseOf([ad("Organizador de cocina", "La tienda de Ana")]).noise, false);
+      // Sin dato de audiencia el filtro NO opina (antes el máximo daba 0 y colaba a todos en silencio).
+      assert.equal(noiseOf([ad("Organizador de cocina", "Tienda X", null)]).noise, false);
+      assert.equal(noiseOf([ad("Organizador de cocina", "Tienda X", 2_000_000)]).noise, true);
+    });
+
+    await test("Hunter Discovery · BUG: el registro guardaba la constante entera de campos, no los que de verdad se pidieron", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runDiscovery } = await import("../src/lib/hunter/discovery/service");
+      const fetcher = (async (input: string | URL | Request) => {
+        const url = String(input);
+        // Meta rechaza 'impressions' en este token; el resto responde.
+        if (url.includes("impressions")) return new Response(JSON.stringify({ error: { message: "Unsupported get request", code: 100 } }), { status: 400, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ data: [{ id: "f1", page_id: "pf", page_name: "Tienda", ad_creative_bodies: ["Organizador de cocina antideslizante"], ad_delivery_start_time: "2026-08-20" }], paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+      const r = await runDiscovery({ terms: ["auditoria-campos"], country: "ES", days: 14, token: "tok", client, now: Math.floor(Date.now() / 1000) });
+      assert.equal(r.stopReason, "completado");
+      assert.ok(r.fieldProbes.some((p) => p.field === "impressions" && p.status === "error"));
+      const fila = db.systemDbHandle().prepare("SELECT fields_json FROM adlib_queries WHERE terms_json=? ORDER BY id DESC LIMIT 1").get(JSON.stringify(["auditoria-campos"])) as { fields_json: string };
+      const guardados = JSON.parse(fila.fields_json) as string[];
+      assert.equal(guardados.includes("impressions"), false, "EL BUG: antes se registraba un campo que Meta había rechazado");
+      assert.ok(guardados.includes("id") && guardados.includes("page_id"));
+      assert.ok(r.rawCount >= 1);
     });
 
     await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {
