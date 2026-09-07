@@ -1012,6 +1012,50 @@ export function migrateAddressValidation(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración 23 (07-09-2026): auto-despacho tras cooldown + IA de intención
+ * post-confirmación — docs/AUTO-DESPACHO-COOLDOWN.md.
+ *  - dispatch_cooldowns: un temporizador por pedido confirmado. Al vencer se
+ *    evalúan las condiciones (sin escalada abierta, sin ALERTA_DIRECCION,
+ *    sigue confirmado) y se dispara el mark-to-send o se queda 'blocked'
+ *    con el motivo, visible en el panel.
+ *  - intent_classifications: auditoría de cada clasificación de texto libre
+ *    post-confirmación (mensaje, intención, confianza, si se auto-respondió
+ *    o se escaló, respuesta cruda del modelo).
+ * ADITIVA: ninguna columna de orders cambia.
+ */
+export function migrateAutoDispatch(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dispatch_cooldowns (
+      order_id INTEGER PRIMARY KEY REFERENCES orders(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK(status IN ('scheduled','executed','blocked','cancelled')),
+      scheduled_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      due_at INTEGER NOT NULL,
+      evaluated_at INTEGER,
+      executed_at INTEGER,
+      executed_via TEXT,
+      blocked_reason TEXT,
+      outcome TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_dispatch_cooldowns_due ON dispatch_cooldowns(due_at) WHERE status = 'scheduled';
+    CREATE TABLE IF NOT EXISTS intent_classifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+      phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      intent TEXT NOT NULL CHECK(intent IN ('cancelacion','duda_conocida','duda_no_reconocida','otro')),
+      faq_id TEXT,
+      confidence REAL,
+      auto_replied INTEGER NOT NULL DEFAULT 0 CHECK(auto_replied IN (0,1)),
+      escalated INTEGER NOT NULL DEFAULT 0 CHECK(escalated IN (0,1)),
+      model TEXT,
+      raw_response TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_intent_classifications_order ON intent_classifications(order_id, created_at DESC);
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1660,6 +1704,7 @@ function build() {
   migrateHunterPredictive(db);
   migrateHunterDiscovery(db);
   migrateAddressValidation(db);
+  migrateAutoDispatch(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1829,7 +1874,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 22;
+export const SCHEMA_VERSION = 23;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

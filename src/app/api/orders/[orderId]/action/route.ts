@@ -16,6 +16,7 @@ import { audit, safeOrder } from "@/lib/workspace";
 import { systemDbHandle } from "@/lib/db";
 import { resolveAddressAlert } from "@/lib/orders/address-validation";
 import { markOrderToSend } from "@/lib/suppliers/beeping";
+import { autoDispatchEnabled, dispatchNow } from "@/lib/orders/auto-dispatch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,6 +35,7 @@ const ACTIONS = new Set([
   "authorize_pilot",
   "revoke_pilot",
   "resolve_address_alert",
+  "dispatch_now",
 ]);
 
 /**
@@ -113,8 +115,21 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
       return NextResponse.json({ ok: false, error: "este pedido no tiene ninguna ALERTA_DIRECCION abierta" }, { status: 409 });
     }
     audit(auth.user, "resolve_address_alert", "order", id, { note });
-    if (order.status === "confirmed") void markOrderToSend(order.shopify_order_number);
+    // Con el cooldown activo el despacho lo decide el temporizador/“despachar
+    // ahora”; sin él, se libera aquí el mark-to-send inmediato que se retuvo.
+    if (order.status === "confirmed" && !autoDispatchEnabled()) void markOrderToSend(order.shopify_order_number);
     return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
+  }
+  // "Despachar ahora": una persona ya revisó las incidencias. Las condiciones
+  // se evalúan igualmente (fail-closed): si sigue habiendo una escalada,
+  // cancelación o ALERTA_DIRECCION abierta, se rechaza con los motivos.
+  if (action === "dispatch_now") {
+    const r = await dispatchNow(id, auth.user.name);
+    audit(auth.user, "dispatch_now", "order", id, { status: r.status, reasons: r.reasons });
+    if (r.status !== "executed") {
+      return NextResponse.json({ ok: false, error: `no se puede despachar: ${r.reasons.join(" · ")}`, order: vistaDelPedido(id) }, { status: 409 });
+    }
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id), outcome: r.result?.outcome ?? null });
   }
 
   // Gate de TEST_MODE para acciones con efecto externo: pasa si el teléfono

@@ -153,6 +153,14 @@ function procesarMensaje(m: InboundWhatsAppMessage): void {
       orderAuthorized: resultado.authorized === true,
     });
   }
+  if (resultado.handled && resultado.followUp) {
+    // IA de intención post-confirmación: la decisión llega después; el
+    // webhook responde ya a Meta y la respuesta al cliente sale por el outbox.
+    const autorizado = resultado.authorized === true;
+    void resultado.followUp()
+      .then((f) => { if (f.reply) sendWhatsAppMessage(m.phone, f.reply, { name: m.profileName ?? undefined, orderAuthorized: autorizado }); })
+      .catch((err) => logger.warn(`[META] followUp de intención falló: ${err instanceof Error ? err.message : String(err)}`));
+  }
 }
 
 /**

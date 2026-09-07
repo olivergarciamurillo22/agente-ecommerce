@@ -59,6 +59,7 @@ import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvalua
 import { evaluateOrderForSupplier } from "../suppliers/service";
 import { isConfirmationEligible } from "./eligibility";
 import { runPendingAddressAiValidations } from "./address-validation";
+import { runDueDispatchCooldowns } from "./auto-dispatch";
 import { logIntegrationEvent, runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -359,6 +360,15 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
     await runPendingAddressAiValidations(5);
   } catch (err) {
     logger.warn(`[ADDRESS] capa 2 falló en el tick (no bloquea): ${err instanceof Error ? err.message : err}`);
+  }
+
+  // 6) Auto-despacho tras cooldown (AUTO_DISPATCH_COOLDOWN_ENABLED=1): los
+  //    temporizadores vencidos se evalúan; solo se despacha sin escaladas,
+  //    cancelaciones ni ALERTA_DIRECCION abiertas. docs/AUTO-DESPACHO-COOLDOWN.md
+  try {
+    await runDueDispatchCooldowns(now);
+  } catch (err) {
+    logger.warn(`[DISPATCH] cooldowns fallaron en el tick (no bloquea): ${err instanceof Error ? err.message : err}`);
   }
 
   return summary;

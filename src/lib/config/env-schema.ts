@@ -43,6 +43,7 @@ export type EnvCategory =
   | "DROPI"
   | "BEEPING"
   | "ADDRESS_AI"
+  | "AUTO_DISPATCH"
   | "META_ADS"
   | "PRODUCT_HUNTER"
   | "TRACKING"
@@ -364,6 +365,31 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "OPENAI_API_KEY", category: "ADDRESS_AI", secret: true, description: "Clave de OpenAI para la capa 2. Sin ella la capa 2 no se ejecuta aunque el interruptor esté a 1. Cuenta propia de Casamable (nada que ver con OPENROUTER_API_KEY del kit).", requiredFor: [] },
   { name: "ADDRESS_AI_MODEL", category: "ADDRESS_AI", secret: false, description: "Modelo de OpenAI para la capa 2. gpt-4o-mini: ~0,0001 € por pedido.", requiredFor: [], defaultValue: "gpt-4o-mini" },
   { name: "ADDRESS_AI_TIMEOUT_MS", category: "ADDRESS_AI", secret: false, description: "Timeout de la llamada (1000–60000). Al vencer, el veredicto es 'dudosa' (fail-closed), nunca 'correcta'.", requiredFor: [], defaultValue: "8000", validate: intPos },
+
+  // ── AUTO-DESPACHO TRAS COOLDOWN + IA DE INTENCIÓN — docs/AUTO-DESPACHO-COOLDOWN.md ──
+  {
+    name: "AUTO_DISPATCH_COOLDOWN_ENABLED",
+    category: "AUTO_DISPATCH",
+    secret: false,
+    description: "1 = al confirmar se programa un cooldown (AUTO_DISPATCH_COOLDOWN_HOURS) y al vencer se dispara el mark-to-send de Beeping SOLO sin escaladas, cancelaciones ni ALERTA_DIRECCION abiertas; si no, queda 'DESPACHO RETENIDO' para revisión manual. 0 = comportamiento anterior (hook inmediato al confirmar).",
+    requiredFor: [],
+    mustEqual: { "local-safe": "0" },
+    defaultValue: "0",
+    validate: bool01,
+  },
+  { name: "AUTO_DISPATCH_COOLDOWN_HOURS", category: "AUTO_DISPATCH", secret: false, description: "Horas de espera tras la confirmación antes de despachar (1–168).", requiredFor: [], defaultValue: "8", validate: intPos },
+  {
+    name: "POST_CONFIRMATION_AI_ENABLED",
+    category: "AUTO_DISPATCH",
+    secret: false,
+    description: "1 = el texto libre que llega tras confirmar se clasifica con OpenAI: solo una duda conocida de config/faq-post-confirmacion.json con confianza ≥ 0,75 se responde sola (texto fijo de la FAQ); todo lo demás va a persona. 0 (default) = todo texto libre post-confirmación va a persona, como hasta ahora. NO activar hasta que Pedro apruebe el contenido de la FAQ.",
+    requiredFor: [],
+    mustEqual: { "local-safe": "0" },
+    defaultValue: "0",
+    validate: bool01,
+  },
+  { name: "POST_CONFIRMATION_AI_MODEL", category: "AUTO_DISPATCH", secret: false, description: "Modelo para clasificar la intención. Comparte OPENAI_API_KEY con la validación de direcciones.", requiredFor: [], defaultValue: "gpt-4o-mini" },
+  { name: "POST_CONFIRMATION_AI_TIMEOUT_MS", category: "AUTO_DISPATCH", secret: false, description: "Timeout (1000–60000). Al vencer se escala a persona (fail-closed).", requiredFor: [], defaultValue: "8000", validate: intPos },
 
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {

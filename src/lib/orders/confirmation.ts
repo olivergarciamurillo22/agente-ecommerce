@@ -43,12 +43,15 @@ import {
   markCancelledOrderHelpRequested,
   getConversationIdByPhone,
   setMode,
+  systemDbHandle,
   type OrderRow,
 } from "../db";
 import { tagOrderConfirmed } from "../shopify/admin";
 import { orderActionAllowed } from "../safety";
 import { markOrderToSend } from "../suppliers/beeping";
 import { hasOpenAddressAlert } from "./address-validation";
+import { autoDispatchEnabled, scheduleDispatchCooldown } from "./auto-dispatch";
+import { classifyPostConfirmationMessage, postConfirmationAiEnabled, type FaqEntry, type IntentAiCompleter } from "./intent-ai";
 import {
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
@@ -84,6 +87,13 @@ export interface OrderReplyResult {
   reply?: string;
   /** true si el pedido implicado está autorizado a mano para el piloto. */
   authorized?: boolean;
+  /**
+   * Resolución ASÍNCRONA pendiente (IA de intención post-confirmación,
+   * docs/AUTO-DESPACHO-COOLDOWN.md): cuando existe, `reply` viene vacío y el
+   * caller debe ejecutarla y enviar lo que devuelva. Así el cliente recibe UNA
+   * sola respuesta (la de la FAQ o "te paso con atención"), nunca dos.
+   */
+  followUp?: () => Promise<{ reply?: string }>;
 }
 
 export type OrderReplyIntent = "confirm" | "change_address" | "delivery_note" | "unknown";
@@ -211,7 +221,13 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): ConfirmO
   // puede no ver que su dirección está incompleta. Lo libera una persona
   // al cerrar la alerta (resolveAddressAlert). La confirmación en sí sigue
   // igual: esto solo retiene el despacho.
-  if (hasOpenAddressAlert(order.id)) {
+  if (autoDispatchEnabled()) {
+    // AUTO-DESPACHO TRAS COOLDOWN (07-09): con el interruptor activo NO se
+    // marca para enviar ahora. Se programa el temporizador (default 8 h) y el
+    // scheduler despacha al vencer solo si no hay escaladas, cancelaciones ni
+    // ALERTA_DIRECCION abiertas. docs/AUTO-DESPACHO-COOLDOWN.md
+    scheduleDispatchCooldown(order);
+  } else if (hasOpenAddressAlert(order.id)) {
     logIntegrationEvent(
       "beeping",
       "mark_to_send_retenido_por_alerta_direccion",
@@ -481,6 +497,47 @@ function escalateUnknownText(phone: string, orders: OrderRow[], reason = "Mensaj
   };
 }
 
+/**
+ * IA de intención post-confirmación (docs/AUTO-DESPACHO-COOLDOWN.md). Se
+ * ejecuta como followUp asíncrono. Auto-responde SOLO con el texto fijo de
+ * la FAQ (duda conocida, confianza ≥ 0,75); cualquier otra cosa escala a
+ * persona con el mismo mecanismo de siempre. Cada decisión queda auditada
+ * en intent_classifications. Con `deps` inyectables para los tests.
+ */
+export async function resolvePostConfirmationText(
+  phone: string,
+  order: OrderRow,
+  text: string,
+  deps: { complete?: IntentAiCompleter; env?: Record<string, string | undefined>; faq?: FaqEntry[] } = {}
+): Promise<{ reply?: string }> {
+  const c = await classifyPostConfirmationMessage(text, deps);
+  const escalated = c.autoReply === null;
+  try {
+    systemDbHandle()
+      .prepare(
+        `INSERT INTO intent_classifications (order_id, phone, message, intent, faq_id, confidence, auto_replied, escalated, model, raw_response)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(order.id, phone, text.slice(0, 2000), c.intent, c.faqId, c.confidence, escalated ? 0 : 1, escalated ? 1 : 0, c.model, c.raw);
+  } catch (err) {
+    logger.warn(`[INTENT] no se pudo auditar la clasificación: ${err instanceof Error ? err.message : err}`);
+  }
+  if (!escalated) {
+    logIntegrationEvent("whatsapp", "post_confirmation_auto_reply", "info", `duda conocida '${c.faqId}' (confianza ${c.confidence?.toFixed(2)}): respondida con la FAQ; el cooldown sigue`, order.shopify_order_number);
+    return { reply: c.autoReply ?? undefined };
+  }
+  // Cancelación detectada por la IA: además de escalar, se estampa la
+  // petición como en el flujo determinista (nada se cancela solo).
+  if (c.intent === "cancelacion") {
+    const r = executeCancellation(phone, [order]);
+    logIntegrationEvent("whatsapp", "post_confirmation_ai_cancellation", "critical", `la IA detectó cancelación (confianza ${c.confidence?.toFixed(2) ?? "n/a"}): escalada y cooldown retenido`, order.shopify_order_number);
+    return { reply: r.reply };
+  }
+  const r = escalateUnknownText(phone, [order], `Mensaje posterior a confirmación (IA: ${c.escalationReason})`);
+  logIntegrationEvent("whatsapp", "post_confirmation_ai_escalated", "warning", `intención ${c.intent} (${c.escalationReason}): derivado a persona`, order.shopify_order_number);
+  return { reply: r.reply };
+}
+
 /** Audio/imagen/documento en una conversación de pedido nunca queda mudo. */
 export function handleNonTextOrderMessage(phone: string, kind: string): OrderReplyResult {
   const active = getActiveOrdersByPhone(phone).filter((o) => orderActionAllowed(o));
@@ -538,6 +595,19 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
       // INERTE. Escalarlo llenaría la bandeja de personas con confirmaciones
       // duplicadas — y esa bandeja es justo lo que hay que mantener limpio.
       if (classifyOrderReply(text) === "unknown") {
+        // IA DE INTENCIÓN (07-09, opcional): con POST_CONFIRMATION_AI_ENABLED=1
+        // el texto se clasifica ANTES de escalar. Solo una duda conocida de la
+        // FAQ con confianza ≥ 0,75 se responde sola (texto fijo) y el cooldown
+        // sigue; todo lo demás acaba igual que hoy: persona. La decisión es
+        // asíncrona (followUp) para que el cliente reciba UNA sola respuesta.
+        if (postConfirmationAiEnabled()) {
+          const target = confirmed[0];
+          return {
+            handled: true,
+            authorized: target.pilot_authorized === 1,
+            followUp: () => resolvePostConfirmationText(phone, target, text),
+          };
+        }
         return escalateUnknownText(phone, confirmed.slice(0, 1), "Mensaje posterior a confirmación");
       }
     }

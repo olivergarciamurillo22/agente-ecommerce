@@ -1178,6 +1178,187 @@ async function main(): Promise<void> {
     assert.equal(body.orders.find((o) => o.id === order.id)?.address_alert_open, 0);
   });
 
+  // ============ AUTO-DESPACHO TRAS COOLDOWN + IA DE INTENCIÓN (07-09-2026) ============
+  console.log("\n— Auto-despacho tras cooldown + IA de intención —");
+  const dispatch = await import("../src/lib/orders/auto-dispatch");
+  const intentAi = await import("../src/lib/orders/intent-ai");
+  const { resolvePostConfirmationText } = await import("../src/lib/orders/confirmation");
+  const FAQ = intentAi.loadPostConfirmationFaq();
+  const DISPATCH_ON = { AUTO_DISPATCH_COOLDOWN_ENABLED: "1", AUTO_DISPATCH_COOLDOWN_HOURS: "8" };
+  const INTENT_ON = { POST_CONFIRMATION_AI_ENABLED: "1", OPENAI_API_KEY: "sk-test-no-real", POST_CONFIRMATION_AI_TIMEOUT_MS: "1500" };
+  const beepingCalls: string[] = [];
+  const fakeMarkToSend = async (id: string | number) => { beepingCalls.push(String(id)); return { outcome: "sent" as const }; };
+  const mkConfirmedForDispatch = (suffix: string) => {
+    const phone = `346000006${suffix.padStart(2, "0")}`;
+    const created = mkOrder(`9399${suffix.padStart(2, "0")}`, `1499${suffix.padStart(2, "0")}`, phone);
+    db.systemDbHandle().prepare("UPDATE orders SET address_line1='Calle Alcalá 123, 2º B', city='Madrid', province='Madrid', postal_code='28001' WHERE id=?").run(created.id);
+    db.claimOrderInitialSend(created.id);
+    return db.getOrderById(created.id)!;
+  };
+
+  await test("COOLDOWN · la FAQ propuesta existe, tiene 4-6 entradas con texto fijo y está marcada como pendiente de aprobación", () => {
+    assert.ok(FAQ.length >= 4 && FAQ.length <= 6, `${FAQ.length} entradas`);
+    for (const e of FAQ) { assert.ok(e.id && e.response.trim().length > 20, e.id); }
+    const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/faq-post-confirmacion.json"), "utf8")) as { status: string };
+    assert.equal(raw.status, "PROPUESTA_PENDIENTE_APROBACION_PEDRO");
+    // Apagado por defecto: sin flag nada cambia.
+    assert.equal(intentAi.postConfirmationAiEnabled({ OPENAI_API_KEY: "sk-x" }), false);
+    assert.equal(dispatch.autoDispatchEnabled({}), false);
+  });
+
+  await test("COOLDOWN · al confirmar con el interruptor activo se programa el temporizador (8 h) en vez de marcar al momento", async () => {
+    await withEnv({ ...DISPATCH_ON, BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "p@e.com", BEEPING_ACCOUNT_PASSWORD: "s" }, async () => {
+      const order = mkConfirmedForDispatch("1");
+      const realFetch = globalThis.fetch; let inmediatas = 0;
+      globalThis.fetch = (async () => { inmediatas++; return new Response(null, { status: 204 }); }) as typeof fetch;
+      try {
+        const before = Math.floor(Date.now() / 1000);
+        assert.equal(handleOrderButtonReply(order.phone, "confirm_order").reply, msgs.MSG_CONFIRMED);
+        await new Promise<void>((r) => setTimeout(r, 0));
+        assert.equal(inmediatas, 0, "con cooldown activo NO se marca para enviar al confirmar");
+        const row = dispatch.getDispatchCooldown(order.id)!;
+        assert.equal(row.status, "scheduled");
+        assert.ok(row.due_at >= before + 8 * 3600 - 2 && row.due_at <= before + 8 * 3600 + 60, "vence a las 8 h");
+      } finally { globalThis.fetch = realFetch; }
+    });
+  });
+
+  await test("COOLDOWN · a las 8 h sin incidencias el despacho se ejecuta (una sola vez)", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("2");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      // Los cooldowns de pedidos de tests anteriores también vencen: se vacían
+      // primero para que los contadores de este test sean solo de este pedido.
+      await dispatch.runDueDispatchCooldowns(row.due_at - 60, { markToSend: fakeMarkToSend });
+      beepingCalls.length = 0;
+      assert.equal(dispatch.listDueDispatchCooldowns(row.due_at - 60).some((r) => r.order_id === order.id), false, "antes de vencer no está en la lista");
+      const vencido = await dispatch.runDueDispatchCooldowns(row.due_at + 1, { markToSend: fakeMarkToSend });
+      assert.ok(vencido.executed >= 1 && vencido.blocked === 0, JSON.stringify(vencido));
+      assert.ok(beepingCalls.includes(order.shopify_order_number), "nuestro pedido se marcó para enviar");
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.status, "executed");
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.executed_via, "cooldown");
+      const otra = await dispatch.runDueDispatchCooldowns(row.due_at + 3600, { markToSend: fakeMarkToSend });
+      assert.deepEqual(otra, { executed: 0, blocked: 0 }, "no se repite");
+      assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='auto_dispatch_executed' AND order_ref=?").get(order.shopify_order_number));
+    });
+  });
+
+  await test("COOLDOWN · con ALERTA_DIRECCION abierta al vencer NO se despacha: queda RETENIDO, visible, y «despachar ahora» solo funciona tras cerrarla", async () => {
+    await withEnv(DISPATCH_ON, async () => {
+      const order = mkConfirmedForDispatch("3");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      addrVal.openAddressAlert(db.getOrderById(order.id)!, 2, "dudosa", ["falta piso"]);
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      beepingCalls.length = 0;
+      const r = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend });
+      assert.equal(r.status, "blocked");
+      assert.equal(beepingCalls.length, 0, "no se despacha por defecto ante la duda");
+      const blocked = dispatch.getDispatchCooldown(order.id)!;
+      assert.equal(blocked.status, "blocked");
+      assert.match(blocked.blocked_reason ?? "", /ALERTA_DIRECCION/);
+      assert.ok(dispatch.listBlockedDispatchOrderIds().has(order.id), "visible en el listado del panel");
+      // Manual sin resolver: sigue rechazado con el motivo.
+      const manualKo = await dispatch.dispatchNow(order.id, "Pedro", { markToSend: fakeMarkToSend });
+      assert.equal(manualKo.status, "blocked");
+      // Se cierra la alerta después de las 8 h → manual OK sin esperar otro ciclo.
+      addrVal.resolveAddressAlert(order.id, "Pedro", "revisada");
+      const manualOk = await dispatch.dispatchNow(order.id, "Pedro", { markToSend: fakeMarkToSend });
+      assert.equal(manualOk.status, "executed");
+      assert.deepEqual(beepingCalls, [order.shopify_order_number]);
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.executed_via, "manual");
+    });
+  });
+
+  await test("INTENCIÓN · cancelación detectada tras confirmar → escalada a persona y el cooldown queda retenido", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const order = mkConfirmedForDispatch("4");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const r = handleOrderReply(order.phone, "oye que al final mejor lo dejo, no me viene bien");
+      assert.equal(r.handled, true);
+      assert.equal(r.reply, undefined, "la respuesta llega por el followUp, no dos veces");
+      assert.ok(r.followUp);
+      const fresh = db.getOrderById(order.id)!;
+      const f = await resolvePostConfirmationText(order.phone, fresh, "oye que al final mejor lo dejo", {
+        env: INTENT_ON, faq: FAQ,
+        complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.91, respuesta_sugerida: "Vale, lo cancelamos" }),
+      });
+      assert.equal(f.reply, msgs.MSG_CANCEL_RECEIVED, "acuse fijo; jamás la respuesta_sugerida del modelo");
+      assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
+      const audit = db.systemDbHandle().prepare("SELECT intent, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as { intent: string; auto_replied: number; escalated: number };
+      assert.deepEqual(audit, { intent: "cancelacion", auto_replied: 0, escalated: 1 });
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      beepingCalls.length = 0;
+      const due = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend });
+      assert.equal(due.status, "blocked");
+      assert.match(dispatch.getDispatchCooldown(order.id)!.blocked_reason ?? "", /cancelación|escalada/);
+      assert.equal(beepingCalls.length, 0);
+    });
+  });
+
+  await test("INTENCIÓN · duda conocida con confianza alta → auto-respuesta con el texto FIJO de la FAQ y el cooldown sigue corriendo", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const order = mkConfirmedForDispatch("5");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const r = handleOrderReply(order.phone, "y cuando me llega mas o menos?");
+      assert.ok(r.followUp);
+      const faq = FAQ.find((e) => e.id === "plazo_entrega")!;
+      let prompt = "";
+      const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "y cuando me llega mas o menos?", {
+        env: INTENT_ON, faq: FAQ,
+        complete: async (args) => { prompt = args.system; return JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.88, respuesta_sugerida: "Mañana mismo!!" }); },
+      });
+      assert.equal(f.reply, faq.response, "texto fijo de la FAQ, no el que sugiere el modelo");
+      assert.match(prompt, /plazo_entrega/, "el catálogo de la FAQ viaja en el prompt");
+      const convoId = db.getConversationIdByPhone(order.phone);
+      assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN", "no se escala");
+      const audit = db.systemDbHandle().prepare("SELECT intent, faq_id, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as Record<string, unknown>;
+      assert.deepEqual(audit, { intent: "duda_conocida", faq_id: "plazo_entrega", auto_replied: 1, escalated: 0 });
+      const row = dispatch.getDispatchCooldown(order.id)!;
+      beepingCalls.length = 0;
+      assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "executed", "el cooldown siguió y despacha");
+    });
+  });
+
+  await test("INTENCIÓN · duda no reconocida, 'otro', confianza < 0,75, id desconocida, JSON inválido, fallo o timeout → SIEMPRE persona (fail-closed)", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const casos: Array<[string, import("../src/lib/orders/intent-ai").IntentAiCompleter, RegExp]> = [
+        ["6", async () => JSON.stringify({ intencion: "duda_no_reconocida", duda_conocida_id: null, confianza: 0.95, respuesta_sugerida: null }), /intencion_duda_no_reconocida/],
+        ["7", async () => JSON.stringify({ intencion: "otro", duda_conocida_id: null, confianza: 0.99, respuesta_sugerida: null }), /intencion_otro/],
+        ["8", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.6, respuesta_sugerida: null }), /confianza_baja_0\.60/],
+        ["9", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "inventada", confianza: 0.99, respuesta_sugerida: "x" }), /duda_conocida_id_desconocida/],
+        ["10", async () => "no json", /respuesta_ia_invalida/],
+        ["11", async () => { throw new Error("boom"); }, /fallo_llamada_ia/],
+        ["12", () => new Promise<string>(() => {}), /timeout_llamada_ia/],
+      ];
+      for (const [suffix, complete, motivo] of casos) {
+        const order = mkConfirmedForDispatch(suffix);
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const c = await intentAi.classifyPostConfirmationMessage("mensaje", { env: INTENT_ON, faq: FAQ, complete });
+        assert.equal(c.autoReply, null, suffix);
+        assert.match(c.escalationReason ?? "", motivo, suffix);
+        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "mensaje", { env: INTENT_ON, faq: FAQ, complete });
+        assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION, `${suffix}: te paso con atención`);
+        assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN", suffix);
+        const row = dispatch.getDispatchCooldown(order.id)!;
+        beepingCalls.length = 0;
+        assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked", `${suffix}: cooldown retenido`);
+      }
+    });
+  });
+
+  await test("INTENCIÓN · con el flag apagado (default) el texto libre post-confirmación va a persona de inmediato, sin followUp ni llamada", () => {
+    const order = mkConfirmedForDispatch("13");
+    handleOrderButtonReply(order.phone, "confirm_order");
+    const r = handleOrderReply(order.phone, "y cuando me llega?");
+    assert.equal(r.followUp, undefined);
+    assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
+  });
+
+  // Limpieza: estos pedidos confirmados NO deben desplazar a los de tests
+  // posteriores fuera de la ventana de getOrdersForSupplierEvaluation (LIMIT 50).
+  db.systemDbHandle().prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE '9399%' OR shopify_order_id LIKE '9299%'").run();
+
   await test("BEEPING mark-to-send: una direccion sospechosa nunca llega al adaptador", async () => {
     await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
       const phone = "34600000415";
@@ -13213,7 +13394,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 22;/, "predictivo usa 20, Discovery 21 y la validación de direcciones 22");
+      assert.match(db, /export const SCHEMA_VERSION = 23;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13734,6 +13915,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 21");
     db.migrateAddressValidation(fixture);
     fixture.pragma("user_version = 22");
+    db.migrateAutoDispatch(fixture);
+    fixture.pragma("user_version = 23");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

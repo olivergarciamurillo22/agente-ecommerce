@@ -62,6 +62,7 @@ export interface OrderItem {
   possible_duplicate: number;
   cancellation_requested_at: number | null;
   address_alert_open?: number;
+  dispatch_blocked?: number;
   supplier_platform: string | null;
   supplier_sync_status: string;
   supplier_external_order_id: string | null;
@@ -292,7 +293,7 @@ function SearchIcon() {
   );
 }
 
-type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot" | "resolve_address_alert";
+type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot" | "resolve_address_alert" | "dispatch_now";
 
 export default function OrdersPanel() {
   const [orders, setOrders] = useState<OrderItem[]>([]);
@@ -404,6 +405,10 @@ export default function OrdersPanel() {
       resend: {
         title: "Enviar WhatsApp real",
         body: `Vas a enviar un WhatsApp REAL a ${order.customer_name ?? "—"} (+${order.phone}) por el pedido #${order.shopify_order_number}. Si el sistema está en SAFE MODE o el teléfono no está autorizado, quedará bloqueado y solo se registrará en el log.`,
+      },
+      dispatch_now: {
+        title: "Despachar ahora",
+        body: `Vas a marcar el pedido #${order.shopify_order_number} para enviar en Beeping sin esperar al cooldown. Solo se ejecuta si ya no hay escaladas, cancelaciones ni alertas de dirección abiertas; si las hay, se rechazará con el motivo.`,
       },
       resolve_address_alert: {
         title: "Cerrar ALERTA DIRECCIÓN",
@@ -715,6 +720,14 @@ export default function OrdersPanel() {
                               ALERTA DIRECCIÓN
                             </span>
                           )}
+                          {o.dispatch_blocked === 1 && (
+                            <span
+                              className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-violet-500/15 text-violet-600 border border-violet-500/30 align-middle"
+                              title="El auto-despacho tras el cooldown NO se ejecutó: hay una escalada, cancelación o alerta de dirección abierta. Revisa la ficha y pulsa «Despachar ahora» cuando esté resuelto."
+                            >
+                              DESPACHO RETENIDO
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 max-w-[150px]">
                           <div className="truncate leading-snug" title={o.customer_name ?? ""}>{o.customer_name ?? "—"}</div>
@@ -1021,6 +1034,22 @@ export default function OrdersPanel() {
                   <div className="mt-2 flex justify-end">
                     <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "resolve_address_alert")} className="!px-2.5 !py-1.5 text-xs">
                       He revisado la dirección: cerrar alerta
+                    </GhostButton>
+                  </div>
+                </div>
+              )}
+
+              {detail.dispatch_blocked === 1 && (
+                <div className="mx-5 mb-3 rounded-lg border border-violet-500/30 bg-violet-500/10 px-3 py-2.5 text-xs text-brand-text">
+                  <div className="font-semibold text-violet-600">DESPACHO RETENIDO</div>
+                  <div className="mt-0.5 text-brand-muted">
+                    Al vencer el cooldown había una escalada a persona, una solicitud de cancelación o una alerta de dirección sin
+                    resolver, así que el envío automático a Beeping no se ejecutó. Resuélvelo en la bandeja de atención y pulsa
+                    «Despachar ahora»: las condiciones se vuelven a comprobar antes de enviar.
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "dispatch_now")} className="!px-2.5 !py-1.5 text-xs">
+                      Despachar ahora
                     </GhostButton>
                   </div>
                 </div>

@@ -259,6 +259,13 @@ export async function handleIncomingMessages(
             orderAuthorized: orderResult.authorized === true,
           });
         }
+        if (orderResult.followUp) {
+          // IA de intención post-confirmación: una sola respuesta, cuando llegue.
+          const autorizado = orderResult.authorized === true;
+          void orderResult.followUp()
+            .then((f) => { if (f.reply) sendWhatsAppMessage(phone, f.reply, { name: pushName, orderAuthorized: autorizado }); })
+            .catch((err) => logger.warn(`[bot] followUp de intención falló: ${err instanceof Error ? err.message : String(err)}`));
+        }
         return;
       }
 

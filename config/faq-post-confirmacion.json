@@ -1,0 +1,36 @@
+{
+  "_doc": "Base de preguntas frecuentes POST-CONFIRMACIÓN. Solo estas respuestas (texto FIJO) puede mandar el bot sin intervención humana, y solo cuando el clasificador devuelve intencion='duda_conocida' con esa id y confianza ≥ 0,75. El modelo NUNCA redacta la respuesta: la elige de aquí. PROPUESTA de Fable 5.1 del 07-09-2026 — PENDIENTE DE APROBACIÓN de Pedro entrada por entrada; hasta entonces POST_CONFIRMATION_AI_ENABLED=0. docs/AUTO-DESPACHO-COOLDOWN.md",
+  "status": "PROPUESTA_PENDIENTE_APROBACION_PEDRO",
+  "entries": [
+    {
+      "id": "plazo_entrega",
+      "question": "¿Cuándo me llega? / ¿Cuánto tarda el envío?",
+      "response": "Tu pedido se prepara en 24-48 h laborables y el reparto suele tardar 1-3 días laborables más (península). Cuando salga te llegará el número de seguimiento por aquí.",
+      "examples": ["cuando me llega", "cuanto tarda", "para cuando lo tengo", "ya lo habeis enviado"]
+    },
+    {
+      "id": "cambiar_direccion",
+      "question": "¿Puedo cambiar la dirección de entrega?",
+      "response": "Sí. Responde a este mensaje con la dirección completa (calle, número, piso/puerta, código postal y localidad) y la actualizamos antes de que salga el paquete.",
+      "examples": ["quiero cambiar la direccion", "me lo podeis mandar a otro sitio", "la direccion esta mal"]
+    },
+    {
+      "id": "forma_pago",
+      "question": "¿Cómo se paga? ¿Puedo pagar con tarjeta al repartidor?",
+      "response": "El pedido es contra reembolso: se paga al repartidor al recibirlo. Ten preparado el importe exacto en efectivo; algunos repartidores aceptan tarjeta, pero no podemos garantizarlo.",
+      "examples": ["como se paga", "puedo pagar con tarjeta", "se paga al recibir"]
+    },
+    {
+      "id": "seguimiento",
+      "question": "¿Dónde veo el seguimiento del envío?",
+      "response": "En cuanto el paquete salga del almacén te enviaremos por este mismo WhatsApp el número de seguimiento y el enlace de la agencia.",
+      "examples": ["numero de seguimiento", "tracking", "donde veo el envio"]
+    },
+    {
+      "id": "contacto",
+      "question": "¿Cómo hablo con una persona?",
+      "response": "Escríbenos por aquí lo que necesites y una persona del equipo te responderá en horario de atención (lunes a viernes, 9:00-18:00).",
+      "examples": ["quiero hablar con alguien", "telefono de contacto", "me podeis llamar"]
+    }
+  ]
+}
