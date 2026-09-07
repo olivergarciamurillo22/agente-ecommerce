@@ -17,7 +17,8 @@
 // métrica, y un dominio declarado no es un dominio resuelto.
 // ============================================================
 
-import type { AdLibraryAd, DiscoverySnapshot } from "./types";
+import { MOMENTUM_RULE, MOMENTUM_STALE_DAYS } from "./momentum";
+import type { AdLibraryAd, DiscoverySnapshot, MomentumTrace } from "./types";
 
 export type SignalSource = "api" | "derivada" | "declarado";
 
@@ -32,6 +33,8 @@ export interface CompetitorSignal {
 }
 
 export interface CompetitorReport {
+  /** El momentum con sus numeros y su fecha, para poder auditarlo. */
+  momentum: MomentumTrace;
   pageId: string;
   pageName: string | null;
   candidateKey: string;
@@ -123,17 +126,20 @@ export function competitorSignals(input: CompetitorSignalsInput): CompetitorRepo
       "cuenta textos distintos, no piezas de vídeo o imagen (la API no las da). Varias variantes sugieren que están testeando o escalando.",
   });
 
-  // 4 · Momentum: ya lo calcula el repositorio contra el snapshot anterior.
+  // 4 · Momentum, con su traza: qué se compara, contra qué fecha y con qué regla.
+  const trace = snapshot.momentumTrace;
+  const viejo = trace.daysSincePrevious !== null && trace.daysSincePrevious >= MOMENTUM_STALE_DAYS;
   signals.push({
     id: "momentum",
-    label: "Momentum frente a la última vez que lo miramos",
-    value: snapshot.momentum,
+    label: "Momentum",
+    value: `${trace.status} · ${trace.reason}`,
     source: "derivada",
     confirmado: false,
-    limite:
-      snapshot.previousActiveAds === null
-        ? "primera vez que vemos este anunciante: no hay con qué comparar todavía"
-        : `comparado con ${snapshot.previousActiveAds} anuncios activos en la corrida anterior`,
+    limite: `Regla: ${MOMENTUM_RULE}. ${
+      trace.previousCapturedAt === null
+        ? "No hay medida anterior: el veredicto no compara nada todavía."
+        : `Se compara contra la medida de hace ${trace.daysSincePrevious} día(s)${viejo ? ", que ya es vieja: cuanto más separadas, menos dice el veredicto" : ""}.`
+    }`,
   });
 
   // 5 · Países. La consulta es de UN país por corrida, así que esto solo
@@ -162,6 +168,7 @@ export function competitorSignals(input: CompetitorSignalsInput): CompetitorRepo
   });
 
   return {
+    momentum: trace,
     pageId: snapshot.pageId,
     pageName: snapshot.pageName,
     candidateKey: snapshot.key,

@@ -18,4 +18,35 @@ export interface DiscoveryGroup {
   activeAds: number; oldestActiveAt: number | null; noise: boolean; noiseReason: string | null;
 }
 export type Momentum = "fuerte" | "debil" | "sin_historico" | "sin_datos";
-export interface DiscoverySnapshot extends DiscoveryGroup { candidateId: number; momentum: Momentum; previousActiveAds: number | null }
+
+/**
+ * El momentum, con TODO lo que hizo falta para calcularlo (07-09-2026).
+ * Antes se guardaba solo la palabra "fuerte" o "debil", y en pantalla parecia
+ * un veredicto cuando en realidad es una comparacion contra una fecha que no
+ * se veia: un "fuerte" contra una corrida de hace dos meses dice muy poco.
+ */
+export interface MomentumTrace {
+  status: Momentum;
+  /** Anuncios activos AHORA. */
+  activeAds: number;
+  /** Anuncios activos la ultima vez que miramos (null = primera vez). */
+  previousActiveAds: number | null;
+  /** Diferencia entre ambos. Null si no hay con que comparar. */
+  delta: number | null;
+  /** Cuando se tomo la medida anterior (unixepoch). */
+  previousCapturedAt: number | null;
+  /** Dias entre aquella medida y esta. Cuanto mayor, menos dice el veredicto. */
+  daysSincePrevious: number | null;
+  /** La regla aplicada, literal. */
+  rule: string;
+  /** La frase que se puede leer en pantalla. */
+  reason: string;
+}
+
+export interface DiscoverySnapshot extends DiscoveryGroup {
+  candidateId: number;
+  momentum: Momentum;
+  previousActiveAds: number | null;
+  previousCapturedAt: number | null;
+  momentumTrace: MomentumTrace;
+}

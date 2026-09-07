@@ -15379,6 +15379,7 @@ async function main(): Promise<void> {
 
     await test("BUSCADOR · las señales van etiquetadas: qué es dato de la API, qué es señal derivada y qué es solo declarado por el anunciante", async () => {
       const { competitorSignals, creativeVariants, declaredDomains, NOT_AVAILABLE_FROM_AD_LIBRARY } = await import("../src/lib/hunter/discovery/signals");
+      const { computeMomentum } = await import("../src/lib/hunter/discovery/momentum");
       const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
       const ad = (id: string, body: string, caption: string | null) => ({
         id, pageId: "p1", pageName: "Tienda Competidora", snapshotUrl: `https://www.facebook.com/ads/library/?id=${id}`,
@@ -15390,6 +15391,8 @@ async function main(): Promise<void> {
         ads: [ad("a1", "Organizador de cocina antideslizante", "tiendacompetidora.es"), ad("a2", "Organizador de cocina en oferta", "tiendacompetidora.es"), ad("a3", "Organizador de cocina antideslizante", null)],
         activeAds: 3, oldestActiveAt: Math.floor(Date.parse("2026-08-01T00:00:00Z") / 1000),
         noise: false, noiseReason: null, candidateId: 1, momentum: "fuerte" as const, previousActiveAds: 1,
+        previousCapturedAt: now - 3 * 86400,
+        momentumTrace: computeMomentum({ activeAds: 3, previousActiveAds: 1, previousCapturedAt: now - 3 * 86400, now }),
       };
       const informe = competitorSignals({ snapshot, now, countriesSeen: ["ES", "PT"] });
       const sig = (id: string) => informe.signals.find((s) => s.id === id)!;
@@ -15403,8 +15406,16 @@ async function main(): Promise<void> {
       assert.equal(sig("variantes_creativas").value, 2, "dos textos distintos entre tres anuncios");
       assert.equal(sig("variantes_creativas").confirmado, false);
       assert.match(sig("variantes_creativas").limite ?? "", /no piezas de vídeo o imagen/);
-      assert.equal(sig("momentum").value, "fuerte");
-      assert.match(sig("momentum").limite ?? "", /1 anuncios activos/);
+      assert.equal(
+        String(sig("momentum").value),
+        "debil · 3 anuncios activos, +2 en 3 dia(s) (antes 1)",
+        "la traza dice los números y la fecha, no solo la etiqueta"
+      );
+      assert.match(sig("momentum").limite ?? "", /Regla: fuerte = al menos 5 anuncios activos/);
+      assert.match(sig("momentum").limite ?? "", /medida de hace 3 d/);
+      assert.equal(informe.momentum.delta, 2);
+      assert.equal(informe.momentum.previousActiveAds, 1);
+      assert.equal(informe.momentum.daysSincePrevious, 3);
       assert.equal(sig("paises_vistos").value, "ES, PT");
       assert.match(sig("paises_vistos").limite ?? "", /no su alcance real/);
       assert.equal(sig("dominio_declarado").value, "tiendacompetidora.es");
@@ -15690,6 +15701,49 @@ async function main(): Promise<void> {
         assert.match(((await post.json()) as { error: string }).error, /META_AD_LIBRARY_ACCESS_TOKEN/);
       });
       raw.prepare("DELETE FROM discovery_jobs").run();
+    });
+
+    await test("MOMENTUM · deja de ser una etiqueta: la traza dice los conteos, la diferencia, contra qué fecha se compara y con qué regla", async () => {
+      const { computeMomentum, MOMENTUM_RULE, MOMENTUM_STALE_DAYS } = await import("../src/lib/hunter/discovery/momentum");
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const hace = (dias: number) => now - dias * 86400;
+
+      // Primera vez: no hay con qué comparar, y se dice.
+      const primera = computeMomentum({ activeAds: 7, previousActiveAds: null, previousCapturedAt: null, now });
+      assert.equal(primera.status, "sin_historico");
+      assert.equal(primera.delta, null);
+      assert.equal(primera.daysSincePrevious, null);
+      assert.match(primera.reason, /primera vez/);
+      assert.equal(primera.rule, MOMENTUM_RULE, "la regla viaja con el dato");
+
+      // Sin anuncios activos no hay nada que medir.
+      assert.equal(computeMomentum({ activeAds: 0, previousActiveAds: 4, previousCapturedAt: hace(2), now }).status, "sin_datos");
+
+      // Fuerte: la regla exige AMBAS condiciones.
+      const fuerte = computeMomentum({ activeAds: 9, previousActiveAds: 5, previousCapturedAt: hace(4), now });
+      assert.equal(fuerte.status, "fuerte");
+      assert.equal(fuerte.delta, 4);
+      assert.equal(fuerte.daysSincePrevious, 4);
+      assert.equal(fuerte.previousActiveAds, 5);
+      assert.match(fuerte.reason, /9 anuncios activos, \+4 en 4 dia\(s\) \(antes 5\)/);
+
+      // Crece, pero con pocos anuncios: no llega a fuerte.
+      assert.equal(computeMomentum({ activeAds: 4, previousActiveAds: 1, previousCapturedAt: hace(1), now }).status, "debil");
+      // Muchos anuncios pero sin crecer: tampoco.
+      assert.equal(computeMomentum({ activeAds: 20, previousActiveAds: 20, previousCapturedAt: hace(1), now }).status, "debil");
+      // Y si baja, la traza lo dice con signo.
+      const baja = computeMomentum({ activeAds: 3, previousActiveAds: 8, previousCapturedAt: hace(5), now });
+      assert.equal(baja.delta, -5);
+      assert.match(baja.reason, /-5 en 5 dia\(s\)/);
+
+      // LA PARTE QUE FALTABA: una comparación vieja se marca como vieja.
+      const viejo = computeMomentum({ activeAds: 12, previousActiveAds: 5, previousCapturedAt: hace(MOMENTUM_STALE_DAYS + 9), now });
+      assert.equal(viejo.status, "fuerte");
+      assert.match(viejo.reason, /el veredicto envejece/, "un 'fuerte' contra una medida de hace un mes dice poco, y ahora se ve");
+      const reciente = computeMomentum({ activeAds: 12, previousActiveAds: 5, previousCapturedAt: hace(2), now });
+      assert.doesNotMatch(reciente.reason, /envejece/);
+      // Horas en vez de días: se dice distinto, no se redondea a "0 días".
+      assert.match(computeMomentum({ activeAds: 6, previousActiveAds: 3, previousCapturedAt: now - 3600, now }).reason, /hace unas horas/);
     });
 
     await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {

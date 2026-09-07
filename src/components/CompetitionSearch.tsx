@@ -31,7 +31,19 @@ interface Signal {
   limite: string | null;
 }
 
+interface MomentumTrace {
+  status: string;
+  activeAds: number;
+  previousActiveAds: number | null;
+  delta: number | null;
+  previousCapturedAt: number | null;
+  daysSincePrevious: number | null;
+  rule: string;
+  reason: string;
+}
+
 interface Competitor {
+  momentum: MomentumTrace;
   pageId: string;
   pageName: string | null;
   candidateKey: string;
@@ -119,9 +131,23 @@ function FichaCompetidor({ c }: { c: Competitor }) {
         <strong className="text-[15px] text-brand-text">{c.pageName ?? c.pageId}</strong>
         <span className="text-[12px] text-brand-muted">{c.activeAds} anuncio(s) activo(s)</span>
       </div>
+      {/* El momentum va aparte y con su traza: qué se compara, contra qué
+          fecha y con qué regla. Antes era solo la palabra «fuerte». */}
+      <div className="mt-2 rounded-md border border-brand-border/70 bg-brand-surface-2 px-3 py-2">
+        <div className="text-[11px] font-semibold uppercase tracking-wide text-brand-tertiary">Momentum</div>
+        <div className="mt-0.5 text-[13px] text-brand-text">{c.momentum.reason}</div>
+        <div className="mt-1 text-[11px] leading-snug text-brand-tertiary">
+          Regla: {c.momentum.rule}.{" "}
+          {c.momentum.previousCapturedAt === null
+            ? "No hay medida anterior: todavía no compara nada."
+            : `Comparado con la medida de hace ${c.momentum.daysSincePrevious} día(s)${
+                (c.momentum.daysSincePrevious ?? 0) >= 21 ? ", que ya es vieja" : ""
+              }.`}
+        </div>
+      </div>
       <dl className="mt-2 grid gap-1.5">
         {c.signals
-          .filter((s) => s.value !== null && s.value !== "")
+          .filter((s) => s.id !== "momentum" && s.value !== null && s.value !== "")
           .map((s) => (
             <div key={s.id} className="text-[13px]">
               <dt className="inline text-brand-muted">{s.label}:</dt>{" "}

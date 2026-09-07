@@ -55,8 +55,16 @@ export interface EnvVarSpec {
   category: EnvCategory;
   secret: boolean;
   description: string;
-  /** Perfiles en los que DEBE estar presente (con valor no vacío). */
+  /** Perfiles en los que DEBE estar presente (con valor no vacío). Su ausencia
+   *  BLOQUEA: entra en missingRequired y tumba el veredicto `ready`. */
   requiredFor: Profile[];
+  /** Perfiles en los que se RECOMIENDA, sin bloquear (07-09-2026). Su ausencia
+   *  sale como aviso visible (⚠️) y como ítem en rojo en el doctor, pero NO
+   *  entra en missingRequired ni tumba `ready`: es el grado que faltaba para
+   *  cosas que importan sin ser el núcleo del pedido COD. Ojo: `readiness`
+   *  trata CUALQUIER peligro de 'local-safe' como fallo, así que no se
+   *  recomienda nada en ese perfil. */
+  recommendedFor?: Profile[];
   /** Valor EXACTO que exige cada perfil (se compara el valor EFECTIVO:
    *  lo puesto en el entorno, o el default si no hay nada). */
   mustEqual?: Partial<Record<Profile, string>>;
@@ -407,6 +415,17 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "OPENAI_DAILY_CALL_LIMIT_INTENT", category: "AUTO_DISPATCH", secret: false, description: "Tope diario solo para la clasificación de intención post-confirmación. Vacío = usa OPENAI_DAILY_CALL_LIMIT.", requiredFor: [] },
   { name: "OPENAI_LIMIT_ADDRESS_FALLBACK", category: "ADDRESS_AI", secret: false, description: "Qué hace la capa 2 de direcciones al agotarse el tope: 'dudosa' (default, decisión de Pedro: abre ALERTA_DIRECCION y retiene el auto-despacho de esos pedidos) u 'omitir' (declara no_ejecutada y manda el veredicto determinista de la capa 1, como cuando la IA está apagada).", requiredFor: [], defaultValue: "dudosa" },
 
+  // ── CAZADOR · Ad Library de Meta — docs/HUNTER-BUSCADOR.md ──
+  {
+    name: "META_AD_LIBRARY_ACCESS_TOKEN",
+    category: "PRODUCT_HUNTER",
+    secret: true,
+    description: "Token de Meta con acceso a /ads_archive para el buscador de competencia. Sin él, el Cazador no busca nada (y lo dice: no inventa resultados). RECOMENDADA, no requerida: un token caducado NO debe bloquear un despliegue del núcleo COD. Si falta, se usa META_ADS_ACCESS_TOKEN como respaldo.",
+    requiredFor: [],
+    recommendedFor: ["nas-production"],
+  },
+  { name: "META_AD_LIBRARY_API_VERSION", category: "PRODUCT_HUNTER", secret: false, description: "Versión de la Graph API para la Ad Library. Vacío = cadena de respaldo (META_GRAPH_API_VERSION, META_ADS_API_VERSION y el default del repo).", requiredFor: [] },
+
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {
     name: "META_ADS_ACCESS_TOKEN",
@@ -596,7 +615,15 @@ export function auditEnvironment(profile: Profile, env: NodeJS.ProcessEnv = proc
       missingRequired.push(spec.name);
     }
 
-    if (state === "ok" && !required && expected === undefined && raw === undefined) {
+    // RECOMENDADA y ausente: se ve, se avisa, pero no bloquea nada.
+    const recomendada = spec.recommendedFor?.includes(profile) ?? false;
+    if (state === "ok" && !required && recomendada && raw === undefined) {
+      state = "missing";
+      problem = "falta y este perfil la recomienda: no bloquea el despliegue, pero lo que dependa de ella no funcionará";
+      dangers.push(`⚠️ ${spec.name} no está puesta: ${spec.description.slice(0, 140)}`);
+    }
+
+    if (state === "ok" && !required && !recomendada && expected === undefined && raw === undefined) {
       state = "not_needed";
     }
 

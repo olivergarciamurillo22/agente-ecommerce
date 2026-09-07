@@ -5,9 +5,9 @@ módulo existente (`src/lib/hunter/**` y sus scripts), no solo lo nuevo. Lo que
 sigue son defectos **reproducidos**, cada uno con su fichero, su escenario de
 fallo y su estado.
 
-Los **nueve primeros están arreglados y con test**. Los **tres últimos** son
-decisiones que Pedro tiene que tomar: no se han resuelto a propósito, porque no
-son criterio técnico.
+Los **nueve primeros están arreglados y con test**. Los tres últimos eran
+decisiones de Pedro: las tomó el 07-09 y quedan resueltas más abajo (dos
+aplicadas, una descartada a conciencia).
 
 ---
 
@@ -96,7 +96,7 @@ abre el paso).
 
 ---
 
-## Anotados, no arreglados (son decisiones)
+## Anotados: lo que NO se arregló y por qué
 
 ### 10 · `META_AD_LIBRARY_ACCESS_TOKEN` no está en el catálogo de variables
 `env:doctor` y `readiness` no saben que el discovery la necesita. Se puede
@@ -114,78 +114,81 @@ que es. Es un límite de la señal, no un bug: hay que decirlo al enseñarla.
 
 ---
 
-## Las tres decisiones que quedan para Pedro
+## Las tres decisiones · RESUELTAS el 07-09-2026 (noche)
 
-Ninguna es un bug ni criterio técnico mío: las tres cambian **qué promete el
-producto** o **qué se considera parte de producción**, y eso no lo decide quien
-escribe el código. Están sin resolver a propósito.
+Pedro las decidió las tres. Así quedaron:
 
-### Decisión 1 · ¿El Cazador es parte de producción o una herramienta aparte?
+### Decisión 1 · El token del Cazador: RECOMENDADO, no requerido — APLICADO
 
-**Qué es.** `META_AD_LIBRARY_ACCESS_TOKEN` no está declarada en
-`src/lib/config/env-schema.ts`, que es la fuente única de verdad sobre
-variables. Consecuencia: `npm run env:doctor`, `npm run readiness` y
-`npm run deploy:precheck` **no saben** que el discovery la necesita. Para esos
-tres comandos, el Cazador no existe.
+`META_AD_LIBRARY_ACCESS_TOKEN` ya está declarada en `src/lib/config/env-schema.ts`
+(categoría `PRODUCT_HUNTER`), junto con `META_AD_LIBRARY_API_VERSION`. Para
+sostenerlo hizo falta un grado nuevo en el catálogo, `recommendedFor`, que no
+existía: hasta ahora una variable era **requerida** (bloquea) o **no hacía
+falta** (silencio total). Ahora hay un punto medio.
 
-**Por qué lo decides tú.** Declararla obliga a elegir su `requiredFor`, y eso
-es una declaración de intenciones, no un detalle:
+Qué hace exactamente:
 
-| Opción | Qué significa | Efecto |
-|---|---|---|
-| No declararla (hoy) | el Cazador es una herramienta de investigación, fuera del sistema de producción | el despliegue nunca se bloquea por el Cazador; tampoco avisa de que le falta el token |
-| Declararla sin `requiredFor` | existe y está documentada, pero es opcional | `env:doctor` la lista y dice si falta; ningún veredicto cambia |
-| Declararla como requerida en `nas-production` | el Cazador es parte del producto desplegado | **un despliegue con el token caducado saldría BLOQUEADO** en `deploy:precheck` |
+| | requerida (`requiredFor`) | **recomendada (`recommendedFor`)** | no declarada |
+|---|---|---|---|
+| `env:doctor` | ✗ en rojo | **✗ en rojo, con su motivo** | no aparece |
+| `dangers` | 🚨 bloqueante | **⚠️ visible, no bloqueante** | — |
+| `missingRequired` | sí | **no** | — |
+| `deploy:precheck` | BLOCK | **WARN** | — |
+| veredicto `ready` | lo tumba | **no lo toca** | — |
 
-**Qué pasa si se deja como está.** El token puede caducar (como ya pasó el
-02-09) y nadie se entera hasta que alguien lanza una búsqueda y no encuentra
-nada. La comprobación pre-despliegue dará verde con el Cazador roto. Mi
-recomendación, si sirve: la opción intermedia, declararla sin `requiredFor`.
-Pero elegir entre las tres es tuyo.
+Se recomienda **solo en `nas-production`**, y eso es deliberado:
+`scripts/readiness.ts:89` trata **cualquier** peligro del perfil `local-safe`
+como fallo con `process.exit(1)`, así que recomendarla ahí habría puesto en
+rojo el desarrollo local de todo el mundo por un token que no hace falta para
+trabajar. Comprobado tras el cambio: `local-safe` sigue con `ready: true`, cero
+peligros y cero faltantes.
 
-### Decisión 2 · ¿El momentum se enseña como etiqueta o como cuenta?
+### Decisión 2 · El momentum pasa a ser una traza — APLICADO
 
-**Qué es.** Hoy el momentum de un competidor se guarda como una palabra:
-`fuerte`, `debil`, `sin_historico` o `sin_datos`. La regla que hay detrás
-(cinco anuncios activos o más, y al menos dos más que la última vez) está en el
-código, pero **no viaja con el dato**. En pantalla se lee «fuerte» y hay que
-creérselo.
+La regla no cambia (cinco anuncios activos o más **y** al menos dos más que la
+medida anterior), pero ahora viaja con sus números y su fecha. Vive en un solo
+sitio, `src/lib/hunter/discovery/momentum.ts`, que devuelve:
 
-**Por qué lo decides tú.** No es cómo se calcula, es **qué se le enseña a
-quien mira**. Convertirlo en una razón legible («12 anuncios activos, cuatro
-más que hace tres días») significa exponer también la antigüedad del snapshot
-anterior, y ahí aparece la parte incómoda: si la comparación es contra una
-corrida de hace dos meses, «fuerte» dice muy poco. Enseñar la traza es
-enseñar cuándo la señal es floja. Es la misma decisión que ya tomamos en el
-scoring del Hunter, donde cada punto lleva su razón, pero aquí no la he tomado
-por ti.
+```
+{ status, activeAds, previousActiveAds, delta, previousCapturedAt,
+  daysSincePrevious, rule, reason }
+```
 
-**Qué pasa si se deja como está.** El buscador enseña una etiqueta que parece
-un veredicto y es una comparación con una fecha que no se ve. Riesgo real:
-tomar una decisión de producto sobre un «fuerte» calculado contra un dato
-viejo. No es incorrecto, es opaco.
+En vez de la palabra «fuerte», la pantalla lee ahora frases como *«9 anuncios
+activos, +4 en 4 día(s) (antes 5)»*, con la regla debajo y la fecha contra la
+que se compara. Y lo que motivaba la decisión: **cuando la medida anterior es
+vieja, se dice**. A partir de veintiún días la frase añade «ojo: la medida
+anterior es de hace N días, el veredicto envejece», que es exactamente el caso
+en que un «fuerte» no significaba gran cosa y no había forma de saberlo.
 
-### Decisión 3 · ¿Qué es «lleva X días activo» cuando el anunciante pausa y relanza?
+La traza se persiste dentro del resultado de la búsqueda (`discovery_jobs.result_json`),
+así que un veredicto de hace semanas se puede auditar entero. La pestaña
+Competencia la pinta en su propio bloque, encima del resto de señales.
 
-**Qué es.** Las consultas piden `ad_active_status=ACTIVE`, fijo, y la
-antigüedad se calcula sobre la fecha de inicio del anuncio activo más antiguo.
-Un competidor que pausa una campaña y la relanza aparece **más joven de lo que
-es**: su anuncio «nuevo» empezó ayer, aunque lleve meses vendiendo ese
-producto.
+### Decisión 3 · «Días activo» se queda como está — DECISIÓN CONSCIENTE, no olvido
 
-**Por qué lo decides tú.** Arreglarlo no es un cambio de código pequeño ni
-gratis: exige consultar también los anuncios inactivos (`ALL` en vez de
-`ACTIVE`), lo que **multiplica los resultados y el consumo de cuota** dentro de
-un presupuesto de quince minutos, y obliga a decidir qué se cuenta: ¿la fecha
-del primer anuncio que le vimos alguna vez, aunque estuviera parado tres meses?
-Eso ya no es «lleva X días activo», es otra métrica distinta. La pregunta de
-negocio, que no es mía, es cuál de las dos te sirve para decidir si testear un
-producto.
+**No se toca, y queda escrito para que dentro de tres meses nadie lo lea como
+un descuido.** La señal sigue calculándose solo sobre anuncios activos
+(`ad_active_status=ACTIVE`), así que un competidor que pausa y relanza aparece
+más joven de lo que es.
 
-**Qué pasa si se deja como está.** La señal subestima a los competidores que
-rotan creativos, que suelen ser precisamente los más profesionales. Hoy está
-mitigado diciéndolo: la señal lleva escrito su límite y se marca como señal, no
-como dato. Pero un número que subestima sigue siendo un número que subestima.
+Por qué no se optimiza ahora:
+
+- Arreglarlo obliga a pedir también los anuncios inactivos, lo que **multiplica
+  los resultados y el gasto de cuota** dentro de un presupuesto de quince
+  minutos que ya se agota antes de recorrer todos los términos.
+- Y obliga a elegir otra métrica: «desde cuándo lo vemos anunciando» no es lo
+  mismo que «lleva X días activo». Cambiar la definición sin necesidad
+  demostrada es peor que mantener una señal honesta con su límite escrito.
+- El riesgo real de dejarlo está acotado: **la señal ya declara su límite** en
+  la propia pantalla («solo cuenta anuncios ACTIVOS: si el anunciante pausó y
+  relanzó, se lee más joven de lo que es») y va etiquetada como señal, nunca
+  como dato confirmado. Subestima, y quien lo mira lo sabe.
+
+Cuándo habría que volver sobre esto: si al usar el buscador de verdad se ve que
+los competidores buenos aparecen sistemáticamente con pocos días, o si Pedro
+decide que la métrica que le sirve para testear un producto es «desde cuándo
+existe esta campaña» y no «cuánto lleva sin pausar».
 
 ---
 
