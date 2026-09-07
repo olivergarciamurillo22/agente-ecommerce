@@ -14643,6 +14643,71 @@ async function main(): Promise<void> {
     canalCov.deleteDispatchChannel({ sku: "COV-CUBIERTO" });
   });
 
+  await test("RESUMEN OPERATIVO · junta las cuatro incidencias que esperan a una persona con su antigüedad, incluida la escalada owner_only que la bandeja /trabajo no enseña", async () => {
+    const pending = await import("../src/lib/system/pending-review");
+    const addr = await import("../src/lib/orders/address-validation");
+    const cancel = await import("../src/lib/orders/ai-cancellation");
+    const raw = db.systemDbHandle();
+    const ahora = Math.floor(Date.now() / 1000);
+
+    // 1 · ALERTA_DIRECCION abierta.
+    const conAlerta = mkOrder("pend-1", "P9001", "34600009101");
+    addr.openAddressAlert(db.getOrderById(conAlerta.id)!, 2, "dudosa", ["falta piso o puerta"]);
+    raw.prepare("UPDATE address_alerts SET opened_at = ? WHERE order_id = ?").run(ahora - 50 * 3600, conAlerta.id);
+
+    // 2 · Cancelación automática por IA sin revisar (camino real).
+    const cancelado = mkOrder("pend-2", "P9002", "34600009102");
+    raw.prepare("UPDATE orders SET status='confirmed' WHERE id=?").run(cancelado.id);
+    const hecha = cancel.cancelOrderByAi(db.getOrderById(cancelado.id)!, { message: "cancelad el pedido", confidence: 0.93, model: "gpt-4o-mini" }, { env: {} });
+    assert.equal(hecha.status, "cancelled", JSON.stringify(hecha));
+
+    // 3 · Despacho retenido.
+    const retenido = mkOrder("pend-3", "P9003", "34600009103");
+    raw.prepare("INSERT INTO dispatch_cooldowns (order_id, status, scheduled_at, due_at, evaluated_at, blocked_reason, channel) VALUES (?, 'blocked', ?, ?, ?, ?, 'beeping')")
+      .run(retenido.id, ahora - 40 * 3600, ahora - 34 * 3600, ahora - 34 * 3600, "hay una solicitud de cancelación del cliente sin resolver");
+
+    // 4 · Escalada owner_only: invisible en /trabajo, pero retiene el despacho.
+    const invisible = mkOrder("pend-4", "P9004", "34600009104");
+    const convo = db.getOrCreateConversation(invisible.phone, "Cliente invisible");
+    raw.prepare("INSERT INTO work_items(conversation_id, order_id, reason, owner_only, created_at) VALUES (?, ?, ?, 1, ?)")
+      .run(convo.id, invisible.id, "Escalado a Pedro: revisar importe", ahora - 5 * 3600);
+
+    const review = pending.getPendingReview(ahora);
+    const mio = (id: number) => review.items.filter((i) => i.orderId === id);
+    assert.equal(mio(conAlerta.id)[0]?.kind, "ALERTA_DIRECCION");
+    assert.equal(mio(conAlerta.id)[0]?.ageHours, 50, "la antigüedad se mide en tiempo transcurrido, no en días naturales");
+    assert.match(mio(conAlerta.id)[0]?.detail ?? "", /dudosa|falta piso/);
+    assert.match(mio(conAlerta.id)[0]?.whatToDo ?? "", /Cerrar alerta/i);
+    assert.equal(mio(cancelado.id)[0]?.kind, "CANCELACION_IA");
+    assert.match(mio(cancelado.id)[0]?.detail ?? "", /0\.93|confianza/);
+    assert.equal(mio(retenido.id)[0]?.kind, "DESPACHO_RETENIDO");
+    assert.match(mio(retenido.id)[0]?.detail ?? "", /cancelación del cliente sin resolver/);
+    assert.equal(mio(retenido.id)[0]?.ageHours, 34);
+    assert.equal(mio(invisible.id)[0]?.kind, "ESCALADA_SOLO_PROPIETARIO");
+    assert.match(mio(invisible.id)[0]?.detail ?? "", /no aparece en la bandeja/);
+
+    // Orden por antigüedad y contadores.
+    for (let i = 1; i < review.items.length; i++) assert.ok(review.items[i - 1].since <= review.items[i].since, "de la más vieja a la más nueva");
+    assert.ok(review.totals.ALERTA_DIRECCION >= 1 && review.totals.CANCELACION_IA >= 1 && review.totals.DESPACHO_RETENIDO >= 1 && review.totals.ESCALADA_SOLO_PROPIETARIO >= 1);
+    assert.ok(review.olderThan24h >= 2, "las de 50 h y 34 h cuentan como mayores de 24 h");
+    const texto = pending.renderPendingReview(review);
+    assert.match(texto, /esperando a una persona/);
+    assert.match(texto, /P9001|P9003/);
+
+    // Al resolverlas, desaparecen del resumen (es lo que mide si alguien atiende).
+    addr.resolveAddressAlert(conAlerta.id, "Pedro", "llamé al cliente");
+    cancel.revertAiCancellation(cancelado.id, "Pedro", "falso positivo", { env: {} });
+    raw.prepare("UPDATE dispatch_cooldowns SET status='executed' WHERE order_id=?").run(retenido.id);
+    raw.prepare("UPDATE work_items SET resolved_at=unixepoch() WHERE order_id=?").run(invisible.id);
+    const despues = pending.getPendingReview(ahora);
+    for (const id of [conAlerta.id, cancelado.id, retenido.id, invisible.id]) {
+      assert.equal(despues.items.some((i) => i.orderId === id), false, `el pedido ${id} ya no espera a nadie`);
+    }
+    // Un resumen vacío se dice con palabras, no con una tabla vacía.
+    assert.match(pending.renderPendingReview({ generatedAt: ahora, items: [], totals: { ALERTA_DIRECCION: 0, CANCELACION_IA: 0, DESPACHO_RETENIDO: 0, ESCALADA_SOLO_PROPIETARIO: 0 }, staleDays: 0, olderThan24h: 0 }), /sin incidencias/);
+    raw.prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE 'pend-%'").run();
+  });
+
   await test("schema 17 migra hasta Discovery 21 sin perder tablas", async () => {
     const Database = (await import("better-sqlite3")).default;
     const fixture = new Database(":memory:");
