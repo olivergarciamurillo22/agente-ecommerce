@@ -215,7 +215,7 @@ DESPLEGADO.**
 > (22; capa 1 determinista ACTIVA por defecto y solo abre `ALERTA_DIRECCION`,
 > capa 2 OpenAI tras `ADDRESS_AI_VALIDATION_ENABLED=0`), **auto-despacho tras
 > cooldown de 6 h + IA de intención** (23; `AUTO_DISPATCH_COOLDOWN_ENABLED=0`,
-> `POST_CONFIRMATION_AI_ENABLED=0`, FAQ `PROPUESTA_PENDIENTE_APROBACION_PEDRO`),
+> `POST_CONFIRMATION_AI_ENABLED=0`, FAQ aprobada por Pedro el 07-09, auto-cancelación IA ≥ 0,85),
 > **router de canal Beeping O Dropea por producto** (24; `dispatch_channels`
 > nace VACÍA: sin fila no se despacha nada), pesos del Hunter **40/35/0/10/10/5**
 > (`docs/HUNTER-SPEC.md`), `CASAMABLE_BUILD_SHA` en `/api/health/live`,

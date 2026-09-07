@@ -79,7 +79,7 @@ que una vuelta atrás de código las ignora sin estorbo.
 | Validación de direcciones capa 1 (determinista) | **ACTIVA**: solo abre `ALERTA_DIRECCION` (visible en panel, retiene el mark-to-send automático); no bloquea la confirmación | siempre |
 | Validación capa 2 (OpenAI) | apagada | `ADDRESS_AI_VALIDATION_ENABLED=1` + `OPENAI_API_KEY` (decisión de Pedro) |
 | Cooldown de auto-despacho (6 h) | apagado: confirmar dispara el hook inmediato como en v4.2 | `AUTO_DISPATCH_COOLDOWN_ENABLED=1` + rellenar `dispatch_channels` (`npm run dispatch:channels`) |
-| IA de intención post-confirmación | apagada: texto libre tras confirmar → persona | `POST_CONFIRMATION_AI_ENABLED=1` tras aprobar `config/faq-post-confirmacion.json` |
+| IA de intención post-confirmación | apagada: texto libre tras confirmar → persona | `POST_CONFIRMATION_AI_ENABLED=1` + `OPENAI_API_KEY` (FAQ ya aprobada el 07-09; incluye auto-cancelación ≥ 0,85) |
 | Router de canal (`dispatch_channels`) | tabla vacía: ningún producto tiene canal | Pedro, producto a producto |
 | Dropea escritura | `DROPEA_WRITE_ENABLED=0` (política): un producto en canal `dropea` quedaría RETENIDO | decisión de Pedro |
 | Identidad de build | `/api/health/live` devuelve `build` = SHA de la imagen (`sin_confirmar` si no se pasó `GIT_SHA`) | `scripts/nas-verify-v43.sh` lo exige |

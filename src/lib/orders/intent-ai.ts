@@ -30,9 +30,14 @@ export type PostConfirmationIntent = "cancelacion" | "duda_conocida" | "duda_no_
 
 export interface FaqEntry {
   id: string;
-  question: string;
+  /** Texto fijo que se envía (en el fichero de Pedro: "respuesta"). */
   response: string;
+  /** Disparadores/ejemplos para el catálogo del prompt (en el fichero: "disparadores"). */
   examples?: string[];
+  /** Pregunta descriptiva opcional (formato antiguo). */
+  question?: string;
+  /** true = además de responder con el texto fijo, abre una escalada REAL a persona (en el fichero: "escala"). */
+  escalate?: boolean;
 }
 
 export interface IntentAiVerdict {
@@ -43,6 +48,8 @@ export interface IntentAiVerdict {
 }
 
 export interface IntentClassification {
+  /** La entrada de la FAQ elegida exige, además, escalada real a persona. */
+  faqEscalate?: boolean;
   intent: PostConfirmationIntent;
   faqId: string | null;
   confidence: number | null;
@@ -83,9 +90,23 @@ export function loadPostConfirmationFaq(file = faqFilePath()): FaqEntry[] {
     const stat = fs.statSync(file);
     if (faqCache && faqCache.file === file && faqCache.mtimeMs === stat.mtimeMs) return faqCache.entries;
     const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { entries?: unknown };
-    const entries = Array.isArray(parsed.entries)
-      ? parsed.entries.filter((e): e is FaqEntry => !!e && typeof e === "object" && typeof (e as FaqEntry).id === "string" && typeof (e as FaqEntry).response === "string" && (e as FaqEntry).response.trim() !== "")
-      : [];
+    // Acepta el formato de Pedro (id / disparadores / respuesta / escala) y el
+    // antiguo (id / question / examples / response). El texto se usa LITERAL.
+    const entries: FaqEntry[] = [];
+    for (const raw of Array.isArray(parsed.entries) ? parsed.entries : []) {
+      if (!raw || typeof raw !== "object") continue;
+      const r = raw as Record<string, unknown>;
+      const response = typeof r.respuesta === "string" ? r.respuesta : typeof r.response === "string" ? r.response : "";
+      if (typeof r.id !== "string" || !r.id.trim() || !response.trim()) continue;
+      const list = Array.isArray(r.disparadores) ? r.disparadores : Array.isArray(r.examples) ? r.examples : [];
+      entries.push({
+        id: r.id,
+        response,
+        examples: list.filter((x): x is string => typeof x === "string" && x.trim() !== ""),
+        question: typeof r.question === "string" ? r.question : undefined,
+        escalate: r.escala === true || r.escalate === true,
+      });
+    }
     faqCache = { file, mtimeMs: stat.mtimeMs, entries };
     return entries;
   } catch {
@@ -107,7 +128,7 @@ export function intentAiTimeoutMs(env: Record<string, string | undefined> = proc
 }
 
 export function buildIntentSystemPrompt(faq: FaqEntry[]): string {
-  const catalog = faq.map((e) => `- id "${e.id}": ${e.question}${e.examples?.length ? ` (ej.: ${e.examples.slice(0, 3).join(" / ")})` : ""}`).join("\n");
+  const catalog = faq.map((e) => `- id "${e.id}"${e.question ? `: ${e.question}` : ""}${e.examples?.length ? ` (disparadores: ${e.examples.slice(0, 6).join(" / ")})` : ""}`).join("\n");
   return (
     "Clasificas mensajes de WhatsApp de clientes que YA han confirmado un pedido contra reembolso en una tienda española. " +
     "Responde solo con el JSON pedido. Intenciones: " +
@@ -115,7 +136,7 @@ export function buildIntentSystemPrompt(faq: FaqEntry[]): string {
     "'duda_conocida' = pregunta que coincide claramente con UNA de estas preguntas frecuentes (pon su id en duda_conocida_id):\n" +
     (catalog || "(sin preguntas frecuentes configuradas)") +
     "\n'duda_no_reconocida' = pregunta o petición que NO está en la lista. " +
-    "REGLA ESTRICTA: cualquier pregunta sobre características técnicas del producto (medidas, materiales, compatibilidad, funcionamiento, contenido del pack, garantía) que no coincida EXACTAMENTE con una de las preguntas frecuentes es 'duda_no_reconocida', nunca 'duda_conocida': la responderá una persona. " +
+    "REGLA ESTRICTA: cualquier pregunta sobre características técnicas del producto (medidas, materiales, compatibilidad, funcionamiento, contenido del pack, garantía) que no coincida con una de las preguntas frecuentes (p. ej. 'especificaciones_producto') es 'duda_no_reconocida', nunca otra 'duda_conocida': la responderá una persona. " +
     "'otro' = saludos, agradecimientos, mensajes vacíos o sin sentido. " +
     "Ante cualquier duda entre cancelación y otra cosa, elige 'cancelacion'. 'confianza' es tu seguridad (0 a 1). " +
     "'respuesta_sugerida' es opcional y NO se enviará al cliente."
@@ -195,5 +216,5 @@ export async function classifyPostConfirmationMessage(
   const entry = v.duda_conocida_id ? faq.find((e) => e.id === v.duda_conocida_id) : undefined;
   if (!entry) return { ...base, autoReply: null, escalationReason: "duda_conocida_id_desconocida" };
   // Texto FIJO de la FAQ, jamás el del modelo.
-  return { ...base, autoReply: entry.response, escalationReason: null };
+  return { ...base, autoReply: entry.response, escalationReason: null, faqEscalate: entry.escalate === true };
 }

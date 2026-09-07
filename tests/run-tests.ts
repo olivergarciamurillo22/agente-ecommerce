@@ -1201,11 +1201,16 @@ async function main(): Promise<void> {
     return db.getOrderById(created.id)!;
   };
 
-  await test("COOLDOWN · la FAQ propuesta existe, tiene 4-6 entradas con texto fijo y está marcada como pendiente de aprobación", () => {
-    assert.ok(FAQ.length >= 4 && FAQ.length <= 6, `${FAQ.length} entradas`);
+  await test("COOLDOWN · la FAQ aprobada por Pedro (07-09) tiene 7 entradas con texto fijo LITERAL y las que prometen una persona llevan escala=true", () => {
+    assert.equal(FAQ.length, 7, `${FAQ.length} entradas`);
+    assert.deepEqual(FAQ.map((e) => e.id), ["tiempo_entrega", "forma_pago", "cambio_direccion", "garantia_devolucion", "seguimiento_pedido", "contacto_humano", "especificaciones_producto"]);
+    assert.equal(FAQ.find((e) => e.id === "tiempo_entrega")!.response, "Tu pedido llega en 24-48h desde que sale del almacén. Lo tienes en la puerta de tu casa en ese plazo.");
+    assert.equal(FAQ.find((e) => e.id === "especificaciones_producto")!.response, "Ahora te paso con atención al cliente para que te confirme ese dato con exactitud.");
+    assert.deepEqual(FAQ.filter((e) => e.escalate).map((e) => e.id), ["cambio_direccion", "garantia_devolucion", "seguimiento_pedido", "contacto_humano", "especificaciones_producto"]);
+    assert.ok(FAQ.find((e) => e.id === "especificaciones_producto")!.examples!.includes("medidas"));
     for (const e of FAQ) { assert.ok(e.id && e.response.trim().length > 20, e.id); }
     const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/faq-post-confirmacion.json"), "utf8")) as { status: string };
-    assert.equal(raw.status, "PROPUESTA_PENDIENTE_APROBACION_PEDRO");
+    assert.equal(raw.status, "APROBADA_PEDRO_2026-09-07");
     // Apagado por defecto: sin flag nada cambia.
     assert.equal(intentAi.postConfirmationAiEnabled({ OPENAI_API_KEY: "sk-x" }), false);
     assert.equal(dispatch.autoDispatchEnabled({}), false);
@@ -1464,8 +1469,8 @@ async function main(): Promise<void> {
   await test("FAQ · pregunta técnica de producto que no coincide con un disparador → SIEMPRE persona: la regla va en el prompt y, aunque el modelo invente un id o sugiera texto, el código no responde libre", async () => {
     await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
       // El estado del fichero: sigue siendo la propuesta (el JSON aprobado no ha llegado). Nunca se inventa contenido aprobado.
-      const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/faq-post-confirmacion.json"), "utf8")) as { status: string; entries: Array<{ id: string; response: string }> };
-      assert.equal(raw.status, "PROPUESTA_PENDIENTE_APROBACION_PEDRO", "hasta recibir el JSON aprobado literal, el fichero no cambia de estado");
+      const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/faq-post-confirmacion.json"), "utf8")) as { status: string; entries: Array<{ id: string; respuesta: string }> };
+      assert.equal(raw.status, "APROBADA_PEDRO_2026-09-07");
       assert.match(intentAi.buildIntentSystemPrompt(FAQ), /REGLA ESTRICTA: cualquier pregunta sobre características técnicas del producto/);
       const casos: Array<[string, string, import("../src/lib/orders/intent-ai").IntentAiCompleter, RegExp]> = [
         // El modelo hace lo correcto: duda_no_reconocida.
@@ -1473,7 +1478,7 @@ async function main(): Promise<void> {
         // El modelo se inventa un id de FAQ que no existe: el código lo rechaza.
         ["71", "¿es de plástico o de tela? ¿se puede lavar?", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "caracteristicas_producto", confianza: 0.99, respuesta_sugerida: "Es de tela lavable" }), /duda_conocida_id_desconocida/],
         // El modelo fuerza un id real con una pregunta técnica: la respuesta que saldría sería el texto FIJO de ese id, nunca la sugerida; aquí se comprueba que jamás sale texto libre.
-        ["72", "¿el pack trae 2 o 3 unidades?", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.6, respuesta_sugerida: "Trae 3 unidades" }), /confianza_baja_0\.60/],
+        ["72", "¿el pack trae 2 o 3 unidades?", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "tiempo_entrega", confianza: 0.6, respuesta_sugerida: "Trae 3 unidades" }), /confianza_baja_0\.60/],
       ];
       for (const [suffix, texto, complete, motivo] of casos) {
         const order = mkConfirmedForDispatch(suffix);
@@ -1487,7 +1492,50 @@ async function main(): Promise<void> {
         assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN", suffix);
       }
       // Todo texto que puede salir solo está en el fichero, literal: ninguna respuesta del bot es distinta de una entrada.
-      for (const e of FAQ) assert.ok(raw.entries.some((x) => x.id === e.id && x.response === e.response), e.id);
+      for (const e of FAQ) assert.ok(raw.entries.some((x) => x.id === e.id && x.respuesta === e.response), e.id);
+    });
+  });
+
+  await test("FAQ · entradas con escala=true (especificaciones_producto, contacto_humano, garantia_devolucion, seguimiento_pedido, cambio_direccion): responden con su texto fijo Y abren una escalada REAL (work_item + HUMAN), el despacho queda retenido; tiempo_entrega y forma_pago NO escalan", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const casos: Array<[string, string, string, boolean]> = [
+        ["80", "especificaciones_producto", "¿de qué material es y qué medidas tiene?", true],
+        ["81", "contacto_humano", "quiero hablar con una persona", true],
+        ["82", "garantia_devolucion", "y si no me gusta lo puedo devolver?", true],
+        ["83", "seguimiento_pedido", "donde esta mi pedido? no me ha llegado el tracking", true],
+        ["84", "cambio_direccion", "me he equivocado de direccion", true],
+        ["85", "tiempo_entrega", "cuanto tarda en llegar?", false],
+        ["86", "forma_pago", "es contrareembolso?", false],
+      ];
+      for (const [suffix, id, texto, escala] of casos) {
+        const order = mkConfirmedForDispatch(suffix);
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const entry = FAQ.find((e) => e.id === id)!;
+        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, texto, {
+          env: INTENT_ON, faq: FAQ,
+          complete: async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: id, confianza: 0.9, respuesta_sugerida: "texto inventado" }),
+        });
+        assert.equal(f.reply, entry.response, `${id}: texto fijo literal del fichero`);
+        const convoId = db.getConversationIdByPhone(order.phone);
+        const wi = db.systemDbHandle().prepare("SELECT reason FROM work_items WHERE order_id=? AND resolved_at IS NULL").all(order.id) as Array<{ reason: string }>;
+        const audit = db.systemDbHandle().prepare("SELECT faq_id, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as Record<string, unknown>;
+        const row = dispatch.getDispatchCooldown(order.id)!;
+        beepingCalls.length = 0;
+        const d = await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend });
+        if (escala) {
+          assert.equal(db.getConversationById(convoId!)!.mode, "HUMAN", `${id}: escalada real, no solo el mensaje`);
+          assert.ok(wi.some((w) => w.reason === `FAQ '${id}': te paso con atención al cliente`), `${id}: work_item abierto: ${JSON.stringify(wi)}`);
+          assert.deepEqual(audit, { faq_id: id, auto_replied: 1, escalated: 1 }, id);
+          assert.equal(d.status, "blocked", `${id}: despacho retenido hasta que la persona resuelva`);
+          assert.equal(beepingCalls.length, 0);
+          assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='post_confirmation_faq_escalated' AND order_ref=?").get(order.shopify_order_number));
+        } else {
+          assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN", `${id}: no escala`);
+          assert.equal(wi.length, 0, id);
+          assert.deepEqual(audit, { faq_id: id, auto_replied: 1, escalated: 0 }, id);
+          assert.equal(d.status, "executed", `${id}: el cooldown sigue y despacha`);
+        }
+      }
     });
   });
 
@@ -1497,18 +1545,18 @@ async function main(): Promise<void> {
       handleOrderButtonReply(order.phone, "confirm_order");
       const r = handleOrderReply(order.phone, "y cuando me llega mas o menos?");
       assert.ok(r.followUp);
-      const faq = FAQ.find((e) => e.id === "plazo_entrega")!;
+      const faq = FAQ.find((e) => e.id === "tiempo_entrega")!;
       let prompt = "";
       const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "y cuando me llega mas o menos?", {
         env: INTENT_ON, faq: FAQ,
-        complete: async (args) => { prompt = args.system; return JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.88, respuesta_sugerida: "Mañana mismo!!" }); },
+        complete: async (args) => { prompt = args.system; return JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "tiempo_entrega", confianza: 0.88, respuesta_sugerida: "Mañana mismo!!" }); },
       });
       assert.equal(f.reply, faq.response, "texto fijo de la FAQ, no el que sugiere el modelo");
-      assert.match(prompt, /plazo_entrega/, "el catálogo de la FAQ viaja en el prompt");
+      assert.match(prompt, /tiempo_entrega/, "el catálogo de la FAQ viaja en el prompt");
       const convoId = db.getConversationIdByPhone(order.phone);
       assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN", "no se escala");
       const audit = db.systemDbHandle().prepare("SELECT intent, faq_id, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as Record<string, unknown>;
-      assert.deepEqual(audit, { intent: "duda_conocida", faq_id: "plazo_entrega", auto_replied: 1, escalated: 0 });
+      assert.deepEqual(audit, { intent: "duda_conocida", faq_id: "tiempo_entrega", auto_replied: 1, escalated: 0 });
       const row = dispatch.getDispatchCooldown(order.id)!;
       beepingCalls.length = 0;
       assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "executed", "el cooldown siguió y despacha");
@@ -1520,7 +1568,7 @@ async function main(): Promise<void> {
       const casos: Array<[string, import("../src/lib/orders/intent-ai").IntentAiCompleter, RegExp]> = [
         ["6", async () => JSON.stringify({ intencion: "duda_no_reconocida", duda_conocida_id: null, confianza: 0.95, respuesta_sugerida: null }), /intencion_duda_no_reconocida/],
         ["7", async () => JSON.stringify({ intencion: "otro", duda_conocida_id: null, confianza: 0.99, respuesta_sugerida: null }), /intencion_otro/],
-        ["8", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.6, respuesta_sugerida: null }), /confianza_baja_0\.60/],
+        ["8", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "tiempo_entrega", confianza: 0.6, respuesta_sugerida: null }), /confianza_baja_0\.60/],
         ["9", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "inventada", confianza: 0.99, respuesta_sugerida: "x" }), /duda_conocida_id_desconocida/],
         ["10", async () => "no json", /respuesta_ia_invalida/],
         ["11", async () => { throw new Error("boom"); }, /fallo_llamada_ia/],

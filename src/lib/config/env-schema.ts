@@ -382,7 +382,7 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     name: "POST_CONFIRMATION_AI_ENABLED",
     category: "AUTO_DISPATCH",
     secret: false,
-    description: "1 = el texto libre que llega tras confirmar se clasifica con OpenAI: solo una duda conocida de config/faq-post-confirmacion.json con confianza ≥ 0,75 se responde sola (texto fijo de la FAQ); todo lo demás va a persona. 0 (default) = todo texto libre post-confirmación va a persona, como hasta ahora. NO activar hasta que Pedro apruebe el contenido de la FAQ.",
+    description: "1 = el texto libre que llega tras confirmar se clasifica con OpenAI: solo una duda conocida de config/faq-post-confirmacion.json con confianza ≥ 0,75 se responde sola (texto fijo de la FAQ); todo lo demás va a persona. 0 (default) = todo texto libre post-confirmación va a persona, como hasta ahora. FAQ aprobada por Pedro el 07-09; activar es decisión suya.",
     requiredFor: [],
     mustEqual: { "local-safe": "0" },
     defaultValue: "0",

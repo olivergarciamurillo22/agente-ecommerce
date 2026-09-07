@@ -1,8 +1,7 @@
 # Auto-despacho tras cooldown + IA de intención post-confirmación (07-09-2026)
 
-**Estado: implementado, DESACTIVADO por defecto** (dos flags a 0) hasta que
-Pedro apruebe el contenido de `config/faq-post-confirmacion.json` y decida
-activar el cooldown. Con los flags a 0 el sistema se comporta exactamente
+**Estado: implementado, DESACTIVADO por defecto** (dos flags a 0). La FAQ
+ya está aprobada por Pedro (07-09); falta su decisión de activar los flags. Con los flags a 0 el sistema se comporta exactamente
 como antes: confirmar dispara el hook inmediato de Beeping y todo texto libre
 post-confirmación va a una persona.
 
@@ -99,32 +98,44 @@ veces se rechaza (409). Insignia **CANCELADO POR IA** en el listado.
 Con `POST_CONFIRMATION_AI_ENABLED=0` (default) nada de esto existe: el flujo
 determinista de siempre.
 
-### Base de FAQ (`config/faq-post-confirmacion.json`)
+### Base de FAQ (`config/faq-post-confirmacion.json`) — APROBADA por Pedro (07-09-2026)
 
-Cinco entradas **propuestas por Fable 5.1**, marcadas
-`PROPUESTA_PENDIENTE_APROBACION_PEDRO`: plazo de entrega, cambiar la
-dirección, forma de pago, seguimiento, contacto. **Pedro debe revisar y
-aprobar cada respuesta antes de poner `POST_CONFIRMATION_AI_ENABLED=1`.**
-Las cifras (24-48 h, 1-3 días, horario 9:00-18:00) son plantillas a
-confirmar, no datos verificados. Cambiar la FAQ no requiere desplegar código:
-se lee del fichero (caché por mtime).
+Siete entradas con el **texto literal de Pedro** (`status: APROBADA_PEDRO_2026-09-07`),
+en su formato `id / disparadores / respuesta [/ escala]` (el loader también
+acepta el formato antiguo). Cambiar la FAQ no requiere desplegar código: se lee
+del fichero (caché por mtime).
 
-**Regla explícita (07-09): una pregunta sobre una característica técnica del
+| id | disparadores (resumen) | ¿escala a persona? |
+|---|---|---|
+| `tiempo_entrega` | cuánto tarda, cuándo llega, plazo de entrega | no: responde y el cooldown sigue |
+| `forma_pago` | cómo pago, contrareembolso, pago al recibir | no |
+| `cambio_direccion` | cambiar dirección, dirección equivocada | **sí** (decisión técnica de Fable: el cambio tras confirmar lo aplica una persona y retiene el despacho; Pedro puede quitar `escala`) |
+| `garantia_devolucion` | garantía, devolución, no me gusta | **sí** |
+| `seguimiento_pedido` | dónde está mi pedido, tracking | **sí** |
+| `contacto_humano` | hablar con alguien, atención al cliente | **sí** |
+| `especificaciones_producto` | medidas, tamaño, material, qué trae el pack, peso, colores… | **sí** |
+
+**`escala: true` = escalada REAL, no solo el mensaje.** Cuando el modelo
+elige una de esas entradas (confianza ≥ 0,75), el cliente recibe su texto fijo
+**y además** se abre exactamente la misma escalada que cualquier otro caso a
+humano: work_item «FAQ '<id>': te paso con atención al cliente», modo HUMAN,
+`needs_call`, despacho automático retenido hasta que la persona resuelva,
+evento `post_confirmation_faq_escalated`, y en `intent_classifications`
+`auto_replied=1, escalated=1`. Test: «FAQ · entradas con escala=true…».
+
+**Regla explícita: una pregunta sobre una característica técnica del
 producto** (medidas, materiales, compatibilidad, funcionamiento, contenido
-del pack, garantía) **que no coincida con uno de los disparadores de la FAQ
-SIEMPRE escala a persona.** Nunca se genera una respuesta libre: el modelo
-solo puede elegir un id existente y, aun así, el texto que sale es el fijo de
-la FAQ. Está en el prompt (`buildIntentSystemPrompt`, «REGLA ESTRICTA») y en
-el código (un id que no exista en el fichero → `duda_conocida_id_desconocida`
-→ persona), con test («pregunta técnica de producto … SIEMPRE persona»).
+del pack, garantía) **acaba SIEMPRE en persona.** O bien coincide con
+`especificaciones_producto` (texto fijo «te paso con atención al cliente» +
+escalada real), o bien no coincide con nada y es `duda_no_reconocida` →
+persona. Nunca se genera una respuesta libre: el modelo solo puede elegir un
+id existente (un id inventado → `duda_conocida_id_desconocida` → persona) y
+el texto que sale es siempre el del fichero. Está en el prompt
+(`buildIntentSystemPrompt`, «REGLA ESTRICTA») y en tests («FAQ · pregunta
+técnica de producto…»).
 
-**Estado del contenido (07-09, noche):** Pedro indicó que había aprobado 6
-entradas, pero el JSON aprobado **no llegó al repositorio** (el prompt lo
-citaba como adjunto y no venía; tampoco está en disco). El fichero sigue con
-las 5 entradas propuestas y `status: PROPUESTA_PENDIENTE_APROBACION_PEDRO`.
-**No se ha reformulado ni inventado ningún texto aprobado.** Cuando llegue el
-JSON literal: sustituir `entries`, poner `status: "APROBADA_PEDRO_<fecha>"` y
-correr `npm test` (el test de la FAQ exige 4–6 entradas con texto fijo).
+Con la FAQ aprobada, lo que falta para `POST_CONFIRMATION_AI_ENABLED=1` es
+solo la decisión de Pedro y `OPENAI_API_KEY` en el `.env` del NAS.
 
 ## Pieza 2 · Cooldown de auto-despacho (`src/lib/orders/auto-dispatch.ts`)
 
@@ -250,7 +261,7 @@ JSON inválido / fallo / timeout → persona (7 casos) · despacho automático a
 las 6 h sin incidencias → se ejecuta una sola vez · bloqueado por
 `ALERTA_DIRECCION` abierta → no se ejecuta, visible en panel, «despachar
 ahora» rechazado hasta cerrarla y aceptado después · flags apagados →
-comportamiento anterior · FAQ con 4-6 entradas y estado pendiente de aprobación ·
+comportamiento anterior · FAQ aprobada (7 entradas, texto literal; las de escala=true responden Y escalan) ·
 **router de canal**: sin canal nunca se despacha (ni manual); Beeping → solo Beeping;
 Dropea → solo Dropea (éxito inyectado despacha; adaptador real con llave cerrada
 queda retenido); líneas en canales distintos → retenido; en ningún caso se

@@ -520,11 +520,21 @@ export async function resolvePostConfirmationText(
         `INSERT INTO intent_classifications (order_id, phone, message, intent, faq_id, confidence, auto_replied, escalated, model, raw_response)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(order.id, phone, text.slice(0, 2000), c.intent, c.faqId, c.confidence, escalated ? 0 : 1, escalated ? 1 : 0, c.model, c.raw);
+      .run(order.id, phone, text.slice(0, 2000), c.intent, c.faqId, c.confidence, escalated ? 0 : 1, escalated || c.faqEscalate ? 1 : 0, c.model, c.raw);
   } catch (err) {
     logger.warn(`[INTENT] no se pudo auditar la clasificación: ${err instanceof Error ? err.message : err}`);
   }
   if (!escalated) {
+    // Entradas con escala=true (contacto humano, especificaciones del
+    // producto, devoluciones…): el texto fijo dice "te paso con una persona"
+    // y eso tiene que ser VERDAD: misma escalada real que cualquier otro caso
+    // a humano (work_item + HUMAN + needs_call, despacho retenido). Solo
+    // cambia el texto que recibe el cliente.
+    if (c.faqEscalate) {
+      escalateUnknownText(phone, [order], `FAQ '${c.faqId}': te paso con atención al cliente`);
+      logIntegrationEvent("whatsapp", "post_confirmation_faq_escalated", "warning", `duda conocida '${c.faqId}' (confianza ${c.confidence?.toFixed(2)}): respondida con la FAQ Y escalada a persona (escala=true)`, order.shopify_order_number);
+      return { reply: c.autoReply ?? undefined };
+    }
     logIntegrationEvent("whatsapp", "post_confirmation_auto_reply", "info", `duda conocida '${c.faqId}' (confianza ${c.confidence?.toFixed(2)}): respondida con la FAQ; el cooldown sigue`, order.shopify_order_number);
     return { reply: c.autoReply ?? undefined };
   }
