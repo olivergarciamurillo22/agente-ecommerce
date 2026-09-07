@@ -26,11 +26,13 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 - Dropi: [DROPI-API-CONTRACT.md](DROPI-API-CONTRACT.md) — **Dropi NO tiene API pública; no implementar writes sin evidencia nueva**
 - Meta Ads: [META-ADS-INTEGRATION.md](META-ADS-INTEGRATION.md)
 - Finanzas/Calculadora: [FINANCE-MODEL.md](FINANCE-MODEL.md) · [BUSINESS-METRICS.md](BUSINESS-METRICS.md)
-- Cazador/Landing: [PRODUCT-HUNTER-CONTRACT.md](PRODUCT-HUNTER-CONTRACT.md) · [LANDING-STUDIO.md](LANDING-STUDIO.md)
+- Cazador/Landing: [PRODUCT-HUNTER-CONTRACT.md](PRODUCT-HUNTER-CONTRACT.md) · [HUNTER-SPEC.md](HUNTER-SPEC.md) (pesos 40/35/0/10/10/5 y constantes con fuente) · evaluación del PI Engine de `hunter-end-to-end-v1` (solo análisis, 4 piezas a portar): [HUNTER-PI-ENGINE-EVALUACION-07-09.md](HUNTER-PI-ENGINE-EVALUACION-07-09.md) · [LANDING-STUDIO.md](LANDING-STUDIO.md)
 
 ## OPERATIONS
 
 - **Deploy vigente: [deploy/RELEASE-v4.3.md](deploy/RELEASE-v4.3.md)** (canónica v4.3, esquema 15→24) · pasos del espacio de atención (crear usuarios): [deploy/PEDRO-WORKSPACE-05-09.md](deploy/PEDRO-WORKSPACE-05-09.md)
+- Migración v4.3 (ensayo sintético + `migration:verify` sobre copia): [deploy/MIGRATION-v4.3.md](deploy/MIGRATION-v4.3.md) · identidad de build y `PRODUCTION_COMMIT`: [deploy/NAS-PRODUCTION.md](deploy/NAS-PRODUCTION.md)
+- Auditoría de números sin fuente (incluye el código del 07-09): [deploy/NUMEROS-SIN-FUENTE-v4.3.md](deploy/NUMEROS-SIN-FUENTE-v4.3.md) · hallazgos de casos borde: [deploy/HALLAZGOS-BORDES-07-09.md](deploy/HALLAZGOS-BORDES-07-09.md)
 - Deploy anterior: [DEPLOY-HOTFIX-02-09.md](DEPLOY-HOTFIX-02-09.md) (incluye rollback)
 - Piloto en curso: [REAL-PILOT-02-09.md](REAL-PILOT-02-09.md) (matriz única de evidencia)
 - NAS: [UGREEN-DXP2800-DEPLOY.md](UGREEN-DXP2800-DEPLOY.md)

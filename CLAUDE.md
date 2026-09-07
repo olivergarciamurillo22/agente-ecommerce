@@ -79,6 +79,8 @@ Reglas del eje de cierre:
 - Toda migración debe ser **idempotente**: `ALTER TABLE ADD COLUMN` con **comprobación previa + try/catch**. Correrla dos o tres veces seguidas no puede fallar ni duplicar nada.
 - **Extrae cada migración a su propia función parametrizada por conexión** (patrón: `migrateClosureAxis(db)`), **no inline en `build()`**. Así se puede testear contra cualquier DB sin pasar por el singleton. Esto no es opcional: es el patrón del repo.
 - **Backfill neutro**: al añadir columnas, las filas existentes reciben el valor por defecto. **No infieras** estado histórico dentro de una migración; eso es trabajo de un script de backfill explícito y revisable.
+- **Guarda simétrica** (`assertSchemaNotNewer`, 07-09): `build()` se niega a abrir una base con `user_version` mayor que `SCHEMA_VERSION` (hoy **24**). Una base tocada por `platform-companies` (bloque ≥1000) o por una rama futura no se degrada en silencio.
+- **Ensayo sobre copia**: `npm run migration:verify -- --db <copia>` copia el fichero, corre el `build()` real en un proceso hijo y compara `user_version`, `integrity_check` y recuentos antes/después. No sustituye la prueba con una copia real del NAS (`docs/deploy/MIGRATION-v4.3.md`).
 
 ---
 
@@ -207,7 +209,22 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 `67f05c7` (esquema 15, cloud_api, TEST_MODE=1). NADA DE LO DE ABAJO ESTÁ
 DESPLEGADO.**
 
-> **07-09-2026 — la rama canónica es `release/casamable-v4.3` (esquema 21).**
+> **07-09-2026 (noche) — la rama canónica es `release/casamable-v4.3` (esquema 24).**
+> Encima de lo de abajo, los bloques cerrados el 07-09 (todo local, sin push
+> desde `5aac3e2`, sin despliegue): **validación de direcciones en dos capas**
+> (22; capa 1 determinista ACTIVA por defecto y solo abre `ALERTA_DIRECCION`,
+> capa 2 OpenAI tras `ADDRESS_AI_VALIDATION_ENABLED=0`), **auto-despacho tras
+> cooldown de 6 h + IA de intención** (23; `AUTO_DISPATCH_COOLDOWN_ENABLED=0`,
+> `POST_CONFIRMATION_AI_ENABLED=0`, FAQ `PROPUESTA_PENDIENTE_APROBACION_PEDRO`),
+> **router de canal Beeping O Dropea por producto** (24; `dispatch_channels`
+> nace VACÍA: sin fila no se despacha nada), pesos del Hunter **40/35/0/10/10/5**
+> (`docs/HUNTER-SPEC.md`), `CASAMABLE_BUILD_SHA` en `/api/health/live`,
+> `migration:verify`, auditoría de números nuevos
+> (`docs/deploy/NUMEROS-SIN-FUENTE-v4.3.md` §07-09) y hallazgos de borde
+> (`docs/deploy/HALLAZGOS-BORDES-07-09.md`). Con el `.env` actual del NAS el
+> comportamiento del bot es el de v4.2 salvo la capa 1 de direcciones.
+
+> **07-09-2026 (mañana) — consolidación (esquema 21 entonces).**
 > Todo lo que describe este apartado (candidato `v4.2` @ `fdad99e`, esquema
 > 18) está **integrado** en v4.3 mediante el merge de
 > `origin/release/casamable-v4.2` @ `4e07ff5` del 07-09, junto con el

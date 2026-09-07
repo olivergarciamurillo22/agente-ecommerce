@@ -4,7 +4,7 @@ Documento vivo: **lo que corre de verdad en el NAS**. Se actualiza en cada
 sesión de operación. El detalle de cómo se llegó a cada estado vive en
 `docs/archive/` — este es el snapshot, no el historial.
 
-**Última actualización: 05-09-2026.**
+**Última actualización: 07-09-2026** (estado del NAS sin cambios desde el 05-09; lo que cambia es el candidato).
 
 ---
 
@@ -63,12 +63,28 @@ Guía exacta: **`docs/deploy/PEDRO-WORKSPACE-05-09.md`** — lleva un **paso
 nuevo obligatorio**: crear los usuarios con `npm run users:create`, sin el
 cual nadie puede entrar al panel.
 
-El salto de esquema es **15 → 18** (tres migraciones aditivas: versión de
+> (Párrafo del 05-09, superado: hoy el salto es 15 → 24, ver la nota de arriba.)
+
+El salto de esquema era **15 → 18** (tres migraciones aditivas: versión de
 agente en llamadas, atribución de marketing, workspace/auth). Ensayado el
 05-09 sobre copias — `17 → 18` y la cadena completa `0 → 18` — idempotente,
 `integrity_check ok` y sin perder una fila. Ninguna columna de `orders`,
 `conversations` ni `messages` cambia: las cinco tablas nuevas son aparte, así
 que una vuelta atrás de código las ignora sin estorbo.
+
+### Qué está activo por defecto en v4.3 (07-09) con el `.env` actual del NAS
+
+| Pieza | Estado con el `.env` de hoy | Cómo se activa |
+|---|---|---|
+| Validación de direcciones capa 1 (determinista) | **ACTIVA**: solo abre `ALERTA_DIRECCION` (visible en panel, retiene el mark-to-send automático); no bloquea la confirmación | siempre |
+| Validación capa 2 (OpenAI) | apagada | `ADDRESS_AI_VALIDATION_ENABLED=1` + `OPENAI_API_KEY` (decisión de Pedro) |
+| Cooldown de auto-despacho (6 h) | apagado: confirmar dispara el hook inmediato como en v4.2 | `AUTO_DISPATCH_COOLDOWN_ENABLED=1` + rellenar `dispatch_channels` (`npm run dispatch:channels`) |
+| IA de intención post-confirmación | apagada: texto libre tras confirmar → persona | `POST_CONFIRMATION_AI_ENABLED=1` tras aprobar `config/faq-post-confirmacion.json` |
+| Router de canal (`dispatch_channels`) | tabla vacía: ningún producto tiene canal | Pedro, producto a producto |
+| Dropea escritura | `DROPEA_WRITE_ENABLED=0` (política): un producto en canal `dropea` quedaría RETENIDO | decisión de Pedro |
+| Identidad de build | `/api/health/live` devuelve `build` = SHA de la imagen (`sin_confirmar` si no se pasó `GIT_SHA`) | `scripts/nas-verify-v43.sh` lo exige |
+
+Antes del NAS: `npm run migration:verify -- --db <copia real de messages.db>` (un comando; `docs/deploy/MIGRATION-v4.3.md`). Pendiente: Pedro aún no ha facilitado una copia real.
 
 Evidencia del piloto: `docs/REAL-PILOT-02-09.md` (matriz única — ambos
 circuitos en BLOCKED hasta que Pedro pegue resultados).
