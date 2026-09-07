@@ -1461,6 +1461,36 @@ async function main(): Promise<void> {
     });
   });
 
+  await test("FAQ · pregunta técnica de producto que no coincide con un disparador → SIEMPRE persona: la regla va en el prompt y, aunque el modelo invente un id o sugiera texto, el código no responde libre", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      // El estado del fichero: sigue siendo la propuesta (el JSON aprobado no ha llegado). Nunca se inventa contenido aprobado.
+      const raw = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/faq-post-confirmacion.json"), "utf8")) as { status: string; entries: Array<{ id: string; response: string }> };
+      assert.equal(raw.status, "PROPUESTA_PENDIENTE_APROBACION_PEDRO", "hasta recibir el JSON aprobado literal, el fichero no cambia de estado");
+      assert.match(intentAi.buildIntentSystemPrompt(FAQ), /REGLA ESTRICTA: cualquier pregunta sobre características técnicas del producto/);
+      const casos: Array<[string, string, import("../src/lib/orders/intent-ai").IntentAiCompleter, RegExp]> = [
+        // El modelo hace lo correcto: duda_no_reconocida.
+        ["70", "¿de qué medidas es el organizador? ¿cabe en un cajón de 40 cm?", async () => JSON.stringify({ intencion: "duda_no_reconocida", duda_conocida_id: null, confianza: 0.95, respuesta_sugerida: "Mide 38x28 cm" }), /intencion_duda_no_reconocida/],
+        // El modelo se inventa un id de FAQ que no existe: el código lo rechaza.
+        ["71", "¿es de plástico o de tela? ¿se puede lavar?", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "caracteristicas_producto", confianza: 0.99, respuesta_sugerida: "Es de tela lavable" }), /duda_conocida_id_desconocida/],
+        // El modelo fuerza un id real con una pregunta técnica: la respuesta que saldría sería el texto FIJO de ese id, nunca la sugerida; aquí se comprueba que jamás sale texto libre.
+        ["72", "¿el pack trae 2 o 3 unidades?", async () => JSON.stringify({ intencion: "duda_conocida", duda_conocida_id: "plazo_entrega", confianza: 0.6, respuesta_sugerida: "Trae 3 unidades" }), /confianza_baja_0\.60/],
+      ];
+      for (const [suffix, texto, complete, motivo] of casos) {
+        const order = mkConfirmedForDispatch(suffix);
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const c = await intentAi.classifyPostConfirmationMessage(texto, { env: INTENT_ON, faq: FAQ, complete });
+        assert.equal(c.autoReply, null, suffix);
+        assert.match(c.escalationReason ?? "", motivo, suffix);
+        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, texto, { env: INTENT_ON, faq: FAQ, complete });
+        assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION, `${suffix}: persona`);
+        assert.doesNotMatch(f.reply ?? "", /Mide|tela|unidades/, "jamás texto del modelo");
+        assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN", suffix);
+      }
+      // Todo texto que puede salir solo está en el fichero, literal: ninguna respuesta del bot es distinta de una entrada.
+      for (const e of FAQ) assert.ok(raw.entries.some((x) => x.id === e.id && x.response === e.response), e.id);
+    });
+  });
+
   await test("INTENCIÓN · duda conocida con confianza alta → auto-respuesta con el texto FIJO de la FAQ y el cooldown sigue corriendo", async () => {
     await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
       const order = mkConfirmedForDispatch("5");

@@ -109,6 +109,23 @@ Las cifras (24-48 h, 1-3 días, horario 9:00-18:00) son plantillas a
 confirmar, no datos verificados. Cambiar la FAQ no requiere desplegar código:
 se lee del fichero (caché por mtime).
 
+**Regla explícita (07-09): una pregunta sobre una característica técnica del
+producto** (medidas, materiales, compatibilidad, funcionamiento, contenido
+del pack, garantía) **que no coincida con uno de los disparadores de la FAQ
+SIEMPRE escala a persona.** Nunca se genera una respuesta libre: el modelo
+solo puede elegir un id existente y, aun así, el texto que sale es el fijo de
+la FAQ. Está en el prompt (`buildIntentSystemPrompt`, «REGLA ESTRICTA») y en
+el código (un id que no exista en el fichero → `duda_conocida_id_desconocida`
+→ persona), con test («pregunta técnica de producto … SIEMPRE persona»).
+
+**Estado del contenido (07-09, noche):** Pedro indicó que había aprobado 6
+entradas, pero el JSON aprobado **no llegó al repositorio** (el prompt lo
+citaba como adjunto y no venía; tampoco está en disco). El fichero sigue con
+las 5 entradas propuestas y `status: PROPUESTA_PENDIENTE_APROBACION_PEDRO`.
+**No se ha reformulado ni inventado ningún texto aprobado.** Cuando llegue el
+JSON literal: sustituir `entries`, poner `status: "APROBADA_PEDRO_<fecha>"` y
+correr `npm test` (el test de la FAQ exige 4–6 entradas con texto fijo).
+
 ## Pieza 2 · Cooldown de auto-despacho (`src/lib/orders/auto-dispatch.ts`)
 
 - Al confirmarse el pedido (`confirmOrder`, con `AUTO_DISPATCH_COOLDOWN_ENABLED=1`)

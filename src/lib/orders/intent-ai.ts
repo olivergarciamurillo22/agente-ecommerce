@@ -114,7 +114,9 @@ export function buildIntentSystemPrompt(faq: FaqEntry[]): string {
     "'cancelacion' = quiere cancelar, devolver, rechazar, dice que no lo pidió, o duda seria sobre seguir adelante; " +
     "'duda_conocida' = pregunta que coincide claramente con UNA de estas preguntas frecuentes (pon su id en duda_conocida_id):\n" +
     (catalog || "(sin preguntas frecuentes configuradas)") +
-    "\n'duda_no_reconocida' = pregunta o petición que NO está en la lista; 'otro' = saludos, agradecimientos, mensajes vacíos o sin sentido. " +
+    "\n'duda_no_reconocida' = pregunta o petición que NO está en la lista. " +
+    "REGLA ESTRICTA: cualquier pregunta sobre características técnicas del producto (medidas, materiales, compatibilidad, funcionamiento, contenido del pack, garantía) que no coincida EXACTAMENTE con una de las preguntas frecuentes es 'duda_no_reconocida', nunca 'duda_conocida': la responderá una persona. " +
+    "'otro' = saludos, agradecimientos, mensajes vacíos o sin sentido. " +
     "Ante cualquier duda entre cancelación y otra cosa, elige 'cancelacion'. 'confianza' es tu seguridad (0 a 1). " +
     "'respuesta_sugerida' es opcional y NO se enviará al cliente."
   );
