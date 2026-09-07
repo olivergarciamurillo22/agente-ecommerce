@@ -147,11 +147,19 @@ Devuelve: entrega de equilibrio, CPA máximo, precio mínimo, coste de
 producto máximo, y entrega/CPA para el margen objetivo. **Si no existe
 solución en el rango, `null`** — nunca una cifra inventada.
 
-**El 62,9% no está hardcodeado en ninguna parte.** La alerta §36 compara la
-entrega real contra el break-even *calculado con los costes actuales*:
-WARNING por debajo de break-even + 5 puntos, CRITICAL en o bajo el
+**El 62,9% no está hardcodeado como break-even en ninguna parte.** La alerta
+§36 compara la entrega real contra el break-even *calculado con los costes
+actuales*: WARNING por debajo de break-even + 5 puntos, CRITICAL en o bajo el
 break-even, y `unknown` con muestra insuficiente (3 pedidos no deciden si
 escalar o parar anuncios).
+
+Matiz (07-09-2026): el **scoring del Hunter** sí usa `0.629` como
+`DEFAULT_ASSUMED_DELIVERY_RATE` (`src/lib/hunter/scoring.ts`), la tasa de
+entrega *supuesta* para puntuar un candidato que todavía no tiene histórico
+propio. No es un break-even ni alimenta la alerta §36: es la hipótesis de
+partida del scoring, y está ahí porque `CandidateFacts` no tiene (aún) una
+tasa de entrega por producto. Cuando exista ese dato, el default debe
+sustituirse por él.
 
 ---
 

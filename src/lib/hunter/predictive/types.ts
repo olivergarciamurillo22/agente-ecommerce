@@ -1,3 +1,4 @@
+import type { ShippingTier } from "../types";
 export type PredictiveVerdict = "descartar" | "investigar" | "candidato_fuerte";
 export type EvidenceKind = "wholesale" | "retail";
 export type EstimateConfidence = "baja" | "media";
@@ -49,7 +50,7 @@ export interface PreliminaryViability {
   worstContributionEur: number | null;
   bestContributionEur: number | null;
   logisticsEur: number | null;
-  shippingTier: "hasta_1kg" | "hasta_4kg" | null;
+  shippingTier: ShippingTier | null;
   reason: string | null;
 }
 

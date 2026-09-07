@@ -75,6 +75,7 @@ function solveInput(
 /**
  * Todos los break-even accionables de golpe (§11-§12).
  * targetMargin en fracción (0.10 = margen objetivo del 10%).
+ * El 10 % por defecto es ESTIMACIÓN INTERNA, no dato confirmado por Pedro.
  */
 export function computeBreakEven(model: CODModelType, i: CODCalculatorInputs, targetMargin = 0.1): CODBreakEven {
   const profitZero = (x: CODCalculatorInputs) => profitPerOrder(model, x);
