@@ -14536,6 +14536,113 @@ async function main(): Promise<void> {
     assert.ok(rejected.problems.some((p) => /NewerSchemaError|user_version=1020|platform-companies/.test(p)), rejected.problems.join(" | "));
   });
 
+  // ============ PRE-DESPLIEGUE · semáforo de un solo comando (07-09-2026) ============
+  console.log("\n— Pre-despliegue: semáforo de un solo comando —");
+  const predeploy = await import("../src/lib/system/predeploy");
+  const canalCov = await import("../src/lib/orders/dispatch-channel");
+
+  await test("PREDESPLIEGUE · identidad del commit: sin declarar, con SHA inválido o con HEAD distinto → FALLO; prefijo correcto → PASA", () => {
+    const head = "c0d8d402a6238334b0129ec991408764cffddf5a";
+    assert.equal(predeploy.checkCommitIdentity(head, undefined).status, "FAIL", "no declarar el commit es un fallo, no un aviso");
+    assert.match(predeploy.checkCommitIdentity(head, undefined).detail, /PRODUCTION_COMMIT/);
+    assert.equal(predeploy.checkCommitIdentity(head, "no-es-un-sha").status, "FAIL");
+    assert.equal(predeploy.checkCommitIdentity(head, "deadbeef").status, "FAIL", "otro commit: estarías comprobando código distinto del que subes");
+    assert.equal(predeploy.checkCommitIdentity(head, head).status, "PASS");
+    assert.equal(predeploy.checkCommitIdentity(head, "c0d8d40").status, "PASS", "un prefijo de 7 basta");
+    assert.equal(predeploy.checkCommitIdentity(head, " C0D8D40 ").status, "PASS", "mayúsculas y espacios no cuentan");
+    assert.equal(predeploy.checkCommitIdentity(null, head).status, "FAIL", "sin git no se puede afirmar nada");
+  });
+
+  await test("PREDESPLIEGUE · coherencia entre flags y entorno: cada función encendida exige lo suyo y el fallo explica qué se rompe", () => {
+    const canal = (beeping: number, dropea: number) => ({ total: beeping + dropea, beeping, dropea });
+    const busca = (checks: Array<{ name: string; status: string; detail: string }>, name: string) => checks.find((c) => c.name === name)!;
+    // Todo apagado (el .env real de producción hoy): ningún fallo por flags.
+    const apagado = predeploy.checkFeatureEnv({ env: { APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1" }, channels: canal(0, 0) });
+    assert.equal(apagado.filter((c) => c.status === "FAIL").length, 0, JSON.stringify(apagado.filter((c) => c.status === "FAIL")));
+    // Capa 2 encendida sin clave: fallo (el flag mentiría).
+    const sinClave = predeploy.checkFeatureEnv({ env: { ADDRESS_AI_VALIDATION_ENABLED: "1" }, channels: canal(1, 0) });
+    assert.equal(busca(sinClave, "Direcciones · capa 2 (IA)").status, "FAIL");
+    // Un placeholder NO cuenta como clave.
+    assert.equal(
+      busca(predeploy.checkFeatureEnv({ env: { ADDRESS_AI_VALIDATION_ENABLED: "1", OPENAI_API_KEY: "changeme" }, channels: canal(1, 0) }), "Direcciones · capa 2 (IA)").status,
+      "FAIL"
+    );
+    assert.equal(
+      busca(predeploy.checkFeatureEnv({ env: { ADDRESS_AI_VALIDATION_ENABLED: "1", OPENAI_API_KEY: "sk-de-verdad" }, channels: canal(1, 0) }), "Direcciones · capa 2 (IA)").status,
+      "PASS"
+    );
+    // IA de intención encendida: exige clave, FAQ aprobada y destinatario del aviso de auto-cancelación.
+    const intent = predeploy.checkFeatureEnv({ env: { POST_CONFIRMATION_AI_ENABLED: "1", OPENAI_API_KEY: "sk-de-verdad" }, channels: canal(1, 0) });
+    assert.equal(busca(intent, "Intención post-confirmación (IA)").status, "PASS");
+    assert.equal(busca(intent, "FAQ post-confirmación").status, "PASS", "la FAQ ya está aprobada en el repo");
+    assert.equal(busca(intent, "Aviso de auto-cancelación").status, "FAIL", "sin ALERT_WHATSAPP el aviso no empuja a nadie");
+    assert.equal(
+      busca(predeploy.checkFeatureEnv({ env: { POST_CONFIRMATION_AI_ENABLED: "1", OPENAI_API_KEY: "sk-x", ALERT_WHATSAPP: "+34600000000" }, channels: canal(1, 0) }), "Aviso de auto-cancelación").status,
+      "PASS"
+    );
+    // Cooldown encendido con la tabla vacía: todos los pedidos quedarían retenidos.
+    const vacia = predeploy.checkFeatureEnv({ env: { AUTO_DISPATCH_COOLDOWN_ENABLED: "1" }, channels: canal(0, 0) });
+    assert.equal(busca(vacia, "Auto-despacho tras cooldown").status, "FAIL");
+    assert.match(busca(vacia, "Auto-despacho tras cooldown").detail, /RETENIDOS/);
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { AUTO_DISPATCH_COOLDOWN_ENABLED: "1" }, channels: null }), "Auto-despacho tras cooldown").status, "WARN", "sin copia no se afirma nada");
+    // Horas fuera de rango: aviso, porque el código usaría 6 h y la variable engañaría.
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { AUTO_DISPATCH_COOLDOWN_HOURS: "0" }, channels: canal(1, 0) }), "Horas de cooldown").status, "WARN");
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { AUTO_DISPATCH_COOLDOWN_HOURS: "200" }, channels: canal(1, 0) }), "Horas de cooldown").status, "WARN");
+    // Dropea: producto enrutado con la llave cerrada = retención permanente.
+    const dropeaCerrado = predeploy.checkFeatureEnv({ env: {}, channels: canal(1, 2) });
+    assert.equal(busca(dropeaCerrado, "Canal Dropea").status, "FAIL");
+    assert.match(busca(dropeaCerrado, "Canal Dropea").detail, /write_disabled|RETENIDOS/);
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { DROPEA_WRITE_ENABLED: "1" }, channels: canal(1, 2) }), "Canal Dropea").status, "PASS");
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { DROPEA_WRITE_ENABLED: "1" }, channels: canal(3, 0) }), "Canal Dropea").status, "WARN", "llave abierta sin uso");
+    // Aviso de despacho encendido con el mapping deshabilitado (estado real hoy).
+    const aviso = predeploy.checkFeatureEnv({ env: { DISPATCH_NOTICE_WHATSAPP_ENABLED: "1" }, channels: canal(1, 0) });
+    assert.equal(busca(aviso, "Aviso de despacho (WhatsApp)").status, "FAIL");
+    assert.match(busca(aviso, "Aviso de despacho (WhatsApp)").detail, /DESHABILITADO/);
+    // Interruptores generales.
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { EMERGENCY_STOP: "1" }, channels: canal(1, 0) }), "Interruptores generales").status, "WARN");
+    assert.equal(busca(predeploy.checkFeatureEnv({ env: { APP_MODE: "production", WHATSAPP_SEND_ENABLED: "1" }, channels: canal(1, 0) }), "Interruptores generales").status, "PASS");
+    assert.equal(predeploy.worstStatus([{ name: "a", status: "PASS", detail: "" }, { name: "b", status: "WARN", detail: "" }]), "WARN");
+    assert.equal(predeploy.worstStatus([{ name: "a", status: "WARN", detail: "" }, { name: "b", status: "FAIL", detail: "" }]), "FAIL");
+  });
+
+  await test("PREDESPLIEGUE · cobertura de canales: enumera los productos REALMENTE vendidos desde raw_payload, ignora el seguro de envío, y delata los que no tienen canal", async () => {
+    const coverage = await import("../src/lib/orders/dispatch-coverage");
+    const linea = (sku: string, title: string, ids: number) => ({ title, sku, product_id: 7900 + ids, variant_id: 8900 + ids, quantity: 1, price: "34.99" });
+    const mkVendido = (suffix: string, lineas: Array<Record<string, unknown>>) => {
+      const o = mkOrder(`cov-${suffix}`, `C90${suffix}`, `34600009${suffix.padStart(2, "0")}`);
+      db.systemDbHandle().prepare("UPDATE orders SET raw_payload=? WHERE id=?").run(JSON.stringify({ line_items: lineas }), o.id);
+      return db.getOrderById(o.id)!;
+    };
+    // Dos productos vendidos + una línea de servicio (sin ninguna clave: el seguro de Releasit).
+    mkVendido("1", [linea("COV-CUBIERTO", "Producto con canal", 1), { title: "Seguro de envío", quantity: 1, price: "1.99" }]);
+    mkVendido("2", [linea("COV-CUBIERTO", "Producto con canal", 1)]);
+    mkVendido("3", [linea("COV-HUERFANO", "Producto sin canal", 2)]);
+    canalCov.upsertDispatchChannel({ sku: "COV-CUBIERTO", channel: "beeping", note: "test de cobertura" });
+
+    const rep = coverage.dispatchCoverage(90);
+    const cubierto = rep.products.find((p) => p.sku === "COV-CUBIERTO")!;
+    const huerfano = rep.products.find((p) => p.sku === "COV-HUERFANO")!;
+    assert.ok(cubierto, "el producto vendido aparece");
+    assert.equal(cubierto.channel, "beeping");
+    assert.equal(cubierto.matchedBy, "sku");
+    assert.equal(cubierto.orders, 2, "cuenta los pedidos en que aparece");
+    assert.equal(huerfano.channel, null);
+    assert.ok(rep.uncovered.some((p) => p.sku === "COV-HUERFANO"), "sale en la lista de los que faltan");
+    assert.equal(rep.uncovered.some((p) => p.sku === "COV-CUBIERTO"), false);
+    assert.equal(rep.products.some((p) => p.title === "Seguro de envío"), false, "una línea sin SKU/producto/variante es servicio: no exige canal");
+    assert.equal(rep.ok, false, "con un producto sin canal la cobertura no está");
+    assert.ok(rep.problems.some((p) => /COV-HUERFANO/.test(p)));
+    assert.ok(rep.channels.total >= 1 && rep.channels.beeping >= 1);
+    // Fuera de la ventana no cuenta: un pedido viejo no obliga a configurar un canal.
+    const viejo = mkVendido("4", [linea("COV-ANTIGUO", "Producto descatalogado", 3)]);
+    db.systemDbHandle().prepare("UPDATE orders SET ordered_at = unixepoch() - 400*86400, created_at = unixepoch() - 400*86400 WHERE id=?").run(viejo.id);
+    assert.equal(coverage.dispatchCoverage(90).products.some((p) => p.sku === "COV-ANTIGUO"), false, "400 días atrás no es un producto activo");
+    assert.ok(coverage.dispatchCoverage(500).products.some((p) => p.sku === "COV-ANTIGUO"), "con la ventana ampliada sí aparece");
+    // Limpieza: estos pedidos no deben arrastrar a otros bloques.
+    db.systemDbHandle().prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE 'cov-%'").run();
+    canalCov.deleteDispatchChannel({ sku: "COV-CUBIERTO" });
+  });
+
   await test("schema 17 migra hasta Discovery 21 sin perder tablas", async () => {
     const Database = (await import("better-sqlite3")).default;
     const fixture = new Database(":memory:");

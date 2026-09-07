@@ -72,7 +72,9 @@
     "landing:lint": "tsx scripts/landing-lint.ts",
     "landing:e2e": "tsx scripts/landing-e2e.ts",
     "dispatch:channels": "tsx scripts/dispatch-channels.ts",
-    "migration:verify": "tsx scripts/migration-verify.ts"
+    "migration:verify": "tsx scripts/migration-verify.ts",
+    "predeploy:check": "tsx scripts/predeploy-check.ts",
+    "dispatch:coverage": "tsx scripts/dispatch-coverage.ts"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.21",
