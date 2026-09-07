@@ -7700,6 +7700,81 @@ async function main(): Promise<void> {
     resetCallCfg();
   });
 
+  await test("RETELL · endpoints deprecados migrados: /v2/list-phone-numbers y /list-agent-versions (ojo: el segundo NO lleva /v2), y la respuesta paginada se lee bien", async () => {
+    const rl = await import("../src/lib/calls/retell-list");
+
+    // Las rutas, literales: la trampa es que solo UNA gana prefijo de versión.
+    assert.equal(rl.RETELL_LIST_PHONE_NUMBERS_PATH, "/v2/list-phone-numbers", "aviso del 15-06-2026");
+    assert.equal(rl.RETELL_LIST_AGENT_VERSIONS_PATH("agent_abc"), "/list-agent-versions/agent_abc", "aviso del 15-09-2026: SIN /v2");
+    assert.doesNotMatch(rl.RETELL_LIST_AGENT_VERSIONS_PATH("agent_abc"), /\/v2\//, "aplicar la regla del otro aviso por analogía daría 404");
+    assert.equal(rl.RETELL_LIST_AGENT_VERSIONS_PATH("a/b c"), "/list-agent-versions/a%2Fb%20c", "el id va escapado");
+
+    // Forma NUEVA: objeto paginado. Es lo que rompía el parseo anterior.
+    const nueva = { has_more: true, pagination_key: "cursor_2", items: [{ version: 7, is_published: true }, { version: 8, is_published: false }] };
+    const leidoNuevo = rl.listItems<Record<string, unknown>>(nueva);
+    assert.equal(leidoNuevo.items.length, 2);
+    assert.equal(leidoNuevo.hasMore, true);
+    assert.equal(leidoNuevo.paginationKey, "cursor_2");
+    assert.equal(leidoNuevo.legacyShape, false);
+    assert.equal(rl.isReadableList(nueva), true);
+    assert.equal(Array.isArray(nueva), false, "EL BUG: un Array.isArray sobre esto da false y el diagnóstico se quedaba mudo");
+
+    // Forma VIEJA: array en la raíz. Se sigue entendiendo mientras Retell la sirva.
+    const vieja = [{ version: 7, is_published: true }];
+    const leidoViejo = rl.listItems<Record<string, unknown>>(vieja);
+    assert.equal(leidoViejo.items.length, 1);
+    assert.equal(leidoViejo.legacyShape, true, "se distingue, para poder avisar");
+    assert.equal(leidoViejo.hasMore, false);
+    assert.equal(rl.isReadableList(vieja), true);
+
+    // Lo que NO es un listado no se convierte en una lista vacía silenciosa.
+    for (const basura of [null, undefined, 42, "texto", { status: 401, message: "Unauthorized" }, { items: "no es array" }]) {
+      assert.equal(rl.isReadableList(basura), false, JSON.stringify(basura));
+      assert.deepEqual(rl.listItems(basura).items, [], JSON.stringify(basura));
+    }
+
+    // Y el doctor pide EXACTAMENTE esas rutas: se comprueba sin red real.
+    const urls: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      const url = String(input);
+      urls.push(url);
+      if (!url.includes("api.retellai.com")) throw new Error(`red no permitida en test: ${url}`);
+      if (url.includes("list-agent-versions")) {
+        return new Response(JSON.stringify({ has_more: false, items: [{ version: 19, is_published: true }] }), { headers: { "content-type": "application/json" } });
+      }
+      if (url.includes("list-phone-numbers")) {
+        return new Response(JSON.stringify({ has_more: false, items: [{ phone_number: "+34950835615" }] }), { headers: { "content-type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ agent_id: "agent_abc", version: 19 }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const API = "https://api.retellai.com";
+      const pedir = async (p: string) => {
+        const res = await fetch(`${API}${p}`, { headers: { Authorization: "Bearer clave-de-prueba" } });
+        return rl.listItems<Record<string, unknown>>(await res.json());
+      };
+      const versiones = await pedir(rl.RETELL_LIST_AGENT_VERSIONS_PATH("agent_abc"));
+      assert.equal(versiones.items.find((v) => String(v.version) === "19")?.is_published, true, "la versión fijada se localiza en la respuesta nueva");
+      const numeros = await pedir(rl.RETELL_LIST_PHONE_NUMBERS_PATH);
+      assert.ok(numeros.items.some((n) => n.phone_number === "+34950835615"), "el número saliente se localiza en la respuesta nueva");
+      assert.ok(urls.some((u) => u.endsWith("/v2/list-phone-numbers")), urls.join(" | "));
+      assert.ok(urls.some((u) => u.endsWith("/list-agent-versions/agent_abc")), urls.join(" | "));
+      assert.equal(urls.some((u) => /\/get-agent-versions\//.test(u)), false, "ni una llamada al endpoint retirado");
+      assert.equal(urls.some((u) => /retellai\.com\/list-phone-numbers/.test(u)), false, "ni una llamada al endpoint retirado");
+      assert.equal(urls.some((u) => u.includes("clave-de-prueba")), false, "la clave jamás viaja en la URL");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+
+    // Y el propio fichero del doctor ya no cita las rutas viejas.
+    const doctor = fs.readFileSync(path.join(process.cwd(), "scripts/retell-doctor.ts"), "utf8");
+    assert.doesNotMatch(doctor, /get\(`\/get-agent-versions\//, "el doctor ya no llama al endpoint retirado");
+    assert.doesNotMatch(doctor, /get\(`\/list-phone-numbers`/, "el doctor ya no llama al endpoint retirado");
+    assert.match(doctor, /RETELL_LIST_AGENT_VERSIONS_PATH\(agentId\)/);
+    assert.match(doctor, /RETELL_LIST_PHONE_NUMBERS_PATH/);
+  });
+
   await test("RETELL · matriz de errores del proveedor: 429 reintenta; 400/422 revisión; 401/402 bloquean; 500/timeout AMBIGUO → revisión, NUNCA segunda llamada", async () => {
     resetCallCfg(); cfgMod.clearCallsBlocked();
     cfgMod.clearCallsBlocked();

@@ -22,6 +22,12 @@
 import "./env-loader";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  RETELL_LIST_AGENT_VERSIONS_PATH,
+  RETELL_LIST_PHONE_NUMBERS_PATH,
+  isReadableList,
+  listItems,
+} from "../src/lib/calls/retell-list";
 
 const API = "https://api.retellai.com";
 const ARGS = new Set(process.argv.slice(2));
@@ -266,11 +272,17 @@ async function main(): Promise<void> {
       if (actual !== version) {
         console.log(`   · el borrador del dashboard va por la ${actual}; las llamadas usan la ${version} (esperado si hay cambios sin publicar)`);
       }
-      // ¿Existe la versión fijada como PUBLICADA? (list agent versions)
+      // ¿Existe la versión fijada como PUBLICADA?
+      // Migrado el 07-09-2026: GET /get-agent-versions/{id} se retira el
+      // 15-09-2026 y su sustituto es GET /list-agent-versions/{id} — SIN
+      // prefijo /v2, a diferencia del otro aviso. Respuesta paginada.
       if (!pinIssue) {
-        const versions = await get(`/get-agent-versions/${agentId}`, key);
-        if (versions.ok && Array.isArray(versions.json)) {
-          const fila = (versions.json as Array<Record<string, unknown>>).find((v) => String(v.version) === version);
+        const versions = await get(RETELL_LIST_AGENT_VERSIONS_PATH(agentId), key);
+        if (versions.ok && isReadableList(versions.json)) {
+          const lista = listItems<Record<string, unknown>>(versions.json);
+          if (lista.legacyShape) console.log("   · aviso: Retell aún devuelve el formato antiguo (array) en list-agent-versions");
+          if (lista.hasMore) console.log(`   · hay más versiones sin listar (paginación): se ha mirado la primera página de ${lista.items.length}`);
+          const fila = lista.items.find((v) => String(v.version) === version);
           if (!fila) {
             console.log(`   ○ la versión ${version} NO aparece entre las versiones del agente: la llamada fallaría o derivaría`);
             verdict.live = "FAIL";
@@ -281,6 +293,7 @@ async function main(): Promise<void> {
           }
         } else {
           console.log(`   ◐ no se pudieron listar las versiones (HTTP ${versions.status}): comprobar a mano en el dashboard que la ${version} está publicada`);
+          if (versions.status === 404) console.log("   · un 404 aquí apunta a la ruta: el sustituto es /list-agent-versions/{id}, sin /v2");
         }
       }
 
@@ -358,9 +371,14 @@ async function main(): Promise<void> {
       }
 
       console.log("\n   NÚMERO SALIENTE Y WEBHOOK");
-      const numbers = await get(`/list-phone-numbers`, key);
-      if (numbers.ok && Array.isArray(numbers.json)) {
-        const propio = (numbers.json as Array<Record<string, unknown>>).find((n) => String(n.phone_number ?? "") === fromNumber);
+      // Migrado el 07-09-2026: GET /list-phone-numbers se retiró el 15-06-2026
+      // y su sustituto es GET /v2/list-phone-numbers, con respuesta paginada.
+      const numbers = await get(RETELL_LIST_PHONE_NUMBERS_PATH, key);
+      if (numbers.ok && isReadableList(numbers.json)) {
+        const lista = listItems<Record<string, unknown>>(numbers.json);
+        if (lista.legacyShape) console.log("   · aviso: Retell aún devuelve el formato antiguo (array) en list-phone-numbers");
+        if (lista.hasMore) console.log(`   · la cuenta tiene más números de los listados (paginación): se ha mirado la primera página de ${lista.items.length}`);
+        const propio = lista.items.find((n) => String(n.phone_number ?? "") === fromNumber);
         console.log(`   ${ok(Boolean(propio))} ${fromNumber || "(sin from number)"} ${propio ? "existe en la cuenta" : "NO está entre los números de la cuenta"}`);
         if (!propio) {
           verdict.live = "FAIL";
@@ -368,6 +386,7 @@ async function main(): Promise<void> {
         }
       } else {
         console.log(`   ◐ no se pudieron listar los números (HTTP ${numbers.status})`);
+        if (numbers.status === 404) console.log("   · un 404 aquí apunta a la ruta: el sustituto es /v2/list-phone-numbers");
       }
       const webhook = typeof a.webhook_url === "string" ? a.webhook_url : "";
       console.log(`   Webhook agente : ${webhook || "(no configurado a nivel de agente: se usa el de la cuenta)"}`);

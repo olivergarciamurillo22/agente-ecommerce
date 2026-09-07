@@ -273,3 +273,72 @@ que esta comprobación no está automatizada. No se ha ampliado el doctor para
 no inventar una validación sobre un contrato sin evidencia.
 
 **Las llamadas siguen MANUAL-ONLY.** Nada de esto activa automatismo.
+
+---
+
+## 9. Endpoints de Retell que usamos, y las dos deprecaciones del 07-09-2026
+
+Este repo **no usa el SDK de Retell**: son seis llamadas HTTP a mano, y solo
+una escribe. Inventario completo:
+
+| Endpoint | Dónde | Para qué |
+|---|---|---|
+| `POST /v2/create-phone-call` | `src/lib/calls/retell.ts` | **La única escritura**: crea la llamada real |
+| `GET /v2/get-call/{id}` | `scripts/retell-reconcile-call.ts` | reconciliar una llamada cuyo webhook se perdió |
+| `GET /get-agent/{id}` | `scripts/retell-doctor.ts` | borrador del agente y prueba de que la clave autentica |
+| `GET /get-agent/{id}?version=N` | `scripts/retell-doctor.ts` | auditar la versión FIJADA |
+| `GET /list-agent-versions/{id}` | `scripts/retell-doctor.ts` | **migrado** (ver abajo) |
+| `GET /v2/list-phone-numbers` | `scripts/retell-doctor.ts` | **migrado** (ver abajo) |
+| `GET /get-retell-llm/{id}` | `scripts/retell-doctor.ts` | prompt y datos de análisis post-llamada |
+
+### Qué cambió
+
+**1 · `GET /list-phone-numbers` → `GET /v2/list-phone-numbers`**
+Aviso «Legacy list endpoints removed for v2/v3», con fecha de corte
+**15-06-2026**, que **ya venció**: el endpoint viejo puede estar fuera de
+servicio desde antes de esta migración.
+`docs.retellai.com/deprecation-notice/2026/06-15_legacy_list_endpoints`
+
+**2 · `GET /get-agent-versions/{id}` → `GET /list-agent-versions/{id}`**
+Aviso «Legacy get-agent-versions endpoints removed», corte el **15-09-2026**.
+`docs.retellai.com/deprecation-notice/2026/09-15_get_agent_versions`
+
+### Las dos trampas
+
+**El prefijo no es simétrico.** El sustituto del primer aviso **gana** `/v2/`;
+el del segundo **no lleva prefijo de versión**. Aplicar la regla del primero
+por analogía da un 404. Por eso las dos rutas viven como constantes en
+`src/lib/calls/retell-list.ts` y hay un test que lo fija.
+
+**Lo que rompe no es la URL, es el parseo.** Los endpoints viejos devolvían un
+**array JSON en la raíz**; los nuevos devuelven `{ items, pagination_key,
+has_more }`. El código anterior hacía `Array.isArray(json)`, que sobre la
+respuesta nueva da `false`: el doctor **habría dejado de comprobar** la versión
+publicada del agente y el número saliente **sin fallar**, que es la peor forma
+de romperse. `listItems()` entiende las dos formas y avisa cuando la respuesta
+llega en el formato viejo.
+
+### Lo que falta por verificar con red real
+
+Los cambios están probados **con red inyectada**, no contra Retell. Cuando haya
+credenciales a mano:
+
+```
+npm run retell:doctor
+```
+
+En el bloque «EN VIVO» debe seguir diciendo si la versión fijada está publicada
+y si `RETELL_FROM_NUMBER` está en la cuenta. Un `404` en cualquiera de las dos
+apunta a la ruta, y el propio doctor lo dice al pie del error. Hay que probarlo
+con **las dos claves afectadas** (`casamable-outbound` y la *Secret Key*), que
+son las que Retell señaló como usuarias de los endpoints retirados.
+
+### Lo que NO se ha tocado
+
+El mismo aviso del 15-06 deprecia además tres campos de configuración de agente
+(`analysis_summary_prompt`, `analysis_successful_prompt`,
+`analysis_user_sentiment_prompt`), que se sustituyen por entradas
+`system-presets` dentro de `post_call_analysis_data`. **Este repo no los usa**:
+el prompt y los datos de análisis se configuran en el panel de Retell, no desde
+el código. Queda anotado porque es fácil pasarlo por alto: la página trata dos
+deprecaciones distintas bajo un título que solo habla de listados.
