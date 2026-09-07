@@ -1829,10 +1829,13 @@ async function main(): Promise<void> {
       assert.equal(out.status, "no_ejecutada", "la capa 2 no gasta una llamada en texto vacío");
     }
     // CP con espacios alrededor o salto de línea: se recorta y es coherente.
-    // CP con espacio interior ("28 001") es formato inválido: abre alerta, no bloquea (estrictez documentada).
+    // CP con espacio interior ("28 001"): desde el 07-09 se compacta y vale. Antes abría alerta.
     assert.equal(addrAssess.checkSpanishPostalCode(" 28001 ", "Madrid", "Madrid").coherence, "coherente");
     assert.equal(addrAssess.checkSpanishPostalCode("28001\n", "Madrid", "Madrid").coherence, "coherente");
-    assert.equal(addrAssess.checkSpanishPostalCode("28 001", "Madrid", "Madrid").existence, "formato_invalido");
+    assert.equal(addrAssess.checkSpanishPostalCode("28 001", "Madrid", "Madrid").existence, "prefijo_valido", "un espacio de más al teclear no es un error del cliente");
+    assert.equal(addrAssess.checkSpanishPostalCode("28 001", "Madrid", "Madrid").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("28 001", "Madrid", "Madrid").raw, "28 001", "el informe conserva lo que escribió el cliente");
+    assert.equal(addrAssess.checkSpanishPostalCode("28 00", "Madrid", "Madrid").existence, "formato_invalido", "cuatro dígitos siguen sin ser un CP");
     assert.equal(addrAssess.checkSpanishPostalCode("２８００１", "Madrid", "Madrid").existence, "formato_invalido", "dígitos de ancho completo no son un CP");
     // Provincia con mayúsculas, espacios o acento mal codificado: la coherencia no se rompe por eso.
     assert.equal(addrAssess.checkSpanishPostalCode("28001", "MADRID ", "Madrid").coherence, "coherente");
@@ -1878,43 +1881,99 @@ async function main(): Promise<void> {
     });
   });
 
-  await test("BORDE intención · texto vacío, solo espacios o solo emoji tras confirmar: nunca auto-responde; la IA (si está encendida) recibe el texto tal cual y falla cerrado a persona; el cooldown queda retenido", async () => {
+  await test("BORDE intención · un acuse trivial tras confirmar (gracias, pulgar, manos juntas, vacío) NO gasta llamada a la IA, NO abre incidencia y NO retiene el despacho: se registra como sin acción", async () => {
     await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
-      const casos: Array<[string, string]> = [["31", ""], ["32", "   "], ["33", "👍"], ["34", "🙏🙏"], ["35", "​"]];
-      for (const [suffix, texto] of casos) {
+      const triviales: Array<[string, string]> = [["31", ""], ["32", "   "], ["33", "👍"], ["34", "🙏🙏"], ["35", "​"], ["37", "gracias"], ["38", "muchas gracias"]];
+      for (const [suffix, texto] of triviales) {
         const order = mkConfirmedForDispatch(suffix);
         handleOrderButtonReply(order.phone, "confirm_order");
+        const antes = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM intent_classifications").get() as { n: number }).n;
         const r = handleOrderReply(order.phone, texto);
         assert.equal(r.handled, true, JSON.stringify(texto));
-        assert.equal(r.reply, undefined, "una sola respuesta, vía followUp");
-        assert.ok(r.followUp, JSON.stringify(texto));
-        let recibido: string | null = null;
-        // El modelo "no sabe qué decir": 'otro' con confianza alta. Aunque
-        // inventara una FAQ con 0,99, el texto que sale sería el fijo; aquí se
-        // comprueba el camino realista: persona.
-        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, texto, {
-          env: INTENT_ON, faq: FAQ,
-          complete: async (args) => { recibido = args.user; return JSON.stringify({ intencion: "otro", duda_conocida_id: null, confianza: 0.97, respuesta_sugerida: null }); },
-        });
-        assert.equal(recibido, texto, "el texto llega al modelo sin transformar (vacío incluido: no se inventa contenido)");
-        assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION, JSON.stringify(texto));
-        assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
-        const audit = db.systemDbHandle().prepare("SELECT message, auto_replied, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as { message: string; auto_replied: number; escalated: number };
-        assert.deepEqual(audit, { message: texto, auto_replied: 0, escalated: 1 });
+        assert.equal(r.reply, undefined, `${JSON.stringify(texto)}: no se le contesta nada`);
+        assert.equal(r.followUp, undefined, `${JSON.stringify(texto)}: ni siquiera se pregunta a la IA`);
+        const despues = (db.systemDbHandle().prepare("SELECT COUNT(*) n FROM intent_classifications").get() as { n: number }).n;
+        assert.equal(despues, antes, `${JSON.stringify(texto)}: cero llamadas a la IA (y cero coste)`);
+        const convoId = db.getConversationIdByPhone(order.phone);
+        assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN", `${JSON.stringify(texto)}: no escala a persona`);
+        assert.ok(
+          db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='post_confirmation_trivial' AND order_ref=?").get(order.shopify_order_number),
+          "queda registrado como acuse trivial"
+        );
+        // Y lo que más importa: un "gracias" no retiene el despacho.
         const row = dispatch.getDispatchCooldown(order.id)!;
         beepingCalls.length = 0;
-        assert.equal((await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked", `${JSON.stringify(texto)}: retenido`);
-        assert.equal(beepingCalls.length, 0);
+        assert.equal(
+          (await dispatch.executeDispatch(order.id, "cooldown", row.due_at + 1, { markToSend: fakeMarkToSend })).status,
+          "executed",
+          `${JSON.stringify(texto)}: el pedido sigue su curso`
+        );
       }
-      // Mismo texto vacío con la IA apagada: persona de inmediato, sin followUp (comportamiento de siempre).
-      const order = mkConfirmedForDispatch("36");
-      handleOrderButtonReply(order.phone, "confirm_order");
-      await withEnv({ POST_CONFIRMATION_AI_ENABLED: "0" }, async () => {
-        const r = handleOrderReply(order.phone, "👍");
-        assert.equal(r.followUp, undefined);
-        assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
+
+      // Lo que NO es trivial sigue yendo a la IA y, si no la entiende, a persona.
+      const conDuda = mkConfirmedForDispatch("36");
+      handleOrderButtonReply(conDuda.phone, "confirm_order");
+      const r = handleOrderReply(conDuda.phone, "gracias, pero cambiadme la dirección");
+      assert.ok(r.followUp, "una petición de verdad sí se clasifica");
+      const f = await resolvePostConfirmationText(conDuda.phone, db.getOrderById(conDuda.id)!, "gracias, pero cambiadme la dirección", {
+        env: INTENT_ON, faq: FAQ,
+        complete: async () => JSON.stringify({ intencion: "duda_no_reconocida", duda_conocida_id: null, confianza: 0.9, respuesta_sugerida: null }),
+      });
+      assert.equal(f.reply, msgs.MSG_HUMAN_ATTENTION);
+      assert.equal(db.getConversationById(db.getConversationIdByPhone(conDuda.phone)!)!.mode, "HUMAN");
+
+      // Con la IA apagada, el trivial tampoco abre incidencia (antes sí).
+      const off = mkConfirmedForDispatch("39");
+      handleOrderButtonReply(off.phone, "confirm_order");
+      await withEnv({ POST_CONFIRMATION_AI_ENABLED: "0" }, () => {
+        const t = handleOrderReply(off.phone, "👍");
+        assert.equal(t.followUp, undefined);
+        assert.equal(t.reply, undefined, "ni te paso con atención: no hay nada que atender");
+        const convoId = db.getConversationIdByPhone(off.phone);
+        assert.ok(convoId === null || db.getConversationById(convoId)!.mode !== "HUMAN");
       });
     });
+  });
+
+  await test("BORDE selección · «1 y 2» con varios pedidos activos escala a persona por ambiguo: nunca confirma el primero en silencio, ni con una selección previa activa", async () => {
+    const conf = await import("../src/lib/orders/confirmation");
+    const raw = db.systemDbHandle();
+    const tel = "34600007701";
+    const uno = mkOrder("amb-1", "A7701", tel);
+    const dos = mkOrder("amb-2", "A7702", tel);
+    raw.prepare("UPDATE orders SET status='awaiting_reply' WHERE id IN (?,?)").run(uno.id, dos.id);
+
+    // El clasificador ya no da "confirm" a un mensaje que nombra dos opciones.
+    assert.equal(conf.classifyOrderReply("1 y 2"), "unknown", "EL BUG: /^1\\b/ lo daba por confirmación del primero");
+    assert.equal(conf.classifyOrderReply("1,2"), "unknown");
+    assert.equal(conf.classifyOrderReply("el 1 y el 3"), "unknown");
+    assert.equal(conf.classifyOrderReply("1"), "confirm", "una sola opción sigue confirmando");
+    assert.equal(conf.classifyOrderReply("1 gracias"), "confirm", "y una opción con cortesía también");
+    assert.equal(conf.mentionsSeveralOptions("1 y 2"), true);
+    assert.equal(conf.mentionsSeveralOptions("1 1"), false, "la misma opción repetida no es ambigüedad");
+    assert.equal(conf.mentionsSeveralOptions("calle mayor 5"), false, "una dirección con un número no es una selección");
+
+    // Con DOS pedidos activos, "1 y 2" va a una persona y no confirma nada.
+    const r = conf.handleOrderReply(tel, "1 y 2");
+    assert.equal(r.handled, true);
+    assert.equal(r.reply, msgs.MSG_HUMAN_ATTENTION);
+    assert.equal(db.getOrderById(uno.id)!.status, "needs_call", "no se confirma: se escala");
+    assert.equal(db.getOrderById(dos.id)!.status, "needs_call");
+    assert.equal(db.getConversationById(db.getConversationIdByPhone(tel)!)!.mode, "HUMAN");
+    const wi = raw.prepare("SELECT reason FROM work_items WHERE order_id IN (?,?) AND resolved_at IS NULL").all(uno.id, dos.id) as Array<{ reason: string }>;
+    assert.ok(wi.some((w) => /Selección ambigua/.test(w.reason)), `la incidencia dice por qué: ${JSON.stringify(wi)}`);
+
+    // Y tampoco cuela con una selección previa viva, que era el agujero real.
+    const tel2 = "34600007702";
+    const tres = mkOrder("amb-3", "A7703", tel2);
+    const cuatro = mkOrder("amb-4", "A7704", tel2);
+    raw.prepare("UPDATE orders SET status='awaiting_reply' WHERE id IN (?,?)").run(tres.id, cuatro.id);
+    db.setSelectedOrderContext(tel2, tres.id);
+    const r2 = conf.handleOrderReply(tel2, "1 y 2");
+    assert.equal(r2.reply, msgs.MSG_HUMAN_ATTENTION, "con selección activa TAMBIÉN se para");
+    assert.equal(db.getOrderById(tres.id)!.status, "needs_call", "el seleccionado NO se confirma en silencio");
+    assert.notEqual(db.getOrderById(tres.id)!.status, "confirmed");
+    raw.prepare("UPDATE orders SET supplier_sync_status='synced' WHERE shopify_order_id LIKE 'amb-%'").run();
   });
 
   await test("BORDE lote · OpenAI falla A MITAD del lote de la capa 2 (excepción síncrona y rechazo): el pedido fallido queda 'dudosa' con alerta, los siguientes se evalúan igual y el tick siguiente no repite ninguno", async () => {
@@ -2698,7 +2757,13 @@ async function main(): Promise<void> {
     assert.equal(classifyOrderReply("1 gracias"), "confirm");
     assert.equal(classifyOrderReply("2, me he equivocado"), "change_address");
     assert.equal(classifyOrderReply("3 quiero poner una nota"), "delivery_note");
-    for (const t of ["👍", "?", "si perfecto", "correcto gracias", "hola", "creo que sí"]) {
+    // Desde el 07-09 el asentimiento SÍ confirma: un pulgar arriba o "ok
+    // gracias" son afirmaciones, y mandarlas a una persona llenaba la bandeja.
+    for (const t of ["👍", "👌", "si perfecto", "correcto gracias", "sí, confirmo", "ok gracias", "vale perfecto"]) {
+      assert.equal(classifyOrderReply(t), "confirm", `"${t}" es una afirmación`);
+    }
+    // Lo que sigue SIN confirmar: cortesía sin afirmar, dudas y ambigüedad.
+    for (const t of ["?", "hola", "creo que sí", "gracias", "muchas gracias", "🙏", "1 y 2", "1,2", "no", "si pero cambia la direccion"]) {
       assert.equal(classifyOrderReply(t), "unknown", `"${t}" debe pedir aclaración`);
     }
     // Caso REAL (#1057, Pedro): un typo NO se adivina. Pedir aclaración cuesta

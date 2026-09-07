@@ -127,8 +127,13 @@ export interface PostalCodeCheck {
 
 export function checkSpanishPostalCode(postalCode: string | null | undefined, province?: string | null, city?: string | null): PostalCodeCheck {
   const raw = (postalCode ?? "").trim();
-  const formatValid = /^\d{5}$/.test(raw);
-  const prefix = formatValid ? raw.slice(0, 2) : null;
+  // "28 001" es un CP valido tecleado con un espacio de mas, no un error del
+  // cliente que merezca una alerta (07-09-2026). Se compacta cualquier espacio
+  // interior, incluidos los invisibles que llegan por copiar y pegar, antes de
+  // validar. El valor original se conserva en `raw` para el informe.
+  const compact = raw.replace(/[\s\u00a0\u200b-\u200d\ufeff]+/g, "");
+  const formatValid = /^\d{5}$/.test(compact);
+  const prefix = formatValid ? compact.slice(0, 2) : null;
   const provinceFromCp = prefix ? (INE_PROVINCE_BY_CP_PREFIX[prefix] ?? null) : null;
   const existence: PostalCodeCheck["existence"] = !formatValid ? "formato_invalido" : provinceFromCp ? "prefijo_valido" : "prefijo_invalido";
   let coherence: PostalCodeCheck["coherence"] = "sin_confirmar";

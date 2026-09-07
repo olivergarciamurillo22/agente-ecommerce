@@ -100,15 +100,36 @@ export interface OrderReplyResult {
 
 export type OrderReplyIntent = "confirm" | "change_address" | "delivery_note" | "unknown";
 
+/**
+ * Emojis de asentimiento → la palabra que representan (07-09-2026).
+ * Va ANTES de normalizeText a propósito: esa función borra todo lo que no sea
+ * [a-z0-9ñ], así que un "👍" suelto llegaba como cadena vacía y acababa en la
+ * bandeja de una persona. Solo los inequívocos: 🙏 (que tanto vale por
+ * "gracias" como por "por favor") NO entra aquí.
+ */
+const AFFIRMATIVE_EMOJI = /[\u{1F44D}\u{1F44C}\u{1F44F}\u{2705}\u{2714}\u{1F197}\u{1F44A}]/gu;
+
 /** minúsculas, sin tildes, sin signos, espacios colapsados — comparación robusta. */
 function normalizeText(text: string): string {
   return text
+    .replace(AFFIRMATIVE_EMOJI, " si ")
     .toLowerCase()
     .normalize("NFD")
     .replace(/[̀-ͯ]/g, "")
     .replace(/[^a-z0-9ñ\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * ¿El mensaje nombra VARIAS opciones del selector ("1 y 2", "1,2", "el 1 y el
+ * 3")? Nunca se resuelve en silencio quedándose con la primera.
+ * Se aplica sobre el texto YA normalizado.
+ */
+export function mentionsSeveralOptions(normalized: string): boolean {
+  const marcadores = normalized.match(/\b[1-9]\b/g);
+  if (!marcadores) return false;
+  return new Set(marcadores).size >= 2;
 }
 
 // Solo frases INEQUÍVOCAS. Cualquier otra cosa pide aclaración.
@@ -131,6 +152,33 @@ const CONFIRM_PHRASES = new Set([
   "perfecto",
   "de acuerdo",
 ]);
+
+/**
+ * Vocabulario de asentimiento (07-09-2026). Un mensaje cuyas palabras sean
+ * TODAS de aquí, y que lleve al menos una que afirme de verdad, es una
+ * confirmación: "si confirmo", "ok gracias", "correcto gracias", "vale
+ * perfecto". Antes, cualquier combinación de dos palabras caía en "unknown" y
+ * se derivaba a una persona, que es justo lo que llenaba la bandeja.
+ */
+const AFFIRM_WORDS = new Set(["si", "sii", "sip", "claro", "ok", "oki", "okey", "okay", "vale", "confirmo", "confirmado", "confirma", "correcto", "correcta", "perfecto", "perfecta", "bien", "genial", "estupendo", "acuerdo", "adelante", "eso", "es", "asi", "exacto", "afirmativo"]);
+/** Cortesía: acompaña, pero por sí sola no confirma nada. */
+const COURTESY_WORDS = new Set(["gracias", "muchas", "mil", "todo", "de", "que", "por", "favor", "porfa", "un", "saludo", "saludos", "muy", "muchisimas", "genial"]);
+
+/** ¿Es una afirmación compuesta ("si confirmo", "ok gracias")? */
+function isAffirmativePhrase(normalized: string): boolean {
+  const words = normalized.split(" ").filter(Boolean);
+  if (words.length === 0 || words.length > 4) return false;
+  let afirma = false;
+  for (const w of words) {
+    if (AFFIRM_WORDS.has(w)) {
+      afirma = true;
+      continue;
+    }
+    if (COURTESY_WORDS.has(w)) continue;
+    return false; // una palabra que no es ni afirmación ni cortesía: no se adivina
+  }
+  return afirma; // "gracias" a secas NO confirma: no afirma nada
+}
 
 const CHANGE_ADDRESS_PHRASES = new Set([
   "2",
@@ -162,12 +210,35 @@ const NOTE_PHRASES = new Set([
 ]);
 
 /**
+ * Acuse trivial: un agradecimiento, un emoji de asentimiento o un mensaje sin
+ * contenido. NO es una duda ni una petición. Se usa DESPUÉS de confirmar, para
+ * no gastar una llamada a la IA ni abrir una incidencia por un "gracias".
+ * Solo cuenta como trivial si TODAS sus palabras son de cortesía o
+ * asentimiento: "gracias, pero cambia la dirección" no lo es.
+ */
+const THANKS_EMOJI = /[\u{1F64F}\u{1F970}\u{2764}\u{1F60A}\u{1F642}\u{1F44D}\u{1F44C}\u{1F44F}\u{2705}\u{1F929}\u{1F60D}]/gu;
+
+export function isTrivialAcknowledgement(text: string): boolean {
+  const sinEmoji = (text ?? "").replace(THANKS_EMOJI, " ");
+  const n = normalizeText(sinEmoji);
+  if (n === "") return true; // vacío, solo espacios o solo emojis
+  const words = n.split(" ").filter(Boolean);
+  if (words.length > 4) return false;
+  return words.every((w) => AFFIRM_WORDS.has(w) || COURTESY_WORDS.has(w));
+}
+
+/**
  * Clasifica la respuesta del cliente SIN IA. Ante la duda → "unknown"
  * ("creo que sí pero la dirección no sé" jamás confirma).
  */
 export function classifyOrderReply(text: string): OrderReplyIntent {
   const n = normalizeText(text);
-  if (CONFIRM_PHRASES.has(n) || /^1\b/.test(n)) return "confirm";
+  // AMBIGÜEDAD PRIMERO (07-09-2026): "1 y 2" mencionaba dos opciones y el
+  // regex /^1\b/ lo daba por confirmación del primero. Con varios pedidos
+  // activos eso confirmaba uno en silencio. Ahora no clasifica: quien decide
+  // es el flujo multi-pedido, que sabe cuántos hay.
+  if (mentionsSeveralOptions(n)) return "unknown";
+  if (CONFIRM_PHRASES.has(n) || /^1\b/.test(n) || isAffirmativePhrase(n)) return "confirm";
   if (CHANGE_ADDRESS_PHRASES.has(n) || /^2\b/.test(n)) return "change_address";
   if (NOTE_PHRASES.has(n) || /^3\b/.test(n)) return "delivery_note";
   return "unknown";
@@ -621,6 +692,20 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
       // es una duda: el pedido ya está confirmado y su segunda pulsación es
       // INERTE. Escalarlo llenaría la bandeja de personas con confirmaciones
       // duplicadas — y esa bandeja es justo lo que hay que mantener limpio.
+      // TRIVIAL (07-09-2026): un "gracias", un pulgar o unas manos juntas tras
+      // confirmar no son una duda. Antes gastaban una llamada a la IA de
+      // intención y, con ella apagada, abrían una incidencia que nadie
+      // necesitaba. Ahora se registran y se acaba ahí.
+      if (isTrivialAcknowledgement(text)) {
+        logIntegrationEvent(
+          "whatsapp",
+          "post_confirmation_trivial",
+          "info",
+          `acuse trivial tras confirmar ("${text.trim().slice(0, 40)}"): sin acción, sin llamada a la IA y sin incidencia`,
+          confirmed[0].shopify_order_number
+        );
+        return { handled: true, authorized: confirmed[0].pilot_authorized === 1 };
+      }
       if (classifyOrderReply(text) === "unknown") {
         // IA DE INTENCIÓN (07-09, opcional): con POST_CONFIRMATION_AI_ENABLED=1
         // el texto se clasifica ANTES de escalar. Solo una duda conocida de la
@@ -701,6 +786,14 @@ export function handleOrderReply(phone: string, text: string): OrderReplyResult 
     const r = authorized(routeToOrder(order, rest, restIntent), order);
     if (restIntent === "confirm") clearSelectedOrderContext(phone);
     return r;
+  }
+
+  // 1-bis) Nombra VARIAS opciones ("1 y 2"): jamás se elige la primera en
+  //        silencio, ni siquiera habiendo un pedido ya seleccionado. Es la
+  //        respuesta más probable de quien quiere los dos, y eso lo decide
+  //        una persona. (07-09-2026)
+  if (mentionsSeveralOptions(normalizeText(text))) {
+    return escalateUnknownText(phone, active, "Selección ambigua: menciona varios pedidos");
   }
 
   // 2) Hay un pedido SELECCIONADO válido: los mensajes son sobre él.
