@@ -48,6 +48,7 @@ import {
 import { tagOrderConfirmed } from "../shopify/admin";
 import { orderActionAllowed } from "../safety";
 import { markOrderToSend } from "../suppliers/beeping";
+import { hasOpenAddressAlert } from "./address-validation";
 import {
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
@@ -204,7 +205,23 @@ export function confirmOrder(order: OrderRow, via: "reply" | "manual"): ConfirmO
   }
   // Best-effort y en segundo plano: nunca retrasa WhatsApp ni revierte el
   // estado local si Beeping falla. (feat/beeping-mark-to-send, 1207b90)
-  void markOrderToSend(order.shopify_order_number);
+  //
+  // ALERTA_DIRECCION (07-09): con una alerta abierta el mark-to-send
+  // AUTOMÁTICO no sale aunque el cliente acabe de confirmar — el cliente
+  // puede no ver que su dirección está incompleta. Lo libera una persona
+  // al cerrar la alerta (resolveAddressAlert). La confirmación en sí sigue
+  // igual: esto solo retiene el despacho.
+  if (hasOpenAddressAlert(order.id)) {
+    logIntegrationEvent(
+      "beeping",
+      "mark_to_send_retenido_por_alerta_direccion",
+      "warning",
+      "pedido confirmado con ALERTA_DIRECCION abierta: mark-to-send automático retenido hasta revisión humana",
+      order.shopify_order_number
+    );
+  } else {
+    void markOrderToSend(order.shopify_order_number);
+  }
   void tagOrderConfirmed(order.shopify_order_id).then((ok) => {
     if (ok) setOrderShopifyTagged(order.id);
   });

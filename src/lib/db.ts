@@ -970,6 +970,48 @@ export function migrateHunterDiscovery(db: Database.Database): void {
   `);
 }
 
+/**
+ * Migración 22 (07-09-2026): validación de direcciones en dos capas
+ * (determinista + IA) — docs/VALIDACION-DIRECCION-IA.md.
+ *  - address_validations: auditoría COMPLETA de cada veredicto (capa, veredicto,
+ *    problemas, confianza, respuesta cruda del modelo). Es también la caché:
+ *    la IA no se vuelve a llamar mientras la dirección (hash) no cambie.
+ *  - address_alerts: la incidencia ALERTA_DIRECCION por pedido. Mientras esté
+ *    abierta (resolved_at IS NULL) el mark-to-send AUTOMÁTICO a Beeping no
+ *    sale, aunque el cliente haya confirmado. Solo la cierra una persona.
+ * ADITIVA: ninguna columna de orders cambia.
+ */
+export function migrateAddressValidation(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS address_validations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      address_hash TEXT NOT NULL,
+      layer INTEGER NOT NULL CHECK(layer IN (1,2)),
+      verdict TEXT NOT NULL CHECK(verdict IN ('correcta','dudosa','incorrecta')),
+      problems_json TEXT NOT NULL DEFAULT '[]',
+      confidence REAL,
+      model TEXT,
+      raw_response TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      UNIQUE(order_id, address_hash, layer)
+    );
+    CREATE INDEX IF NOT EXISTS idx_address_validations_order ON address_validations(order_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS address_alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      detected_by_layer INTEGER NOT NULL CHECK(detected_by_layer IN (1,2)),
+      verdict TEXT NOT NULL CHECK(verdict IN ('dudosa','incorrecta')),
+      problems_json TEXT NOT NULL DEFAULT '[]',
+      opened_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      resolved_at INTEGER,
+      resolved_by TEXT,
+      resolution_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_address_alerts_open ON address_alerts(order_id) WHERE resolved_at IS NULL;
+  `);
+}
+
 export interface OrderRow {
   id: number;
   shopify_order_id: string;
@@ -1617,6 +1659,7 @@ function build() {
   migrateProductCandidates(db);
   migrateHunterPredictive(db);
   migrateHunterDiscovery(db);
+  migrateAddressValidation(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1786,7 +1829,7 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 21;
+export const SCHEMA_VERSION = 22;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

@@ -58,6 +58,7 @@ import {
 import { deferOrderUntil, getOrdersForSupplierEvaluation, setOrderSupplierEvaluation } from "../db";
 import { evaluateOrderForSupplier } from "../suppliers/service";
 import { isConfirmationEligible } from "./eligibility";
+import { runPendingAddressAiValidations } from "./address-validation";
 import { logIntegrationEvent, runInstrumented } from "../system/repo";
 
 const logger = pino({ level: (process.env.LOG_LEVEL as pino.Level | undefined) ?? "info" });
@@ -347,6 +348,17 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
       const ok = await tagOrderConfirmed(order.shopify_order_id);
       if (ok) setOrderShopifyTagged(order.id);
     }
+  }
+
+  // 5) Validación de dirección, capa 2 (IA). Carril PROPIO, después de los
+  //    envíos: nunca retrasa la confirmación. Solo corre con
+  //    ADDRESS_AI_VALIDATION_ENABLED=1 + OPENAI_API_KEY; una llamada por pedido
+  //    (caché por dirección) y como mucho 5 por tick. Cualquier fallo es
+  //    "dudosa" → ALERTA_DIRECCION. docs/VALIDACION-DIRECCION-IA.md
+  try {
+    await runPendingAddressAiValidations(5);
+  } catch (err) {
+    logger.warn(`[ADDRESS] capa 2 falló en el tick (no bloquea): ${err instanceof Error ? err.message : err}`);
   }
 
   return summary;

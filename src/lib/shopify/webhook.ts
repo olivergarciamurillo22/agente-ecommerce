@@ -11,6 +11,7 @@
 
 import pino from "pino";
 import { getDuplicateCandidatesByPhone, insertOrderIfNew, markOrderPossibleDuplicate } from "../db";
+import { runAddressValidationLayer1 } from "../orders/address-validation";
 import { findPossibleDuplicates } from "../orders/multi-order";
 import {
   isCodOrder,
@@ -189,6 +190,23 @@ export function processOrdersCreateWebhook(rawBody: string, headers: WebhookHead
     } catch (err) {
       // La detección es best-effort: jamás puede tumbar la entrada del pedido.
       logger.warn(`[ORDER] detección de duplicados falló (no bloquea): ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  // VALIDACIÓN DE DIRECCIÓN, capa 1 (determinista, sin red, 07-09-2026).
+  // Corre AL ENTRAR el pedido y no bloquea nada: la confirmación por WhatsApp
+  // sale igual. Si algo no cuadra abre ALERTA_DIRECCION (bandeja de atención
+  // + bloqueo del mark-to-send automático hasta revisión humana). La capa 2
+  // (IA) la ejecuta el scheduler por su cuenta. docs/VALIDACION-DIRECCION-IA.md
+  if (!tooOld) {
+    try {
+      const l1 = runAddressValidationLayer1(order);
+      if (l1.verdict !== "correcta") {
+        logger.warn(`[ADDRESS] ${orderLabel} capa 1: ${l1.verdict} (${l1.problems.join(", ")}) → ALERTA_DIRECCION`);
+      }
+    } catch (err) {
+      // Best-effort: jamás puede tumbar la entrada del pedido.
+      logger.warn(`[ADDRESS] validación de dirección falló (no bloquea): ${err instanceof Error ? err.message : err}`);
     }
   }
 

@@ -18,6 +18,7 @@
 import { getOrderById, isActionResolved, type OrderRow } from "../db";
 import { lineItemsFromPayload } from "../orders/line-items";
 import { assessOrderShippingAddress } from "../orders/address-assessment";
+import { getOpenAddressAlert } from "../orders/address-validation";
 import { emergencyStop } from "../safety";
 import { logIntegrationEvent } from "../system/repo";
 import {
@@ -77,6 +78,12 @@ export function evaluateLocalReleaseGate(order: OrderRow): ReleaseGate {
   const minimumAddress = assessOrderShippingAddress(order);
   if (minimumAddress.status === "SUSPICIOUS") {
     reasons.push(`dirección sospechosa (${minimumAddress.reason}): revisión humana obligatoria`);
+  }
+  // ALERTA_DIRECCION (07-09): la validación en dos capas dejó una incidencia
+  // abierta. Una persona tiene que cerrarla (desde la ficha) antes de liberar.
+  const addressAlert = getOpenAddressAlert(order.id);
+  if (addressAlert) {
+    reasons.push(`ALERTA_DIRECCION abierta (capa ${addressAlert.detected_by_layer}, ${addressAlert.verdict}): ciérrala en la ficha tras revisar la dirección`);
   }
   const city = (order.city ?? "").trim();
   if (!(order.address_line1 ?? "").trim() || !city || city === "-" || !(order.postal_code ?? "").trim()) {

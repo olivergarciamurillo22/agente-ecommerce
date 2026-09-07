@@ -42,6 +42,7 @@ export type EnvCategory =
   | "DROPEA"
   | "DROPI"
   | "BEEPING"
+  | "ADDRESS_AI"
   | "META_ADS"
   | "PRODUCT_HUNTER"
   | "TRACKING"
@@ -347,6 +348,22 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
   { name: "BEEPING_WRITE_ENABLED", category: "BEEPING", secret: false, description: "1 = escrituras (mark-to-send/cancel/update). Capa aparte de la lectura; a 0 hasta el piloto real.", requiredFor: [], defaultValue: "0", validate: bool01 },
   { name: "BEEPING_AUTO_RELEASE_CONFIRMED", category: "BEEPING", secret: false, description: "1 = liberar automáticamente al confirmar. HOY SIEMPRE 0: el modo acordado es LIBERACIÓN MANUAL.", requiredFor: [], defaultValue: "0", validate: bool01, status: "FUTURE" },
   { name: "BEEPING_NOTIFICATIONS_ENABLED", category: "BEEPING", secret: false, description: "1 = la sync de Beeping puede encolar WhatsApps de postventa. A 0 en desarrollo (actualiza estados sin mandar nada).", requiredFor: [], defaultValue: "0", validate: bool01 },
+
+  // ── VALIDACIÓN DE DIRECCIONES (capa 2, IA) — docs/VALIDACION-DIRECCION-IA.md ──
+  // La capa 1 (determinista) no tiene variables: corre siempre y sin coste.
+  {
+    name: "ADDRESS_AI_VALIDATION_ENABLED",
+    category: "ADDRESS_AI",
+    secret: false,
+    description: "1 = la capa 2 evalúa cada dirección nueva con OpenAI (una llamada por pedido, con caché). 0 = la capa 2 no se ejecuta y se registra como 'no_ejecutada'. Fail-closed cuando está a 1: cualquier fallo o confianza < 0,6 → 'dudosa' → ALERTA_DIRECCION.",
+    requiredFor: [],
+    mustEqual: { "local-safe": "0" },
+    defaultValue: "0",
+    validate: bool01,
+  },
+  { name: "OPENAI_API_KEY", category: "ADDRESS_AI", secret: true, description: "Clave de OpenAI para la capa 2. Sin ella la capa 2 no se ejecuta aunque el interruptor esté a 1. Cuenta propia de Casamable (nada que ver con OPENROUTER_API_KEY del kit).", requiredFor: [] },
+  { name: "ADDRESS_AI_MODEL", category: "ADDRESS_AI", secret: false, description: "Modelo de OpenAI para la capa 2. gpt-4o-mini: ~0,0001 € por pedido.", requiredFor: [], defaultValue: "gpt-4o-mini" },
+  { name: "ADDRESS_AI_TIMEOUT_MS", category: "ADDRESS_AI", secret: false, description: "Timeout de la llamada (1000–60000). Al vencer, el veredicto es 'dudosa' (fail-closed), nunca 'correcta'.", requiredFor: [], defaultValue: "8000", validate: intPos },
 
   // ── META ADS (Marketing API) — solo lectura de insights ──
   {

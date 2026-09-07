@@ -1007,6 +1007,177 @@ async function main(): Promise<void> {
     });
   });
 
+  // ============ VALIDACIÓN DE DIRECCIONES · dos capas (07-09-2026) ============
+  console.log("\n— Validación de direcciones (determinista + IA) —");
+  const addrVal = await import("../src/lib/orders/address-validation");
+  const addrAi = await import("../src/lib/orders/address-ai");
+  const addrAssess = await import("../src/lib/orders/address-assessment");
+  const mkAddrOrder = (suffix: string, fields: Partial<{ address_line1: string; city: string; province: string | null; postal_code: string }>) => {
+    const phone = `346000005${suffix.padStart(2, "0")}`;
+    const created = mkOrder(`9299${suffix.padStart(2, "0")}`, `1399${suffix.padStart(2, "0")}`, phone);
+    db.systemDbHandle()
+      .prepare("UPDATE orders SET address_line1=?, city=?, province=?, postal_code=? WHERE id=?")
+      .run(fields.address_line1 ?? "Calle Alcalá 123, 2º B", fields.city ?? "Madrid", fields.province === undefined ? "Madrid" : fields.province, fields.postal_code ?? "28001", created.id);
+    return db.getOrderById(created.id)!;
+  };
+  const AI_ON = { ADDRESS_AI_VALIDATION_ENABLED: "1", OPENAI_API_KEY: "sk-test-no-real", ADDRESS_AI_TIMEOUT_MS: "1500" };
+  const okCompleter: typeof addrAi.openAiCompleter = async () => JSON.stringify({ veredicto: "correcta", problemas: [], confianza: 0.93 });
+
+  await test("DIRECCIÓN capa 1 · CP inválido (formato o prefijo inexistente) → incorrecta + ALERTA_DIRECCION, sin IA", async () => {
+    for (const [suffix, cp] of [["1", "2800"], ["2", "99001"], ["3", "ABCDE"]] as const) {
+      const order = mkAddrOrder(suffix, { postal_code: cp });
+      const l1 = addrVal.runAddressValidationLayer1(order);
+      assert.equal(l1.verdict, "incorrecta", cp);
+      assert.ok(l1.problems.some((p) => p === "cp_formato_invalido" || p === "cp_prefijo_inexistente"), l1.problems.join(","));
+      assert.ok(addrVal.hasOpenAddressAlert(order.id), "abre la alerta");
+      const out = await addrVal.runAddressValidationLayer2(order, { env: AI_ON, complete: async () => { throw new Error("no debería llamarse"); } });
+      assert.deepEqual(out, { status: "no_ejecutada", reason: "capa1_ya_detecto_problema" }, "la capa 2 no gasta una llamada cuando la 1 ya vio el problema");
+    }
+  });
+
+  await test("DIRECCIÓN capa 1 · CP válido pero incoherente con la provincia/ciudad → incorrecta (08001 con Madrid)", () => {
+    const order = mkAddrOrder("4", { postal_code: "08001", city: "Madrid", province: "Madrid" });
+    const l1 = addrVal.runAddressValidationLayer1(order);
+    assert.equal(l1.verdict, "incorrecta");
+    assert.ok(l1.problems.some((p) => p.startsWith("cp_incoherente_con_provincia:08001->Barcelona")), l1.problems.join(","));
+    assert.equal(l1.postalCode.provinceFromCp, "Barcelona");
+    // Con la ciudad como única pista también sirve cuando es capital; si no hay nada reconocible se declara sin_confirmar.
+    assert.equal(addrAssess.checkSpanishPostalCode("41001", null, "Sevilla").coherence, "coherente");
+    assert.equal(addrAssess.checkSpanishPostalCode("41001", null, "Dos Hermanas").coherence, "sin_confirmar");
+    assert.equal(addrAssess.checkSpanishPostalCode("41001", "Andalucía", "Dos Hermanas").coherence, "sin_confirmar", "una comunidad autónoma no es una provincia: no se adivina");
+  });
+
+  await test("DIRECCIÓN capa 1 · relleno de prueba (asdasd, test, 11111, solo números) → incorrecta", () => {
+    for (const [suffix, texto] of [["5", "asdasd"], ["6", "test"], ["7", "aaaa aaaa"], ["8", "12345"], ["9", "qwerty 1"]] as const) {
+      const order = mkAddrOrder(suffix, { address_line1: texto });
+      const l1 = addrVal.runAddressValidationLayer1(order);
+      assert.equal(l1.verdict, "incorrecta", texto);
+      assert.ok(l1.problems.includes("direccion_relleno_de_prueba") || l1.problems.some((p) => p.startsWith("direccion_sin_forma")), `${texto}: ${l1.problems.join(",")}`);
+    }
+    assert.equal(addrAssess.isFillerAddress("Calle Alcalá 123"), false);
+    assert.equal(addrAssess.isFillerAddress("Avenida del Mar s/n"), false);
+  });
+
+  await test("DIRECCIÓN capa 2 · la llamada a OpenAI falla, da timeout o responde basura → 'dudosa' (fail-closed), nunca 'correcta'", async () => {
+    const casos: Array<[string, typeof addrAi.openAiCompleter, RegExp]> = [
+      ["10", async () => { throw new Error("ECONNRESET"); }, /sin_confirmar:fallo_llamada_ia/],
+      ["11", () => new Promise<string>(() => { /* nunca resuelve: timeout */ }), /sin_confirmar:timeout_llamada_ia/],
+      ["12", async () => "esto no es JSON", /sin_confirmar:respuesta_ia_invalida/],
+      ["13", async () => JSON.stringify({ veredicto: "correcta", problemas: [], confianza: 0.4 }), /sin_confirmar:confianza_baja_0\.40/],
+    ];
+    for (const [suffix, complete, motivo] of casos) {
+      const order = mkAddrOrder(suffix, {});
+      const out = await addrVal.validateOrderAddress(order, { env: AI_ON, complete });
+      assert.equal(out.layer1.verdict, "correcta", "la capa 1 no ve problema en una dirección normal");
+      assert.equal(out.layer2.status, "evaluada");
+      if (out.layer2.status !== "evaluada") return;
+      assert.equal(out.layer2.result.verdict, "dudosa", suffix);
+      assert.ok(out.layer2.result.problems.some((p) => motivo.test(p)), `${suffix}: ${out.layer2.result.problems.join(",")}`);
+      assert.ok(addrVal.hasOpenAddressAlert(order.id), "dudosa abre ALERTA_DIRECCION");
+      const audit = addrVal.listAddressValidations(order.id);
+      assert.ok(audit.some((r) => r.layer === 2 && r.verdict === "dudosa" && typeof r.raw_response === "string"), "queda auditado con la respuesta/error cruda");
+    }
+  });
+
+  await test("DIRECCIÓN capa 2 · dirección correcta y completa → 'correcta' con confianza alta, sin alerta, y la IA no se repite (caché por dirección)", async () => {
+    const order = mkAddrOrder("14", { address_line1: "Calle Alcalá 123, 2º B" });
+    let llamadas = 0;
+    const complete: typeof addrAi.openAiCompleter = async (args) => { llamadas++; assert.match(args.user, /Calle Alcalá 123/); assert.match(args.user, /prefijo → Madrid/); return okCompleter(args); };
+    const out = await addrVal.validateOrderAddress(order, { env: AI_ON, complete });
+    assert.equal(out.layer2.status, "evaluada");
+    if (out.layer2.status === "evaluada") { assert.equal(out.layer2.result.verdict, "correcta"); assert.equal(out.layer2.result.confidence, 0.93); assert.equal(out.layer2.alert, null); }
+    assert.equal(addrVal.hasOpenAddressAlert(order.id), false);
+    const again = await addrVal.runAddressValidationLayer2(order, { env: AI_ON, complete });
+    assert.equal(again.status, "cache");
+    assert.equal(llamadas, 1, "una sola llamada por pedido mientras la dirección no cambie");
+    // Cambia la dirección → nuevo hash → nueva evaluación.
+    db.systemDbHandle().prepare("UPDATE orders SET address_line1='Calle Alcalá 125' WHERE id=?").run(order.id);
+    const changed = await addrVal.runAddressValidationLayer2(db.getOrderById(order.id)!, { env: AI_ON, complete });
+    assert.equal(changed.status, "evaluada");
+    assert.equal(llamadas, 2);
+  });
+
+  await test("DIRECCIÓN capa 2 · con la IA desactivada (default) NO se llama a nada y se declara 'no_ejecutada'", async () => {
+    const order = mkAddrOrder("15", {});
+    const out = await addrVal.runAddressValidationLayer2(order, { env: { ADDRESS_AI_VALIDATION_ENABLED: "0", OPENAI_API_KEY: "sk-x" }, complete: async () => { throw new Error("no debería llamarse"); } });
+    assert.deepEqual(out, { status: "no_ejecutada", reason: "ia_desactivada" });
+    const sinKey = await addrVal.runAddressValidationLayer2(order, { env: { ADDRESS_AI_VALIDATION_ENABLED: "1" }, complete: async () => { throw new Error("no debería llamarse"); } });
+    assert.deepEqual(sinKey, { status: "no_ejecutada", reason: "ia_desactivada" });
+    assert.equal(addrVal.hasOpenAddressAlert(order.id), false);
+  });
+
+  await test("DIRECCIÓN flujo · la confirmación por WhatsApp sale igual con ALERTA_DIRECCION, pero el mark-to-send automático queda retenido hasta que una persona cierra la alerta", async () => {
+    await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
+      const order = mkAddrOrder("16", { address_line1: "Calle Alcalá 123, 2º B" });
+      // La IA marca dudosa (confianza baja): alerta abierta ANTES de que el cliente conteste.
+      await addrVal.validateOrderAddress(order, { env: AI_ON, complete: async () => JSON.stringify({ veredicto: "dudosa", problemas: ["falta piso"], confianza: 0.9 }) });
+      assert.ok(addrVal.hasOpenAddressAlert(order.id));
+      db.claimOrderInitialSend(order.id);
+      const realFetch = globalThis.fetch;
+      let beepingCalls = 0;
+      globalThis.fetch = (async () => { beepingCalls++; return new Response(null, { status: 204 }); }) as typeof fetch;
+      try {
+        const r = handleOrderButtonReply(order.phone, "confirm_order");
+        assert.equal(r.reply, msgs.MSG_CONFIRMED, "el cliente confirma con normalidad: cero fricción");
+        assert.equal(db.getOrderById(order.id)!.status, "confirmed");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(beepingCalls, 0, "mark-to-send automático RETENIDO");
+        assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='mark_to_send_retenido_por_alerta_direccion' AND order_ref=?").get(order.shopify_order_number));
+        // Gate manual de Beeping: también lo lista como motivo.
+        const { evaluateLocalReleaseGate } = await import("../src/lib/beeping/release");
+        assert.ok(evaluateLocalReleaseGate(db.getOrderById(order.id)!).reasons.some((m) => /ALERTA_DIRECCION/.test(m)));
+        // Una persona la cierra → work_item resuelto, evento, y ahora sí se libera.
+        assert.equal(addrVal.resolveAddressAlert(order.id, "Pedro", "dirección comprobada por teléfono"), true);
+        assert.equal(addrVal.hasOpenAddressAlert(order.id), false);
+        assert.equal(addrVal.resolveAddressAlert(order.id, "Pedro"), false, "cerrar dos veces no hace nada");
+        const wi = db.systemDbHandle().prepare("SELECT resolved_at FROM work_items WHERE order_id=? AND reason='ALERTA_DIRECCION'").get(order.id) as { resolved_at: number | null } | undefined;
+        assert.ok(wi && wi.resolved_at, "el trabajo de la bandeja queda resuelto");
+        assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='address_alert_resolved' AND order_ref=?").get(order.shopify_order_number));
+        assert.ok(!evaluateLocalReleaseGate(db.getOrderById(order.id)!).reasons.some((m) => /ALERTA_DIRECCION/.test(m)));
+      } finally { globalThis.fetch = realFetch; }
+    });
+  });
+
+  await test("DIRECCIÓN flujo · el webhook de Shopify ejecuta la capa 1 al entrar el pedido y abre la alerta sin bloquear el alta", () => {
+    const payload = codPayload({ id: 929917, order_number: 139917, name: "#139917", shipping_address: { address1: "asdasd", city: "Madrid", province: "Madrid", zip: "28001", country_code: "ES", phone: "+34 600 000 517" } });
+    const raw = JSON.stringify(payload);
+    const res = processOrdersCreateWebhook(raw, { hmac: sign(raw), topic: "orders/create", webhookId: "wh-addr", shopDomain: "x.myshopify.com" });
+    assert.equal(res.status, 200);
+    const order = db.getOrderByShopifyId("929917")!;
+    assert.equal(order.status, "pending_send", "la entrada y el envío de la confirmación no se bloquean");
+    assert.ok(addrVal.hasOpenAddressAlert(order.id), "ALERTA_DIRECCION abierta al entrar");
+    const l1 = addrVal.listAddressValidations(order.id).find((r) => r.layer === 1)!;
+    assert.equal(l1.verdict, "incorrecta");
+    assert.ok(JSON.parse(l1.problems_json).includes("direccion_relleno_de_prueba"));
+  });
+
+  await test("DIRECCIÓN API · el propietario cierra la alerta desde la ficha; queda en audit_log con su nombre", async () => {
+    const order = mkAddrOrder("18", { address_line1: "asdasd" });
+    addrVal.runAddressValidationLayer1(order);
+    assert.ok(addrVal.hasOpenAddressAlert(order.id));
+    const { NextRequest } = await import("next/server");
+    const route = await import("../src/app/api/orders/[orderId]/action/route");
+    const sessions = await import("../src/lib/auth/session");
+    const raw = db.systemDbHandle();
+    raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-addr@test','Dueña Direcciones','owner','x')").run();
+    const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-addr@test'").get() as { id: number }).id;
+    const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+    const res = await route.POST(new NextRequest(`http://localhost/api/orders/${order.id}/action`, { method: "POST", headers, body: JSON.stringify({ action: "resolve_address_alert", note: "llamé al cliente" }) }), { params: Promise.resolve({ orderId: String(order.id) }) });
+    assert.equal(res.status, 200);
+    assert.equal(addrVal.hasOpenAddressAlert(order.id), false);
+    const alert = addrVal.listAddressAlerts(order.id)[0];
+    assert.equal(alert.resolved_by, "Dueña Direcciones");
+    assert.equal(alert.resolution_note, "llamé al cliente");
+    assert.ok(raw.prepare("SELECT 1 FROM audit_log WHERE user_id=? AND action='resolve_address_alert' AND subject_id=?").get(userId, String(order.id)));
+    const again = await route.POST(new NextRequest(`http://localhost/api/orders/${order.id}/action`, { method: "POST", headers, body: JSON.stringify({ action: "resolve_address_alert" }) }), { params: Promise.resolve({ orderId: String(order.id) }) });
+    assert.equal(again.status, 409, "sin alerta abierta no hay nada que cerrar");
+    // El listado del panel lleva la insignia como campo calculado.
+    const list = await import("../src/app/api/orders/route");
+    const listRes = await list.GET(new NextRequest("http://localhost/api/orders", { headers }));
+    const body = (await listRes.json()) as { orders: Array<{ id: number; address_alert_open: number }> };
+    assert.equal(body.orders.find((o) => o.id === order.id)?.address_alert_open, 0);
+  });
+
   await test("BEEPING mark-to-send: una direccion sospechosa nunca llega al adaptador", async () => {
     await withEnv({ BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
       const phone = "34600000415";
@@ -13042,7 +13213,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 21;/, "predictivo usa 20 y Discovery añade 21");
+      assert.match(db, /export const SCHEMA_VERSION = 22;/, "predictivo usa 20, Discovery 21 y la validación de direcciones 22");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -13516,7 +13687,7 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "work_items", "confirmation_resends"]) {
       assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(raw.pragma("user_version", { simple: true }), 21);
+    assert.equal(raw.pragma("user_version", { simple: true }), db.SCHEMA_VERSION);
   });
 
   await test("GUARDA · una base con user_version mayor que SCHEMA_VERSION (futuro o platform-companies ≥1000) se rechaza antes de migrar", async () => {
@@ -13542,7 +13713,7 @@ async function main(): Promise<void> {
   await test("schema 17 migra a workspace 18, Hunter 19, predictivo 20 y discovery 21 sin perder datos (fixture realista)", async () => {
     const { runMigrationV43Test } = await import("../scripts/test-migration-v43");
     const report = await runMigrationV43Test();
-    assert.equal(report.schemaVersion, 21);
+    assert.equal(report.schemaVersion, db.SCHEMA_VERSION);
     assert.equal(report.integrity, "ok");
     assert.deepEqual(report.counts, { orders: 116, conversations: 63, messages: 349, outbox: 180, integration_events: 1700 });
     console.log(`    migración realista v17→v21: ${report.durationMs} ms`);
@@ -13561,6 +13732,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 20");
     db.migrateHunterDiscovery(fixture);
     fixture.pragma("user_version = 21");
+    db.migrateAddressValidation(fixture);
+    fixture.pragma("user_version = 22");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
@@ -13568,7 +13741,7 @@ async function main(): Promise<void> {
     for (const table of ["users", "sessions", "audit_log", "product_candidates", "candidate_events", "hunter_predictive_estimates", "adlib_queries", "adlib_candidates", "adlib_candidate_snapshots"]) {
       assert.ok(fixture.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), table);
     }
-    assert.equal(fixture.pragma("user_version", { simple: true }), 21);
+    assert.equal(fixture.pragma("user_version", { simple: true }), db.SCHEMA_VERSION);
     fixture.close();
   });
 
@@ -13891,7 +14064,7 @@ async function main(): Promise<void> {
     });
 
     await test("Hunter predictivo · migración 20 convive con Hunter 19", () => {
-      assert.equal(db.SCHEMA_VERSION, 21);
+      assert.ok(db.SCHEMA_VERSION >= 21, "predictivo (20) y discovery (21) ya están por debajo del esquema vigente");
       const tables = db.systemDbHandle().prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{name:string}>;
       assert.ok(tables.some(t => t.name === "product_candidates"));
       assert.ok(tables.some(t => t.name === "candidate_events"));

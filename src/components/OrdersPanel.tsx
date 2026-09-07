@@ -61,6 +61,7 @@ export interface OrderItem {
   deferred_until: number | null;
   possible_duplicate: number;
   cancellation_requested_at: number | null;
+  address_alert_open?: number;
   supplier_platform: string | null;
   supplier_sync_status: string;
   supplier_external_order_id: string | null;
@@ -291,7 +292,7 @@ function SearchIcon() {
   );
 }
 
-type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot";
+type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot" | "resolve_address_alert";
 
 export default function OrdersPanel() {
   const [orders, setOrders] = useState<OrderItem[]>([]);
@@ -403,6 +404,10 @@ export default function OrdersPanel() {
       resend: {
         title: "Enviar WhatsApp real",
         body: `Vas a enviar un WhatsApp REAL a ${order.customer_name ?? "—"} (+${order.phone}) por el pedido #${order.shopify_order_number}. Si el sistema está en SAFE MODE o el teléfono no está autorizado, quedará bloqueado y solo se registrará en el log.`,
+      },
+      resolve_address_alert: {
+        title: "Cerrar ALERTA DIRECCIÓN",
+        body: `Confirmas que has revisado la dirección del pedido #${order.shopify_order_number} y es entregable. Quedará registrado a tu nombre y, si el pedido ya está confirmado, se liberará el envío automático a Beeping que estaba retenido.`,
       },
     };
     const ejecutar = async () => {
@@ -702,6 +707,14 @@ export default function OrdersPanel() {
                               PIDE CANCELAR
                             </span>
                           )}
+                          {o.address_alert_open === 1 && (
+                            <span
+                              className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-orange-500/15 text-orange-600 border border-orange-500/30 align-middle"
+                              title="Validación de dirección: dudosa o incorrecta. El envío automático a Beeping queda retenido hasta que una persona la revise."
+                            >
+                              ALERTA DIRECCIÓN
+                            </span>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 max-w-[150px]">
                           <div className="truncate leading-snug" title={o.customer_name ?? ""}>{o.customer_name ?? "—"}</div>
@@ -994,6 +1007,22 @@ export default function OrdersPanel() {
               {detail.deferred_until && detail.status === "pending_send" && (
                 <div className="mx-5 mb-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3 text-sm text-amber-600">
                   En espera por horario: el mensaje saldrá hacia las {new Date(detail.deferred_until * 1000).toLocaleString("es-ES")}.
+                </div>
+              )}
+
+              {detail.address_alert_open === 1 && (
+                <div className="mx-5 mb-3 rounded-lg border border-orange-500/30 bg-orange-500/10 px-3 py-2.5 text-xs text-brand-text">
+                  <div className="font-semibold text-orange-600">ALERTA DIRECCIÓN</div>
+                  <div className="mt-0.5 text-brand-muted">
+                    La validación (determinista o IA) marcó la dirección como dudosa o incorrecta. El envío automático a Beeping
+                    queda retenido aunque el cliente confirme. Revisa la dirección (y la propuesta, si la hay) y cierra la alerta
+                    solo si es entregable.
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "resolve_address_alert")} className="!px-2.5 !py-1.5 text-xs">
+                      He revisado la dirección: cerrar alerta
+                    </GhostButton>
+                  </div>
                 </div>
               )}
 

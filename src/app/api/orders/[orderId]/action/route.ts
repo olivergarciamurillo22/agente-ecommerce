@@ -14,6 +14,8 @@ import { manualDialOrder } from "@/lib/calls/manual";
 import { requireStaff } from "@/lib/auth/guard";
 import { audit, safeOrder } from "@/lib/workspace";
 import { systemDbHandle } from "@/lib/db";
+import { resolveAddressAlert } from "@/lib/orders/address-validation";
+import { markOrderToSend } from "@/lib/suppliers/beeping";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -31,6 +33,7 @@ const ACTIONS = new Set([
   "cancel",
   "authorize_pilot",
   "revoke_pilot",
+  "resolve_address_alert",
 ]);
 
 /**
@@ -54,9 +57,9 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     return NextResponse.json({ ok: false, error: "id inválido" }, { status: 400 });
   }
 
-  let body: { action?: string; replenishmentDate?: string };
+  let body: { action?: string; replenishmentDate?: string; note?: string };
   try {
-    body = (await req.json()) as { action?: string; replenishmentDate?: string };
+    body = (await req.json()) as { action?: string; replenishmentDate?: string; note?: string };
   } catch {
     return NextResponse.json({ ok: false, error: "JSON inválido" }, { status: 400 });
   }
@@ -97,6 +100,20 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
   }
   if (action === "revoke_pilot") {
     revokeOrderPilotAuthorization(id);
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
+  }
+  // ALERTA_DIRECCION: solo una PERSONA la cierra, y queda en la auditoría
+  // quién y con qué nota. No pasa por el gate de allowlist: cerrar una
+  // incidencia interna no tiene efecto sobre el cliente. Si el pedido ya está
+  // confirmado y la integración automática está activa, aquí se libera el
+  // mark-to-send que la alerta retuvo. docs/VALIDACION-DIRECCION-IA.md
+  if (action === "resolve_address_alert") {
+    const note = typeof body.note === "string" ? body.note.trim().slice(0, 500) : null;
+    if (!resolveAddressAlert(id, auth.user.name, note)) {
+      return NextResponse.json({ ok: false, error: "este pedido no tiene ninguna ALERTA_DIRECCION abierta" }, { status: 409 });
+    }
+    audit(auth.user, "resolve_address_alert", "order", id, { note });
+    if (order.status === "confirmed") void markOrderToSend(order.shopify_order_number);
     return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
   }
 
