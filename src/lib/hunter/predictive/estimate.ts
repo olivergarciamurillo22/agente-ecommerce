@@ -1,12 +1,12 @@
-import { shippingTierForGrams } from "../scoring";
+import { COD_FEE_EUR, PICKING_EUR as SCORING_PICKING_EUR, shippingTierForGrams } from "../scoring";
 import type { PredictiveEstimate, PredictiveSearchProvider, PriceRange, PreliminaryViability, SearchEvidence } from "./types";
 
 // ESTIMACIÓN INTERNA, no dato confirmado por Pedro: caducidad de una estimación.
 export const ESTIMATE_TTL_DAYS = 30;
-// Confirmado por Pedro (contrato Beeping actualizado, 2026-09-05/06): picking & packing 1,40 €.
-export const PICKING_EUR = 1.4;
-// Confirmado por Pedro (contrato Beeping): comisión COD 0,70 €.
-export const COD_EUR = 0.7;
+// Picking 1,40 € y COD 0,70 € (contrato Beeping, Pedro 05/06-09): UNA sola
+// fuente en scoring.ts; aquí solo se re-exportan para los consumidores actuales.
+export const PICKING_EUR = SCORING_PICKING_EUR;
+export const COD_EUR = COD_FEE_EUR;
 // ESTIMACIÓN INTERNA, no dato confirmado por Pedro: umbral de "candidato fuerte".
 export const STRONG_MIN_WORST_MARGIN_EUR = 8;
 

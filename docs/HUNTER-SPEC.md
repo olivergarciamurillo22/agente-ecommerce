@@ -74,3 +74,31 @@ del repositorio prevalecen.
   canónico; el inventario detallado está en `HUNTER-VS-PI-ENGINE.md`.
 - **Operación owner-only y local.** `/api/hunter` comprueba el rol owner. La
   generación deja artefactos locales, nunca escribe ni publica en Shopify.
+
+## Constantes económicas con fuente (07-09-2026)
+
+| Constante | Valor | Fuente | Dónde |
+|---|---|---|---|
+| Picking & packing | 1,40 € por pedido enviado | contrato Beeping actualizado (Pedro, 05/06-09) | `scoring.ts` `PICKING_EUR` (única fuente; `predictive/estimate.ts` la re-exporta) — entra en el margen del scoring **y** en la estimación predictiva |
+| Comisión COD | 0,70 € por entregado | contrato Beeping | `COD_FEE_EUR` |
+| Transporte de salida | 3,80 / 3,86 / 3,94 / 4,00 € (≤1 / ≤2 / ≤3 / ≤4 kg) | Correos Express con recargo de combustible (Pedro, 06-09) | `SHIPPING_TIERS`; >4 kg sin tramo confirmado → no se puntúa |
+| Tasa de entrega supuesta | 0,629 | hipótesis de partida, no break-even | `DEFAULT_ASSUMED_DELIVERY_RATE` (ver `FINANCE-MODEL.md`) |
+| CPA histórico, coste de rechazo, rango de ticket, pesos, `targetMargin` | 7,77 · 9,37 · 29,9–59,9 · 30/25/20/10/10/5 · 10 % | **estimación interna, sin dato de Pedro** | comentadas como tales en el código |
+
+**Penalización por peso: eliminada (decisión de Pedro, 07-09).** Con la tarifa
+casi plana el salto entre tramos es de céntimos y ese coste ya entra en
+`margen_unitario` vía `outboundShippingCost`; restar puntos además era contar
+dos veces. El factor `tramo_envio` conserva sus 20 puntos para cualquier paquete
+dentro de un tramo confirmado (la escala sigue en 100 y los umbrales 80/60/40 no
+cambian) y solo es 0 cuando no hay tramo. Redistribuir esos 20 puntos es una
+decisión de pesos pendiente de Pedro.
+
+**Impacto en el caso de ejemplo** (fixture organizador, 190 g, coste 3,29 €, PVP 34,99 €):
+
+| Caso | Antes (4,08 € envío, sin picking) | Tras tramos reales (3,80 €) | Tras tramos + picking 1,40 € en el scoring |
+|---|---|---|---|
+| 1 ud | margen 10,72 € · CPA máx. 10,72 · break-even 38,3 % · score 91,8 (prioritario) | 11,00 € · 11,00 · 37,7 % · 92,5 (prioritario) | **9,60 € · 9,60 · 40,9 % · 89,0 (prioritario)** |
+| pack 2 uds (coste 6,58 €, 380 g) | 7,43 € · 7,43 · 45,9 % · 82,5 (prioritario) | 7,71 € · 7,71 · 45,2 % · 84,1 (prioritario) | **6,31 € · 6,31 · 48,4 % · 76,1 (probar)** |
+
+El pack de 2 baja de «prioritario» a «probar» al contar el picking: antes el
+scoring lo sobrevaloraba en 1,40 € por envío.

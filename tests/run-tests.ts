@@ -13780,6 +13780,21 @@ async function main(): Promise<void> {
       assert.equal(hunterScore.COD_FEE_EUR, 0.7);
       assert.equal(hunterScore.DEFAULT_ASSUMED_DELIVERY_RATE, 0.629);
     });
+    await test("Hunter · el picking entra en el margen del scoring y el peso ya no penaliza (tarifa plana, 07-09)", () => {
+      const fixture=JSON.parse(fs.readFileSync(path.join(process.cwd(),"tests/fixtures/hunter-organizador.json"),"utf8"));
+      const ligero = hunterScore.scoreCandidate({ ...fixture, salePriceEur: 34.99 })!;
+      // Sin picking el margen sería 1,40 € mayor: se recalcula con el modelo real quitando solo ese coste.
+      const { calculateRealCODModel } = require("../src/lib/cod-calculator/real-model") as typeof import("../src/lib/cod-calculator/real-model");
+      const sinPicking = calculateRealCODModel({ salePrice: 34.99, productCost: 3.29, vatRate: 0, rawCPA: 0, shippingRate: 1, deliveryRate: hunterScore.DEFAULT_ASSUMED_DELIVERY_RATE, outboundShippingCost: 3.8, codFee: 0.7, returnCost: hunterScore.REFUSAL_COST_EUR, returnedProductRecoveryRate: 0 }).profitPerSent!;
+      assert.equal(Math.round((sinPicking - ligero.unitMarginEur) * 100) / 100, hunterScore.PICKING_EUR, "el margen por enviado descuenta exactamente el picking");
+      // Un paquete de 3 kg paga 0,14 € más de transporte (ya en el margen) y NO pierde puntos de tramo.
+      const pesado = hunterScore.scoreCandidate({ ...fixture, salePriceEur: 34.99, weightGrams: 2900 })!;
+      assert.equal(pesado.shippingTier, "hasta_3kg");
+      const tramo = (s: typeof ligero) => s.reasons.find((r) => r.factor === "tramo_envio")!.points;
+      assert.equal(tramo(pesado), tramo(ligero), "sin penalización por peso dentro de los tramos confirmados");
+      assert.equal(tramo(ligero), hunterScore.WEIGHT_SHIPPING);
+      assert.equal(Math.round((ligero.unitMarginEur - pesado.unitMarginEur) * 100) / 100, 0.14, "la diferencia real de coste sí se ve en el margen");
+    });
     await test("Hunter · limpia tres títulos spam reales", () => {
       const titles = [
         "🔥 2024 New Hot Sale Electric Nail Clipper Free Shipping",

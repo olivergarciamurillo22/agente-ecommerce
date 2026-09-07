@@ -16,6 +16,10 @@ export const DEFAULT_ASSUMED_DELIVERY_RATE = 0.629;
 export const BASE_SHIPPING_RATE = 1;
 // Confirmado por Pedro (contrato Beeping, 2026-09-05/06): comisión COD 0,70 €.
 export const COD_FEE_EUR = 0.7;
+// Confirmado por Pedro (contrato Beeping actualizado, 2026-09-05/06): picking &
+// packing 1,40 € por pedido ENVIADO. Única fuente: la estimación predictiva
+// (predictive/estimate.ts) la importa de aquí.
+export const PICKING_EUR = 1.4;
 // ESTIMACIÓN INTERNA, no dato confirmado por Pedro: coste de un rechazo
 // (picking ida + envío + retorno + picking vuelta). Pendiente de contrastar
 // con la tarifa real de devolución del contrato Beeping/Correos Express.
@@ -25,9 +29,14 @@ export const REFUSAL_COST_EUR = 9.37;
 // El margen y el CPA mandan porque determinan cuánto se puede invertir sin perder dinero.
 export const WEIGHT_MARGIN = 30;
 export const WEIGHT_CPA = 25;
-// Tramo de envío. OJO: con la tarifa real (casi plana, ver SHIPPING_TIERS) el salto
-// de coste entre tramos es de céntimos; la penalización de puntos por peso se
-// mantiene tal cual hasta que Pedro decida si sigue teniendo sentido.
+// Tramo de envío. DECISIÓN 07-09-2026 (Pedro): con la tarifa real casi plana
+// (3,80–4,00 € entre 1 y 4 kg, ver SHIPPING_TIERS) la penalización de peso ya
+// no tiene base de coste, y el coste del tramo YA entra en margen_unitario
+// (outboundShippingCost). Penalizar además por peso era contar dos veces. El
+// factor se conserva con sus 20 puntos para todo paquete dentro de un tramo
+// confirmado — así la escala sigue siendo 100 y los umbrales de veredicto no
+// cambian — y vuelve a ser 0 solo cuando NO hay tramo (fuera de 4 kg: sin
+// puntuar, fail-closed). Redistribuir esos 20 puntos es decisión de Pedro.
 export const WEIGHT_SHIPPING = 20;
 // Menos variantes reducen errores, stock inmovilizado y complejidad de fulfillment.
 export const WEIGHT_VARIANTS = 10;
@@ -92,7 +101,10 @@ export function scoreCandidate(f: CandidateFacts, manualNote: string | null = nu
   const inputs = {
     salePrice: price, productCost: f.unitCostEur, vatRate: 0, rawCPA: 0,
     shippingRate: BASE_SHIPPING_RATE, deliveryRate: DEFAULT_ASSUMED_DELIVERY_RATE,
-    outboundShippingCost: shipment.eur, codFee: COD_FEE_EUR,
+    // Coste por pedido ENVIADO = transporte del tramo + picking & packing.
+    // (07-09-2026: el picking faltaba en el scoring; solo estaba en la
+    // estimación predictiva. Ambos usan ahora la misma constante.)
+    outboundShippingCost: shipment.eur + PICKING_EUR, codFee: COD_FEE_EUR,
     returnCost: REFUSAL_COST_EUR, returnedProductRecoveryRate: 0,
   };
   const model = calculateRealCODModel(inputs);
@@ -103,7 +115,7 @@ export function scoreCandidate(f: CandidateFacts, manualNote: string | null = nu
   const add = (factor: string, points: number, detail: string) => reasons.push({ factor, points: round2(points), detail });
   add("margen_unitario", Math.max(0, Math.min(WEIGHT_MARGIN, margin / 12 * WEIGHT_MARGIN)), `${round2(margin)} € por enviado`);
   add("cpa_maximo", Math.max(0, Math.min(WEIGHT_CPA, be.cpaBreakEven / HISTORIC_CPA_EUR * WEIGHT_CPA)), `${round2(be.cpaBreakEven)} € frente a ${HISTORIC_CPA_EUR} € históricos`);
-  add("tramo_envio", shipment.tier === "hasta_1kg" ? WEIGHT_SHIPPING : WEIGHT_SHIPPING / 2, `${shipment.eur} € (${shipment.tier.replace("_", " ")})`);
+  add("tramo_envio", WEIGHT_SHIPPING, `${shipment.eur} € (${shipment.tier.replace("_", " ")}) + picking ${PICKING_EUR} € · coste ya en el margen; tarifa casi plana: sin penalización por peso`);
   const variantCount = f.variants?.length ?? 0;
   add("variantes", variantCount <= 1 ? WEIGHT_VARIANTS : variantCount <= 3 ? 6 : 2, `${variantCount} variantes`);
   add("ticket", price >= TICKET_MIN_EUR && price <= TICKET_MAX_EUR ? WEIGHT_TICKET : 5, `PVP propuesto ${price} €`);
