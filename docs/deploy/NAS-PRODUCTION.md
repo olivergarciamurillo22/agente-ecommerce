@@ -11,10 +11,18 @@ código). Si un comando de aquí no existe, es un fallo a corregir.
 | Proyecto de Compose | **`repo-v3c`** (declarado en `docker-compose.yml` con `name:`) |
 | Contenedor | `casamable-agent` |
 | Carpeta persistente | `/volume1/docker/CasamableAgent` (`auth/`, `data/`, `backups/`) |
-| Esquema esperado | **24** con `release/casamable-v4.3` (era 18 con `7fd8014`, 05-09) |
+| Checkout real | **`/volume1/docker/CasamableAgent/repo-v3c`** (las otras `repo-*` son restos: nunca levantar Compose desde ellas) |
+| Esquema en producción | **30** desde el 07-09-2026 (`22f8013`); antes 17 (medido, no 18) |
+| Commit en producción | `22f8013e42e1bad2c8fedd76216f1ec92e12cf23` — lo confirma `/api/health/live` → `build` |
+| `.env` real | `repo-v3c/.env` (600, root), cargado por `env_file`; se hornea en la imagen: cambiar un flag = rebuild + recreate |
 | Proveedor de WhatsApp | `cloud_api` |
 
 ### ¿Qué commit corre ahora mismo? (`PRODUCTION_COMMIT`)
+
+> **Resuelto el 07-09-2026:** `PRODUCTION_COMMIT=22f8013e42e1bad2c8fedd76216f1ec92e12cf23`,
+> confirmado por `curl -s https://agente.casamable.es/api/health/live` →
+> `"build":"22f8013…"`, `schemaVersion: 30`. Lo de abajo describe cómo se
+> confirma a partir de ahora.
 
 Desde el repo **no se puede saber**: ni la imagen ni el health lo exponían
 (07-09-2026). Hay dos maneras, y solo la primera vale hoy:
@@ -46,6 +54,17 @@ estado corrompido. Desde el 03-09 el nombre viaja dentro de
 `docker-compose.yml` (`name: repo-v3c`), así que `up -d` **reemplaza** el
 contenedor en marcha desde cualquier carpeta. No hace falta acordarse de
 `-p`, pero si lo usas, que sea `-p repo-v3c`.
+
+## Particularidades del host UGOS (aprendidas el 07-09)
+
+- No hay `git` ni `sqlite3` nativos. Se usan contenedores efímeros:
+  `docker run --rm -v /volume1/docker/CasamableAgent/repo-v3c:/git alpine/git:latest <cmd>`
+  para fetch/checkout/show, y `docker exec casamable-agent node -e '…better-sqlite3…'`
+  para consultas SQL puntuales. No instalar nada permanente en el sistema.
+- El remote solo trae por defecto la rama trackeada
+  (`fix/confirmation-provider-mapping`): para otra rama, `git fetch origin <rama> -v`.
+- El `.env` va horneado en la imagen (`env_file`): un cambio de flag exige
+  `docker compose -p repo-v3c build` + `up -d --no-build --force-recreate`.
 
 ## Antes de tocar nada
 

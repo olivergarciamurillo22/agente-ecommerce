@@ -209,7 +209,7 @@ Un PR no se abre sin los tres en verde. Ningún test se marca como skip para des
 `67f05c7` (esquema 15, cloud_api, TEST_MODE=1). NADA DE LO DE ABAJO ESTÁ
 DESPLEGADO.**
 
-> **07-09-2026 (noche) — la rama canónica es `release/casamable-v4.3` (esquema 30).**
+> **07-09-2026 (noche) — la rama canónica es `release/casamable-v4.3` (esquema 30). DESPLEGADA en el NAS esa misma noche: producción corre `22f8013` (esquema 17 → 30). Informe: `docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md`.**
 > Encima de lo de abajo, los bloques cerrados el 07-09 (todo local, sin push
 > desde `5aac3e2`, sin despliegue): **validación de direcciones en dos capas**
 > (22; capa 1 determinista ACTIVA por defecto y solo abre `ALERTA_DIRECCION`,

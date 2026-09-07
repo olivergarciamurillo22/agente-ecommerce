@@ -4,7 +4,7 @@ Documento vivo: **lo que corre de verdad en el NAS**. Se actualiza en cada
 sesión de operación. El detalle de cómo se llegó a cada estado vive en
 `docs/archive/` — este es el snapshot, no el historial.
 
-**Última actualización: 07-09-2026** (estado del NAS sin cambios desde el 05-09; lo que cambia es el candidato).
+**Última actualización: 08-09-2026** — la noche del 07-09 se desplegó `release/casamable-v4.3` en el NAS. Informe completo: `docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md`.
 
 ---
 
@@ -12,9 +12,9 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 
 | | |
 |---|---|
-| Rama desplegada | `feat/casamable-control-center-v2` |
-| Commit desplegado | **INCÓGNITA (07-09).** Los docs dicen `67f05c7` (02-09) y el runbook del 05-09 preparaba `fdad99e`; ninguno está confirmado. Cómo confirmarlo: `docs/deploy/NAS-PRODUCTION.md` § PRODUCTION_COMMIT. Desde el próximo despliegue, `/api/health/live` devuelve `build` |
-| Esquema SQLite | **15** |
+| Rama desplegada | `release/casamable-v4.3` (desplegada 07-09-2026 por la noche) |
+| Commit desplegado | **`22f8013e42e1bad2c8fedd76216f1ec92e12cf23`** (hotfix de plantilla sobre `ab5e3a8`). Confirmado por `/api/health/live` → `build`. Antes corría `adb2be7` (esquema 17) |
+| Esquema SQLite | **30** (era 17 antes del despliegue, no 15 ni 18 como decían los docs) |
 | Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
 | NAS | UGREEN DXP2800, `192.168.2.109` |
 | Acceso público | `https://agente.casamable.es` (VPS Hetzner → Caddy → WireGuard → NAS:3000) |
@@ -25,6 +25,18 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 | Dropi | sin API (solo diagnóstico), sincronización de su app desactivada |
 | Beeping | **apagado** (sin credencial; todo fail-closed) |
 | Meta Ads | read-only, funcionando (cuenta `act_1365655995103103`, EUR, Europe/Madrid) |
+| Ad Library (Cazador) | desplegado; `META_AD_LIBRARY_ACCESS_TOKEN` caducado → la pestaña Competencia avisa y no encola nada |
+| Flags v4.3 | `ADDRESS_AI_VALIDATION_ENABLED=0`, `AUTO_DISPATCH_COOLDOWN_ENABLED=0`, `POST_CONFIRMATION_AI_ENABLED=0`, `DISPATCH_NOTICE_WHATSAPP_ENABLED=0` |
+| Plantillas WhatsApp | doctor 8 PASS / 1 DISABLED / 0 FAIL (07-09, tras el hotfix `22f8013`) |
+
+### Incidente cerrado el 07-09: confirmación bloqueada por la plantilla
+
+La plantilla aprobada `confirmacion_pedido_cod` pasó de 4 a 5 variables en
+WhatsApp Manager (línea de confirmación de dirección) después del 01-09 y
+el contrato local seguía en 4. El fail-safe bloqueó los envíos: 3 fallos
+reales en outbox desde el 06-09 15:13, ningún cliente con mensaje roto,
+ningún pedido atascado. Ya existía en `adb2be7`; corregido en `22f8013`.
+Detalle en `docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md` §3.
 
 ## 2 · Incidentes abiertos (02-09) y su estado en código
 
@@ -47,8 +59,11 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 > workspace, Hunter + Landing Studio (19), predictivo (20) y discovery (21).
 > El salto de esquema desde producción (15) es **15 → 30** (22 = validacion de direcciones, 23 = auto-despacho, 24 = canal de despacho, 25 = auto-cancelacion IA, 26 = aviso de despacho, 27 = tope diario de IA, 28 = estado de corrida de discovery, 29 = cola de busquedas, 30 = tipos de trabajo de la cola: auditoria de tienda y cadena; 07-09), todo aditivo y
 > ensayado con el fixture realista (`scripts/test-migration-v43.ts`). Guía
-> de release: `docs/deploy/RELEASE-v4.3.md`. Lo que corre en el NAS no se ha
-> podido confirmar desde el repo: hace falta `PRODUCTION_COMMIT`.
+> de release: `docs/deploy/RELEASE-v4.3.md`.
+>
+> **08-09-2026: HECHO.** Desplegado el 07-09 (`22f8013`, esquema real 17 → 30,
+> recuentos intactos). Esta sección queda como historial; lo pendiente ahora
+> está en `DEPLOY-REPORT-v4.3-2026-09-07.md` §5.
 
 **Candidato del 05-09 (integrado en v4.3): `release/casamable-v4.2` @ `fdad99e` (esquema 18).**
 Contiene el hotfix de Retell/ops, la integración móvil, el espacio de

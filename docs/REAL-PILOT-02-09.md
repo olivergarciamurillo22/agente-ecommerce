@@ -10,7 +10,7 @@ cambiad PENDING por PASS/FAIL. Nada se analiza antes de estar pegado.
 Falta también, para el delta de producción:
 
 ```
-PRODUCTION_COMMIT=
+PRODUCTION_COMMIT=22f8013e42e1bad2c8fedd76216f1ec92e12cf23   # 07-09-2026, release/casamable-v4.3, esquema 30 (ver docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md)
 ```
 
 ---
