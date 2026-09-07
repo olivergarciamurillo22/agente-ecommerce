@@ -83,7 +83,7 @@ del repositorio prevalecen.
 | Comisión COD | 0,70 € por entregado | contrato Beeping | `COD_FEE_EUR` |
 | Transporte de salida | 3,80 / 3,86 / 3,94 / 4,00 € (≤1 / ≤2 / ≤3 / ≤4 kg) | Correos Express con recargo de combustible (Pedro, 06-09) | `SHIPPING_TIERS`; >4 kg sin tramo confirmado → no se puntúa |
 | Tasa de entrega supuesta | 0,629 | hipótesis de partida, no break-even | `DEFAULT_ASSUMED_DELIVERY_RATE` (ver `FINANCE-MODEL.md`) |
-| CPA histórico, coste de rechazo, rango de ticket, pesos, `targetMargin` | 7,77 · 9,37 · 29,9–59,9 · 30/25/20/10/10/5 · 10 % | **estimación interna, sin dato de Pedro** | comentadas como tales en el código |
+| CPA histórico, coste de rechazo, rango de ticket, pesos, `targetMargin` | 7,77 · 9,37 · 29,9–59,9 · 40/35/0/10/10/5 · 10 % | **estimación interna, sin dato de Pedro** | comentadas como tales en el código |
 
 **Penalización por peso: eliminada (decisión de Pedro, 07-09).** Con la tarifa
 casi plana el salto entre tramos es de céntimos y ese coste ya entra en
