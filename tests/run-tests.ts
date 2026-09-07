@@ -13497,6 +13497,26 @@ async function main(): Promise<void> {
     assert.equal(raw.pragma("user_version", { simple: true }), 21);
   });
 
+  await test("GUARDA · una base con user_version mayor que SCHEMA_VERSION (futuro o platform-companies ≥1000) se rechaza antes de migrar", async () => {
+    const Database = (await import("better-sqlite3")).default;
+    for (const foreign of [db.SCHEMA_VERSION + 1, 1001, 1020]) {
+      const other = new Database(":memory:");
+      other.pragma(`user_version = ${foreign}`);
+      assert.throws(
+        () => db.assertSchemaNotNewer(other, "fixture.db"),
+        (e: unknown) => e instanceof db.NewerSchemaError && (foreign >= 1000 ? /platform-companies/.test((e as Error).message) : /más nueva/.test((e as Error).message)),
+        `user_version=${foreign} debe rechazarse`
+      );
+      assert.throws(() => other.pragma("user_version"), /database connection is not open|closed/i, "la conexión se cierra: nadie puede migrar encima");
+    }
+    for (const own of [0, 17, db.SCHEMA_VERSION]) {
+      const mine = new Database(":memory:");
+      mine.pragma(`user_version = ${own}`);
+      assert.doesNotThrow(() => db.assertSchemaNotNewer(mine, "fixture.db"), `user_version=${own} es nuestro`);
+      mine.close();
+    }
+  });
+
   await test("schema 17 migra a workspace 18, Hunter 19, predictivo 20 y discovery 21 sin perder datos (fixture realista)", async () => {
     const { runMigrationV43Test } = await import("../scripts/test-migration-v43");
     const report = await runMigrationV43Test();

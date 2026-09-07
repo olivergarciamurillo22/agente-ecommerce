@@ -1234,6 +1234,11 @@ function build() {
   }
 
   const db = new Database(DB_PATH);
+  // Antes de cualquier PRAGMA de escritura o migración: una base con un
+  // user_version por encima del que este código conoce NO es nuestra (otro
+  // producto —platform-companies estampa ≥1000— o una versión futura de
+  // Casamable). Abrirla y migrar "por si acaso" es justo lo que no puede pasar.
+  assertSchemaNotNewer(db);
 
   // PRAGMA WAL: permite que bot y dashboard lean/escriban el mismo archivo a la vez.
   db.pragma("journal_mode = WAL");
@@ -1782,6 +1787,32 @@ function ctx(): ReturnType<typeof build> {
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
 export const SCHEMA_VERSION = 21;
+
+export class NewerSchemaError extends Error {
+  constructor(public readonly userVersion: number, public readonly file: string) {
+    super(
+      `La SQLite ${file} tiene user_version=${userVersion}, mayor que el esquema ${SCHEMA_VERSION} que conoce este código. ` +
+        (userVersion >= 1000
+          ? "Ese bloque (≥1000) es de platform-companies: esta base no es de Casamable. "
+          : "O es una base de una versión más nueva de Casamable, o está corrupta. ") +
+        "No se ha ejecutado ninguna migración. Revisa DATA_DIR."
+    );
+    this.name = "NewerSchemaError";
+  }
+}
+
+/**
+ * Guarda simétrica a la de platform-companies (07-09-2026): Casamable solo
+ * abre bases con user_version ≤ SCHEMA_VERSION. Se ejecuta antes de cualquier
+ * migración; una base "del futuro" o de otro producto se cierra sin tocarla.
+ */
+export function assertSchemaNotNewer(db: Database.Database, file = DB_PATH): void {
+  const version = Number(db.pragma("user_version", { simple: true }));
+  if (version > SCHEMA_VERSION) {
+    db.close();
+    throw new NewerSchemaError(version, file);
+  }
+}
 
 /**
  * Handle crudo de SQLite para el módulo de observabilidad (`src/lib/system/`),
