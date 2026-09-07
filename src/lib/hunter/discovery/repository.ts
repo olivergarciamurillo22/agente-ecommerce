@@ -40,4 +40,24 @@ export class DiscoveryRepository {
     });
     return tx();
   }
+
+  /**
+   * Paises en los que hemos visto a este candidato. La clave lleva el pais
+   * delante (PAIS:pageId:huella), asi que basta con mirar las claves que
+   * comparten pagina y huella. NO dice donde anuncia de verdad: dice donde
+   * hemos buscado y lo hemos encontrado.
+   */
+  countriesForCandidate(pageId: string, fingerprint: string): string[] {
+    const filas = this.db
+      .prepare("SELECT DISTINCT candidate_key FROM adlib_candidates WHERE page_id = ? AND fingerprint = ?")
+      .all(pageId, fingerprint) as Array<{ candidate_key: string }>;
+    const paises = new Set<string>();
+    for (const fila of filas) {
+      const trozos = fila.candidate_key.split(":");
+      // Formato nuevo: PAIS:pageId:huella. El formato viejo (pageId:huella) no
+      // lleva pais y se ignora en vez de inventarlo.
+      if (trozos.length >= 3 && /^[A-Z]{2}$/.test(trozos[0])) paises.add(trozos[0]);
+    }
+    return [...paises].sort();
+  }
 }

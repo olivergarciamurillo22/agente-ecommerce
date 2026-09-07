@@ -131,9 +131,18 @@ export class AdLibraryClient {
 export interface FieldProbe { field: string; status: "datos" | "vacio" | "error"; error: string | null }
 
 /** Prueba campo a campo: un opcional rechazado no inutiliza la consulta. */
-export async function probeAdLibraryFields(client: AdLibraryClient, params: { term: string; country: string; since: string; until: string }, wait: (ms: number) => Promise<void> = sleep): Promise<FieldProbe[]> {
+export async function probeAdLibraryFields(
+  client: AdLibraryClient,
+  params: { term: string; country: string; since: string; until: string },
+  wait: (ms: number) => Promise<void> = sleep,
+  budget?: DiscoveryBudget
+): Promise<FieldProbe[]> {
   const probes: FieldProbe[] = [];
   for (const field of ADLIB_FIELDS) {
+    // El sondeo son 14 peticiones reales: cuentan contra el presupuesto igual
+    // que las búsquedas. Antes se gastaban "gratis" y el tope mentía.
+    if (budget?.check()) break;
+    budget?.spend();
     try {
       const page = await client.page({ ...params, fields: field === "id" || field === "page_id" ? ["id", "page_id"] : ["id", "page_id", field] });
       const hasData = page.ads.some((ad) => {

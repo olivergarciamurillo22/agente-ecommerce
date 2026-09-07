@@ -63,7 +63,7 @@ export async function runDiscovery(input: {
   const budget = input.budget ?? new DiscoveryBudget();
 
   const seed = input.terms[0];
-  const fieldProbes = await probeAdLibraryFields(client, { term: seed, country: input.country, since, until });
+  const fieldProbes = await probeAdLibraryFields(client, { term: seed, country: input.country, since, until }, undefined, budget);
   const fields = fieldProbes.filter((field) => field.status !== "error").map((field) => field.field);
   if (!fields.includes("id")) fields.unshift("id");
   if (!fields.includes("page_id")) fields.unshift("page_id");

@@ -15339,6 +15339,164 @@ async function main(): Promise<void> {
       assert.ok(r.rawCount >= 1);
     });
 
+    // ===== Buscador de competencia por una palabra (07-09-2026) =====
+    await test("BUSCADOR · una palabra se expande de forma DETERMINISTA y cada término dice de dónde sale (nada lo inventa un modelo)", async () => {
+      const { expandSearchTerm, loadExpansionLexicon, pluralEs, singularEs } = await import("../src/lib/hunter/discovery/expansion");
+      const lexicon = { sinonimos: { almohada: ["cojin"] }, traducciones: { almohada: ["pillow"] }, modificadores: ["comprar {}", "{} barato"] };
+      const t1 = expandSearchTerm("almohada", { lexicon });
+      const t2 = expandSearchTerm("almohada", { lexicon });
+      assert.deepEqual(t1, t2, "la misma palabra da siempre la misma batería");
+      assert.equal(t1[0].term, "almohada");
+      assert.equal(t1[0].origin, "semilla");
+      const porOrigen = (o: string) => t1.filter((x) => x.origin === o).map((x) => x.term);
+      assert.deepEqual(porOrigen("sinonimo"), ["cojin"]);
+      assert.deepEqual(porOrigen("ingles"), ["pillow"]);
+      assert.ok(porOrigen("variante").includes("almohadas"), "plural");
+      assert.deepEqual(porOrigen("modificador"), ["comprar almohada", "almohada barato"]);
+      for (const t of t1) assert.ok(t.why.trim().length > 3, `cada término explica su origen: ${t.term}`);
+      // Frase de dos palabras: los sinónimos de la última palabra conservan la primera.
+      const frase = expandSearchTerm("funda almohada", { lexicon });
+      assert.ok(frase.some((x) => x.term === "funda cojin"), JSON.stringify(frase.map((x) => x.term)));
+      assert.ok(frase.some((x) => x.term === "funda almohadas"));
+      // Sin diccionario, sigue habiendo variantes y modificadores: nunca cero.
+      const sinLexico = expandSearchTerm("taladro", { lexicon: { sinonimos: {}, traducciones: {}, modificadores: ["comprar {}"] } });
+      assert.ok(sinLexico.length >= 2);
+      // Morfología española.
+      assert.equal(pluralEs("casa"), "casas");
+      assert.equal(pluralEs("papel"), "papeles");
+      assert.equal(pluralEs("luz"), "luces");
+      assert.equal(singularEs("luces"), "luz");
+      assert.equal(singularEs("papeles"), "papel");
+      assert.equal(singularEs("casas"), "casa");
+      // El tope se respeta y el fichero real del repo es legible.
+      assert.equal(expandSearchTerm("almohada", { lexicon, max: 3 }).length, 3);
+      const real = loadExpansionLexicon();
+      assert.ok(real.modificadores.length >= 3, "el diccionario curado del repo carga");
+      assert.equal(expandSearchTerm("   ", { lexicon }).length, 0);
+    });
+
+    await test("BUSCADOR · las señales van etiquetadas: qué es dato de la API, qué es señal derivada y qué es solo declarado por el anunciante", async () => {
+      const { competitorSignals, creativeVariants, declaredDomains, NOT_AVAILABLE_FROM_AD_LIBRARY } = await import("../src/lib/hunter/discovery/signals");
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const ad = (id: string, body: string, caption: string | null) => ({
+        id, pageId: "p1", pageName: "Tienda Competidora", snapshotUrl: `https://www.facebook.com/ads/library/?id=${id}`,
+        bodies: [body], captions: caption ? [caption] : [], titles: [], platforms: ["facebook"], languages: ["es"],
+        creationTime: null, startTime: "2026-08-01", stopTime: null, impressions: null, audience: null,
+      });
+      const snapshot = {
+        key: "ES:p1:abc", pageId: "p1", pageName: "Tienda Competidora", fingerprint: "abc",
+        ads: [ad("a1", "Organizador de cocina antideslizante", "tiendacompetidora.es"), ad("a2", "Organizador de cocina en oferta", "tiendacompetidora.es"), ad("a3", "Organizador de cocina antideslizante", null)],
+        activeAds: 3, oldestActiveAt: Math.floor(Date.parse("2026-08-01T00:00:00Z") / 1000),
+        noise: false, noiseReason: null, candidateId: 1, momentum: "fuerte" as const, previousActiveAds: 1,
+      };
+      const informe = competitorSignals({ snapshot, now, countriesSeen: ["ES", "PT"] });
+      const sig = (id: string) => informe.signals.find((s) => s.id === id)!;
+      assert.equal(sig("dias_activo").value, 37, "01-08 a 07-09");
+      assert.equal(sig("dias_activo").source, "derivada");
+      assert.equal(sig("dias_activo").confirmado, false, "llevar semanas SUGIERE que funciona; no lo demuestra");
+      assert.match(sig("dias_activo").limite ?? "", /pausó y relanzó|no lo demuestra/);
+      assert.equal(sig("anuncios_activos").value, 3);
+      assert.equal(sig("anuncios_activos").confirmado, true, "esto sí es un dato de la API");
+      assert.equal(sig("anuncios_activos").limite, null);
+      assert.equal(sig("variantes_creativas").value, 2, "dos textos distintos entre tres anuncios");
+      assert.equal(sig("variantes_creativas").confirmado, false);
+      assert.match(sig("variantes_creativas").limite ?? "", /no piezas de vídeo o imagen/);
+      assert.equal(sig("momentum").value, "fuerte");
+      assert.match(sig("momentum").limite ?? "", /1 anuncios activos/);
+      assert.equal(sig("paises_vistos").value, "ES, PT");
+      assert.match(sig("paises_vistos").limite ?? "", /no su alcance real/);
+      assert.equal(sig("dominio_declarado").value, "tiendacompetidora.es");
+      assert.equal(sig("dominio_declarado").source, "declarado");
+      assert.match(sig("dominio_declarado").limite ?? "", /No se ha visitado ni resuelto/);
+      // NINGUNA señal es una métrica de rendimiento.
+      for (const s of informe.signals) assert.equal(/gasto|impresion|ctr|conversion/i.test(s.label), false, s.label);
+      assert.ok(informe.snapshotUrls[0]?.includes("facebook.com/ads/library"), "la evidencia es la ficha del anuncio, no el creativo");
+      // Funciones sueltas.
+      assert.equal(creativeVariants([ad("x", "uno", null), ad("y", "uno", null), ad("z", "dos", null)]), 2);
+      assert.deepEqual(declaredDomains([ad("x", "b", "https://www.MiTienda.es/producto")]), ["mitienda.es"]);
+      assert.deepEqual(declaredDomains([ad("x", "b", "Mi Tienda Online")]), [], "un texto que no es dominio no se inventa como dominio");
+      assert.ok(NOT_AVAILABLE_FROM_AD_LIBRARY.some((l) => /gasto/.test(l)));
+      assert.ok(NOT_AVAILABLE_FROM_AD_LIBRARY.some((l) => /creativo/.test(l)));
+    });
+
+    await test("BUSCADOR · una búsqueda completa con red inyectada: expande, agrupa por competidor, informa de progreso y respeta el presupuesto", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      const { runWordSearch } = await import("../src/lib/hunter/discovery/word-search");
+      let peticiones = 0;
+      const fetcher = (async (input: string | URL | Request) => {
+        peticiones++;
+        const url = new URL(String(input));
+        const term = url.searchParams.get("search_terms") ?? "";
+        // Dos competidores + una academia que el filtro de ruido debe apartar.
+        const data = [
+          { id: `${term}-comp1`, page_id: "comp1", page_name: "Tienda Uno", ad_snapshot_url: "https://www.facebook.com/ads/library/?id=1", ad_creative_bodies: [`${term} antideslizante para casa`], ad_creative_link_captions: ["tiendauno.es"], ad_delivery_start_time: "2026-08-01" },
+          { id: `${term}-comp2`, page_id: "comp2", page_name: "Tienda Dos", ad_snapshot_url: "https://www.facebook.com/ads/library/?id=2", ad_creative_bodies: [`${term} con envio rapido`], ad_creative_link_captions: ["tiendados.es"], ad_delivery_start_time: "2026-08-20" },
+          { id: `${term}-ruido`, page_id: "academia", page_name: "Academia", ad_creative_bodies: ["Curso y webinar de formacion online"], ad_delivery_start_time: "2026-08-01" },
+        ];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+      const progreso: string[] = [];
+      const now = Math.floor(Date.parse("2026-09-07T12:00:00Z") / 1000);
+      const r = await runWordSearch({
+        seed: "buscador-test-organizador",
+        country: "ES",
+        days: 30,
+        token: "tok",
+        now,
+        client,
+        maxTerms: 4,
+        budget: new DiscoveryBudget({ maxRequests: 100, deadlineAt: Date.now() + 60_000 }),
+        onProgress: (p) => progreso.push(p.fase),
+      });
+      assert.equal(r.stopReason, "completado");
+      assert.ok(r.terms.length <= 4 && r.terms.length >= 2);
+      assert.equal(r.termsQueried.length, r.terms.length, "se consultaron todos los términos");
+      assert.ok(progreso.includes("expandiendo") && progreso.includes("buscando") && progreso.includes("agrupando") && progreso.includes("terminado"), progreso.join(","));
+      // Agrupado por COMPETIDOR, no por anuncio.
+      assert.equal(r.competitors.length, 2, JSON.stringify(r.competitors.map((c) => c.pageName)));
+      assert.deepEqual(r.competitors.map((c) => c.pageId).sort(), ["comp1", "comp2"]);
+      assert.equal(r.discarded.length, 1);
+      assert.equal(r.discarded[0].pageId, "academia");
+      assert.match(r.discarded[0].noiseReason ?? "", /formación o infoproducto/);
+      // Cada competidor trae sus señales etiquetadas y su evidencia.
+      const uno = r.competitors.find((c) => c.pageId === "comp1")!;
+      assert.ok(uno.signals.some((s) => s.id === "dias_activo" && typeof s.value === "number"));
+      assert.ok(uno.signals.some((s) => s.id === "dominio_declarado" && s.value === "tiendauno.es" && s.source === "declarado"));
+      assert.ok(uno.snapshotUrls.length >= 1);
+      assert.ok(r.requests >= r.terms.length, `${r.requests} peticiones`);
+      assert.equal(peticiones, r.requests, "el contador del presupuesto cuadra con las peticiones reales");
+      // Y quedó persistido con su motivo de parada.
+      const fila = db.systemDbHandle().prepare("SELECT stop_reason, requests_used FROM adlib_queries ORDER BY id DESC LIMIT 1").get() as { stop_reason: string; requests_used: number };
+      assert.equal(fila.stop_reason, "completado");
+      assert.ok(fila.requests_used >= 1);
+    });
+
+    await test("BUSCADOR · si el presupuesto se agota a mitad, lo encontrado se guarda y el informe dice por qué paró (no se pierde el trabajo)", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      const { runWordSearch } = await import("../src/lib/hunter/discovery/word-search");
+      const fetcher = (async (input: string | URL | Request) => {
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        return new Response(JSON.stringify({ data: [{ id: `${term}-a`, page_id: "pp", page_name: "Tienda", ad_creative_bodies: [`${term} para casa`], ad_delivery_start_time: "2026-08-01" }], paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+      // 14 peticiones se van en el sondeo de campos: con 16 se corta enseguida.
+      const r = await runWordSearch({
+        seed: "buscador-corte-presupuesto",
+        country: "ES", days: 30, token: "tok", client, maxTerms: 12,
+        now: Math.floor(Date.now() / 1000),
+        budget: new DiscoveryBudget({ maxRequests: 16, deadlineAt: Date.now() + 60_000 }),
+      });
+      assert.equal(r.stopReason, "presupuesto_peticiones");
+      assert.ok(r.termsQueried.length >= 1, "algo se llegó a consultar");
+      assert.ok(r.termsQueried.length < r.terms.length, "y NO se consultó todo");
+      assert.ok(r.competitors.length >= 1, "lo encontrado antes del corte se conserva");
+      const fila = db.systemDbHandle().prepare("SELECT stop_reason FROM adlib_queries ORDER BY id DESC LIMIT 1").get() as { stop_reason: string };
+      assert.equal(fila.stop_reason, "presupuesto_peticiones", "queda escrito por qué paró");
+    });
+
     await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {
       const config = JSON.parse(fs.readFileSync(path.join(process.cwd(), "config/hunter-discovery-terms.json"), "utf8")) as { source: string; buyer_note: string; terms: string[] };
       assert.equal(config.source, "docs/nicho-abuelos-pain-points.md");

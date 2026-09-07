@@ -1,0 +1,35 @@
+{
+  "_doc": "Diccionario CURADO para expandir una búsqueda de una palabra (docs/HUNTER-BUSCADOR.md). Nada de esto lo genera un modelo: lo que no esté aquí, no se busca. Pedro puede ampliarlo sin desplegar (se relee por mtime). 'sinonimos' y 'traducciones' se aplican a la frase completa o a su última palabra; 'modificadores' usan {} como hueco del término.",
+  "status": "SEMILLA_INICIAL_AMPLIABLE_POR_PEDRO",
+  "modificadores": [
+    "comprar {}",
+    "{} barato",
+    "{} oferta",
+    "{} original",
+    "{} envio gratis",
+    "{} contra reembolso"
+  ],
+  "sinonimos": {
+    "organizador": ["organizadora", "ordenador de armario", "caja organizadora", "cesta organizadora"],
+    "cocina": ["hogar", "casa"],
+    "almohada": ["cojin", "almohadilla"],
+    "corrector": ["ferula", "protector"],
+    "juanetes": ["hallux valgus", "juanete"],
+    "cepillo": ["escobilla", "limpiador"],
+    "lampara": ["luz led", "foco"],
+    "masajeador": ["masaje", "aparato de masaje"],
+    "andador": ["caminador", "ayuda para caminar"],
+    "cortauñas": ["cortauñas electrico", "lima de uñas"]
+  },
+  "traducciones": {
+    "organizador": ["organizer", "storage box"],
+    "cocina": ["kitchen"],
+    "almohada": ["pillow"],
+    "corrector": ["corrector brace"],
+    "cepillo": ["brush"],
+    "lampara": ["led lamp"],
+    "masajeador": ["massager"],
+    "andador": ["walker"],
+    "cortauñas": ["nail clipper"]
+  }
+}
