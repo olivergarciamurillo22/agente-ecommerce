@@ -2,15 +2,19 @@
 
 Documento **versionado**. Todo lo que se cita existe en el repositorio.
 
+> **Para v4.3 (07-09-2026), lee primero [ROLLBACK-v4.3.md](ROLLBACK-v4.3.md)**:
+> lo nuevo se apaga con flags SIN desplegar, y solo si eso no basta se vuelve
+> el código con la mecánica de aquí, que no cambia.
+
 ## Regla de oro
 
 El rollback devuelve el **código**, nunca los **datos**. La base de datos se
-queda como está: el esquema **18** lo entiende también la versión anterior.
-Las cinco tablas que añade el 18 (`users`, `sessions`, `audit_log`,
-`work_items`, `confirmation_resends`) son **tablas aparte** — no se tocó
-ninguna columna de `orders`, `conversations` ni `messages` —, así que una
-versión previa del código simplemente las ignora. Ensayado el 05-09 sobre
-copias (`17 → 18` y la cadena completa `0 → 18`): idempotente,
+queda como está, y una versión previa del código la entiende igual: todas las
+migraciones son **aditivas** (tablas nuevas, y las columnas añadidas a tablas
+existentes son nullable o llevan `DEFAULT`), así que el código antiguo las
+ignora y sigue insertando. Con v4.3 el salto es **15 → 27**; el detalle de qué
+se pierde al volver está en [ROLLBACK-v4.3.md](ROLLBACK-v4.3.md).
+Ensayado sobre copias con `npm run migration:verify`: idempotente,
 `integrity_check ok`, sin perder una fila.
 **No restaures la base** salvo orden expresa de Óliver.
 
@@ -62,7 +66,7 @@ prefieres ser explícito: añade `-p repo-v3c` a los dos comandos.
 ```bash
 docker inspect --format='{{.Image}}' casamable-agent   # == la imagen de rescate
 docker ps --filter name=casamable-agent                # Up + healthy
-docker exec casamable-agent npm run db:health          # esquema 18, integridad ok
+docker exec casamable-agent npm run db:health          # esquema esperado, integridad ok
 docker exec casamable-agent npm run deploy:guard       # UN solo bot
 ```
 

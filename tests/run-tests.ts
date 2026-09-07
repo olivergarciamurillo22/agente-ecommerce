@@ -8294,6 +8294,16 @@ async function main(): Promise<void> {
     for (const m of nas.matchAll(/npm run ([a-z:-]+)/g)) {
       assert.ok(pkg.scripts[m[1]], `NAS-PRODUCTION.md cita 'npm run ${m[1]}' y debe existir`);
     }
+    for (const doc of ["docs/deploy/ROLLBACK-v4.3.md", "docs/deploy/PREDESPLIEGUE.md", "docs/deploy/RESUMEN-OPERATIVO.md"]) {
+      assert.ok(fs.existsSync(path.join(process.cwd(), doc)), `${doc} existe y está versionado`);
+      const texto = leer(doc);
+      for (const m of texto.matchAll(/npm run ([a-z:-]+)/g)) {
+        assert.ok(pkg.scripts[m[1]], `${doc} cita 'npm run ${m[1]}' y debe existir`);
+      }
+      // Solo se permiten las dos frases que PROHÍBEN el comando, literales.
+      const sinAvisos = texto.split("**Nunca** `docker compose down -v`.").join("");
+      assert.ok(!/down -v/.test(sinAvisos), `${doc} jamás propone down -v`);
+    }
     const rollback = leer("docs/deploy/ROLLBACK.md");
     assert.ok(!/down -v/.test(rollback.replace(/\*\*Nunca\*\* `docker compose down -v`\./g, "")), "el rollback jamás propone down -v");
     for (const m of rollback.matchAll(/npm run ([a-z:-]+)/g)) {
