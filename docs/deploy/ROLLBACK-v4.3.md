@@ -78,10 +78,10 @@ Lo que sí cambia en v4.3 es lo que hay que saber ANTES de pulsar:
 
 ### El esquema no vuelve, y no pasa nada
 
-La base habrá pasado de **15 a 27**. Ese salto **no se deshace** y no hay que
+La base habrá pasado de **15 a 29**. Ese salto **no se deshace** y no hay que
 deshacerlo:
 
-- Las migraciones 16→27 son **aditivas**: tablas nuevas y columnas nuevas. Las
+- Las migraciones 16→29 son **aditivas**: tablas nuevas y columnas nuevas. Las
   columnas añadidas a tablas existentes son *nullable* o llevan `DEFAULT`
   (`orders.ordered_at`, `orders.dispatch_notice_sent_at`,
   `dispatch_cooldowns.channel`, `order_status_history.status_axis`…), así que
@@ -89,11 +89,11 @@ deshacerlo:
 - El código al que vuelves (`feat/casamable-control-center-v2`) declara
   `SCHEMA_VERSION = 15` y **no lleva la guarda `assertSchemaNotNewer`** (se
   añadió en esta release). Consecuencia práctica: **arrancará sin protestar**
-  sobre una base en 27, ignorará las tablas que no conoce y **no bajará el
+  sobre una base en 29, ignorará las tablas que no conoce y **no bajará el
   `user_version`**. Es el comportamiento deseado, pero conviene saberlo: no
   esperes un error si algo va mal, espera silencio.
 - Si más adelante vuelves a desplegar v4.3 sobre esa misma base, la migración
-  no tiene nada que hacer (es idempotente) y el `user_version` ya está en 27.
+  no tiene nada que hacer (es idempotente) y el `user_version` ya está en 29.
 
 ### Lo que sí se pierde al volver el código
 

@@ -1749,6 +1749,7 @@ function build() {
   migrateDispatchNotice(db);
   migrateAiCallLog(db);
   migrateDiscoveryRunState(db);
+  migrateDiscoveryJobs(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -2002,7 +2003,35 @@ export function migrateDiscoveryRunState(db: Database.Database): void {
   }
 }
 
-export const SCHEMA_VERSION = 28;
+/**
+ * Migracion 29 (07-09-2026): cola de busquedas del Cazador —
+ * docs/HUNTER-BUSCADOR.md. El panel encola y el proceso del bot ejecuta: una
+ * busqueda dura hasta 15 minutos y no cabe en una peticion de Next. El
+ * progreso vive en la fila para que sobreviva a un reinicio. ADITIVA.
+ */
+export function migrateDiscoveryJobs(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS discovery_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      seed TEXT NOT NULL,
+      country TEXT NOT NULL DEFAULT 'ES',
+      days INTEGER NOT NULL DEFAULT 30,
+      minutes INTEGER NOT NULL DEFAULT 15,
+      status TEXT NOT NULL CHECK(status IN ('pendiente','corriendo','terminado','fallido','cancelado')),
+      requested_by TEXT,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      started_at INTEGER,
+      finished_at INTEGER,
+      progress_json TEXT,
+      result_json TEXT,
+      error TEXT,
+      stop_reason TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_discovery_jobs_status ON discovery_jobs(status, id);
+  `);
+}
+
+export const SCHEMA_VERSION = 29;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

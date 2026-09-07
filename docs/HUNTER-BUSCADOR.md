@@ -107,12 +107,31 @@ es una barra que parpadea.
   [ 3/11] "organizador cocinas" · 47 anuncios · 21 peticiones · quedan 13 min
 ```
 
-Para una interfaz en el panel, el patrón del repo es **polling** (como el
-listado de pedidos, que refresca cada 3 s): no hay ni un precedente de SSE ni
-WebSocket. El hueco natural es la pestaña «Competencia» de la vista de
-crecimiento, que hoy está vacía y promete exactamente esto. **No implementado
-todavía**: el trabajo largo debe vivir en el proceso del bot, no en una ruta de
-Next, que muere en cada redespliegue.
+## En el panel: pestaña «Competencia»
+
+Ya está construida (Crecimiento → Competencia). Cómo está montada, y por qué:
+
+- **El panel solo ENCOLA.** `POST /api/hunter/competencia` crea una fila en
+  `discovery_jobs` (migración 29) y devuelve. La búsqueda la ejecuta el
+  **proceso del bot** (`startDiscoveryWorker`, junto al resto de trabajos
+  largos). Una ruta de Next moriría en cada redespliegue y bloquearía su hilo
+  durante la agrupación.
+- **El progreso vive en la fila**, no en memoria: si el bot se reinicia a
+  mitad no se pierde el rastro, y un trabajo colgado se marca como fallido en
+  vez de bloquear la cola para siempre.
+- **Una búsqueda a la vez.** Encolar una segunda se rechaza con motivo: dos
+  partirían la cuota del mismo token.
+- **Polling cada 4 s**, como el resto del panel. No hay ni un precedente de
+  SSE ni WebSocket en este repo.
+- **La parada de emergencia se ve ARRIBA**, en rojo, y el botón queda
+  bloqueado. Lo mismo si falta el token. Nadie llega a lanzar una búsqueda que
+  iba a fallar sin explicación.
+- **Cada señal lleva su etiqueta** (`dato` / `señal` / `declarado`) y su
+  límite al pasar el ratón. El dominio va marcado como declarado por el
+  anunciante y sin verificar. Nunca se escribe «disponible en X países»: solo
+  «países en los que lo hemos encontrado».
+- **Sin análisis del creativo por IA**: desactivado, y así se dice en la
+  propia pantalla.
 
 ## Lo que hace falta para usarlo de verdad
 

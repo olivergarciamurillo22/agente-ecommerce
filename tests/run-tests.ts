@@ -14123,7 +14123,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 28;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28");
+      assert.match(db, /export const SCHEMA_VERSION = 29;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14640,7 +14640,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -14859,6 +14859,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 27");
     db.migrateDiscoveryRunState(fixture);
     fixture.pragma("user_version = 28");
+    db.migrateDiscoveryJobs(fixture);
+    fixture.pragma("user_version = 29");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
@@ -15550,6 +15552,144 @@ async function main(): Promise<void> {
         assert.equal(r.stopReason, "completado");
         assert.ok(peticiones >= 1, "ahora sí sale");
       });
+    });
+
+    await test("COMPETENCIA · el panel solo ENCOLA: el trabajo largo lo ejecuta el proceso del bot, con progreso persistido y una búsqueda a la vez", async () => {
+      const jobs = await import("../src/lib/hunter/discovery/jobs");
+      const { runDiscoveryWorkerTick } = await import("../src/lib/hunter/discovery/worker");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const raw = db.systemDbHandle();
+      raw.prepare("DELETE FROM discovery_jobs").run();
+
+      // 1 · Encolar valida la entrada y no deja dos a la vez.
+      assert.equal(jobs.enqueueDiscoveryJob({ seed: "   " }).ok, false, "una palabra vacía no se encola");
+      const primera = jobs.enqueueDiscoveryJob({ seed: "cola-organizador", minutes: 99, days: 400, country: "es", requestedBy: "Pedro" });
+      assert.equal(primera.ok, true);
+      if (!primera.ok) return;
+      assert.equal(primera.job.minutes, jobs.MAX_SEARCH_MINUTES, "los minutos se acotan al techo");
+      assert.equal(primera.job.days, 90, "los días también");
+      assert.equal(primera.job.country, "ES");
+      assert.equal(primera.job.status, "pendiente");
+      assert.equal(primera.job.requestedBy, "Pedro");
+      const segunda = jobs.enqueueDiscoveryJob({ seed: "otra cosa" });
+      assert.equal(segunda.ok, false);
+      if (!segunda.ok) assert.equal(segunda.reason, "ya_hay_una", "dos a la vez partirían la cuota del token");
+
+      // 2 · El vigilante la reclama (atómico) y la ejecuta con red inyectada.
+      let peticiones = 0;
+      const fetcher = (async (input: string | URL | Request) => {
+        peticiones++;
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        const ad = { id: `${term}-1`, page_id: "cola-comp", page_name: "Competidor Cola", ad_snapshot_url: "https://www.facebook.com/ads/library/?id=9", ad_creative_bodies: [`${term} antideslizante`], ad_creative_link_captions: ["tiendacola.es"], ad_delivery_start_time: "2026-08-01" };
+        return new Response(JSON.stringify({ data: [ad], paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+      const atendida = await runDiscoveryWorkerTick({ client, token: "tok" });
+      assert.equal(atendida?.id, primera.job.id);
+      const terminada = jobs.getDiscoveryJob(primera.job.id)!;
+      assert.equal(terminada.status, "terminado");
+      assert.ok(terminada.result, "el resultado queda en la fila, no en memoria");
+      assert.equal(terminada.result?.competitors[0]?.pageId, "cola-comp");
+      assert.equal(terminada.stopReason, "completado");
+      assert.ok(terminada.progress, "el progreso se fue guardando por el camino");
+      assert.ok(peticiones > 0);
+      // Ya no hay nada pendiente: el siguiente ciclo no hace nada.
+      assert.equal(await runDiscoveryWorkerTick({ client, token: "tok" }), null);
+      // Y con la anterior terminada, ya se puede encolar otra.
+      assert.equal(jobs.enqueueDiscoveryJob({ seed: "cola-siguiente" }).ok, true);
+      raw.prepare("DELETE FROM discovery_jobs").run();
+    });
+
+    await test("COMPETENCIA · con EMERGENCY_STOP no se encola ni se reclama nada, y sin token la búsqueda falla con un motivo legible", async () => {
+      const jobs = await import("../src/lib/hunter/discovery/jobs");
+      const { runDiscoveryWorkerTick, discoveryToken } = await import("../src/lib/hunter/discovery/worker");
+      const raw = db.systemDbHandle();
+      const cuantas = () => (raw.prepare("SELECT COUNT(*) n FROM discovery_jobs").get() as { n: number }).n;
+      raw.prepare("DELETE FROM discovery_jobs").run();
+
+      await withEnv({ EMERGENCY_STOP: "1" }, () => {
+        const r = jobs.enqueueDiscoveryJob({ seed: "no-deberia-entrar" });
+        assert.equal(r.ok, false);
+        if (!r.ok) {
+          assert.equal(r.reason, "parada_emergencia");
+          assert.match(r.detail, /EMERGENCY_STOP/);
+        }
+        assert.equal(cuantas(), 0, "con la parada activa no se encola NADA");
+      });
+
+      // Encolada con el gate abierto, pero el vigilante ve la parada: la deja
+      // pendiente en vez de fallarla en bucle.
+      const encolada = jobs.enqueueDiscoveryJob({ seed: "espera-a-que-levanten-la-parada" });
+      assert.equal(encolada.ok, true);
+      await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+        assert.equal(await runDiscoveryWorkerTick({ token: "tok" }), null, "no se reclama con la parada activa");
+      });
+      if (encolada.ok) assert.equal(jobs.getDiscoveryJob(encolada.job.id)!.status, "pendiente", "sigue esperando, no se ha quemado");
+
+      // Sin token, el trabajo falla diciendo exactamente qué falta.
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: undefined, META_ADS_ACCESS_TOKEN: undefined }, async () => {
+        assert.equal(discoveryToken(), "");
+        const atendida = await runDiscoveryWorkerTick();
+        assert.ok(atendida, "la reclama");
+        const fila = jobs.getDiscoveryJob(atendida!.id)!;
+        assert.equal(fila.status, "fallido");
+        assert.match(fila.error ?? "", /META_AD_LIBRARY_ACCESS_TOKEN/);
+        assert.match(fila.error ?? "", /sin token no se busca nada/);
+      });
+      raw.prepare("DELETE FROM discovery_jobs").run();
+    });
+
+    await test("COMPETENCIA · la ruta del panel exige propietario, avisa de la parada y del token que falta, y nunca busca ella misma", async () => {
+      const raw = db.systemDbHandle();
+      raw.prepare("DELETE FROM discovery_jobs").run();
+      const { NextRequest } = await import("next/server");
+      const route = await import("../src/app/api/hunter/competencia/route");
+      const sessions = await import("../src/lib/auth/session");
+      raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-comp@test','Dueña Competencia','owner','x')").run();
+      const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-comp@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+
+      // Sin sesión, ni se mira.
+      const anonimo = await route.GET(new NextRequest("http://localhost/api/hunter/competencia"));
+      assert.equal(anonimo.status, 401);
+
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: "tok-de-prueba", EMERGENCY_STOP: "0" }, async () => {
+        const res = await route.GET(new NextRequest("http://localhost/api/hunter/competencia", { headers }));
+        assert.equal(res.status, 200);
+        const body = (await res.json()) as { paradaEmergencia: boolean; tokenConfigurado: boolean; job: unknown };
+        assert.equal(body.paradaEmergencia, false);
+        assert.equal(body.tokenConfigurado, true);
+        assert.equal(body.job, null);
+        // POST encola y devuelve el trabajo.
+        const post = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ seed: "ruta-competencia" }) }));
+        assert.equal(post.status, 200);
+        const creado = (await post.json()) as { ok: boolean; job: { id: number; status: string } };
+        assert.equal(creado.ok, true);
+        assert.equal(creado.job.status, "pendiente", "la ruta NO busca: encola");
+        // Y una segunda se rechaza con motivo.
+        const repe = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ seed: "otra" }) }));
+        assert.equal(repe.status, 409);
+      });
+
+      // Con la parada activa, la ruta lo DICE (la interfaz lo pinta arriba).
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: "tok", EMERGENCY_STOP: "1" }, async () => {
+        const res = await route.GET(new NextRequest("http://localhost/api/hunter/competencia", { headers }));
+        const body = (await res.json()) as { paradaEmergencia: boolean; paradaMensaje: string };
+        assert.equal(body.paradaEmergencia, true);
+        assert.match(body.paradaMensaje, /EMERGENCY_STOP/);
+        const post = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ seed: "con-parada" }) }));
+        assert.equal(post.status, 409);
+      });
+
+      // Sin token, la ruta lo dice antes de encolar nada.
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: undefined, META_ADS_ACCESS_TOKEN: undefined, EMERGENCY_STOP: "0" }, async () => {
+        const res = await route.GET(new NextRequest("http://localhost/api/hunter/competencia", { headers }));
+        assert.equal(((await res.json()) as { tokenConfigurado: boolean }).tokenConfigurado, false);
+        const post = await route.POST(new NextRequest("http://localhost/api/hunter/competencia", { method: "POST", headers, body: JSON.stringify({ seed: "sin-token" }) }));
+        assert.equal(post.status, 409);
+        assert.match(((await post.json()) as { error: string }).error, /META_AD_LIBRARY_ACCESS_TOKEN/);
+      });
+      raw.prepare("DELETE FROM discovery_jobs").run();
     });
 
     await test("Hunter Discovery · el nicho de mayores vive en configuracion trazable", () => {

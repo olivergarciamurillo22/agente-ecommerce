@@ -12,6 +12,7 @@ import { useCallback, useEffect, useState } from "react";
 import AdsPanel from "./AdsPanel";
 import CodCalculatorPanel from "./CodCalculatorPanel";
 import FinancePanel from "./FinancePanel";
+import CompetitionSearch from "./CompetitionSearch";
 import GrowthProductsPanel from "./GrowthProductsPanel";
 import type { DockView } from "./NavRail";
 import { Card, Chip, EmptyState, ErrorState, SectionTitle, SkeletonRows, TabBar, formatInt } from "./ui";
@@ -133,19 +134,12 @@ function RepurchasePanel() {
   );
 }
 
-function CompetitionPanel({ onNavigate }: { onNavigate: (v: DockView) => void }) {
+function CompetitionPanel() {
+  // El buscador vive en su propio componente: el trabajo largo lo ejecuta el
+  // proceso del bot y esto solo encola y pregunta. docs/HUNTER-BUSCADOR.md
   return (
     <ScrollRoot>
-      <div>
-        <h1 className="font-display text-2xl font-semibold text-brand-text">Competencia</h1>
-        <p className="mt-1 text-sm text-brand-muted">Quién anuncia qué y desde cuándo. Se alimenta del Cazador de productos (Meta Ad Library).</p>
-      </div>
-      <Card>
-        <EmptyState title="Sin datos de competencia todavía." hint="Cuando el backend del Cazador esté conectado, aquí verás anunciantes y productos vigilados. Mientras tanto, la búsqueda vive en Cazador." />
-        <div className="flex justify-center pb-6">
-          <Chip onClick={() => onNavigate("hunter")}>Ir al Cazador →</Chip>
-        </div>
-      </Card>
+      <CompetitionSearch />
     </ScrollRoot>
   );
 }
@@ -194,7 +188,7 @@ export default function GrowthView({ initialTab, onNavigate }: { initialTab?: Gr
         ) : tab === "repurchase" ? (
           <RepurchasePanel />
         ) : (
-          <CompetitionPanel onNavigate={onNavigate} />
+          <CompetitionPanel />
         )}
       </div>
     </div>
