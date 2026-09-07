@@ -1,12 +1,15 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { listOrders, getOrderCounts, ORDER_STATUSES, type OrderStatus } from "@/lib/db";
 import { isConfirmationEligible } from "@/lib/orders/eligibility";
+import { requireOwner } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** Lista de pedidos + contadores para el panel. ?status= filtra por estado. */
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  const auth = requireOwner(req);
+  if (!auth.ok) return auth.response;
   const statusParam = req.nextUrl.searchParams.get("status");
   const status =
     statusParam && (ORDER_STATUSES as string[]).includes(statusParam)

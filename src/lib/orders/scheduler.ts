@@ -213,7 +213,7 @@ export async function runSchedulerTick(nowSec?: number): Promise<{
           );
           logIntegrationEvent(
             "whatsapp",
-            esBloqueo ? "template_not_ready" : "template_build_failed",
+            esBloqueo ? "confirmation_template_not_ready" : "template_build_failed",
             "warning",
             esBloqueo
               ? `confirmación inicial BLOQUEADA (${(err as TemplateNotReadyError).blocker}): ${err instanceof Error ? err.message : ""}`.slice(0, 300)

@@ -23,7 +23,7 @@
         "producto",
         "importe"
       ],
-      "draft_body": "Hola {{1}} 👋 Somos Casamable.\nHemos recibido tu pedido {{2}}: {{3}}\nEs un pedido contra reembolso: pagarás {{4}} en efectivo al repartidor cuando lo recibas.\n¿Confirmas que quieres recibirlo?",
+      "draft_body": "Hola {{1}} 👋 Somos Casamable. Confirma tu pedido {{2}}: {{3}}. Es contra reembolso y pagarás {{4}} al repartidor cuando lo recibas.",
       "buttons": [
         {
           "type": "QUICK_REPLY",
@@ -41,7 +41,7 @@
           "payload": "delivery_note"
         }
       ],
-      "fallback": "ninguno en Cloud API: si no está APPROVED, el envío se bloquea"
+      "fallback": "ninguno en Cloud API: si la plantilla no está lista, no se envía"
     },
     {
       "name": "order_reminder",

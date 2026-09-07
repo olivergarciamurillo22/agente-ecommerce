@@ -245,6 +245,16 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     defaultValue: "0",
     validate: bool01,
   },
+  {
+    name: "META_WHATSAPP_MEDIA_DOWNLOAD_ENABLED",
+    category: "META_CLOUD",
+    secret: false,
+    description:
+      "Descargar de Meta las imágenes/audios que manda el cliente para verlos en el panel. Viene ACTIVADO (solo '0' lo apaga): son llamadas a Meta y ficheros en DATA_DIR/media.",
+    requiredFor: [],
+    defaultValue: "1",
+    validate: bool01,
+  },
   { name: "META_WHATSAPP_PHONE_NUMBER_ID", category: "META_CLOUD", secret: false, description: "Phone Number ID (en el piloto, el del número de PRUEBAS).", requiredFor: ["whatsapp-cloud-pilot"], validate: intPos },
   { name: "META_WHATSAPP_BUSINESS_ACCOUNT_ID", category: "META_CLOUD", secret: false, description: "WABA ID.", requiredFor: ["whatsapp-cloud-pilot"], validate: intPos },
   {

@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { normalizePhone } from "./orders/normalize";
 import path from "node:path";
 import fs from "node:fs";
+import { assessOrderShippingAddress } from "./orders/address-assessment";
 
 // DATA_DIR se puede sobreescribir por entorno (los tests usan un directorio
 // temporal para no tocar la base de datos real).
@@ -1884,6 +1885,12 @@ export function insertMessage(
   return ctx().insertMessageTx(conversationId, role, content);
 }
 
+/** Completa un placeholder de media cuando termina su descarga asíncrona. */
+export function updateMessageContent(messageId: number, content: string): boolean {
+  const info = ctx().db.prepare("UPDATE messages SET content = ? WHERE id = ?").run(content.slice(0, 4000), messageId);
+  return info.changes > 0;
+}
+
 export function getMessages(conversationId: number, limit = 50): Message[] {
   return ctx().stmtGetMessages.all(conversationId, limit).reverse();
 }
@@ -2518,6 +2525,19 @@ export function getLatestCustomerOrderByPhone(phone: string): OrderRow | null {
   );
 }
 
+/** Confirmados recientes todavía gestionables: cubre cancelaciones post-confirmación. */
+export function getRecentConfirmedOrdersByPhone(phone: string, maxAgeDays = 30): OrderRow[] {
+  return ctx()
+    .db.prepare(
+      `SELECT * FROM orders
+       WHERE phone = ? AND status = 'confirmed'
+         AND COALESCE(closure_status, 'unknown') NOT IN ('cancelled','delivered','refused')
+         AND COALESCE(confirmed_at, updated_at, created_at) >= unixepoch() - ? * 86400
+       ORDER BY COALESCE(confirmed_at, updated_at, created_at) DESC, id DESC`
+    )
+    .all(phone, maxAgeDays) as OrderRow[];
+}
+
 /**
  * Candidatos a duplicado del mismo teléfono para la detección A LA ENTRADA.
  *
@@ -2920,6 +2940,11 @@ export function markOrderIgnoredOld(id: number, reason?: string): boolean {
  * (así una doble confirmación jamás produce dos mutaciones).
  */
 export function markOrderConfirmed(id: number, viaReply: boolean): boolean {
+  // Última barrera común: incluso un caller nuevo que se salte el servicio de
+  // confirmación no puede convertir una dirección evidentemente basura en un
+  // pedido confirmed/WA_CONFIRMED.
+  const candidate = getOrderById(id);
+  if (!candidate || assessOrderShippingAddress(candidate).status === "SUSPICIOUS") return false;
   const info = ctx()
     .db.prepare(
       `UPDATE orders SET status='confirmed', confirmed_at = unixepoch(),
@@ -2928,6 +2953,18 @@ export function markOrderConfirmed(id: number, viaReply: boolean): boolean {
        WHERE id = ? AND status NOT IN ('confirmed','cancelled','ignored_old')`
     )
     .run(viaReply ? 1 : 0, id);
+  return info.changes > 0;
+}
+
+/** Aparta una confirmación con dirección sospechosa para revisión humana. */
+export function markOrderAddressNeedsAttention(id: number): boolean {
+  const info = ctx()
+    .db.prepare(
+      `UPDATE orders SET status='needs_correction',
+        customer_replied_at = COALESCE(customer_replied_at, unixepoch()), ${TOUCH}
+       WHERE id = ? AND status NOT IN ('confirmed','cancelled','ignored_old')`
+    )
+    .run(id);
   return info.changes > 0;
 }
 

@@ -14,6 +14,7 @@ import pino from "pino";
 import type { OrderRow } from "../db";
 import { emergencyStop, orderActionAllowed } from "../safety";
 import { resolveFinalAddress, describeAddressIssue } from "./address";
+import { assessOrderShippingAddress } from "../orders/address-assessment";
 import { resolveSupplier } from "./router";
 import { orderLineItems } from "../orders/line-items";
 import { dropiProvider } from "./dropi";
@@ -105,6 +106,19 @@ export function evaluateOrderForSupplier(order: OrderRow): SupplierEvaluation {
       status: "not_ready",
       platform: "unknown",
       reason: `el pedido está en "${order.status}": solo se envían los confirmados`,
+      input: null,
+    };
+  }
+
+  // Defensa en profundidad para pedidos confirmados antes del hotfix o por
+  // cualquier integración: una dirección obviamente no direccional nunca
+  // queda lista para escribir en un proveedor.
+  const minimumAddress = assessOrderShippingAddress(order);
+  if (minimumAddress.status === "SUSPICIOUS") {
+    return {
+      status: "blocked_address",
+      platform: "unknown",
+      reason: `dirección sospechosa (${minimumAddress.reason}): revisión humana obligatoria`,
       input: null,
     };
   }

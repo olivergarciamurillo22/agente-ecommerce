@@ -5,9 +5,19 @@ Documento **versionado**. Todo lo que se cita existe en el repositorio.
 ## Regla de oro
 
 El rollback devuelve el **código**, nunca los **datos**. La base de datos se
-queda como está: el esquema 17 lo entiende también la versión anterior
-(demostrado en ensayo local, ida y vuelta, con los datos intactos).
+queda como está: el esquema **18** lo entiende también la versión anterior.
+Las cinco tablas que añade el 18 (`users`, `sessions`, `audit_log`,
+`work_items`, `confirmation_resends`) son **tablas aparte** — no se tocó
+ninguna columna de `orders`, `conversations` ni `messages` —, así que una
+versión previa del código simplemente las ignora. Ensayado el 05-09 sobre
+copias (`17 → 18` y la cadena completa `0 → 18`): idempotente,
+`integrity_check ok`, sin perder una fila.
 **No restaures la base** salvo orden expresa de Óliver.
+
+Ojo con una consecuencia práctica: si vuelves a una versión anterior al
+espacio de atención, **los usuarios creados dejan de servir para entrar**
+(esa versión no tiene login por usuario). Necesitarás `DASHBOARD_PASSWORD`
+en el `.env` para acceder al panel mientras dure el rollback.
 
 ## Antes: identifica la imagen de rescate por su ID
 
@@ -52,7 +62,7 @@ prefieres ser explícito: añade `-p repo-v3c` a los dos comandos.
 ```bash
 docker inspect --format='{{.Image}}' casamable-agent   # == la imagen de rescate
 docker ps --filter name=casamable-agent                # Up + healthy
-docker exec casamable-agent npm run db:health          # esquema 17, integridad ok
+docker exec casamable-agent npm run db:health          # esquema 18, integridad ok
 docker exec casamable-agent npm run deploy:guard       # UN solo bot
 ```
 

@@ -1,9 +1,9 @@
 // ============================================================
 // MENSAJES INTERACTIVOS DE CASAMABLE — botones y listas.
 //
-// Cada builder devuelve DOS cosas: el mensaje interactivo (para la Cloud
-// API) y su texto de FALLBACK (lo que enseña el panel, y lo que sale tal
-// cual si el proveedor activo es Baileys — el flujo 1/2/3 de siempre).
+// Cada builder devuelve el mensaje para la Cloud API y una representación
+// legible para el panel. En la PRIMERA confirmación esa representación NO es
+// un fallback enviable: Cloud usa siempre la plantilla aprobada.
 //
 // Límites duros de Meta que condicionan el diseño:
 //   · máximo 3 reply buttons, título ≤20 caracteres
@@ -45,45 +45,21 @@ export interface InteractiveSpec {
   templateFallback?: Extract<OutboundWhatsAppMessage, { kind: "template" }>;
 }
 
-/** Confirmación de pedido con botones (el mensaje inicial del flujo COD). */
-export function buildConfirmationInteractive(order: OrderRow): InteractiveSpec {
-  const nombre = firstName(order);
-  const body =
-    `Hola${nombre ? ` ${nombre}` : ""} 👋 Somos Casamable.\n\n` +
-    `Hemos recibido tu pedido #${order.shopify_order_number}: ${shortProductLine(order)}\n\n` +
-    `Es un pedido contra reembolso: pagarás ${money(order)} en efectivo al repartidor cuando lo recibas.\n\n` +
-    `¿Confirmas que quieres recibirlo?`;
-  return {
-    message: {
-      kind: "interactive_buttons",
-      body,
-      buttons: [
-        { id: BUTTON_PAYLOADS.CONFIRM, title: "✅ Confirmar pedido" },
-        { id: BUTTON_PAYLOADS.CHANGE_ADDRESS, title: "📍 Cambiar dirección" },
-        { id: BUTTON_PAYLOADS.DELIVERY_NOTE, title: "📝 Dejar nota" },
-      ],
-    },
-    fallbackText: body,
-  };
-}
-
 /**
- * Confirmación inicial, decidiendo INTERACTIVO vs PLANTILLA según la
- * ventana de 24 h (BUG1: fuera de ventana, un interactivo/texto libre no
- * es una opción — Meta lo rechaza siempre con outside_24h_window).
- *
- * Mapeo mensaje → plantilla (pedido en BUG1, punto 2): de momento una sola
- * entrada, porque es la única plantilla aprobada hoy
- * (config/whatsapp-templates.json). El recordatorio, el aviso de
- * seguimiento, etc. se añaden aquí cuando sus plantillas estén aprobadas
- * en Meta — no antes, para no fallar por un nombre que la WABA no conoce.
+ * Primera confirmación: una única ruta, SIEMPRE la plantilla aprobada. La
+ * ventana de 24 h no cambia la identidad del mensaje; solo permitiría texto
+ * libre, pero usarlo fue la causa del mensaje antiguo en producción.
  */
-export function buildConfirmationOutbound(order: OrderRow, _withinSessionWindow?: boolean): InteractiveSpec {
+export function buildConfirmationOutbound(order: OrderRow, _withinSessionWindow = false): InteractiveSpec {
   return {
     message: confirmationTemplate(order),
-    // Mismo texto que el interactivo: es lo que enseña el panel y lo que
-    // sale tal cual si algún día se hace rollback a Baileys con esto en cola.
-    fallbackText: buildConfirmationInteractive(order).fallbackText,
+    // El panel representa fielmente los datos y los botones de la plantilla.
+    // No es un texto alternativo para enviar al cliente.
+    fallbackText:
+      `Casamable · confirmación del pedido #${order.shopify_order_number}\n` +
+      `📦 ${shortProductLine(order)}\n` +
+      `💶 Contra reembolso: ${money(order)}\n` +
+      `[Botones: Confirmar pedido · Cambiar dirección · Dejar una nota]`,
   };
 }
 

@@ -1,5 +1,16 @@
 # Hotfix WhatsApp · 05-09-2026
 
+> **Nota del 07-09-2026:** este documento describe la implementación de la
+> **mañana** del 05-09 (`fix/whatsapp-confirmacion-bugs`). Ese mismo día por
+> la tarde Óliver reescribió los tres arreglos con más alcance en
+> `origin/release/casamable-v4.2` (`2d1d726`…`fdad99e`) y esa es la que
+> queda en la canónica: `assessOrderAddress`/`address-quality.ts` fue
+> sustituido por `assessShippingAddress` (`orders/address-assessment.ts`),
+> la escalada usa `orders/attention.ts` (work_items) y el texto libre pasa
+> por `orders/free-text-intent.ts`. El contrato vigente es
+> `docs/CONVERSACION-REGLAS.md`. Las causas y la evidencia de abajo siguen
+> siendo válidas.
+
 Rama `fix/whatsapp-confirmacion-bugs`, creada desde el commit de producción `92cfd3e`. Evidencia operativa: pedidos `#35011404` y `#35011394`. No se incluyen nombres, teléfonos ni direcciones reales.
 
 ## Bug 1 · confirmación con dirección inválida

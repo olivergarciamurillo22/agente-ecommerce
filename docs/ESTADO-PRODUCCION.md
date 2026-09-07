@@ -4,7 +4,7 @@ Documento vivo: **lo que corre de verdad en el NAS**. Se actualiza en cada
 sesión de operación. El detalle de cómo se llegó a cada estado vive en
 `docs/archive/` — este es el snapshot, no el historial.
 
-**Última actualización: 03-09-2026.**
+**Última actualización: 05-09-2026.**
 
 ---
 
@@ -41,10 +41,51 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 
 ## 3 · Qué falta para mover producción
 
-Rama candidata: `feat/control-center-v3-operational-polish` (esquema 17;
-migraciones aditivas). Guía exacta: `docs/DEPLOY-HOTFIX-02-09.md`.
+> **07-09-2026:** el candidato vigente pasa a ser **`release/casamable-v4.3`
+> (esquema 21)**, que contiene íntegro el candidato de abajo (`v4.2` @
+> `fdad99e`, merge de `origin/release/casamable-v4.2` @ `4e07ff5`) más el
+> workspace, Hunter + Landing Studio (19), predictivo (20) y discovery (21).
+> El salto de esquema desde producción (15) es **15 → 21**, todo aditivo y
+> ensayado con el fixture realista (`scripts/test-migration-v43.ts`). Guía
+> de release: `docs/deploy/RELEASE-v4.3.md`. Lo que corre en el NAS no se ha
+> podido confirmar desde el repo: hace falta `PRODUCTION_COMMIT`.
+
+**Candidato del 05-09 (integrado en v4.3): `release/casamable-v4.2` @ `fdad99e` (esquema 18).**
+Contiene el hotfix de Retell/ops, la integración móvil, el espacio de
+atención al cliente con roles y auditoría, y los tres arreglos de conducta
+del bot en WhatsApp del 05-09 (`docs/CONVERSACION-REGLAS.md`).
+
+Efecto operativo a vigilar la primera semana: esa conducta manda **más
+conversaciones a la bandeja de atención** que antes. Es deliberado (sale más
+barato que un rehusado), pero si se llena de casos resolubles el ajuste está
+en `orders/free-text-intent.ts`, no en volver a los bucles.
+Guía exacta: **`docs/deploy/PEDRO-WORKSPACE-05-09.md`** — lleva un **paso
+nuevo obligatorio**: crear los usuarios con `npm run users:create`, sin el
+cual nadie puede entrar al panel.
+
+El salto de esquema es **15 → 18** (tres migraciones aditivas: versión de
+agente en llamadas, atribución de marketing, workspace/auth). Ensayado el
+05-09 sobre copias — `17 → 18` y la cadena completa `0 → 18` — idempotente,
+`integrity_check ok` y sin perder una fila. Ninguna columna de `orders`,
+`conversations` ni `messages` cambia: las cinco tablas nuevas son aparte, así
+que una vuelta atrás de código las ignora sin estorbo.
+
 Evidencia del piloto: `docs/REAL-PILOT-02-09.md` (matriz única — ambos
 circuitos en BLOCKED hasta que Pedro pegue resultados).
+
+Dos rojos heredados que **no** arregla este candidato y siguen bloqueando el
+piloto: la plantilla de confirmación (`whatsapp:templates:doctor`, exige
+credenciales de la WABA) y la firma de webhooks de Retell (exige la API key
+con distintivo *webhook* en el `.env` del NAS).
+
+### Acceso al panel: decisión pendiente de Pedro
+
+`DASHBOARD_PASSWORD` **sigue dando acceso completo de propietario aunque ya
+existan usuarios** (comprobado el 05-09). Es una llave compartida y anónima:
+quien entra por ahí figura en la auditoría como «Propietario (Basic Auth)»,
+sin persona detrás. Recomendado: crear el usuario `owner`, verificar el
+acceso y **retirar la variable del `.env`**. Detalle y alternativas en
+`docs/deploy/PEDRO-WORKSPACE-05-09.md` §5.
 
 ## 4 · Lo que no se toca
 

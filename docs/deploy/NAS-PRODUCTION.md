@@ -11,7 +11,7 @@ código). Si un comando de aquí no existe, es un fallo a corregir.
 | Proyecto de Compose | **`repo-v3c`** (declarado en `docker-compose.yml` con `name:`) |
 | Contenedor | `casamable-agent` |
 | Carpeta persistente | `/volume1/docker/CasamableAgent` (`auth/`, `data/`, `backups/`) |
-| Esquema esperado | **17** |
+| Esquema esperado | **18** (desde `7fd8014`, 05-09) |
 | Proveedor de WhatsApp | `cloud_api` |
 
 **Por qué importa el proyecto de Compose.** Por defecto Compose nombra el
@@ -40,7 +40,7 @@ repite. **No se despliega con dos vivos.**
 
 ```bash
 # 2 · Estado real del sistema
-docker exec casamable-agent npm run db:health          # esquema 17 + integridad
+docker exec casamable-agent npm run db:health          # esquema 18 + integridad
 docker exec casamable-agent npm run readiness:runtime  # lo que importa EN producción
 ```
 
@@ -72,7 +72,7 @@ docker compose up -d --no-build casamable-agent
 
 ```bash
 docker ps --filter name=casamable-agent            # Up + healthy
-docker exec casamable-agent npm run db:health      # esquema 17, integridad ok
+docker exec casamable-agent npm run db:health      # esquema 18, integridad ok
 docker exec casamable-agent npm run readiness:runtime
 docker exec casamable-agent npm run whatsapp:templates:doctor
 docker exec casamable-agent npm run retell:doctor
@@ -80,7 +80,7 @@ docker logs --tail 100 casamable-agent
 ```
 
 Esperado: contenedor *healthy*, **WhatsApp reconecta sin pedir QR**, esquema
-17, plantillas 7 ACTIVE PASS / 1 DISABLED / 0 FAIL, y ningún secreto en los
+18, plantillas 7 ACTIVE PASS / 1 DISABLED / 0 FAIL, y ningún secreto en los
 logs.
 
 Si algo no cuadra: `docs/deploy/ROLLBACK.md`.

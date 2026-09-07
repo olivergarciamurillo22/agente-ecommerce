@@ -27,6 +27,9 @@ export interface InboundWhatsAppMessage {
   profileName: string | null;
   /** Id del mensaje al que responde, si es una respuesta. */
   replyToMessageId: string | null;
+  /** Id opaco de Meta para descargar la media entrante. */
+  mediaId?: string | null;
+  mimeType?: string | null;
 }
 
 /** Estado de un mensaje SALIENTE, reportado por el webhook de Meta. */
@@ -167,8 +170,15 @@ export function parseMetaWebhookPayload(body: unknown): ParsedMetaWebhook {
         } else if (type === "audio") {
           out.messages.push({ ...base, kind: "audio", text: null, payload: null });
         } else if (type === "image") {
-          const img = m.image as { caption?: string } | undefined;
-          out.messages.push({ ...base, kind: "image", text: img?.caption ?? null, payload: null });
+          const img = m.image as { id?: string; caption?: string; mime_type?: string } | undefined;
+          out.messages.push({
+            ...base,
+            kind: "image",
+            text: img?.caption ?? null,
+            payload: null,
+            mediaId: img?.id ?? null,
+            mimeType: img?.mime_type ?? null,
+          });
         } else {
           out.messages.push({ ...base, kind: "unknown", text: null, payload: null });
         }

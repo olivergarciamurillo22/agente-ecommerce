@@ -223,10 +223,16 @@ export function getTemplateReadiness(logicalKey: string): TemplateReadiness {
     );
   }
   const localButtons = resolveMappingSpec(mapping)?.buttons.length ?? 0;
-  if (verified.buttonCount > 0 && verified.buttonCount !== localButtons) {
+  const localButtonTypes = (resolveMappingSpec(mapping)?.buttons ?? []).map((b) => b.type.toUpperCase());
+  const verifiedButtonTypes = verified.buttonTypes.map((b) => b.toUpperCase());
+  if (
+    verified.buttonCount !== localButtons ||
+    verifiedButtonTypes.length !== localButtonTypes.length ||
+    verifiedButtonTypes.some((type, index) => type !== localButtonTypes[index])
+  ) {
     return bloquea(
       "TEMPLATE_BUTTONS_MISMATCH",
-      `"${mapping.providerTemplate}" tiene ${verified.buttonCount} botón(es) y el flujo local espera ${localButtons}: revisar payloads antes de activar`
+      `"${mapping.providerTemplate}" tiene ${verified.buttonCount} botón(es) (${verifiedButtonTypes.join(", ")}) y el flujo local espera ${localButtons} (${localButtonTypes.join(", ")}): revisar botones antes de activar`
     );
   }
   return { ready: true, blocker: null, detail: `"${mapping.providerTemplate}" (${mapping.language}) APPROVED · ${verified.paramCount} variable(s) · ${verified.buttonCount} botón(es)`, mapping, verified };

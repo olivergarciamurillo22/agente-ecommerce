@@ -58,7 +58,7 @@ docker logs --tail 150 casamable-agent
 Aceptar únicamente con:
 
 - contenedor `healthy`, cero reinicios y un solo bot;
-- SQLite `integrity_check=ok`, `user_version=19` y recuentos de pedidos, conversaciones, mensajes, outbox y eventos coherentes con los anotados antes del despliegue;
+- SQLite `integrity_check=ok`, `user_version=21` (19 = Hunter, 20 = predictivo, 21 = discovery; el doc decía 19 antes de la consolidación del 07-09) y recuentos de pedidos, conversaciones, mensajes, outbox y eventos coherentes con los anotados antes del despliegue;
 - WhatsApp: 7 plantillas activas PASS, 1 deshabilitada y 0 FAIL;
 - Retell y readiness sin bloqueos ocultos. `UNAVAILABLE_API` para saldo Retell es un aviso conocido: se comprueba manualmente en Billing;
 - ningún envío real inesperado y ningún secreto en logs.
@@ -79,4 +79,4 @@ docker exec casamable-agent npm run db:health -- --full
 npm run deploy:guard -- --data-dir /volume1/docker/CasamableAgent/data
 ```
 
-El rollback revierte la imagen, **no revierte la migración SQLite 18/19**. No se restaura la DB automáticamente y nunca se usa `down -v`. Si el código anterior no entiende schema 19, mantener `EMERGENCY_STOP=1`, conservar datos y escalar antes de cualquier restauración. La copia externa de `data/` y `auth/` solo se restaura con autorización expresa y diagnóstico de corrupción de datos.
+El rollback revierte la imagen, **no revierte la migración SQLite 18→21**. No se restaura la DB automáticamente y nunca se usa `down -v`. Si el código anterior no entiende schema 21, mantener `EMERGENCY_STOP=1`, conservar datos y escalar antes de cualquier restauración. La copia externa de `data/` y `auth/` solo se restaura con autorización expresa y diagnóstico de corrupción de datos.
