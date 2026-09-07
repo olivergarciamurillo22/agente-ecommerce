@@ -45,6 +45,60 @@ gastan llamada.
   Eventos: `post_confirmation_auto_reply`, `post_confirmation_ai_escalated`,
   `post_confirmation_ai_cancellation`.
 
+### Auto-cancelación por IA en casos inequívocos (07-09, cambio de diseño de Pedro)
+
+Umbral propio **`AI_CANCEL_MIN_CONFIDENCE = 0,85`** (`src/lib/orders/ai-cancellation.ts`),
+más estricto que el de la FAQ (0,75) porque aquí la acción es sobre el pedido.
+
+- `cancelacion` con confianza **≥ 0,85** → el sistema, sin esperar a nadie:
+  1. **cancela el pedido** en el eje operativo local (`orders.status`
+     confirmed → cancelled, como el resultado de una llamada). **Shopify y
+     el proveedor no se tocan**: siguen siendo acciones humanas con sus
+     gates (`beeping/cancel.ts`, `DROPEA_WRITE_ENABLED`). El tag
+     WA_CONFIRMED no se retira.
+  2. **para el cooldown** de auto-despacho (`dispatch_cooldowns.status =
+     cancelled`); «Despachar ahora» también queda rechazado.
+  3. **avisa a una persona de inmediato** (para revertir rápido, no para
+     aprobar antes): work_item «Cancelación automática por IA: revisar y
+     revertir si es incorrecta» + modo HUMAN en la bandeja, y WhatsApp a
+     `ALERT_WHATSAPP` por el outbox (pasa por los safety gates: en SAFE MODE
+     queda en el log) con el texto «Pedido #X cancelado automáticamente por
+     IA (confianza N). Revisar y revertir si es incorrecto», cliente, mensaje
+     y **enlaces directos** a la ficha (`/?order=<id>`) y a la conversación
+     (`/trabajo?conversationId=<id>`).
+  4. **audita** en `ai_cancellations` (migración 25): mensaje original,
+     confianza, modelo, estado previo, estado y vencimiento del cooldown
+     antes, vía de aviso, timestamp; y en `intent_classifications` como
+     hasta ahora. Eventos `ai_cancellation_executed` (critical),
+     `ai_cancellation_notified`, `ai_cancellation_alert_not_sent`.
+  5. responde al cliente con el texto fijo `MSG_CANCELLED_AUTO` («Hecho ✅
+     Tu pedido queda cancelado…»), nunca con `respuesta_sugerida`.
+- `cancelacion` con confianza **< 0,85** (ambiguo): **nada cambia** respecto
+  a lo anterior: petición estampada, escalada a persona, cooldown retenido,
+  acuse `MSG_CANCEL_RECEIVED`. No se cancela nada.
+- La auto-cancelación **no procede** (y cae al camino de escalada, evento
+  `ai_cancellation_skipped`) si el pedido ya no está `confirmed`, ya está
+  cerrado, **ya se despachó** (cooldown `executed`) o ya está creado en el
+  proveedor (`supplier_sync_status` syncing/synced): cancelar «en local» un
+  pedido que ya salió sería mentir; eso lo gestiona una persona con el
+  proveedor. Es idempotente: una segunda cancelación no duplica ni re-avisa.
+
+**Reversión desde el panel** (ficha → bloque rojo «CANCELADO AUTOMÁTICAMENTE
+POR IA» → **«Revertir cancelación»**; API `POST /api/orders/:id/action`
+`{ "action": "revert_ai_cancellation", "note"? }`, propietario): el pedido
+vuelve a `confirmed`, la solicitud de cancelación se borra (deja de bloquear
+el despacho), el work_item se cierra y el **cooldown se REINICIA** desde ese
+momento (6 h nuevas) si `AUTO_DISPATCH_COOLDOWN_ENABLED=1`. **Decisión
+técnica**: reiniciar en vez de reanudar donde estaba, porque tras un
+«cancelar» del cliente y una corrección humana una ventana entera es más
+prudente, y no exige contabilizar tiempo pausado. La conversación sigue en
+HUMAN (quien revierte ya la atiende). Queda en `audit_log`
+(`revert_ai_cancellation`) y en `ai_cancellations.reverted_*`. Revertir dos
+veces se rechaza (409). Insignia **CANCELADO POR IA** en el listado.
+
+Con `POST_CONFIRMATION_AI_ENABLED=0` (default) nada de esto existe: el flujo
+determinista de siempre.
+
 ### Base de FAQ (`config/faq-post-confirmacion.json`)
 
 Cinco entradas **propuestas por Fable 5.1**, marcadas
@@ -156,9 +210,10 @@ y seguiría siendo despreciable.
 ## Esquema
 
 Migraciones 23 (`migrateAutoDispatch`: `dispatch_cooldowns`,
-`intent_classifications`) y 24 (`migrateDispatchChannels`: `dispatch_channels` +
-columna `dispatch_cooldowns.channel`). Aditivas; cubiertas por el fixture realista
-`scripts/test-migration-v43.ts` (17→24).
+`intent_classifications`), 24 (`migrateDispatchChannels`: `dispatch_channels` +
+columna `dispatch_cooldowns.channel`) y 25 (`migrateAiCancellations`:
+`ai_cancellations`). Aditivas; cubiertas por el fixture realista
+`scripts/test-migration-v43.ts` (17→25).
 
 ## Tests (`tests/run-tests.ts`, bloque «Auto-despacho tras cooldown + IA de intención»)
 
@@ -174,7 +229,11 @@ comportamiento anterior · FAQ con 4-6 entradas y estado pendiente de aprobació
 Dropea → solo Dropea (éxito inyectado despacha; adaptador real con llave cerrada
 queda retenido); líneas en canales distintos → retenido; en ningún caso se
 llaman los dos adaptadores. Todo sin red (completer, mark-to-send y confirm de
-Dropea inyectados).
+Dropea inyectados). **Auto-cancelación**: confianza ≥ 0,85 → se cancela sola,
+cooldown parado, aviso (bandeja + WhatsApp retenido por gates), auditoría,
+cero llamadas externas, idempotente · confianza 0,84/0,6/0,3 o pedido ya
+despachado → escalada sin cancelar · «Revertir cancelación» por la API del
+panel → confirmed, cooldown reiniciado, audit_log; segunda reversión 409.
 
 ## Fuera de alcance
 

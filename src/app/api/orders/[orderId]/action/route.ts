@@ -17,6 +17,7 @@ import { systemDbHandle } from "@/lib/db";
 import { resolveAddressAlert } from "@/lib/orders/address-validation";
 import { markOrderToSend } from "@/lib/suppliers/beeping";
 import { autoDispatchEnabled, dispatchNow } from "@/lib/orders/auto-dispatch";
+import { revertAiCancellation } from "@/lib/orders/ai-cancellation";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,6 +37,7 @@ const ACTIONS = new Set([
   "revoke_pilot",
   "resolve_address_alert",
   "dispatch_now",
+  "revert_ai_cancellation",
 ]);
 
 /**
@@ -119,6 +121,19 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     // ahora”; sin él, se libera aquí el mark-to-send inmediato que se retuvo.
     if (order.status === "confirmed" && !autoDispatchEnabled()) void markOrderToSend(order.shopify_order_number);
     return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
+  }
+  // "Revertir cancelación" (07-09): deshace una cancelación AUTOMÁTICA por IA.
+  // Interna (no toca Shopify ni proveedor), sin gate de allowlist; el
+  // pedido vuelve a confirmed y el cooldown se REINICIA (6 h nuevas). Queda
+  // en audit_log con nombre y nota. docs/AUTO-DESPACHO-COOLDOWN.md
+  if (action === "revert_ai_cancellation") {
+    const note = typeof body.note === "string" ? body.note.trim().slice(0, 500) : null;
+    const r = revertAiCancellation(id, auth.user.name, note);
+    audit(auth.user, "revert_ai_cancellation", "order", id, { note, ...r });
+    if (r.status !== "reverted") {
+      return NextResponse.json({ ok: false, error: r.reason, order: vistaDelPedido(id) }, { status: 409 });
+    }
+    return NextResponse.json({ ok: true, order: vistaDelPedido(id), cooldown: r.cooldown, dueAt: r.dueAt });
   }
   // "Despachar ahora": una persona ya revisó las incidencias. Las condiciones
   // se evalúan igualmente (fail-closed): si sigue habiendo una escalada,

@@ -196,6 +196,11 @@ export function buildCancelMultiPrompt(orders: OrderRow[]): string {
 }
 
 /** La petición de cancelar quedó registrada (no se toca nada automáticamente). */
+/** Cancelación AUTOMÁTICA por IA (confianza ≥ 0,85): el pedido ya queda cancelado; una persona lo revisa y puede revertirlo. */
+export const MSG_CANCELLED_AUTO =
+  "Hecho ✅ Tu pedido queda cancelado y no se te enviará nada. " +
+  "Si ha sido un error o cambias de idea, escríbenos por aquí y lo reactivamos.";
+
 export const MSG_CANCEL_RECEIVED =
   "Anotado ✅ Dejamos tu pedido marcado para cancelar y te contactamos para confirmarlo. " +
   "Mientras tanto no se te enviará nada.";

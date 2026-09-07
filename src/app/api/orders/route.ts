@@ -3,6 +3,7 @@ import { listOrders, getOrderCounts, ORDER_STATUSES, type OrderStatus } from "@/
 import { isConfirmationEligible } from "@/lib/orders/eligibility";
 import { listOpenAddressAlertOrderIds } from "@/lib/orders/address-validation";
 import { listBlockedDispatchOrderIds } from "@/lib/orders/auto-dispatch";
+import { listAiCancelledOrderIds } from "@/lib/orders/ai-cancellation";
 import { requireOwner } from "@/lib/auth/guard";
 
 export const runtime = "nodejs";
@@ -24,9 +25,10 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   // ALERTA_DIRECCION (07-09): una consulta para todo el listado, no una por fila.
   const addressAlerts = listOpenAddressAlertOrderIds();
   const blockedDispatch = listBlockedDispatchOrderIds();
+  const aiCancelled = listAiCancelledOrderIds();
   const orders = listOrders(status).map(({ raw_payload: _raw, ...rest }) => {
     const elig = isConfirmationEligible({ ...rest, raw_payload: null });
-    return { ...rest, confirmation_eligible: elig.eligible, confirmation_reason: elig.detail, address_alert_open: addressAlerts.has(rest.id) ? 1 : 0, dispatch_blocked: blockedDispatch.has(rest.id) ? 1 : 0 };
+    return { ...rest, confirmation_eligible: elig.eligible, confirmation_reason: elig.detail, address_alert_open: addressAlerts.has(rest.id) ? 1 : 0, dispatch_blocked: blockedDispatch.has(rest.id) ? 1 : 0, ai_cancelled: aiCancelled.has(rest.id) ? 1 : 0 };
   });
   return NextResponse.json({ counts: getOrderCounts(), orders });
 }

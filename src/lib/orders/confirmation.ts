@@ -52,10 +52,12 @@ import { markOrderToSend } from "../suppliers/beeping";
 import { hasOpenAddressAlert } from "./address-validation";
 import { autoDispatchEnabled, scheduleDispatchCooldown } from "./auto-dispatch";
 import { classifyPostConfirmationMessage, postConfirmationAiEnabled, type FaqEntry, type IntentAiCompleter } from "./intent-ai";
+import { AI_CANCEL_MIN_CONFIDENCE, cancelOrderByAi } from "./ai-cancellation";
 import {
   buildDuplicateReviewMessage,
   buildOrderActionMenu,
   MSG_CANCEL_RECEIVED,
+  MSG_CANCELLED_AUTO,
   MSG_ESCALATE_TO_HUMAN,
   MSG_CONFIRMED,
   MSG_ASK_ADDRESS,
@@ -526,8 +528,23 @@ export async function resolvePostConfirmationText(
     logIntegrationEvent("whatsapp", "post_confirmation_auto_reply", "info", `duda conocida '${c.faqId}' (confianza ${c.confidence?.toFixed(2)}): respondida con la FAQ; el cooldown sigue`, order.shopify_order_number);
     return { reply: c.autoReply ?? undefined };
   }
-  // Cancelación detectada por la IA: además de escalar, se estampa la
-  // petición como en el flujo determinista (nada se cancela solo).
+  // Cancelación detectada por la IA (07-09, cambio de diseño de Pedro):
+  //  - confianza ≥ 0,85 (AI_CANCEL_MIN_CONFIDENCE) e inequívoca → el pedido se
+  //    cancela SOLO (eje operativo, sin tocar Shopify ni proveedor), el
+  //    cooldown se para y una persona recibe aviso inmediato para revertir
+  //    si fue un error. Si la auto-cancelación no procede (ya despachado,
+  //    ya en el proveedor, ya cancelado…) cae al camino de abajo.
+  //  - por debajo de 0,85 → como hasta ahora: se estampa la petición, se
+  //    escala a persona y nada se cancela.
+  if (c.intent === "cancelacion" && c.fromModel && c.confidence !== null && c.confidence >= AI_CANCEL_MIN_CONFIDENCE) {
+    const auto = cancelOrderByAi(order, { message: text, confidence: c.confidence, model: c.model }, { env: deps.env });
+    if (auto.status === "cancelled") {
+      clearSelectedOrderContext(phone);
+      resetConversationPrompt(phone);
+      return { reply: MSG_CANCELLED_AUTO };
+    }
+    logIntegrationEvent("whatsapp", "ai_cancellation_skipped", "warning", `la IA detectó cancelación con confianza ${c.confidence.toFixed(2)} pero no se cancela sola: ${auto.reason}; escalada a persona`, order.shopify_order_number);
+  }
   if (c.intent === "cancelacion") {
     const r = executeCancellation(phone, [order]);
     logIntegrationEvent("whatsapp", "post_confirmation_ai_cancellation", "critical", `la IA detectó cancelación (confianza ${c.confidence?.toFixed(2) ?? "n/a"}): escalada y cooldown retenido`, order.shopify_order_number);

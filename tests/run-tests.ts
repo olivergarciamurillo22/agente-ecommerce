@@ -1276,7 +1276,7 @@ async function main(): Promise<void> {
     });
   });
 
-  await test("INTENCIÓN · cancelación detectada tras confirmar → escalada a persona y el cooldown queda retenido", async () => {
+  await test("INTENCIÓN · cancelación detectada tras confirmar con confianza < 0,85 → escalada a persona y el cooldown queda retenido (sin cancelar sola)", async () => {
     await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
       const order = mkConfirmedForDispatch("4");
       handleOrderButtonReply(order.phone, "confirm_order");
@@ -1287,7 +1287,7 @@ async function main(): Promise<void> {
       const fresh = db.getOrderById(order.id)!;
       const f = await resolvePostConfirmationText(order.phone, fresh, "oye que al final mejor lo dejo", {
         env: INTENT_ON, faq: FAQ,
-        complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.91, respuesta_sugerida: "Vale, lo cancelamos" }),
+        complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.8, respuesta_sugerida: "Vale, lo cancelamos" }),
       });
       assert.equal(f.reply, msgs.MSG_CANCEL_RECEIVED, "acuse fijo; jamás la respuesta_sugerida del modelo");
       assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
@@ -1299,6 +1299,165 @@ async function main(): Promise<void> {
       assert.equal(due.status, "blocked");
       assert.match(dispatch.getDispatchCooldown(order.id)!.blocked_reason ?? "", /cancelación|escalada/);
       assert.equal(beepingCalls.length, 0);
+    });
+  });
+
+  // ---------- AUTO-CANCELACIÓN POR IA (07-09, cambio de diseño de Pedro) ----------
+  const aiCancel = await import("../src/lib/orders/ai-cancellation");
+
+  await test("AUTO-CANCELACIÓN · cancelación inequívoca (confianza ≥ 0,85) → el pedido se cancela SOLO, el cooldown se para, se avisa a una persona (bandeja + WhatsApp por gates) y queda auditado; Shopify y proveedor sin tocar", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON, ALERT_WHATSAPP: "+34 600 000 999" }, async () => {
+      assert.equal(aiCancel.AI_CANCEL_MIN_CONFIDENCE, 0.85, "umbral más estricto que el de la FAQ (0,75)");
+      assert.ok(aiCancel.AI_CANCEL_MIN_CONFIDENCE > intentAi.INTENT_AI_MIN_CONFIDENCE);
+      const order = mkConfirmedForDispatch("40");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const before = dispatch.getDispatchCooldown(order.id)!;
+      assert.equal(before.status, "scheduled");
+      const realFetch = globalThis.fetch; let externas = 0;
+      globalThis.fetch = (async () => { externas++; return new Response(null, { status: 500 }); }) as typeof fetch;
+      let f: { reply?: string };
+      try {
+        f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "cancelad el pedido por favor, ya no lo quiero", {
+          env: { ...INTENT_ON, ...DISPATCH_ON, ALERT_WHATSAPP: "+34 600 000 999" }, faq: FAQ,
+          complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.93, respuesta_sugerida: "ok cancelado" }),
+        });
+      } finally { globalThis.fetch = realFetch; }
+      assert.equal(externas, 0, "ni Shopify ni proveedor: cero llamadas externas");
+      assert.equal(f.reply, msgs.MSG_CANCELLED_AUTO, "acuse fijo de cancelación hecha; jamás la respuesta_sugerida");
+      const fresh = db.getOrderById(order.id)!;
+      assert.equal(fresh.status, "cancelled");
+      assert.ok(fresh.cancellation_requested_at, "la petición queda estampada");
+      assert.equal(dispatch.getDispatchCooldown(order.id)!.status, "cancelled", "el cooldown se detiene");
+      assert.match(dispatch.getDispatchCooldown(order.id)!.outcome ?? "", /cancelado automáticamente por IA/);
+      // Auditoría: mensaje original, confianza, acción, timestamp.
+      const row = aiCancel.getActiveAiCancellation(order.id)!;
+      assert.ok(row);
+      assert.equal(row.message, "cancelad el pedido por favor, ya no lo quiero");
+      assert.equal(row.confidence, 0.93);
+      assert.equal(row.previous_status, "confirmed");
+      assert.equal(row.cooldown_status_before, "scheduled");
+      assert.equal(row.cooldown_due_before, before.due_at);
+      assert.ok(row.cancelled_at > 0);
+      assert.equal(row.reverted_at, null);
+      const clas = db.systemDbHandle().prepare("SELECT intent, confidence, escalated FROM intent_classifications WHERE order_id=? ORDER BY id DESC LIMIT 1").get(order.id) as Record<string, unknown>;
+      assert.deepEqual(clas, { intent: "cancelacion", confidence: 0.93, escalated: 1 });
+      assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='ai_cancellation_executed' AND order_ref=?").get(order.shopify_order_number));
+      // Aviso inmediato a persona: work_item + modo HUMAN…
+      const convoId = db.getConversationIdByPhone(order.phone)!;
+      assert.equal(db.getConversationById(convoId)!.mode, "HUMAN");
+      const wi = db.systemDbHandle().prepare("SELECT reason FROM work_items WHERE order_id=? AND resolved_at IS NULL").all(order.id) as Array<{ reason: string }>;
+      assert.ok(wi.some((w) => w.reason === aiCancel.AI_CANCEL_WORK_ITEM_REASON), JSON.stringify(wi));
+      // …y WhatsApp al dueño con enlaces directos, RETENIDO por los gates en tests (SAFE MODE): queda en el log, no sale nada.
+      assert.match(row.notified_via, /work_item/);
+      assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type IN ('ai_cancellation_alert_not_sent','ai_cancellation_notified') AND order_ref=?").get(order.shopify_order_number));
+      const links = aiCancel.aiCancellationLinks(order.id, convoId, { PUBLIC_BASE_URL: "https://agente.casamable.es/" });
+      assert.equal(links.order, `https://agente.casamable.es/?order=${order.id}`);
+      assert.equal(links.conversation, `https://agente.casamable.es/trabajo?conversationId=${convoId}`);
+      // Idempotente: un segundo "cancelar" no duplica ni vuelve a avisar.
+      const again = aiCancel.cancelOrderByAi(db.getOrderById(order.id)!, { message: "cancelar", confidence: 0.99, model: "x" });
+      assert.equal(again.status, "skipped");
+      assert.equal(aiCancel.listAiCancellations(order.id).length, 1);
+      // Ya no se despacha ni a mano.
+      beepingCalls.length = 0;
+      assert.equal((await dispatch.executeDispatch(order.id, "manual", before.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked");
+      assert.equal(beepingCalls.length, 0);
+    });
+  });
+
+  await test("AUTO-CANCELACIÓN · cancelación con confianza media/baja (< 0,85), o alta pero con el pedido ya despachado → NO se cancela nada: escalada a persona como hasta ahora", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      for (const [suffix, confianza] of [["41", 0.84], ["42", 0.6], ["43", 0.3]] as const) {
+        const order = mkConfirmedForDispatch(suffix);
+        handleOrderButtonReply(order.phone, "confirm_order");
+        const f = await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "mmm no se, igual lo cancelo", {
+          env: INTENT_ON, faq: FAQ,
+          complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza, respuesta_sugerida: null }),
+        });
+        assert.equal(f.reply, msgs.MSG_CANCEL_RECEIVED, `${suffix}: acuse de petición, no de cancelación hecha`);
+        const fresh = db.getOrderById(order.id)!;
+        assert.equal(fresh.status, "needs_call", `${suffix}: petición estampada y a persona, sin cancelar`);
+        assert.equal(aiCancel.getActiveAiCancellation(order.id), null, `${suffix}: sin auto-cancelación`);
+        assert.equal(db.getConversationById(db.getConversationIdByPhone(order.phone)!)!.mode, "HUMAN");
+        assert.notEqual(dispatch.getDispatchCooldown(order.id)!.status, "cancelled");
+        assert.equal((await dispatch.executeDispatch(order.id, "cooldown", dispatch.getDispatchCooldown(order.id)!.due_at + 1, { markToSend: fakeMarkToSend })).status, "blocked", `${suffix}: cooldown retenido`);
+      }
+      // Confianza alta pero el pedido YA se despachó: cancelar en local sería mentir → persona.
+      const shipped = mkConfirmedForDispatch("44");
+      handleOrderButtonReply(shipped.phone, "confirm_order");
+      const due = dispatch.getDispatchCooldown(shipped.id)!.due_at;
+      assert.equal((await dispatch.executeDispatch(shipped.id, "cooldown", due + 1, { markToSend: fakeMarkToSend })).status, "executed");
+      const f = await resolvePostConfirmationText(shipped.phone, db.getOrderById(shipped.id)!, "cancelar pedido", {
+        env: INTENT_ON, faq: FAQ,
+        complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.97, respuesta_sugerida: null }),
+      });
+      assert.equal(f.reply, msgs.MSG_CANCEL_RECEIVED);
+      assert.equal(aiCancel.getActiveAiCancellation(shipped.id), null);
+      assert.equal(db.getOrderById(shipped.id)!.status, "needs_call");
+      assert.ok(db.systemDbHandle().prepare("SELECT 1 FROM integration_events WHERE event_type='ai_cancellation_skipped' AND order_ref=?").get(shipped.shopify_order_number));
+      // Con la IA de intención apagada nada de esto existe: el flujo determinista de siempre.
+      const off = mkConfirmedForDispatch("45");
+      handleOrderButtonReply(off.phone, "confirm_order");
+      await withEnv({ POST_CONFIRMATION_AI_ENABLED: "0" }, async () => {
+        const r = handleOrderReply(off.phone, "quiero cancelar el pedido");
+        assert.equal(r.reply, msgs.MSG_CANCEL_RECEIVED);
+        assert.equal(aiCancel.getActiveAiCancellation(off.id), null);
+      });
+    });
+  });
+
+  await test("AUTO-CANCELACIÓN · «Revertir cancelación» desde el panel: el pedido vuelve a confirmado, el work_item se cierra, el cooldown se REINICIA (6 h desde ahora) y queda en audit_log; revertir dos veces se rechaza", async () => {
+    await withEnv({ ...DISPATCH_ON, ...INTENT_ON }, async () => {
+      const order = mkConfirmedForDispatch("46");
+      handleOrderButtonReply(order.phone, "confirm_order");
+      const originalDue = dispatch.getDispatchCooldown(order.id)!.due_at;
+      await resolvePostConfirmationText(order.phone, db.getOrderById(order.id)!, "cancela el pedido", {
+        env: { ...INTENT_ON, ...DISPATCH_ON }, faq: FAQ,
+        complete: async () => JSON.stringify({ intencion: "cancelacion", duda_conocida_id: null, confianza: 0.9, respuesta_sugerida: null }),
+      });
+      assert.equal(db.getOrderById(order.id)!.status, "cancelled");
+      // Por la API del panel, como propietario.
+      const { POST: actionRoute } = await import("../src/app/api/orders/[orderId]/action/route");
+      const { NextRequest } = await import("next/server");
+      const sessions = await import("../src/lib/auth/session");
+      db.systemDbHandle().prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-cancel@test','Dueño Cancelaciones','owner','x')").run();
+      const userId = (db.systemDbHandle().prepare("SELECT id FROM users WHERE email='owner-cancel@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+      const call = async (action: string, note?: string) => {
+        const req = new NextRequest(`http://local/api/orders/${order.id}/action`, { method: "POST", headers, body: JSON.stringify({ action, note }) });
+        const res = await actionRoute(req, { params: Promise.resolve({ orderId: String(order.id) }) });
+        return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+      };
+      const now = Math.floor(Date.now() / 1000);
+      const r1 = await call("revert_ai_cancellation", "falso positivo, el cliente hablaba de otro pedido");
+      assert.equal(r1.status, 200, JSON.stringify(r1.body));
+      assert.equal(r1.body.cooldown, "restarted");
+      const fresh = db.getOrderById(order.id)!;
+      assert.equal(fresh.status, "confirmed");
+      assert.equal(fresh.cancellation_requested_at, null, "la solicitud de cancelación se borra: ya no bloquea el despacho");
+      const cd = dispatch.getDispatchCooldown(order.id)!;
+      assert.equal(cd.status, "scheduled");
+      assert.ok(cd.due_at >= now + 6 * 3600 - 2 && cd.due_at <= now + 6 * 3600 + 60, "reiniciado: 6 h desde la reversión");
+      assert.ok(cd.due_at >= originalDue && cd.scheduled_at >= now, "no se reanuda donde estaba: ventana nueva desde la reversión (documentado)");
+      const row = aiCancel.listAiCancellations(order.id)[0];
+      assert.ok(row.reverted_at && row.reverted_by, "queda quién revirtió");
+      assert.equal(row.revert_note, "falso positivo, el cliente hablaba de otro pedido");
+      assert.equal(aiCancel.getActiveAiCancellation(order.id), null);
+      const abiertos = db.systemDbHandle().prepare("SELECT COUNT(*) AS n FROM work_items WHERE order_id=? AND reason=? AND resolved_at IS NULL").get(order.id, aiCancel.AI_CANCEL_WORK_ITEM_REASON) as { n: number };
+      assert.equal(abiertos.n, 0, "el work_item de la cancelación automática se cierra");
+      const audit = db.systemDbHandle().prepare("SELECT action, user_name FROM audit_log WHERE action='revert_ai_cancellation' AND subject_id=? ORDER BY id DESC LIMIT 1").get(String(order.id)) as { action: string; user_name: string };
+      assert.equal(audit?.user_name, "Dueño Cancelaciones", "queda en audit_log con nombre");
+      // El listado del panel lleva la insignia como campo calculado (ya revertida → 0).
+      const list = await import("../src/app/api/orders/route");
+      const listRes = await list.GET(new NextRequest("http://localhost/api/orders", { headers }));
+      const listBody = (await listRes.json()) as { orders: Array<{ id: number; ai_cancelled: number }> };
+      assert.equal(listBody.orders.find((o) => o.id === order.id)?.ai_cancelled, 0);
+      // Tras revertir, el cooldown vuelve a poder despachar (la conversación sigue en HUMAN, pero eso no es una escalada abierta).
+      beepingCalls.length = 0;
+      const d = await dispatch.executeDispatch(order.id, "cooldown", cd.due_at + 1, { markToSend: fakeMarkToSend });
+      assert.equal(d.status, "executed", JSON.stringify(d));
+      // Segunda reversión: nada que revertir.
+      const r2 = await call("revert_ai_cancellation");
+      assert.equal(r2.status, 409);
     });
   });
 
@@ -13666,7 +13825,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 24;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24");
+      assert.match(db, /export const SCHEMA_VERSION = 25;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14183,7 +14342,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -14222,6 +14381,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 23");
     db.migrateDispatchChannels(fixture);
     fixture.pragma("user_version = 24");
+    db.migrateAiCancellations(fixture);
+    fixture.pragma("user_version = 25");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

@@ -10,7 +10,7 @@ La automatización **no** significa «ejecutar y olvidar»: el operador debe lee
 
 ## 0. Antes de tocar el NAS (07-09)
 
-- Con una copia real de `messages.db` del NAS: `npm run migration:verify -- --db <copia>` en local. Debe terminar en `user_version 15 → 24`, `integrity ok → ok` y recuentos intactos (`MIGRATION-v4.3.md` §2). Sin copia real, el fixture (`--fixture`) solo prueba la herramienta.
+- Con una copia real de `messages.db` del NAS: `npm run migration:verify -- --db <copia>` en local. Debe terminar en `user_version 15 → 25`, `integrity ok → ok` y recuentos intactos (`MIGRATION-v4.3.md` §2). Sin copia real, el fixture (`--fixture`) solo prueba la herramienta.
 - Construir con `GIT_SHA=$(git rev-parse HEAD)` (lo hace `scripts/nas-verify-v43.sh`); tras arrancar, `/api/health/live` debe devolver ese `build`. `sin_confirmar` = la imagen se construyó sin SHA: no aceptar.
 - Nada nuevo se activa por sí solo: los tres flags (`ADDRESS_AI_VALIDATION_ENABLED`, `AUTO_DISPATCH_COOLDOWN_ENABLED`, `POST_CONFIRMATION_AI_ENABLED`) siguen a 0 y `dispatch_channels` nace vacía. Solo la capa 1 de direcciones (determinista) actúa, y solo abre alertas. Ver `ESTADO-PRODUCCION.md` §3.
 
@@ -64,7 +64,7 @@ docker logs --tail 150 casamable-agent
 Aceptar únicamente con:
 
 - contenedor `healthy`, cero reinicios y un solo bot;
-- SQLite `integrity_check=ok`, `user_version=24` (19 = Hunter, 20 = predictivo, 21 = discovery, 22 = validación de direcciones, 23 = auto-despacho, 24 = canal de despacho; el doc decía 19 antes de la consolidación del 07-09; tablas nuevas desde 15: `users`, `sessions`, `audit_log`, `product_candidates`, `candidate_events`, `hunter_predictive_estimates`, `adlib_*`, `address_validations`, `address_alerts`, `dispatch_cooldowns`, `intent_classifications`, `dispatch_channels`, además de las de atribución/versión de agente) y recuentos de pedidos, conversaciones, mensajes, outbox y eventos coherentes con los anotados antes del despliegue;
+- SQLite `integrity_check=ok`, `user_version=25` (19 = Hunter, 20 = predictivo, 21 = discovery, 22 = validación de direcciones, 23 = auto-despacho, 24 = canal de despacho, 25 = auto-cancelación IA; el doc decía 19 antes de la consolidación del 07-09; tablas nuevas desde 15: `users`, `sessions`, `audit_log`, `product_candidates`, `candidate_events`, `hunter_predictive_estimates`, `adlib_*`, `address_validations`, `address_alerts`, `dispatch_cooldowns`, `intent_classifications`, `dispatch_channels`, `ai_cancellations`, además de las de atribución/versión de agente) y recuentos de pedidos, conversaciones, mensajes, outbox y eventos coherentes con los anotados antes del despliegue;
 - WhatsApp: 7 plantillas activas PASS, 1 deshabilitada y 0 FAIL;
 - Retell y readiness sin bloqueos ocultos. `UNAVAILABLE_API` para saldo Retell es un aviso conocido: se comprueba manualmente en Billing;
 - `/api/health/live` devuelve `build` igual al SHA desplegado;
@@ -86,4 +86,4 @@ docker exec casamable-agent npm run db:health -- --full
 npm run deploy:guard -- --data-dir /volume1/docker/CasamableAgent/data
 ```
 
-El rollback revierte la imagen, **no revierte la migración SQLite 15→24**. No se restaura la DB automáticamente y nunca se usa `down -v`. Si el código anterior no entiende schema 24, mantener `EMERGENCY_STOP=1`, conservar datos y escalar antes de cualquier restauración. La copia externa de `data/` y `auth/` solo se restaura con autorización expresa y diagnóstico de corrupción de datos.
+El rollback revierte la imagen, **no revierte la migración SQLite 15→25**. No se restaura la DB automáticamente y nunca se usa `down -v`. Si el código anterior no entiende schema 25, mantener `EMERGENCY_STOP=1`, conservar datos y escalar antes de cualquier restauración. La copia externa de `data/` y `auth/` solo se restaura con autorización expresa y diagnóstico de corrupción de datos.

@@ -7,7 +7,7 @@ type Detail = { conversationId:number; messages:Array<{id:number;role:string;con
 export default function TrabajoPage() {
   const [items,setItems]=useState<Item[]>([]), [detail,setDetail]=useState<Detail|null>(null), [selected,setSelected]=useState<number|undefined>(), [error,setError]=useState("");
   const load=useCallback(async(id?:number)=>{ const r=await fetch(`/api/workspace${id?`?conversationId=${id}`:""}`); if(r.status===401)return location.assign("/login"); const b=await r.json(); if(!r.ok)return setError(b.error); setItems(b.items); setDetail(b.selected); setSelected(b.selected?.conversationId); },[]);
-  useEffect(()=>{void load();},[load]);
+  useEffect(()=>{let id:number|undefined;try{const q=Number(new URLSearchParams(window.location.search).get("conversationId"));if(Number.isFinite(q)&&q>0)id=q;}catch{}void load(id);},[load]);
   async function act(url:string, body:Record<string,unknown>){setError("");const r=await fetch(url,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});const b=await r.json();if(!r.ok){setError(b.error);return false;}await load(selected);return true;}
   async function promptAction(action:string,label:string){const value=window.prompt(label);if(value)await act("/api/workspace/action",{action,conversationId:selected,orderId:detail?.order?.id,value});}
   async function send(e:FormEvent<HTMLFormElement>){e.preventDefault();const form=new FormData(e.currentTarget);if(await act(`/api/messages/${selected}`,{content:form.get("message")}))e.currentTarget.reset();}

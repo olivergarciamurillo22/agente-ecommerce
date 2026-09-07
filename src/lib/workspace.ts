@@ -1,7 +1,7 @@
 import { systemDbHandle, type OrderRow } from "./db";
 import type { AuthPrincipal } from "./auth/guard";
 
-export type AuditAction = "take_over" | "return_to_bot" | "send_message" | "correct_address" | "delivery_note" | "resolve" | "escalate" | "resend_confirmation" | "resolve_address_alert" | "dispatch_now";
+export type AuditAction = "take_over" | "return_to_bot" | "send_message" | "correct_address" | "delivery_note" | "resolve" | "escalate" | "resend_confirmation" | "resolve_address_alert" | "dispatch_now" | "revert_ai_cancellation";
 
 export function audit(user: AuthPrincipal, action: AuditAction, subjectType: string, subjectId: string | number, detail?: unknown): void {
   systemDbHandle().prepare(

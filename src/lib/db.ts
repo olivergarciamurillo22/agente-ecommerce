@@ -1743,6 +1743,7 @@ function build() {
   migrateAddressValidation(db);
   migrateAutoDispatch(db);
   migrateDispatchChannels(db);
+  migrateAiCancellations(db);
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -1912,7 +1913,36 @@ function ctx(): ReturnType<typeof build> {
 }
 
 /** Versión de esquema estampada en PRAGMA user_version. Subir con cada cambio. */
-export const SCHEMA_VERSION = 24;
+/**
+ * Migración 25 (07-09-2026): auto-cancelación por IA —
+ * docs/AUTO-DESPACHO-COOLDOWN.md § Auto-cancelación. Una fila por cada
+ * cancelación automática (mensaje original, confianza, acción, timestamp) y
+ * su reversión desde el panel. ADITIVA.
+ */
+export function migrateAiCancellations(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ai_cancellations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      phone TEXT NOT NULL,
+      message TEXT NOT NULL,
+      confidence REAL NOT NULL,
+      model TEXT,
+      previous_status TEXT NOT NULL,
+      cooldown_status_before TEXT,
+      cooldown_due_before INTEGER,
+      notified_via TEXT NOT NULL DEFAULT pending,
+      cancelled_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      reverted_at INTEGER,
+      reverted_by TEXT,
+      revert_note TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_ai_cancellations_order ON ai_cancellations(order_id, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_ai_cancellations_active ON ai_cancellations(order_id) WHERE reverted_at IS NULL;
+  `);
+}
+
+export const SCHEMA_VERSION = 25;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

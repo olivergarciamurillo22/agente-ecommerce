@@ -63,6 +63,7 @@ export interface OrderItem {
   cancellation_requested_at: number | null;
   address_alert_open?: number;
   dispatch_blocked?: number;
+  ai_cancelled?: number;
   supplier_platform: string | null;
   supplier_sync_status: string;
   supplier_external_order_id: string | null;
@@ -293,7 +294,7 @@ function SearchIcon() {
   );
 }
 
-type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot" | "resolve_address_alert" | "dispatch_now";
+type ActionName = "confirm" | "call_now" | "needs_call" | "resend" | "notify_delay" | "cancel" | "authorize_pilot" | "revoke_pilot" | "resolve_address_alert" | "dispatch_now" | "revert_ai_cancellation";
 
 export default function OrdersPanel() {
   const [orders, setOrders] = useState<OrderItem[]>([]);
@@ -335,6 +336,23 @@ export default function OrdersPanel() {
     const interval = setInterval(refresh, 3000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  // Enlace directo desde un aviso (?order=<id>): abre la ficha al cargar.
+  const [deepLinkDone, setDeepLinkDone] = useState(false);
+  useEffect(() => {
+    if (deepLinkDone || !loaded) return;
+    setDeepLinkDone(true);
+    try {
+      const id = Number(new URLSearchParams(window.location.search).get("order"));
+      if (Number.isFinite(id) && id > 0) {
+        const o = orders.find((x) => x.id === id);
+        if (o) openDetail(o);
+      }
+    } catch {
+      /* sin deep link */
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded, orders, deepLinkDone]);
 
   const drawerOpen = detail !== null;
   useEffect(() => {
@@ -409,6 +427,10 @@ export default function OrdersPanel() {
       dispatch_now: {
         title: "Despachar ahora",
         body: `Vas a marcar el pedido #${order.shopify_order_number} para enviar en Beeping sin esperar al cooldown. Solo se ejecuta si ya no hay escaladas, cancelaciones ni alertas de dirección abiertas; si las hay, se rechazará con el motivo.`,
+      },
+      revert_ai_cancellation: {
+        title: "Revertir cancelación automática",
+        body: `La IA canceló el pedido #${order.shopify_order_number} porque el cliente pidió cancelar. Al revertir, el pedido vuelve a CONFIRMADO y el cooldown de auto-despacho se reinicia desde ahora (6 h nuevas). Shopify y el proveedor no se tocan. Quedará registrado a tu nombre.`,
       },
       resolve_address_alert: {
         title: "Cerrar ALERTA DIRECCIÓN",
@@ -726,6 +748,14 @@ export default function OrdersPanel() {
                               title="El auto-despacho tras el cooldown NO se ejecutó: hay una escalada, cancelación o alerta de dirección abierta. Revisa la ficha y pulsa «Despachar ahora» cuando esté resuelto."
                             >
                               DESPACHO RETENIDO
+                            </span>
+                          )}
+                          {o.ai_cancelled === 1 && (
+                            <span
+                              className="ml-1.5 px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-500/15 text-red-600 border border-red-500/30 align-middle"
+                              title="Cancelado automáticamente por la IA (el cliente pidió cancelar con confianza alta). Revisa la ficha y pulsa «Revertir cancelación» si fue un error."
+                            >
+                              CANCELADO POR IA
                             </span>
                           )}
                         </td>
@@ -1050,6 +1080,22 @@ export default function OrdersPanel() {
                   <div className="mt-2 flex justify-end">
                     <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "dispatch_now")} className="!px-2.5 !py-1.5 text-xs">
                       Despachar ahora
+                    </GhostButton>
+                  </div>
+                </div>
+              )}
+
+              {detail.ai_cancelled === 1 && (
+                <div className="mx-5 mb-3 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2.5 text-xs text-brand-text">
+                  <div className="font-semibold text-red-600">CANCELADO AUTOMÁTICAMENTE POR IA</div>
+                  <div className="mt-0.5 text-brand-muted">
+                    El cliente pidió cancelar tras confirmar y la IA lo entendió sin ambigüedad (confianza ≥ 0,85): el pedido se
+                    canceló solo, el cooldown de auto-despacho se detuvo y se avisó a una persona. Shopify y el proveedor no se
+                    han tocado. Si fue un error, «Revertir cancelación» lo devuelve a confirmado y reinicia el cooldown.
+                  </div>
+                  <div className="mt-2 flex justify-end">
+                    <GhostButton disabled={busy === detail.id} onClick={() => doAction(detail, "revert_ai_cancellation")} className="!px-2.5 !py-1.5 text-xs">
+                      Revertir cancelación
                     </GhostButton>
                   </div>
                 </div>
