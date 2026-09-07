@@ -14000,7 +14000,38 @@ async function main(): Promise<void> {
     assert.equal(report.schemaVersion, db.SCHEMA_VERSION);
     assert.equal(report.integrity, "ok");
     assert.deepEqual(report.counts, { orders: 116, conversations: 63, messages: 349, outbox: 180, integration_events: 1700 });
-    console.log(`    migración realista v17→v21: ${report.durationMs} ms`);
+    console.log(`    migración realista v17→v${db.SCHEMA_VERSION}: ${report.durationMs} ms`);
+  });
+
+  await test("HERRAMIENTA · migration:verify copia el fichero, migra la COPIA (nunca el original), compara recuentos y detecta una base 'del futuro'", async () => {
+    const { verifyMigrationOnCopy } = await import("../scripts/migration-verify");
+    const { createSchema17FixtureFile } = await import("../scripts/test-migration-v43");
+    const dir = fs.mkdtempSync(path.join(tmpDir, "mv-"));
+    const source = createSchema17FixtureFile(path.join(dir, "origen-17.db"));
+    const hashBefore = crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex");
+    // Cadena explícita (el build() real exige un proceso nuevo: lo cubre `npm run migration:verify -- --fixture`).
+    const chain = (copy: string) => {
+      const Database = require("better-sqlite3") as typeof import("better-sqlite3");
+      const raw = new Database(copy);
+      db.assertSchemaNotNewer(raw, copy);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels]) m(raw);
+      raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
+      raw.close();
+      return db.SCHEMA_VERSION;
+    };
+    const report = await verifyMigrationOnCopy(source, chain);
+    assert.equal(report.ok, true, report.problems.join(" | "));
+    assert.equal(report.before.userVersion, 17);
+    assert.equal(report.after.userVersion, db.SCHEMA_VERSION);
+    assert.deepEqual(report.countDiffs, [], "ninguna fila cambia");
+    assert.ok(report.addedTables.includes("dispatch_channels") && report.addedTables.includes("address_alerts"));
+    assert.equal(crypto.createHash("sha256").update(fs.readFileSync(source)).digest("hex"), hashBefore, "el ORIGINAL no se toca ni un byte");
+    // Una base con user_version por encima del código se rechaza y el informe lo dice.
+    const future = new (require("better-sqlite3") as typeof import("better-sqlite3"))(path.join(dir, "futuro.db"));
+    future.pragma("user_version = 1020"); future.close();
+    const rejected = await verifyMigrationOnCopy(path.join(dir, "futuro.db"), chain);
+    assert.equal(rejected.ok, false);
+    assert.ok(rejected.problems.some((p) => /NewerSchemaError|user_version=1020|platform-companies/.test(p)), rejected.problems.join(" | "));
   });
 
   await test("schema 17 migra hasta Discovery 21 sin perder tablas", async () => {

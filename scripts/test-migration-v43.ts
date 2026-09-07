@@ -39,6 +39,22 @@ function seed(db: Database.Database): void {
   db.pragma("user_version = 17");
 }
 
+/**
+ * Escribe el fixture sintético (esquema 17, 116 pedidos…) en un fichero y
+ * devuelve su ruta. Lo usa `npm run migration:verify -- --fixture` como
+ * prueba de humo de la herramienta. Datos SINTÉTICOS: no sustituyen una
+ * copia real de producción.
+ */
+export function createSchema17FixtureFile(file: string): string {
+  const db = new Database(file);
+  try {
+    seed(db);
+  } finally {
+    db.close();
+  }
+  return file;
+}
+
 export async function runMigrationV43Test(): Promise<MigrationV43Report> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "casamable-migration-v43-"));
   const dbFile = path.join(dir, "fixture-schema17.db");
