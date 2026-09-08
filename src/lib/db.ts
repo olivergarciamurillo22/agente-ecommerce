@@ -1751,6 +1751,7 @@ function build() {
   migrateDiscoveryRunState(db);
   migrateDiscoveryJobs(db);
   migrateDiscoveryJobKinds(db);
+  migrateProductHunterInternal(db);
   // Pase de datos, una sola vez por base (ver purgeAccessTokensFromAdlibRows).
   if (!db.prepare("SELECT 1 FROM settings WHERE key = ?").get(ADLIB_TOKEN_PURGE_SETTING)) {
     const purged = purgeAccessTokensFromAdlibRows(db);
@@ -2058,6 +2059,94 @@ export function migrateDiscoveryJobKinds(db: Database.Database): void {
 }
 
 /**
+ * Migración 31 (08-09-2026) — Cazador de productos INTERNO
+ * (docs/PRODUCT-HUNTER-BACKEND-PLAN.md §5). Aditiva. Tres piezas:
+ *  · dropea_catalog: copia local del catálogo de Dropea (hunter:dropea:sync);
+ *    la búsqueda del panel lee de aquí, nunca de la API en vivo.
+ *  · hunter_pipeline: el pipeline del contrato del Cazador (ids
+ *    local:|adlib:|dropea:|cruce:), con estado, notas, decisiones y economics.
+ *  · hunter_cruce_runs + hunter_cruces: cruces Dropea × Ad Library con su
+ *    score desglosado y fecha, para comparar pasadas.
+ */
+export function migrateProductHunterInternal(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS dropea_catalog (
+      variant_id INTEGER PRIMARY KEY,
+      product_id INTEGER NOT NULL,
+      sku TEXT,
+      name TEXT,
+      product_name TEXT,
+      cost_eur REAL,
+      recommended_price_eur REAL,
+      currency TEXT,
+      stock INTEGER,
+      status TEXT,
+      raw_json TEXT NOT NULL,
+      search_text TEXT NOT NULL DEFAULT '',
+      synced_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_dropea_catalog_product ON dropea_catalog(product_id);
+
+    CREATE TABLE IF NOT EXISTS hunter_pipeline (
+      id TEXT PRIMARY KEY,
+      source TEXT NOT NULL CHECK(source IN ('ad_library','local','dropea','cruce')),
+      result_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'discovered',
+      economics_json TEXT,
+      notes_json TEXT NOT NULL DEFAULT '[]',
+      decisions_json TEXT NOT NULL DEFAULT '[]',
+      risks_json TEXT NOT NULL DEFAULT '[]',
+      saturation TEXT,
+      saved_at INTEGER,
+      product_candidate_id INTEGER,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_pipeline_status ON hunter_pipeline(status, saved_at);
+
+    CREATE TABLE IF NOT EXISTS hunter_cruce_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at INTEGER NOT NULL,
+      finished_at INTEGER,
+      country TEXT NOT NULL,
+      category TEXT,
+      max_products INTEGER,
+      processed INTEGER NOT NULL DEFAULT 0,
+      matched INTEGER NOT NULL DEFAULT 0,
+      requests INTEGER NOT NULL DEFAULT 0,
+      stop_reason TEXT
+    );
+    CREATE TABLE IF NOT EXISTS hunter_cruces (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      run_id INTEGER NOT NULL REFERENCES hunter_cruce_runs(id) ON DELETE CASCADE,
+      variant_id INTEGER NOT NULL,
+      product_name TEXT,
+      cost_eur REAL,
+      terms_json TEXT NOT NULL,
+      match TEXT NOT NULL CHECK(match IN ('si','dudoso','no')),
+      match_confidence REAL NOT NULL,
+      adlib_candidate_key TEXT,
+      page_name TEXT,
+      active_ads INTEGER,
+      oldest_active_at INTEGER,
+      variants INTEGER,
+      momentum TEXT,
+      detected_price_eur REAL,
+      detected_price_source TEXT,
+      margin_eur REAL,
+      margin_pct REAL,
+      score REAL,
+      breakdown_json TEXT NOT NULL,
+      country TEXT NOT NULL,
+      captured_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_cruces_variant ON hunter_cruces(variant_id, captured_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_hunter_cruces_run ON hunter_cruces(run_id, score DESC);
+  `);
+}
+
+
+/**
  * Limpieza de datos (08-09-2026, auditoría §3.2): recorta `access_token=…`
  * de los `ad_snapshot_url` que ya estuvieran guardados en
  * adlib_candidate_snapshots.ads_json, discovery_jobs.result_json y
@@ -2085,7 +2174,7 @@ export function purgeAccessTokensFromAdlibRows(db: Database.Database): { snapsho
   return out;
 }
 
-export const SCHEMA_VERSION = 30;
+export const SCHEMA_VERSION = 31;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

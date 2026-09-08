@@ -1,6 +1,6 @@
 # Cazador de productos — contrato del backend (para Pedro)
 
-**Estado:** UI y adaptadores implementados; **sin backend real conectado**.
+**Estado (08-09-2026):** UI y adaptadores implementados. El backend externo `api` nunca se construyó; desde `feat/product-hunter-backend` existe un **backend interno** (`PRODUCT_HUNTER_SOURCE=internal`) sobre los datos del propio sistema: `PRODUCT-HUNTER-BACKEND-PLAN.md` y `PRODUCT-HUNTER-BACKEND-USO.md`.
 Fuente: `src/lib/product-hunter/{types,adapter}.ts`. La UI nunca inventa
 ventas, ROAS, gasto ni beneficio: lo que la fuente no sabe se muestra como
 "No disponible".
@@ -9,7 +9,7 @@ ventas, ROAS, gasto ni beneficio: lo que la fuente no sabe se muestra como
 
 | Variable | Valores | Efecto |
 |---|---|---|
-| `PRODUCT_HUNTER_SOURCE` | `off` (default) · `api` · `mock` | `off` = módulo visible pero "no conectado"; `mock` = datos de ejemplo, **rechazado con `NODE_ENV=production`**; `api` = backend real |
+| `PRODUCT_HUNTER_SOURCE` | `off` (default) · `internal` · `api` · `mock` | `off` = módulo visible pero "no conectado"; `internal` = backend dentro de este proceso (Ad Library del discovery, candidatos locales, copia del catálogo de Dropea, cruces), sin URL; `mock` = datos de ejemplo, **rechazado con `NODE_ENV=production`**; `api` = backend externo (contrato de abajo) |
 | `PRODUCT_HUNTER_API_URL` | URL base sin barra final | obligatoria con `api` |
 | `PRODUCT_HUNTER_API_TOKEN` | secreto | opcional; se envía como `Authorization: Bearer …` solo desde el servidor |
 

@@ -30,9 +30,20 @@ import {
   SELECT_COMPACT_CLASS,
 } from "./hunter-shared";
 
+/** Fuentes del backend interno (08-09-2026). "all" = Ad Library + candidatos locales. */
+type SearchSource = "all" | "ad_library" | "dropea" | "cruce" | "local";
+const SOURCE_LABEL: Record<SearchSource, string> = {
+  all: "Anuncios + locales",
+  ad_library: "Ad Library (Competencia)",
+  dropea: "Catálogo Dropea",
+  cruce: "Cruce Dropea × Ad Library",
+  local: "Candidatos locales",
+};
+
 interface SearchForm {
   keywords: string;
   country: string;
+  source: SearchSource;
   activeOnly: boolean;
   format: CreativeFormatFilter;
   minActiveDays: string;
@@ -45,6 +56,7 @@ interface SearchForm {
 const DEFAULT_FORM: SearchForm = {
   keywords: "",
   country: "ES",
+  source: "all",
   activeOnly: false,
   format: "all",
   minActiveDays: "",
@@ -55,6 +67,15 @@ const DEFAULT_FORM: SearchForm = {
 };
 
 const EXAMPLES = ["cocina", "mascotas", "bienestar", "hogar"];
+
+/** Qué hay detrás de cada fuente y qué hacer si sale vacía (backend interno). */
+const SOURCE_HINT: Record<SearchSource, { idle: string; empty: string }> = {
+  all: { idle: "Busca en los anuncios ya descubiertos (Crecimiento → Competencia) y en los candidatos locales. Lo que la fuente no sabe se marca como no disponible.", empty: "Ningún anuncio descubierto ni candidato local con esas palabras. Lanza una búsqueda en Competencia o cambia la fuente." },
+  ad_library: { idle: "Grupos de anuncios activos ya descubiertos por el buscador de Competencia (último snapshot, sin ruido). Aquí no se llama a Meta: se lee lo persistido.", empty: "Ningún grupo descubierto con esas palabras en este país. Lanza la búsqueda en Crecimiento → Competencia y vuelve." },
+  dropea: { idle: "Copia local del catálogo de Dropea (coste mayorista real; sin peso ni medidas). Se actualiza con npm run hunter:dropea:sync.", empty: "Nada en la copia del catálogo con esas palabras. Si la copia está vacía o vieja: npm run hunter:dropea:sync." },
+  cruce: { idle: "Cruces Dropea × Ad Library ya calculados, ordenados por Score de Oportunidad Validada. Se generan con npm run hunter:cruce-dropea; el panel solo los lee. Deja las palabras vacías para verlos todos.", empty: "Aún no hay cruces (o ninguno con esas palabras). Ejecuta npm run hunter:cruce-dropea -- --limite 20 en el servidor." },
+  local: { idle: "Candidatos guardados con hunter:add (fichas leídas o datos manuales).", empty: "Ningún candidato local con esas palabras. Añade uno con npm run hunter:add." },
+};
 const PAGE_SIZE = 12;
 
 function toQuery(f: SearchForm, page: number): Record<string, string | number | boolean | undefined> {
@@ -62,6 +83,7 @@ function toQuery(f: SearchForm, page: number): Record<string, string | number | 
   return {
     keywords: f.keywords.trim(),
     country: f.country,
+    source: f.source === "all" ? undefined : f.source,
     activeOnly: f.activeOnly || undefined,
     creativeFormat: f.format === "all" ? undefined : f.format,
     minActiveDays: min,
@@ -213,6 +235,19 @@ export default function SearchView({
           />
         </div>
         <select
+          value={form.source}
+          onChange={(e) => quick({ source: e.target.value as SearchSource })}
+          aria-label="Fuente"
+          title="Dónde buscar: los anuncios del discovery (Competencia), la copia local del catálogo de Dropea, los cruces persistidos o los candidatos locales"
+          className={`${SELECT_CLASS} md:w-56`}
+        >
+          {(Object.keys(SOURCE_LABEL) as SearchSource[]).map((s) => (
+            <option key={s} value={s}>
+              {SOURCE_LABEL[s]}
+            </option>
+          ))}
+        </select>
+        <select
           value={form.country}
           onChange={(e) => quick({ country: e.target.value })}
           aria-label="País"
@@ -278,8 +313,8 @@ export default function SearchView({
       ) : results === null ? (
         <Card>
           <EmptyState
-            title="Escribe qué buscas y pulsa Buscar"
-            hint="Consulta la Biblioteca de anuncios de Meta por país. Los resultados llegan con lo que la fuente sabe; lo que no sabe se marca como no disponible."
+            title={form.source === "cruce" ? "Pulsa Buscar para ver los cruces" : "Escribe qué buscas y pulsa Buscar"}
+            hint={SOURCE_HINT[form.source].idle}
           />
           <div className="flex flex-wrap justify-center gap-2 pb-8 -mt-6">
             {EXAMPLES.map((k) => (
@@ -300,7 +335,7 @@ export default function SearchView({
         <Card>
           <EmptyState
             title="Sin resultados para esa búsqueda"
-            hint="Prueba con menos palabras, otro país o quita los filtros rápidos."
+            hint={`${SOURCE_HINT[(applied ?? form).source].empty} Prueba también con menos palabras o sin filtros rápidos.`}
           />
         </Card>
       ) : (

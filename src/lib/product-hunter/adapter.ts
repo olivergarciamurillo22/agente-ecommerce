@@ -8,6 +8,11 @@
 //                                 NODE_ENV !== "production". En producción
 //                                 lanza NotConfiguredError: un mock jamás
 //                                 llega al NAS.
+//   PRODUCT_HUNTER_SOURCE=internal → InternalAdapter (08-09-2026): el backend
+//                                 DENTRO de este proceso, sobre SQLite (discovery
+//                                 de Ad Library, product_candidates, copia del
+//                                 catálogo de Dropea y cruces). Sin URL ni token.
+//                                 docs/PRODUCT-HUNTER-BACKEND-PLAN.md
 //   cualquier otro valor / vacío → OffAdapter: todo responde "no configurado".
 //
 // ------------------------------------------------------------
@@ -56,6 +61,7 @@
 // ============================================================
 
 import { buildMockCandidates } from "./mock-data";
+import { InternalAdapter } from "./internal/adapter";
 import {
   assertCompareIds,
   isProductResearchStatus,
@@ -104,7 +110,7 @@ export class ProductHunterUpstreamError extends Error {
 // --- Resolución de entorno (se lee en cada llamada: sin caché, testeable) ---
 
 const OFF_REASON =
-  "Activa PRODUCT_HUNTER_SOURCE=api con la URL del backend de Pedro, o =mock en desarrollo";
+  "Activa PRODUCT_HUNTER_SOURCE=internal (backend interno sobre los datos de este sistema), PRODUCT_HUNTER_SOURCE=api con la URL de un backend externo, o =mock en desarrollo";
 
 function envSource(): string {
   return (process.env.PRODUCT_HUNTER_SOURCE ?? "").trim().toLowerCase();
@@ -130,6 +136,9 @@ function hostOf(url: string): string {
 
 export function productHunterAvailability(): ProductHunterAvailability {
   const src = envSource();
+  if (src === "internal") {
+    return { available: true, source: "internal", reason: "Backend interno: discovery de Ad Library, candidatos locales, copia del catálogo de Dropea y cruces (sin backend externo)." };
+  }
   if (src === "api") {
     const url = apiUrl();
     if (!url) {
@@ -152,6 +161,7 @@ export function productHunterAvailability(): ProductHunterAvailability {
 
 export function createProductHunterDataSource(): ProductHunterDataSource {
   const availability = productHunterAvailability();
+  if (availability.source === "internal") return new InternalAdapter();
   if (availability.source === "api") {
     const url = apiUrl();
     if (!url) throw new NotConfiguredError(availability.reason);

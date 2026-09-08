@@ -81,6 +81,32 @@ export class HunterRepository {
     this.db.prepare("UPDATE product_candidates SET pvp_entrada_eur=?,score=NULL,motivos_json=NULL,updated_at=unixepoch() WHERE id=?").run(salePriceEur,id);
     this.event(id,"precio_venta",before.state,before.state,before.scoring?.score??null,null,{salePriceEur});return this.score(id);
   }
+  /**
+   * Hechos manuales (F3, 08-09-2026): coste, PVP, peso y medidas que Pedro
+   * teclea porque la fuente no los da (Dropi/Dropea: catálogo privado). Solo
+   * se tocan los campos que llegan; los demás se conservan. Queda constancia
+   * del ORIGEN humano en nota_manual y en candidate_events, para que después
+   * se pueda auditar qué dato es scrapeado y cuál es de Pedro.
+   * Invalida el score (se recalcula con score()).
+   */
+  setFacts(id:number,facts:{unitCostEur?:number|null;salePriceEur?:number|null;weightGrams?:number|null;lengthCm?:number|null;widthCm?:number|null;heightCm?:number|null},origin:"manual"|"dropea"="manual"):ProductCandidate {
+    const before=this.byId(id); if(!before) throw new Error(`No existe el candidato ${id}`);
+    const cols:Array<[string,number|null]>=[];
+    const given=(v:unknown):v is number|null=>v!==undefined;
+    if(given(facts.unitCostEur))cols.push(["coste_unitario_eur",facts.unitCostEur]);
+    if(given(facts.salePriceEur))cols.push(["pvp_entrada_eur",facts.salePriceEur]);
+    if(given(facts.weightGrams))cols.push(["peso_gramos",facts.weightGrams]);
+    if(given(facts.lengthCm))cols.push(["largo_cm",facts.lengthCm]);
+    if(given(facts.widthCm))cols.push(["ancho_cm",facts.widthCm]);
+    if(given(facts.heightCm))cols.push(["alto_cm",facts.heightCm]);
+    for(const [,v] of cols) if(v!==null&&(!Number.isFinite(v)||v<0)) throw new Error("Los hechos manuales deben ser números no negativos");
+    if(!cols.length) return before;
+    const sobrescritos=cols.filter(([c])=>{const k=c as keyof typeof before; const prev=(before as unknown as Record<string,unknown>)[{coste_unitario_eur:"unitCostEur",pvp_entrada_eur:"salePriceEur",peso_gramos:"weightGrams",largo_cm:"lengthCm",ancho_cm:"widthCm",alto_cm:"heightCm"}[c] as string]; return prev!==null&&prev!==undefined&&k;}).map(([c])=>c);
+    const marca=`[${origin} ${new Date().toISOString().slice(0,10)}] ${cols.map(([c,v])=>`${c}=${v}`).join(", ")}${sobrescritos.length?` (sobrescribe dato previo: ${sobrescritos.join(", ")})`:""}`;
+    this.db.prepare(`UPDATE product_candidates SET ${cols.map(([c])=>`${c}=?`).join(",")},score=NULL,motivos_json=NULL,nota_manual=CASE WHEN nota_manual IS NULL OR nota_manual='' THEN ? ELSE nota_manual||char(10)||? END,updated_at=unixepoch() WHERE id=?`).run(...cols.map(([,v])=>v),marca,marca,id);
+    this.event(id,"hechos_manuales",before.state,before.state,before.scoring?.score??null,null,{origin,facts:Object.fromEntries(cols),sobrescritos});
+    return this.byId(id)!;
+  }
   private event(id:number,type:string,prev:CandidateState|null,next:CandidateState|null,prevScore:number|null,nextScore:number|null,details:unknown){
     this.db.prepare(`INSERT INTO candidate_events(candidate_id,event_type,previous_state,next_state,previous_score,next_score,details_json) VALUES(?,?,?,?,?,?,?)`).run(id,type,prev,next,prevScore,nextScore,JSON.stringify(details));
   }
