@@ -19,15 +19,17 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 | NAS | UGREEN DXP2800, `192.168.2.109` |
 | Acceso público | `https://agente.casamable.es` (VPS Hetzner → Caddy → WireGuard → NAS:3000) |
 | WhatsApp | **Cloud API oficial de Meta** (`WHATSAPP_PROVIDER=cloud_api`), número `+34 641 308 254` |
-| Modo | `APP_MODE=production` · `TEST_MODE=1` (solo allowlist) · `WHATSAPP_SEND_ENABLED=1` |
+| Modo | `APP_MODE=production` · `WHATSAPP_SEND_ENABLED=1`. **Rollout ACTIVO a clientes reales (confirmado por Pedro el 08-09-2026).** La línea anterior de este doc («`TEST_MODE=1`, solo allowlist») estaba desactualizada y llevó a la auditoría del 08-09 a concluir que el negocio no estaba encendido. Los valores exactos de `TEST_MODE`, `TEST_PHONE_ALLOWLIST` y `whatsapp_rollout_percent` en el NAS **no están volcados en el repo**: pendiente de que Pedro los pegue aquí |
 | Llamadas (Retell) | Instalado, **MANUAL-ONLY** (el scheduler no marca solo), kill switch cerrado |
 | Dropea | read-only, `DROPEA_WRITE_ENABLED=0`, creación vía su app oficial |
 | Dropi | sin API (solo diagnóstico), sincronización de su app desactivada |
 | Beeping | **apagado** (sin credencial; todo fail-closed) |
 | Meta Ads | read-only, funcionando (cuenta `act_1365655995103103`, EUR, Europe/Madrid) |
 | Ad Library (Cazador) | desplegado; `META_AD_LIBRARY_ACCESS_TOKEN` caducado → la pestaña Competencia avisa y no encola nada |
-| Flags v4.3 | `ADDRESS_AI_VALIDATION_ENABLED=0`, `AUTO_DISPATCH_COOLDOWN_ENABLED=0`, `POST_CONFIRMATION_AI_ENABLED=0`, `DISPATCH_NOTICE_WHATSAPP_ENABLED=0` |
+| Flags v4.3 | El informe del despliegue del 07-09 los dejó a 0. **Pedro confirma el 08-09 que la IA y el detector de direcciones ya funcionan en real**, así que al menos `ADDRESS_AI_VALIDATION_ENABLED` está a 1; el valor real de los cuatro (`ADDRESS_AI_VALIDATION_ENABLED`, `AUTO_DISPATCH_COOLDOWN_ENABLED`, `POST_CONFIRMATION_AI_ENABLED`, `DISPATCH_NOTICE_WHATSAPP_ENABLED`) hay que leerlo del `.env` del NAS y pegarlo aquí |
 | Plantillas WhatsApp | doctor 8 PASS / 1 DISABLED / 0 FAIL (07-09, tras el hotfix `22f8013`) |
+| Fixes de seguridad 08-09 | `f427b9f` (mark-to-send de Beeping respeta `EMERGENCY_STOP` y allowlist) y `0228ad5` (el token de Meta ya no se persiste en `ad_snapshot_url`) están en `release/casamable-v4.3` y en GitHub, **pendientes de desplegar** en la próxima ventana fuera de 10:00–21:00. Sin cambio de esquema (sigue en 30) |
+| Dropea vs Beeping | **No es una decisión pendiente**: el enrutado ya es por producto (`dispatch_channels`). Lo que falta es que Beeping entregue la información de conexión (bloqueo externo) |
 
 ### Incidente cerrado el 07-09: confirmación bloqueada por la plantilla
 

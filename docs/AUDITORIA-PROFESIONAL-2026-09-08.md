@@ -10,6 +10,33 @@ las 59 ramas remotas. Método: cinco lecturas independientes en paralelo
 verificación cruzada de los hallazgos graves sobre el código. Todo lo que
 no se pudo verificar se dice.
 
+> ## Errata (08-09-2026, tarde) — correcciones de Pedro sobre el diagnóstico
+>
+> La auditoría se hizo sobre el repositorio y su documentación, sin acceso
+> al `.env` real del NAS. Dos conclusiones se apoyaban en documentación
+> desactualizada y **Pedro las corrige**:
+>
+> 1. **El negocio SÍ está encendido.** El sistema confirma pedidos de
+>    clientes reales, la IA está activa y el detector de direcciones
+>    funciona en real. La lectura «`TEST_MODE=1`, allowlist de 2, piloto
+>    BLOCKED» del punto 1 del resumen y de la fila 1 de la priorización
+>    venía de `ESTADO-PRODUCCION.md`, `REAL-PILOT-02-09.md` y
+>    `CONTEXTO-2026-08-24.md`, que no se habían actualizado. Los valores
+>    exactos de rollout y flags en el NAS siguen sin estar en el repo:
+>    `ESTADO-PRODUCCION.md` §1 lo deja anotado como pendiente de volcar.
+> 2. **Dropea vs Beeping no es una decisión pendiente.** El enrutado ya es
+>    por producto (`dispatch_channels`); lo que falta es que Beeping
+>    entregue la información de conexión. Es un bloqueo externo, no una
+>    decisión interna (fila 2 de la priorización).
+>
+> Lo que sigue en pie: el resto de hallazgos de seguridad (los dos altos ya
+> corregidos en `f427b9f` y `0228ad5`, pendientes de desplegar), la deuda
+> técnica, y la condición sobre el Cazador: **el Score de Oportunidad
+> Validada no se usa como criterio de compra de stock hasta corregir C1–C6**;
+> como herramienta de exploración manual puede seguir puliéndose. El texto
+> original se conserva tal cual debajo, para que se vea qué se afirmó y con
+> qué base.
+
 ## Resumen ejecutivo (leer esto si no se lee nada más)
 
 1. **El negocio no está encendido.** Producción lleva desde agosto en

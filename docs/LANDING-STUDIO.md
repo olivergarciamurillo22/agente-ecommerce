@@ -1,7 +1,8 @@
 # Landing Studio — contrato y límites
 
-**Estado:** implementado en la rama `feat/control-center-v4-apple-redesign`,
-sin desplegar y sin ninguna escritura a Shopify.
+**Estado:** desplegado en producción con v4.3 (07-09-2026, commit `22f8013`),
+sin ninguna escritura a Shopify. (Hasta el 08-09 este doc decía «sin
+desplegar»: estaba desactualizado.)
 
 ## Fuente de verdad
 

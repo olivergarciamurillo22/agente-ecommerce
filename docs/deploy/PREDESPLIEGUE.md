@@ -49,8 +49,8 @@ En el repo conviven tres convenciones para el `2`; este script fija la suya:
    **proceso hijo** (obligatorio: `src/lib/db.ts` congela `DATA_DIR` al
    importarse, así que la ruta de producción solo funciona en un proceso
    recién nacido). Informe antes/después: `user_version`, `integrity_check`,
-   tablas nuevas y recuentos por tabla. Producción está en el **esquema 15**,
-   así que el «antes» correcto es 15, no 26: el script no exige un valor de
+   tablas nuevas y recuentos por tabla. Producción está en el **esquema 30** desde el 07-09-2026
+   (antes de ese despliegue estaba en 17, no en 15 como decía este doc): el script no exige un valor de
    partida, exige que el «después» sea el que espera el código y que ninguna
    fila cambie.
 4. **Cobertura del router de canal.** Sobre la **copia ya migrada**, enumera
