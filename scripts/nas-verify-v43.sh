@@ -50,7 +50,9 @@ pass "backup DB íntegro y auth en $rescue_dir"
 # lo devuelve /api/health/live como `build`. Así nunca vuelve a ser una incógnita.
 GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo sin_confirmar)"; export GIT_SHA
 printf 'INFO · construyendo commit %s\n' "$GIT_SHA"
-docker compose -p "$PROJECT" build "$SERVICE"
+# Inline además del export: si alguien ejecuta este script sin sudo y docker
+# lo exige, «sudo docker compose» no heredaría la variable (incidencia 08-09).
+GIT_SHA="$GIT_SHA" docker compose -p "$PROJECT" build "$SERVICE"
 pass "imagen construida"
 docker compose -p "$PROJECT" up -d --no-build --force-recreate "$SERVICE"
 pass "contenedor reemplazado"

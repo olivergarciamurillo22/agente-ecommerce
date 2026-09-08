@@ -13,7 +13,7 @@ código). Si un comando de aquí no existe, es un fallo a corregir.
 | Carpeta persistente | `/volume1/docker/CasamableAgent` (`auth/`, `data/`, `backups/`) |
 | Checkout real | **`/volume1/docker/CasamableAgent/repo-v3c`** (las otras `repo-*` son restos: nunca levantar Compose desde ellas) |
 | Esquema en producción | **30** desde el 07-09-2026 (`22f8013`); antes 17 (medido, no 18) |
-| Commit en producción | `22f8013e42e1bad2c8fedd76216f1ec92e12cf23` — lo confirma `/api/health/live` → `build` |
+| Commit en producción | `f2af4940639ec4a051404c3cb72868448d06bf8b` (08-09-2026; antes `22f8013`, 07-09) — lo confirma `/api/health/live` → `build` |
 | `.env` real | `repo-v3c/.env` (600, root), cargado por `env_file`; se hornea en la imagen: cambiar un flag = rebuild + recreate |
 | Proveedor de WhatsApp | `cloud_api` |
 
@@ -65,6 +65,8 @@ contenedor en marcha desde cualquier carpeta. No hace falta acordarse de
   (`fix/confirmation-provider-mapping`): para otra rama, `git fetch origin <rama> -v`.
 - El `.env` va horneado en la imagen (`env_file`): un cambio de flag exige
   `docker compose -p repo-v3c build` + `up -d --no-build --force-recreate`.
+- **`sudo` no hereda `export GIT_SHA=…`** (08-09): el build sale `sin_confirmar`.
+  La variable va inline: `sudo GIT_SHA=<sha> docker compose -p repo-v3c build casamable-agent`.
 
 ## Antes de tocar nada
 
