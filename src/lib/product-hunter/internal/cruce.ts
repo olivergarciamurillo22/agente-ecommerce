@@ -230,6 +230,13 @@ function rowOf(r: Record<string, unknown>): CruceRow {
   };
 }
 
+/**
+ * Nombre a enseñar: el del PRODUCTO en el catálogo (si sigue ahí) y, si no,
+ * lo persistido. Así las filas de la primera corrida real (08-09), que
+ * guardaron el nombre de la variante, se leen bien sin tocar datos.
+ */
+const PRODUCT_NAME_SQL = "COALESCE((SELECT d.product_name FROM dropea_catalog d WHERE d.variant_id = c.variant_id), c.product_name) AS product_name";
+
 export class CruceRepository {
   constructor(private readonly db: Database.Database = systemDbHandle()) {}
 
@@ -254,7 +261,7 @@ export class CruceRepository {
     return this.byId(Number(r.lastInsertRowid))!;
   }
   byId(id: number): CruceRow | null {
-    const r = this.db.prepare("SELECT * FROM hunter_cruces WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    const r = this.db.prepare(`SELECT c.*, ${PRODUCT_NAME_SQL} FROM hunter_cruces c WHERE c.id=?`).get(id) as Record<string, unknown> | undefined;
     return r ? rowOf(r) : null;
   }
   /** El último cruce de cada producto, ordenado por score. */
@@ -263,14 +270,14 @@ export class CruceRepository {
     const params: unknown[] = [];
     if (opts.country) { where.push("c.country=?"); params.push(opts.country.toUpperCase()); }
     for (const w of tokens(opts.term ?? "")) { where.push("LOWER(COALESCE(c.product_name,'')) LIKE ?"); params.push(`%${w}%`); }
-    const sql = `SELECT c.* FROM hunter_cruces c
+    const sql = `SELECT c.*, ${PRODUCT_NAME_SQL} FROM hunter_cruces c
       WHERE c.id = (SELECT x.id FROM hunter_cruces x WHERE x.variant_id=c.variant_id ORDER BY x.captured_at DESC, x.id DESC LIMIT 1)
       ${where.length ? "AND " + where.join(" AND ") : ""}
       ORDER BY c.score DESC, c.captured_at DESC LIMIT ?`;
     return (this.db.prepare(sql).all(...params, opts.limit ?? 200) as Array<Record<string, unknown>>).map(rowOf);
   }
   latestForVariant(variantId: number): CruceRow | null {
-    const r = this.db.prepare("SELECT * FROM hunter_cruces WHERE variant_id=? ORDER BY captured_at DESC, id DESC LIMIT 1").get(variantId) as Record<string, unknown> | undefined;
+    const r = this.db.prepare(`SELECT c.*, ${PRODUCT_NAME_SQL} FROM hunter_cruces c WHERE c.variant_id=? ORDER BY c.captured_at DESC, c.id DESC LIMIT 1`).get(variantId) as Record<string, unknown> | undefined;
     return r ? rowOf(r) : null;
   }
   /** Cuántos productos del catálogo ya tienen cruce (para el offset por defecto del CLI). */
@@ -371,7 +378,10 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     if (!keywords.length) breakdown.validacion.detail = "el nombre del producto no deja palabras clave útiles: no se buscó";
     if (keywords.length && isGenericName(keywords)) breakdown.confianza.detail += ` · nombre genérico (${keywords.join(", ")}): confianza recortada a la mitad; revisar a mano`;
     const row = repo.insert({
-      runId, variantId: producto.variantId, productName: producto.name ?? producto.productName, costEur: producto.costEur, terms: keywords,
+      // Se guarda el nombre del PRODUCTO, el mismo del que salieron las palabras clave.
+      // (Bug de display de la primera corrida real, 08-09: se guardaba el de la
+      // variante —«IVORY», «S/M»— y la tabla parecía decir que se buscó eso.)
+      runId, variantId: producto.variantId, productName: producto.productName ?? producto.name, costEur: producto.costEur, terms: keywords,
       match: match?.verdict ?? "no", matchConfidence: round2(match?.coverage ?? 0), adlibCandidateKey: g?.key ?? null, pageName: g?.pageName ?? null,
       activeAds: g?.activeAds ?? null, oldestActiveAt: g?.oldestActiveAt ?? null, variants, momentum: g ? momentum.status : null,
       detectedPriceEur: price?.amount ?? null, detectedPriceSource: price ? "anuncio" : null, marginEur: s.marginEur, marginPct: s.marginPct, score: s.score, breakdown, country, capturedAt: now,

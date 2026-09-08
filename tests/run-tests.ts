@@ -15041,7 +15041,7 @@ async function main(): Promise<void> {
         const cr = await ds.search({ country: "ES", keywords: "", advanced: { source: "cruce" } });
         assert.ok(cr.results.length >= 3);
         assert.match(cr.results[0].id, /^cruce:\d+$/);
-        assert.equal(cr.results[0].productName, "Cortaúñas Eléctrico 3 en 1");
+        assert.equal(cr.results[0].productName, "Cortaúñas Eléctrico 3 en 1 para mayores", "el nombre del PRODUCTO (el buscado), no el de la variante (fix 09-09)");
         assert.ok((cr.results[0].winnerScore?.total ?? 0) > (cr.results[cr.results.length - 1].winnerScore?.total ?? 0));
         const sinMatch = cr.results.find((r) => r.productName === "Relleno 2")!;
         assert.match(sinMatch.advertiser ?? "", /sin anunciante/);
@@ -15349,6 +15349,50 @@ async function main(): Promise<void> {
       const r2 = await runCruceBatch({ token: "tok", now: nowSec + 3600, limit: 20, client: new AdLibraryClient("tok", fetcher, async () => {}), catalog, repo });
       assert.ok(r2.cruces.every((c) => !r.cruces.some((x) => x.variantId === c.variantId)), "sin repetir los ya cruzados");
       assert.equal(repo.crossedVariantIds().size, r.processed + r2.processed);
+    });
+
+    await test("INTERNO · corrida real 08-09: la tabla enseñaba «IVORY», «S/M», «S» — eran nombres de VARIANTE; las palabras clave salieron del PRODUCTO y ahora se persiste y se enseña ese nombre (y las palabras enviadas)", async () => {
+      limpiar();
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runCruceBatch, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
+      const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const catalog = new DropeaCatalogRepository(raw);
+      catalog.upsertProducts([
+        { id: 30001, name: "Faja reductora postparto", variants: [{ variant_id: 31001, sku: "F-S", name: "S", price: 8 }, { variant_id: 31002, sku: "F-M", name: "M", price: 8 }] },
+        { id: 30002, name: "Sofá cama plegable para salón", variants: [{ variant_id: 31003, sku: "SC-1", name: "IVORY", price: 60 }] },
+        { id: 30003, name: "Arona Pro Smartwatch", variants: [{ variant_id: 31004, sku: "AR-1", name: "Arona Pro Smartwatch", price: 8.99 }] },
+        // Dato sucio de ORIGEN: Dropea no manda nombre de producto, solo el de la variante.
+        { id: 30004, name: null as unknown as string, variants: [{ variant_id: 31005, sku: "X-1", name: "Silicona negra", price: 3 }] },
+      ], nowSec);
+      const terminos: string[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        terminos.push(term);
+        const data = term.includes("arona") ? [{ id: "ar-1", page_id: "p-ar", page_name: "Arona Store", ad_creative_bodies: ["Arona Pro Smartwatch, solo 59,90 €"], ad_delivery_start_time: "2026-09-05" }] : [];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const repo = new CruceRepository(raw);
+      const r = await runCruceBatch({ token: "tok", now: nowSec, limit: 10, client: new AdLibraryClient("tok", fetcher, async () => {}), catalog, repo });
+      // Lo que fue a Meta: el nombre del producto, nunca «S», «M» ni «IVORY».
+      // «pro» es relleno y «negra» un color: ambos fuera por diseño; «silicona» queda como término genérico de una palabra.
+      assert.deepEqual(terminos.sort(), ["arona smartwatch", "faja reductora postparto", "silicona", "sofa cama plegable salon"]);
+      const porVariante = new Map(r.cruces.map((c) => [c.variantId, c]));
+      const faja = porVariante.get(31001) ?? porVariante.get(31002)!;
+      assert.deepEqual(faja.terms, ["faja", "reductora", "postparto"]);
+      assert.equal(faja.productName, "Faja reductora postparto", "se persiste el nombre del PRODUCTO, no «S»");
+      assert.equal(porVariante.get(31003)!.productName, "Sofá cama plegable para salón", "no «IVORY»");
+      assert.equal(porVariante.get(31004)!.productName, "Arona Pro Smartwatch");
+      assert.deepEqual(porVariante.get(31004)!.terms, ["arona", "smartwatch"], "el candidato que mira Pedro se buscó por su nombre real (sin «pro», relleno)");
+      assert.equal(porVariante.get(31004)!.match, "si");
+      // Dato sucio de origen: sin nombre de producto, se busca por el de la variante y se enseña ese (es lo único que hay).
+      assert.deepEqual(porVariante.get(31005)!.terms, ["silicona"], "sin nombre de producto solo queda la variante: término genérico");
+      assert.equal(porVariante.get(31005)!.match, "no");
+      assert.equal(porVariante.get(31005)!.productName, "Silicona negra");
+      // Filas ANTIGUAS que guardaron el nombre de la variante: al leer, manda el del catálogo.
+      raw.prepare("UPDATE hunter_cruces SET product_name=? WHERE variant_id=31003").run("IVORY");
+      assert.equal(repo.byId(porVariante.get(31003)!.id)!.productName, "Sofá cama plegable para salón");
+      assert.equal(repo.latest({ country: "ES" }).find((c) => c.variantId === 31003)!.productName, "Sofá cama plegable para salón");
+      assert.equal(repo.latestForVariant(31003)!.productName, "Sofá cama plegable para salón");
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

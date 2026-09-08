@@ -35,6 +35,7 @@ function tabla(rows: Array<import("../src/lib/product-hunter/internal/cruce").Cr
   if (!rows.length) { console.log("  (sin cruces todavía: lanza npm run hunter:cruce-dropea -- --limite 20)"); return; }
   console.table(rows.map((c) => ({
     producto: (c.productName ?? "?").slice(0, 38),
+    "palabras a Meta": c.terms.join(" ").slice(0, 32) || "(ninguna)",
     coste: eur(c.costEur),
     match: c.match,
     "anuncio desde": fecha(c.oldestActiveAt),

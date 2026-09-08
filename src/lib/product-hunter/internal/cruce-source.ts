@@ -51,7 +51,7 @@ export function cruceResult(c: CruceRow, dropea: DropeaCatalogRow | null): AdLib
   const activeDays = c.oldestActiveAt !== null ? Math.max(0, Math.floor((c.capturedAt - c.oldestActiveAt) / DAY)) : null;
   return {
     id: `cruce:${c.id}`,
-    productName: c.productName ?? dropea?.name ?? null,
+    productName: c.productName ?? dropea?.productName ?? dropea?.name ?? null,
     advertiser: c.match === "no" ? "sin anunciante que case (Ad Library)" : c.pageName,
     countries: [c.country],
     format: null, cta: null,
