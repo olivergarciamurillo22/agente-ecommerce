@@ -109,8 +109,11 @@ HEAD_NOW="$(git_in_repo rev-parse HEAD | tr -d '[:space:]')"
 pass "checkout en $HEAD_NOW"
 
 # ─── 7 · Build con identidad y recreate ───
+# La variable va INLINE en el comando: «export GIT_SHA» + «sudo docker compose»
+# no la propaga (incidencia del 08-09, build «sin_confirmar»). Este script se
+# ejecuta entero bajo sudo, pero así da igual cómo se invoque.
 export GIT_SHA="$SHA_MERGE"
-( cd "$REPO" && docker compose -p "$PROJECT" build "$SERVICE" )
+( cd "$REPO" && GIT_SHA="$SHA_MERGE" docker compose -p "$PROJECT" build "$SERVICE" )
 pass "imagen construida con GIT_SHA=$GIT_SHA"
 ( cd "$REPO" && docker compose -p "$PROJECT" up -d --no-build --force-recreate "$SERVICE" )
 pass "contenedor reemplazado"

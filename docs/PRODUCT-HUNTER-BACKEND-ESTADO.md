@@ -94,7 +94,9 @@ el esquema medido no es 30 o si falta `PRODUCT_HUNTER_SOURCE=internal` en el
 esquema queda en 31 con los recuentos intactos y que `/api/health/live`
 devuelve el SHA, lanza el sync de Dropea y el primer cruce de 20, e imprime
 el informe con los campos rellenados (los del panel se rellenan a mano).
-`SKIP_FIRST_RUN=1` despliega sin lanzar el sync ni el cruce.
+`SKIP_FIRST_RUN=1` despliega sin lanzar el sync ni el cruce. El build pasa
+`GIT_SHA` inline al comando (`sudo` no hereda un `export`; incidencia del
+despliegue de los fixes del 08-09).
 
 El script vive en el propio commit que se despliega: primero el checkout
 (el script hace fetch y checkout al SHA), así que la primera vez hay que
