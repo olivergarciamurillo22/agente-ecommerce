@@ -63,6 +63,39 @@ interface EconomicsForm {
   returnCost: string;
 }
 
+/** F3 (08-09-2026): hechos del producto que alimentan el motor hunter:score. */
+interface FactsForm {
+  unitCostEur: string;
+  pvpEur: string;
+  weightGrams: string;
+  lengthCm: string;
+  widthCm: string;
+  heightCm: string;
+}
+
+const FACT_SOURCE_LABEL: Record<string, string> = { manual: "tecleado a mano", dropea: "coste real del catálogo de Dropea", scraping: "leído de la ficha de origen" };
+
+function factsForm(f: WinningProductCandidate["facts"] | undefined): FactsForm {
+  return {
+    unitCostEur: numToField(f?.unitCostEur ?? null),
+    pvpEur: numToField(f?.pvpEur ?? null),
+    weightGrams: numToField(f?.weightGrams ?? null),
+    lengthCm: numToField(f?.lengthCm ?? null),
+    widthCm: numToField(f?.widthCm ?? null),
+    heightCm: numToField(f?.heightCm ?? null),
+  };
+}
+
+/** Solo los campos rellenados: lo vacío no se toca (el servidor conserva lo que había). */
+function formToFacts(f: FactsForm): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const k of Object.keys(f) as Array<keyof FactsForm>) {
+    const n = fieldToNum(f[k]);
+    if (n !== null) out[k] = n;
+  }
+  return out;
+}
+
 const PIPELINE_TARGETS = PRODUCT_RESEARCH_STATUSES.filter((s) => s !== "discovered");
 
 function isCandidate(x: AdLibraryResult | WinningProductCandidate): x is WinningProductCandidate {
@@ -129,7 +162,8 @@ export default function CandidateDetail({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ tone: "ok" | "error" | "info"; text: string } | null>(null);
-  const [busy, setBusy] = useState<"save" | "move" | "note" | "economics" | null>(null);
+  const [busy, setBusy] = useState<"save" | "move" | "note" | "economics" | "facts" | null>(null);
+  const [facts, setFacts] = useState<FactsForm>(factsForm(null));
   const [moveTo, setMoveTo] = useState<ProductResearchStatus>("researching");
   const [moveNote, setMoveNote] = useState("");
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -144,6 +178,7 @@ export default function CandidateDetail({
     const seed = target.initial ? (isCandidate(target.initial) ? target.initial : toCandidateShape(target.initial)) : null;
     setCandidate(seed);
     setEco(economicsForm(seed?.economics ?? null));
+    setFacts(factsForm(seed?.facts ?? null));
     setLoading(true);
     setError(null);
     setNotice(null);
@@ -151,6 +186,7 @@ export default function CandidateDetail({
     if (r.ok) {
       setCandidate(r.candidate);
       setEco(economicsForm(r.candidate.economics));
+      setFacts(factsForm(r.candidate.facts ?? null));
     } else if (r.code === "NOT_FOUND" && seed) {
       // Resultado aún sin guardar en el backend: seguimos con lo que sabíamos.
       setCandidate(seed);
@@ -211,6 +247,16 @@ export default function CandidateDetail({
     const r = await hunterPost<{ candidate: WinningProductCandidate }>({ op: "note", id: candidate.id, text: noteText.trim() });
     applyResult(r, "Nota añadida.");
     if (r.ok) setNoteText("");
+    setBusy(null);
+  };
+
+  const saveFacts = async () => {
+    if (!candidate) return;
+    const body = formToFacts(facts);
+    if (!Object.keys(body).length) return;
+    setBusy("facts");
+    const r = await hunterPost<{ candidate: WinningProductCandidate }>({ op: "facts", id: candidate.id, facts: body });
+    applyResult(r, "Hechos guardados: el motor ha vuelto a puntuar.");
     setBusy(null);
   };
 
@@ -450,6 +496,46 @@ export default function CandidateDetail({
                 </PrimaryButton>
               </div>
             </DrawerSection>
+
+            {/* ── Hechos del producto y motor real (backend interno, F3/F4) ── */}
+            {candidate.facts !== undefined || candidate.hunterScore !== undefined || candidate.hunterMissing !== undefined ? (
+              <DrawerSection title="Hechos del producto (motor hunter:score)" right={<span className="text-[11px] text-brand-muted">{candidate.facts?.source ? FACT_SOURCE_LABEL[candidate.facts.source] ?? candidate.facts.source : "sin hechos todavía"}</span>}>
+                {candidate.hunterScore ? (
+                  <div className="mb-3 rounded-xl border border-brand-border bg-brand-surface px-4 py-3">
+                    <div className="flex items-baseline justify-between">
+                      <span className="text-[12px] font-medium text-brand-muted">Score del motor</span>
+                      <span className="font-display text-xl font-semibold tabular-nums">{candidate.hunterScore.score} <span className="text-[12px] font-normal text-brand-muted">/ 100 · {candidate.hunterScore.verdict}</span></span>
+                    </div>
+                    <div className="mt-1 grid grid-cols-3 gap-2 text-[12px] text-brand-muted">
+                      <span>margen/enviado <strong className="text-brand-text">{formatEuro(candidate.hunterScore.unitMarginEur)}</strong></span>
+                      <span>CPA máx. <strong className="text-brand-text">{formatEuro(candidate.hunterScore.maxCpaEur)}</strong></span>
+                      <span>entrega mín. <strong className="text-brand-text">{candidate.hunterScore.breakEvenDeliveryPct} %</strong></span>
+                    </div>
+                    <ul className="mt-2 space-y-0.5 text-[11px] text-brand-muted">
+                      {candidate.hunterScore.reasons.map((r) => (
+                        <li key={r.factor}><span className="text-brand-text">{r.factor}</span> +{r.points} · {r.detail}</li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : candidate.hunterMissing?.length ? (
+                  <p className="mb-3 text-[12px] text-amber-700">El motor no puntúa: {candidate.hunterMissing.map((m) => m.detail).join("; ")}. Completa los hechos y se recalcula.</p>
+                ) : (
+                  <p className="mb-3 text-[12px] text-brand-muted">Sin hechos logísticos: Dropea no da peso ni medidas y una ficha de anuncio tampoco. Tecléalos aquí; queda anotado que son manuales.</p>
+                )}
+                <div className="grid grid-cols-3 gap-3">
+                  <Field label="Coste unitario (€)"><input type="number" inputMode="decimal" min={0} step="0.01" value={facts.unitCostEur} onChange={(e) => setFacts({ ...facts, unitCostEur: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                  <Field label="PVP (€)"><input type="number" inputMode="decimal" min={0} step="0.01" value={facts.pvpEur} onChange={(e) => setFacts({ ...facts, pvpEur: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                  <Field label="Peso (g)"><input type="number" inputMode="numeric" min={0} step="1" value={facts.weightGrams} onChange={(e) => setFacts({ ...facts, weightGrams: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                  <Field label="Largo (cm)"><input type="number" inputMode="decimal" min={0} step="0.1" value={facts.lengthCm} onChange={(e) => setFacts({ ...facts, lengthCm: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                  <Field label="Ancho (cm)"><input type="number" inputMode="decimal" min={0} step="0.1" value={facts.widthCm} onChange={(e) => setFacts({ ...facts, widthCm: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                  <Field label="Alto (cm)"><input type="number" inputMode="decimal" min={0} step="0.1" value={facts.heightCm} onChange={(e) => setFacts({ ...facts, heightCm: e.target.value })} className={INPUT_CLASS} placeholder="—" /></Field>
+                </div>
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <p className="text-[11px] text-brand-muted leading-snug">Sin coste no hay margen y sin medidas no hay tramo de envío: el sistema no inventa ninguno. Un dato manual sustituye al leído y queda registrado como tuyo.</p>
+                  <PrimaryButton onClick={() => void saveFacts()} busy={busy === "facts"} disabled={unsaved}>Guardar hechos</PrimaryButton>
+                </div>
+              </DrawerSection>
+            ) : null}
 
             {/* ── Estado del pipeline ── */}
             <DrawerSection title="Estado del pipeline">
