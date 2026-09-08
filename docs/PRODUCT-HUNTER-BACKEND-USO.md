@@ -230,8 +230,14 @@ docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 20
   Parada: completado · 20 procesado(s) · 9 con match · 20 peticiones a Meta · 41 s (corrida 1)
 ```
 
-y la tabla ordenada por score (producto, coste, match, anuncio desde,
-activos, precio anuncio, margen %, score, motivo `validación+margen+confianza`).
+y la tabla ordenada por score (producto, **palabras a Meta** (las que de
+verdad se enviaron), coste, match, anuncio desde, activos, precio anuncio,
+margen %, score, motivo `validación+margen+confianza`). La columna
+«producto» es el nombre del PRODUCTO de Dropea, el mismo del que salen las
+palabras clave; el nombre de la variante («IVORY», «S/M») no se busca ni se
+enseña (la primera corrida real del 08-09 lo enseñaba por un bug de display,
+corregido el 09-09). Si Dropea no manda nombre de producto, se usa el de la
+variante y se ve así: es dato de origen, no del cruce.
 Lectura: un **84 con precio detectado** es «hay demanda y el margen bruto es
 grande: revisar a mano el anuncio (enlace en la ficha del panel) y el
 proveedor»; un **38 sin precio** es «alguien lo anuncia desde hace semanas,
