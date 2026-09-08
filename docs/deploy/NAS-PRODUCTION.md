@@ -82,7 +82,7 @@ repite. **No se despliega con dos vivos.**
 
 ```bash
 # 2 · Estado real del sistema
-docker exec casamable-agent npm run db:health          # esquema 18 + integridad
+docker exec casamable-agent npm run db:health          # esquema 30 desde el 07-09 + integridad
 docker exec casamable-agent npm run readiness:runtime  # lo que importa EN producción
 ```
 
@@ -114,7 +114,7 @@ docker compose up -d --no-build casamable-agent
 
 ```bash
 docker ps --filter name=casamable-agent            # Up + healthy
-docker exec casamable-agent npm run db:health      # esquema 18, integridad ok
+docker exec casamable-agent npm run db:health      # esquema 30, integridad ok
 docker exec casamable-agent npm run readiness:runtime
 docker exec casamable-agent npm run whatsapp:templates:doctor
 docker exec casamable-agent npm run retell:doctor

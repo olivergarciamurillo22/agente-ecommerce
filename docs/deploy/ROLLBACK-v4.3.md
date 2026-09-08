@@ -89,7 +89,7 @@ deshacerlo:
 - El código al que vuelves (`feat/casamable-control-center-v2`) declara
   `SCHEMA_VERSION = 15` y **no lleva la guarda `assertSchemaNotNewer`** (se
   añadió en esta release). Consecuencia práctica: **arrancará sin protestar**
-  sobre una base en 29, ignorará las tablas que no conoce y **no bajará el
+  sobre una base en 30 (o 31 si ya entró el Cazador), ignorará las tablas que no conoce y **no bajará el
   `user_version`**. Es el comportamiento deseado, pero conviene saberlo: no
   esperes un error si algo va mal, espera silencio.
 - Si más adelante vuelves a desplegar v4.3 sobre esa misma base, la migración
