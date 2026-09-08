@@ -16507,6 +16507,33 @@ async function main(): Promise<void> {
       assert.equal(result.suspiciousInstruction, true);
       assert.match(result.facts.name ?? "", /Lámpara LED/i);
     });
+    await test("SCRIPTS · todos los scripts/*.ts compilan como los ejecuta tsx (CJS): ningún await de nivel superior (incidente hunter:add 08-09)", async () => {
+      // El proyecto es CommonJS (package.json sin "type": "module"): tsx pasa
+      // cada script por esbuild con format "cjs", y ahí un await suelto en el
+      // módulo revienta ANTES de ejecutar nada. Se compila cada script igual
+      // que lo haría tsx; no se ejecuta ninguno.
+      const esbuild = (await import("esbuild")) as { transform: (code: string, opts: Record<string, unknown>) => Promise<unknown> };
+      const pkg = JSON.parse(fs.readFileSync(path.join(process.cwd(), "package.json"), "utf8")) as { type?: string };
+      assert.notEqual(pkg.type, "module", "si algún día el proyecto pasa a ESM, este test y el patrón main() dejan de ser necesarios");
+      const dir = path.join(process.cwd(), "scripts");
+      const scripts = fs.readdirSync(dir).filter((f) => f.endsWith(".ts"));
+      assert.ok(scripts.includes("hunter-add.ts") && scripts.includes("hunter-discovery-doctor.ts"));
+      const rotos: string[] = [];
+      for (const f of scripts) {
+        try {
+          await esbuild.transform(fs.readFileSync(path.join(dir, f), "utf8"), { loader: "ts", format: "cjs", target: "node20", sourcefile: f });
+        } catch (e) {
+          rotos.push(`${f}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+        }
+      }
+      assert.deepEqual(rotos, [], "scripts que tsx no puede compilar en CJS");
+      // Y el patrón del repo, explícito: el trabajo va dentro de main().
+      const add = fs.readFileSync(path.join(dir, "hunter-add.ts"), "utf8");
+      assert.match(add, /async function main\(\)/);
+      assert.match(add, /main\(\)\.catch/);
+      assert.doesNotMatch(add, /^const \w+\s*=\s*await /m, "sin await de nivel superior");
+    });
+
     await test("Hunter · fetch exige HTML, registra el intento y corta una respuesta de 50 MB", async()=>{
       const events:Array<{type:string;message:string;url:string}>=[],emit=(type:string,_severity:string,message:string,url:string)=>events.push({type,message,url});
       const huge=new ReadableStream<Uint8Array>({pull(controller){controller.enqueue(new Uint8Array(1024*1024));}});
