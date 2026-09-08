@@ -103,11 +103,33 @@ Es una heurística de texto y así se enseña: puede casar un producto parecido
 forma (falso negativo). Un cruce sin match se guarda como **sin validar** con
 score bajo, no se descarta.
 
-**Precio de competencia**: solo si está escrito en el anuncio («solo 29,99 €»,
-«desde 19.99 EUR»). Se etiqueta «precio detectado en el anuncio» y se guarda
-la frase. Con varios importes se prefiere el precedido de «solo/ahora/PVP» y,
-si no, el más bajo. Sin precio: margen **no calculable**, nunca estimado. No se
-visita la landing del competidor (mejora futura, no implementada).
+**Precio de competencia**: solo si está escrito en el anuncio. Se etiqueta
+«precio detectado en el anuncio» y se guarda la frase. Sin precio: margen
+**no calculable**, nunca estimado. No se visita la landing del competidor
+(mejora futura, no implementada). El parser (`price-detect.ts`, probado con
+frases reales de anuncios españoles):
+
+| Reconoce | Ejemplo → importe |
+|---|---|
+| € o EUR/euros antes o después, con o sin decimales | «solo 29€» → 29 · «€29.99» → 29,99 · «14,99 euros» → 14,99 |
+| apóstrofo o símbolo como coma decimal | «29'99€» → 29,99 · «29€99» → 29,99 |
+| rebajas | «antes 49,99 € ahora solo 29,99 €» → 29,99 (gana el marcado con solo/ahora/PVP/precio/oferta; si no hay marca, el más bajo) |
+| «desde X €» | 19,99 con aviso «desde: puede ser la variante más barata» |
+| «sin IVA» / «+ IVA» / «IVA incluido» | se marca (`vat`); el importe **no se ajusta**: no se inventa el 21 % |
+| «3 unidades por 24,99 €», «pack de 2 a 34,99 €» | 24,99 con aviso «precio de lote, no unitario» |
+
+| Ignora a propósito (no es el precio del producto) |
+|---|
+| «envío 4,99 €», «gastos de envío», «ahorra 20 €», «descuento de 10 €», «cupón de 5 €», «regalo de 15 €», «valorado en 60 €», «-30 %», «x2», «2x1», «3x2» |
+
+| Donde falla, y no se adivina |
+|---|
+| dos importes sin ninguna marca («12 € o 3 por 30 €»): se toma el más bajo y se dice cuántos había |
+| importes ≥ 1.000 € o < 1 €: descartados (no es un producto COD de este negocio) |
+| otras monedas ($, £): no se reconocen |
+| el precio en la imagen o el vídeo del anuncio: la Ad Library no da el creativo |
+
+Los avisos viajan en el desglose del cruce (`priceNotes`) y se ven en la ficha.
 
 **Momentum**: `computeMomentum` del discovery, comparando con el cruce
 anterior del mismo producto; por eso `--repetir` sirve para medir si sube.

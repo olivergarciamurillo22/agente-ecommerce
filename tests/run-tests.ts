@@ -2156,6 +2156,12 @@ async function main(): Promise<void> {
   });
 
   await test("respuesta '3' pide la nota y NO recibe recordatorio mientras espera", async () => {
+    // La cola: el bloque de validación de direcciones (07-09) deja ~38 pedidos
+    // pending_send sin tickear y MAX_ACTIONS_PER_TICK envía 20 por pasada, así
+    // que el pedido nuevo podía no llegar en UN tick (fallo intermitente
+    // diagnosticado el 08-09: dependía de cuántos de esos ticks anteriores
+    // corrieron dentro de un withEnv que bloquea envíos). Se drena antes.
+    for (let i = 0; i < 6 && (await runSchedulerTick(Math.floor(Date.now() / 1000))).sent > 0; i++) { /* drenar */ }
     mkOrder("920001", "1301", "34600000010");
     await runSchedulerTick(Math.floor(Date.now() / 1000));
     const res = handleOrderReply("34600000010", "3");
@@ -14731,6 +14737,47 @@ async function main(): Promise<void> {
       assert.equal(dos.amount, 29.99);
       assert.equal(dos.candidates, 2, "con varios importes la elección es heurística y se dice");
       assert.match(dos.quote, /29,99/);
+    });
+
+    await test("INTERNO · parser de precios con frases reales de anuncios españoles: reconoce, ignora lo que no es precio del producto, marca IVA/desde/lote y declara dónde falla", async () => {
+      const { detectPriceInText } = await import("../src/lib/product-hunter/internal/price-detect");
+      const p = (s: string) => detectPriceInText(s);
+      // Reconoce
+      assert.equal(p("Solo 29€ hoy")!.amount, 29, "entero sin decimales");
+      assert.equal(p("29'99€ envío incluido")!.amount, 29.99, "apóstrofo decimal");
+      assert.equal(p("29€99")!.amount, 29.99, "símbolo como coma (formato francés)");
+      assert.equal(p("29€99")!.candidates, 1, "no cuenta además «29€» ni «€99»");
+      assert.equal(p("Por solo 14,99 euros")!.amount, 14.99);
+      assert.equal(p("€ 12,50 la unidad")!.amount, 12.5);
+      // Rebajas: gana el marcado; si no hay marca, el más bajo.
+      assert.equal(p("Valorado en 60 €, hoy 29,90 €")!.amount, 29.9, "«valorado en» no es precio");
+      assert.equal(p("Cupón de 5 € en tu primera compra, después 19,99 €")!.amount, 19.99);
+      // Ignora lo que no es el precio del producto
+      const envio = p("Solo 29€ y envío 4,99 €")!;
+      assert.equal(envio.amount, 29);
+      assert.equal(envio.candidates, 1, "el envío no cuenta ni como candidato");
+      assert.equal(p("Ahorra 20 € hoy: 39,90 €")!.amount, 39.9);
+      assert.equal(p("Descuento de 10€ · precio final 24,90 €")!.amount, 24.9);
+      assert.equal(p("gastos de envío 3,95 €"), null);
+      assert.equal(p("Regalo de 15 € con tu pedido"), null);
+      assert.equal(p("2x1 en toda la web"), null);
+      assert.equal(p("3x2 solo hoy"), null);
+      assert.equal(p("$29.99"), null, "otras monedas no: esto es COD en España");
+      // Marca los matices sin ajustar el importe
+      assert.equal(p("Precio 24,99 € + IVA")!.vat, "excl");
+      assert.equal(p("24,99 € sin IVA")!.vat, "excl");
+      assert.equal(p("24,99 € sin IVA")!.amount, 24.99, "no se inventa el 21 %");
+      assert.equal(p("24,99 € IVA incluido")!.vat, "incl");
+      assert.equal(p("Desde 19.99 EUR")!.isFrom, true);
+      assert.equal(p("desde 9,99 €/ud")!.amount, 9.99);
+      const lote = p("3 unidades por 24,99 €")!;
+      assert.equal(lote.amount, 24.99);
+      assert.equal(lote.unitAmbiguous, true, "precio del lote, no unitario: se devuelve tal cual y se marca");
+      assert.equal(p("Pack de 2 a solo 34,99€")!.unitAmbiguous, true);
+      // Donde NO se adivina: dos importes sin marca → el más bajo, y se dice cuántos había.
+      const dos = p("12€ o 3 por 30€")!;
+      assert.equal(dos.amount, 12);
+      assert.equal(dos.candidates, 2);
     });
 
     await test("INTERNO · palabras clave, emparejamiento por texto y Score de Oportunidad Validada: fórmula explícita, sin match → sin validar, sin precio → margen no calculable", async () => {

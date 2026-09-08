@@ -31,7 +31,7 @@ export function cruceWinnerScore(c: CruceRow): WinnerScoreBreakdown {
     ? { value: Math.round(Math.max(0, Math.min(1, (c.marginPct - 0.3) / 0.4)) * 100), weight: 40, observed: b.margen.detail }
     : { value: null, weight: 40, observed: b.margen.detail });
   medidas.set("price_potential", c.detectedPriceEur !== null
-    ? { value: null, weight: null, observed: `precio detectado en el anuncio: ${c.detectedPriceEur.toFixed(2)} € («${b.priceQuote ?? ""}»)` }
+    ? { value: null, weight: null, observed: `precio detectado en el anuncio: ${c.detectedPriceEur.toFixed(2)} € («${b.priceQuote ?? ""}»)${(b.priceNotes ?? []).length ? " · " + b.priceNotes.join("; ") : ""}` }
     : { value: null, weight: null, observed: "sin precio escrito en el anuncio" });
   medidas.set("offer_clarity", { value: Math.round(c.matchConfidence * 100), weight: 20, observed: `confianza del emparejamiento por texto: ${b.confianza.detail} (heurística; palabras clave: ${b.keywords.join(", ")})` });
   const signals: WinnerScoreSignal[] = WINNER_SIGNAL_KEYS.map((key) => {

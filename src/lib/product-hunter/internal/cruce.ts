@@ -141,6 +141,8 @@ export interface CruceBreakdown {
   confianza: { points: number; max: number; detail: string };
   momentum: { status: string; reason: string };
   priceQuote: string | null;
+  /** Avisos del parser: «sin IVA», «desde», «precio de lote», «varios importes». Vacío = sin matices. */
+  priceNotes: string[];
   snapshotUrl: string | null;
 }
 
@@ -170,7 +172,7 @@ export interface CruceRow {
 }
 
 /** El score, puro: mismo cálculo en el motor, en el CLI y en los tests. */
-export function scoreCruce(input: { costEur: number | null; match: GroupMatch | null; detectedPrice: number | null; activeDays: number | null; variants: number | null; activeAds: number | null; momentum: { status: string; reason: string } }): { score: number; marginEur: number | null; marginPct: number | null; breakdown: Omit<CruceBreakdown, "keywords" | "priceQuote" | "snapshotUrl"> } {
+export function scoreCruce(input: { costEur: number | null; match: GroupMatch | null; detectedPrice: number | null; activeDays: number | null; variants: number | null; activeAds: number | null; momentum: { status: string; reason: string } }): { score: number; marginEur: number | null; marginPct: number | null; breakdown: Omit<CruceBreakdown, "keywords" | "priceQuote" | "priceNotes" | "snapshotUrl"> } {
   const m = input.match;
   // 1 · validación de mercado
   let validacion = 0;
@@ -216,7 +218,7 @@ export function scoreCruce(input: { costEur: number | null; match: GroupMatch | 
 // ------------------------------------------------------------
 function rowOf(r: Record<string, unknown>): CruceRow {
   let breakdown: CruceBreakdown;
-  try { breakdown = JSON.parse(String(r.breakdown_json)) as CruceBreakdown; } catch { breakdown = { formula: CRUCE_FORMULA, keywords: [], match: "no", coverage: 0, validacion: { points: 0, max: 40, detail: "" }, margen: { points: 0, max: 40, detail: "", calculable: false }, confianza: { points: 0, max: 20, detail: "" }, momentum: { status: "sin_datos", reason: "" }, priceQuote: null, snapshotUrl: null }; }
+  try { breakdown = JSON.parse(String(r.breakdown_json)) as CruceBreakdown; } catch { breakdown = { formula: CRUCE_FORMULA, keywords: [], match: "no", coverage: 0, validacion: { points: 0, max: 40, detail: "" }, margen: { points: 0, max: 40, detail: "", calculable: false }, confianza: { points: 0, max: 20, detail: "" }, momentum: { status: "sin_datos", reason: "" }, priceQuote: null, priceNotes: [], snapshotUrl: null }; }
   let terms: string[] = [];
   try { terms = JSON.parse(String(r.terms_json)) as string[]; } catch { terms = []; }
   return {
@@ -358,7 +360,13 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     const previous = repo.previousFor(producto.variantId, runId);
     const momentum = computeMomentum({ activeAds: g?.activeAds ?? 0, previousActiveAds: previous?.activeAds ?? null, previousCapturedAt: previous?.capturedAt ?? null, now });
     const s = scoreCruce({ costEur: producto.costEur, match, detectedPrice: price?.amount ?? null, activeDays, variants, activeAds: g?.activeAds ?? null, momentum: { status: momentum.status, reason: momentum.reason } });
-    const breakdown: CruceBreakdown = { ...s.breakdown, keywords, priceQuote: price?.quote ?? null, snapshotUrl: g?.ads.map((a) => a.snapshotUrl).find(Boolean) ?? null };
+    const priceNotes: string[] = [];
+    if (price?.vat === "excl") priceNotes.push("el anuncio dice «sin IVA»: el precio final al cliente es mayor; no se ajusta");
+    if (price?.isFrom) priceNotes.push("«desde»: puede ser la variante más barata");
+    if (price?.unitAmbiguous) priceNotes.push("precio de lote («N por X €»), no unitario");
+    if (price && price.candidates > 1) priceNotes.push(`${price.candidates} importes distintos en el texto: se eligió el marcado como precio o el más bajo`);
+    const breakdown: CruceBreakdown = { ...s.breakdown, keywords, priceQuote: price?.quote ?? null, priceNotes, snapshotUrl: g?.ads.map((a) => a.snapshotUrl).find(Boolean) ?? null };
+    if (priceNotes.length && breakdown.margen.calculable) breakdown.margen.detail += ` · ${priceNotes.join("; ")}`;
     if (busquedaError) breakdown.validacion.detail += ` · la consulta a la Ad Library falló (${busquedaError}): sin validar no significa que no anuncien`;
     if (!keywords.length) breakdown.validacion.detail = "el nombre del producto no deja palabras clave útiles: no se buscó";
     if (keywords.length && isGenericName(keywords)) breakdown.confianza.detail += ` · nombre genérico (${keywords.join(", ")}): confianza recortada a la mitad; revisar a mano`;
