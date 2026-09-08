@@ -14812,7 +14812,9 @@ async function main(): Promise<void> {
       assert.equal(ct.marginEur, 22.09);
       assert.equal(ct.activeAds, 2);
       assert.equal(ct.variants, 2);
-      assert.ok(ct.score! > 60, `score ${ct.score}`);
+      assert.equal(ct.score, 84, "el ejemplo numérico de docs/PRODUCT-HUNTER-BACKEND-USO.md §4: 24 + 40 + 20");
+      assert.equal(ct.breakdown.validacion.points, 24);
+      assert.equal(ct.breakdown.margen.points, 40);
       assert.match(ct.breakdown.priceQuote ?? "", /29,99/);
       assert.equal(ct.breakdown.snapshotUrl, "https://www.facebook.com/ads/library/?id=ct1");
       const ba = r.cruces.find((c) => c.variantId === 5001)!;
@@ -14820,6 +14822,7 @@ async function main(): Promise<void> {
       assert.equal(ba.detectedPriceEur, null);
       assert.equal(ba.marginEur, null, "sin precio en el anuncio no se inventa margen");
       assert.match(ba.breakdown.margen.detail, /no calculable/);
+      assert.equal(ba.score, 38, "38 días/60×20 + 1/3×10 + 1/5×10 = 18 · margen 0 · confianza 20");
       const re = r.cruces.find((c) => c.variantId === 5002)!;
       assert.equal(re.match, "no");
       assert.equal(re.score, 0);

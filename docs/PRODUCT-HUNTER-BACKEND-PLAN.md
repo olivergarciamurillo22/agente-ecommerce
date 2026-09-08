@@ -217,7 +217,15 @@ Una sola migración, declarada aquí, con tres tablas nuevas:
 - Cualquier métrica de ventas/ROAS/gasto: prohibida por el contrato y por la
   fuente.
 
-## 7 · Orden de trabajo y commits
+## 7 · Orden de trabajo y commits (hecho el 08-09-2026)
+
+Lo implementado y cómo se usa está en `PRODUCT-HUNTER-BACKEND-USO.md`. Dos
+ajustes respecto al plan, decididos al probar: (a) el cruce funde los grupos
+del discovery por página anunciante antes de casar (la unidad es el
+anunciante, no la línea de producto); (b) una sola palabra clave coincidente
+es «dudoso» sea cual sea la cobertura, y nunca «si».
+
+Orden previsto:
 
 1. F1 (este documento) · 2. F2b catálogo Dropea + migración 31 + adaptador
 `internal` con búsqueda · 3. F2 búsqueda Ad Library + local · 4. F3 hechos
