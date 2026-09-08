@@ -1751,6 +1751,11 @@ function build() {
   migrateDiscoveryRunState(db);
   migrateDiscoveryJobs(db);
   migrateDiscoveryJobKinds(db);
+  // Pase de datos, una sola vez por base (ver purgeAccessTokensFromAdlibRows).
+  if (!db.prepare("SELECT 1 FROM settings WHERE key = ?").get(ADLIB_TOKEN_PURGE_SETTING)) {
+    const purged = purgeAccessTokensFromAdlibRows(db);
+    db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(ADLIB_TOKEN_PURGE_SETTING, JSON.stringify({ at: Math.floor(Date.now() / 1000), ...purged }));
+  }
 
   // --- Conversations ---
   const stmtGetConvByPhone = db.prepare<[string], Conversation>(
@@ -2050,6 +2055,34 @@ export function migrateDiscoveryJobKinds(db: Database.Database): void {
       if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }
   }
+}
+
+/**
+ * Limpieza de datos (08-09-2026, auditoría §3.2): recorta `access_token=…`
+ * de los `ad_snapshot_url` que ya estuvieran guardados en
+ * adlib_candidate_snapshots.ads_json, discovery_jobs.result_json y
+ * hunter_predictive_estimates.competitor_url. Es un pase sobre DATOS, no un
+ * cambio de esquema: no sube SCHEMA_VERSION (el 31 está reservado en otra
+ * rama) y se marca en settings para correr una sola vez. Idempotente.
+ */
+export const ADLIB_TOKEN_PURGE_SETTING = "adlib_snapshot_tokens_purged_at";
+export function purgeAccessTokensFromAdlibRows(db: Database.Database): { snapshots: number; jobs: number; estimates: number } {
+  const strip = (s: string) => s.replace(/([?&])access_token=[^&#"'\\]*&?/gi, "$1").replace(/([?&])(["'\\])/g, "$2");
+  const has = (s: string | null) => typeof s === "string" && /access_token=/i.test(s);
+  const out = { snapshots: 0, jobs: 0, estimates: 0 };
+  const tablas = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((t) => t.name);
+  const pasar = (tabla: string, columna: string, clave: keyof typeof out) => {
+    if (!tablas.includes(tabla)) return;
+    const filas = db.prepare(`SELECT rowid AS rid, ${columna} AS v FROM ${tabla} WHERE ${columna} LIKE '%access_token=%'`).all() as Array<{ rid: number; v: string | null }>;
+    const upd = db.prepare(`UPDATE ${tabla} SET ${columna} = ? WHERE rowid = ?`);
+    for (const f of filas) { if (!has(f.v)) continue; upd.run(strip(f.v as string), f.rid); out[clave]++; }
+  };
+  db.transaction(() => {
+    pasar("adlib_candidate_snapshots", "ads_json", "snapshots");
+    pasar("discovery_jobs", "result_json", "jobs");
+    pasar("hunter_predictive_estimates", "competitor_url", "estimates");
+  })();
+  return out;
 }
 
 export const SCHEMA_VERSION = 30;

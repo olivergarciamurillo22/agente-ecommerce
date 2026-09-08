@@ -15706,6 +15706,94 @@ async function main(): Promise<void> {
       assert.ok(NOT_AVAILABLE_FROM_AD_LIBRARY.some((l) => /creativo/.test(l)));
     });
 
+    await test("SEGURIDAD 08-09 · el access_token que Meta mete en ad_snapshot_url nunca se persiste ni se sirve: se sustituye por la ficha pública, y las filas antiguas se limpian una sola vez", async () => {
+      const { AdLibraryClient, sanitizeSnapshotUrl, stripAccessToken } = await import("../src/lib/hunter/discovery/client");
+      const { runWordSearch } = await import("../src/lib/hunter/discovery/word-search");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      const { enqueueDiscoveryJob, latestDiscoveryJob } = await import("../src/lib/hunter/discovery/jobs");
+      const { runDiscoveryWorkerTick } = await import("../src/lib/hunter/discovery/worker");
+      const TOKEN = "EAABsbCS1iHgBO7ZCZCZBfakeTOKENfakeTOKENfakeTOKEN12345";
+      const raw = db.systemDbHandle();
+
+      // Unidad: render_ad con token → ficha pública por id; cualquier otra URL pierde el parámetro y conserva el resto.
+      assert.equal(sanitizeSnapshotUrl(`https://www.facebook.com/ads/archive/render_ad/?id=1234567890&access_token=${TOKEN}`, "1234567890"), "https://www.facebook.com/ads/library/?id=1234567890");
+      assert.equal(stripAccessToken(`https://e/x?foo=1&access_token=${TOKEN}&bar=2`), "https://e/x?foo=1&bar=2");
+      assert.equal(stripAccessToken(`https://e/x?access_token=${TOKEN}`), "https://e/x");
+      assert.equal(stripAccessToken(`https://e/x?foo=1&access_token=${TOKEN}#f`), "https://e/x?foo=1#f");
+      assert.equal(sanitizeSnapshotUrl(null, "1"), null);
+
+      // Integración: la Ad Library simulada devuelve el token en TODOS los anuncios.
+      raw.prepare("DELETE FROM discovery_jobs").run();
+      const fetcher = (async (input: string | URL | Request) => {
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        const data = [
+          { id: "900001", page_id: "p-tok", page_name: "Tienda Token", ad_snapshot_url: `https://www.facebook.com/ads/archive/render_ad/?id=900001&access_token=${TOKEN}`, ad_creative_bodies: [`${term} con envío rápido`], ad_creative_link_captions: ["tiendatoken.es"], ad_delivery_start_time: "2026-08-01" },
+          { id: "900002", page_id: "p-tok", page_name: "Tienda Token", ad_snapshot_url: `https://www.facebook.com/ads/archive/render_ad/?id=900002&access_token=${TOKEN}`, ad_creative_bodies: [`${term} oferta`], ad_creative_link_captions: ["tiendatoken.es"], ad_delivery_start_time: "2026-08-10" },
+        ];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("tok", fetcher, async () => {});
+      const now = Math.floor(Date.parse("2026-09-08T12:00:00Z") / 1000);
+      const r = await runWordSearch({ seed: "token-test-organizador", country: "ES", days: 30, token: "tok", now, client, maxTerms: 2, budget: new DiscoveryBudget({ maxRequests: 50, deadlineAt: Date.now() + 60_000 }) });
+      assert.ok(r.competitors.length >= 1);
+      for (const c of r.competitors) for (const u of c.snapshotUrls) { assert.ok(!u.includes("access_token"), u); assert.match(u, /^https:\/\/www\.facebook\.com\/ads\/library\/\?id=\d+$/); }
+      // Nada persistido lleva el token: snapshots del discovery ni (vía la cola) el informe del trabajo.
+      const tablas = ["adlib_candidate_snapshots", "adlib_candidates", "adlib_queries"];
+      for (const t of tablas) {
+        const filas = raw.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE EXISTS (SELECT 1) AND (${(raw.prepare(`PRAGMA table_info(${t})`).all() as Array<{ name: string }>).map((c) => `CAST(${c.name} AS TEXT) LIKE '%access_token=%'`).join(" OR ")})`).get() as { n: number };
+        assert.equal(filas.n, 0, `${t} sin token`);
+      }
+      const enc = enqueueDiscoveryJob({ kind: "busqueda", seed: "token-cola-organizador", country: "ES", days: 30, minutes: 5 });
+      assert.ok(enc.ok);
+      await runDiscoveryWorkerTick({ client, token: "tok" });
+      const job = latestDiscoveryJob()!;
+      assert.equal(job.status, "terminado", job.error ?? "");
+      assert.ok(!JSON.stringify(job.result).includes("access_token"), "el informe de la cola no lleva el token");
+      assert.ok(!JSON.stringify(job.result).includes(TOKEN));
+      assert.equal((raw.prepare("SELECT COUNT(*) AS n FROM discovery_jobs WHERE result_json LIKE '%access_token=%'").get() as { n: number }).n, 0);
+      // Lo que sirve el panel tampoco.
+      const { NextRequest } = await import("next/server");
+      const route = await import("../src/app/api/hunter/competencia/route");
+      const sessions = await import("../src/lib/auth/session");
+      raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-tok@test','Dueña Token','owner','x')").run();
+      const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-tok@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}` };
+      await withEnv({ META_AD_LIBRARY_ACCESS_TOKEN: "tok", EMERGENCY_STOP: "0" }, async () => {
+        const res = await route.GET(new NextRequest("http://localhost/api/hunter/competencia", { headers }));
+        const body = await res.text();
+        assert.ok(!body.includes("access_token") && !body.includes(TOKEN), "la ruta del panel no sirve el token");
+        assert.ok(body.includes("facebook.com/ads/library/?id=900001"), "sí sirve la ficha pública");
+      });
+      raw.prepare("DELETE FROM discovery_jobs").run();
+
+      // Limpieza de filas ANTIGUAS (persistidas antes de este fix): idempotente y solo datos.
+      const { purgeAccessTokensFromAdlibRows, ADLIB_TOKEN_PURGE_SETTING } = await import("../src/lib/db");
+      const sucio = JSON.stringify([{ id: "1", snapshotUrl: `https://www.facebook.com/ads/archive/render_ad/?id=1&access_token=${TOKEN}` }, { id: "2", snapshotUrl: `https://x/?access_token=${TOKEN}&id=2` }]);
+      const qid = Number(raw.prepare("INSERT INTO adlib_queries(terms_json,country,days,fields_json,result_count,passed_noise_count,group_count,queried_at) VALUES('[\"purga-test\"]','ES',30,'[]',2,2,1,?)").run(now).lastInsertRowid);
+      raw.prepare("INSERT OR IGNORE INTO adlib_candidates(candidate_key,page_id,page_name,fingerprint) VALUES('ES:purga:1','purga','Purga','f')").run();
+      const cid = Number((raw.prepare("SELECT id FROM adlib_candidates WHERE candidate_key='ES:purga:1'").get() as { id: number }).id);
+      raw.prepare("INSERT INTO adlib_candidate_snapshots(query_id,candidate_id,captured_at,active_ads,oldest_active_at,momentum,previous_active_ads,noise,noise_reason,ads_json) VALUES(?,?,?,2,?,'sin_historico',NULL,0,NULL,?)").run(qid, cid, now, now, sucio);
+      raw.prepare("INSERT INTO discovery_jobs(seed,country,days,minutes,status,created_at,result_json) VALUES('purga-job','ES',30,5,'terminado',?,?)").run(now, sucio);
+      raw.prepare("DELETE FROM settings WHERE key=?").run(ADLIB_TOKEN_PURGE_SETTING);
+      const purged = purgeAccessTokensFromAdlibRows(raw);
+      assert.equal(purged.snapshots, 1);
+      assert.equal(purged.jobs, 1);
+      const limpio = raw.prepare("SELECT ads_json FROM adlib_candidate_snapshots WHERE query_id=?").get(qid) as { ads_json: string };
+      assert.ok(!limpio.ads_json.includes("access_token") && !limpio.ads_json.includes(TOKEN));
+      const parsed = JSON.parse(limpio.ads_json) as Array<{ snapshotUrl: string }>;
+      assert.equal(parsed[0].snapshotUrl, "https://www.facebook.com/ads/archive/render_ad/?id=1", "sigue siendo JSON válido y conserva el resto de la URL");
+      assert.equal(parsed[1].snapshotUrl, "https://x/?id=2");
+      assert.equal((raw.prepare("SELECT result_json FROM discovery_jobs WHERE seed='purga-job'").get() as { result_json: string }).result_json.includes(TOKEN), false);
+      assert.deepEqual(purgeAccessTokensFromAdlibRows(raw), { snapshots: 0, jobs: 0, estimates: 0 }, "segunda pasada: nada que limpiar");
+      raw.prepare("DELETE FROM discovery_jobs WHERE seed='purga-job'").run();
+      raw.prepare("DELETE FROM adlib_candidate_snapshots WHERE query_id=?").run(qid);
+      raw.prepare("DELETE FROM adlib_candidates WHERE id=?").run(cid);
+      raw.prepare("DELETE FROM adlib_queries WHERE id=?").run(qid);
+      // build() deja el marcador en settings para no repetir el pase en cada arranque; se restaura aquí.
+      raw.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(ADLIB_TOKEN_PURGE_SETTING, JSON.stringify({ at: now, snapshots: 0, jobs: 0, estimates: 0 }));
+      assert.ok(raw.prepare("SELECT 1 FROM settings WHERE key=?").get(ADLIB_TOKEN_PURGE_SETTING));
+    });
+
     await test("BUSCADOR · una búsqueda completa con red inyectada: expande, agrupa por competidor, informa de progreso y respeta el presupuesto", async () => {
       const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
       const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");

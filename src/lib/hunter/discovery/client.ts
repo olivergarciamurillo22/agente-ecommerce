@@ -18,13 +18,39 @@ const range = (v: unknown): { lowerBound: number | null; upperBound: number | nu
   return { lowerBound: bound(o.lower_bound), upperBound: bound(o.upper_bound) };
 };
 
+/**
+ * El `ad_snapshot_url` que devuelve Meta lleva el access_token EN LA QUERY
+ * (`…/ads/archive/render_ad/?id=…&access_token=…`). Guardarlo tal cual metía
+ * el token en SQLite, en backups, en los JSON de la cola y en el HTML del
+ * panel (auditoría 08-09 §3.2). Aquí, en el único sitio por el que entran los
+ * anuncios, se sustituye por la ficha PÚBLICA de la Ad Library
+ * (`/ads/library/?id=<ad_archive_id>`), que se abre en cualquier navegador
+ * sin token ni sesión. Si la URL no es de render_ad, se le quita cualquier
+ * `access_token` de la query y se conserva el resto. Nunca se devuelve una
+ * URL con token.
+ */
+export function sanitizeSnapshotUrl(raw: unknown, adId: string): string | null {
+  if (typeof raw !== "string" || !raw) return null;
+  const trimmed = raw.slice(0, 2048);
+  if (/\/ads\/archive\/render_ad\//i.test(trimmed) && /^\d+$/.test(adId)) return `https://www.facebook.com/ads/library/?id=${adId}`;
+  return stripAccessToken(trimmed);
+}
+
+/** Quita `access_token=…` de la query de cualquier URL; deja el resto intacto. */
+export function stripAccessToken(url: string): string {
+  return url
+    .replace(/([?&])access_token=[^&#]*&?/gi, "$1")
+    .replace(/[?&](?=#|$)/, "")
+    .replace(/\?&/, "?");
+}
+
 function normalize(raw: unknown): AdLibraryAd | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
   if (typeof o.id !== "string" || (typeof o.page_id !== "string" && typeof o.page_id !== "number")) return null;
   return {
     id: o.id, pageId: String(o.page_id), pageName: typeof o.page_name === "string" ? o.page_name.slice(0, 200) : null,
-    snapshotUrl: typeof o.ad_snapshot_url === "string" ? o.ad_snapshot_url.slice(0, 2048) : null,
+    snapshotUrl: sanitizeSnapshotUrl(o.ad_snapshot_url, o.id),
     bodies: strings(o.ad_creative_bodies), captions: strings(o.ad_creative_link_captions), titles: strings(o.ad_creative_link_titles),
     descriptions: strings(o.ad_creative_link_descriptions),
     platforms: strings(o.publisher_platforms), languages: strings(o.languages),
