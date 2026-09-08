@@ -205,6 +205,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       // F3: hechos manuales (coste, PVP, peso, medidas). Solo el backend interno los entiende.
       const facts = normalizeFactsInput(body.facts);
       if (!facts) throw new ProductHunterInputError("faltan los hechos (coste, PVP, peso o medidas)");
+      if (ds.source === "off") throw new NotConfiguredError(productHunterAvailability().reason);
       if (!ds.setFacts) throw new ProductHunterInputError("esta fuente no admite hechos manuales");
       const candidate = await ds.setFacts(id, facts);
       return NextResponse.json({ ok: true, candidate });

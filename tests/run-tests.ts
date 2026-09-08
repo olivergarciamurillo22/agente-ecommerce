@@ -15160,6 +15160,53 @@ async function main(): Promise<void> {
       assert.match(soporte.breakdown.confianza.detail, /nombre genérico \(soporte\): confianza recortada a la mitad/);
       assert.ok((soporte.score ?? 0) < (faja.score ?? 0));
     });
+
+    await test("INTERNO · garantía del rollback: fuera del módulo del Cazador nadie lee las tablas del esquema 31, y con PRODUCT_HUNTER_SOURCE=off ninguna consulta las toca aunque existan", async () => {
+      // 1 · Estático: las tablas nuevas solo se nombran en el módulo interno, sus CLIs, la migración y el verificador.
+      const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
+      const ficheros = [...walk(path.join(process.cwd(), "src")), ...walk(path.join(process.cwd(), "scripts"))].filter((f) => /\.(ts|tsx)$/.test(f));
+      const permitidos = [/src[\\/]lib[\\/]product-hunter[\\/]internal[\\/]/, /src[\\/]lib[\\/]db\.ts$/, /scripts[\\/]hunter-dropea-sync\.ts$/, /scripts[\\/]hunter-cruce-dropea\.ts$/, /scripts[\\/]migration-verify\.ts$/];
+      const intrusos = ficheros.filter((f) => !permitidos.some((re) => re.test(f)) && /dropea_catalog|hunter_pipeline|hunter_cruce/.test(fs.readFileSync(f, "utf8")));
+      assert.deepEqual(intrusos.map((f) => path.relative(process.cwd(), f)), [], "ningún fichero del bot, del scheduler, de WhatsApp, pedidos o Shopify nombra las tablas nuevas");
+      // El módulo interno solo lo importa el selector de fuente del Cazador, y nada del proceso del bot.
+      const importadores = ficheros.filter((f) => !f.includes(path.join("product-hunter", "internal")) && (fs.readFileSync(f, "utf8").includes("product-hunter/internal/") || fs.readFileSync(f, "utf8").includes('from "./internal/')));
+      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-dropea-sync.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador y sus dos CLIs");
+      const bot = fs.readFileSync(path.join(process.cwd(), "scripts/start-bot.ts"), "utf8");
+      assert.ok(!/product-hunter/.test(bot), "el proceso del bot no carga el Cazador");
+
+      // 2 · Dinámico: con la fuente en off, la ruta no ejecuta NINGUNA consulta contra esas tablas (aunque existan).
+      const { NextRequest } = await import("next/server");
+      const route = await import("../src/app/api/product-hunter/route");
+      const sessions = await import("../src/lib/auth/session");
+      raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-rb@test','Dueña Rollback','owner','x')").run();
+      const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-rb@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}` };
+      const vistas: string[] = [];
+      const prepareOriginal = raw.prepare.bind(raw);
+      (raw as unknown as { prepare: (sql: string) => unknown }).prepare = (sql: string) => { vistas.push(sql); return prepareOriginal(sql); };
+      try {
+        await withEnv({ PRODUCT_HUNTER_SOURCE: "off" }, async () => {
+          for (const op of ["availability", "search&country=ES&keywords=x&source=dropea", "candidates", "candidate&id=dropea:5000", "compare&ids=dropea:5000,dropea:5001"]) {
+            const r = await route.GET(new NextRequest(`http://localhost/api/product-hunter?op=${op}`, { headers }));
+            const body = (await r.json()) as { ok: boolean; code?: string };
+            assert.equal(body.ok, op === "availability" ? true : false, op);
+            if (op !== "availability") assert.equal(body.code, "NOT_CONFIGURED", op);
+          }
+          const post = await route.POST(new NextRequest("http://localhost/api/product-hunter", { method: "POST", headers: { ...headers, "content-type": "application/json" }, body: JSON.stringify({ op: "facts", id: "dropea:5000", facts: { pvpEur: 1 } }) }));
+          assert.equal(((await post.json()) as { code: string }).code, "NOT_CONFIGURED");
+        });
+      } finally {
+        (raw as unknown as { prepare: unknown }).prepare = prepareOriginal;
+      }
+      assert.deepEqual(vistas.filter((s) => /dropea_catalog|hunter_pipeline|hunter_cruce/i.test(s)), [], "con el módulo apagado, cero consultas a las tablas nuevas");
+      // Y un valor que un código anterior no conozca cae en «off», nunca revienta.
+      await withEnv({ PRODUCT_HUNTER_SOURCE: "internal-futuro" }, async () => {
+        const av = await (await route.GET(new NextRequest("http://localhost/api/product-hunter?op=availability", { headers }))).json() as { availability: { source: string; available: boolean } };
+        assert.equal(av.availability.source, "off");
+        assert.equal(av.availability.available, false);
+      });
+    });
+
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
       const { spawnSync } = await import("node:child_process");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));
