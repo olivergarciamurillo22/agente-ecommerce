@@ -15395,6 +15395,34 @@ async function main(): Promise<void> {
       assert.equal(repo.latestForVariant(31003)!.productName, "Sofá cama plegable para salón");
     });
 
+    await test("DEEP DIVE · el parser de render_ad saca destino (l.php decodificado), imágenes y vídeos, detecta login y desafío, y el token nunca sale en un informe", async () => {
+      const { parseRenderAdHtml, renderAdUrl, redactToken } = await import("../src/lib/hunter/deep-dive/render-ad");
+      const TOKEN = "EAABfakeTOKENfakeTOKEN123";
+      const html = `<html><body><div class="ad">
+        <a href="https://l.facebook.com/l.php?u=https%3A%2F%2Ftiendacojines.es%2Fproducts%2Fcojin-gel-silla%3Futm_source%3Dfb&amp;h=AT0abc">Comprar ahora</a>
+        <a href="https://www.facebook.com/GelSillaOficial/">Página</a>
+        <img src="https://scontent-mad1-1.xx.fbcdn.net/v/t45.1600-4/12345_n.jpg?_nc_cat=1&amp;oh=abc">
+        <video src="https://video-mad1-1.xx.fbcdn.net/v/t42.1790-2/99999_n.mp4?efg=eyJ2&amp;oh=def"></video>
+        <p>Cojín de gel para silla: adiós al dolor de espalda. Solo 24,99 €</p>
+        </div></body></html>`;
+      const p = parseRenderAdHtml(html);
+      assert.equal(p.blocked, null);
+      assert.deepEqual(p.outboundUrls, ["https://tiendacojines.es/products/cojin-gel-silla?utm_source=fb"], "el destino decodificado; el enlace a la página de Facebook no cuenta");
+      assert.deepEqual(p.outboundHosts, ["tiendacojines.es"]);
+      assert.equal(p.imageUrls.length, 1);
+      assert.equal(p.imageUrls[0], "https://scontent-mad1-1.xx.fbcdn.net/v/t45.1600-4/12345_n.jpg?_nc_cat=1&oh=abc", "entidades HTML decodificadas (&amp; → &)");
+      assert.equal(p.videoUrls.length, 1);
+      assert.match(p.visibleText, /Solo 24,99 €/);
+      assert.equal(parseRenderAdHtml("<html><head><title>Ad Library</title></head><body><script>executeChallenge()</script></body></html>").blocked, "challenge");
+      assert.equal(parseRenderAdHtml("<html><body><form id=\"login_form\">Log in to Facebook</form></body></html>").blocked, "login");
+      assert.deepEqual(parseRenderAdHtml("").outboundUrls, []);
+      // El token va en la URL de render_ad SOLO en memoria; cualquier texto de informe lo pierde.
+      const u = renderAdUrl("123", TOKEN);
+      assert.ok(u.includes(TOKEN));
+      assert.ok(!redactToken(u).includes(TOKEN));
+      assert.ok(!redactToken(JSON.stringify({ a: u, b: [u] })).includes(TOKEN));
+    });
+
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
       const { spawnSync } = await import("node:child_process");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));
