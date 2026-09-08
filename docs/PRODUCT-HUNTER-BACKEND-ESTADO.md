@@ -63,6 +63,56 @@ compra.
   repartidor», que no drenaba la cola de pedidos que dejan los tests de
   validación de direcciones (el scheduler envía 20 por tick).
 
+## Avisos del semáforo, uno por uno
+
+`predeploy:check --fixture --commit <sha>` termina en LISTO CON AVISOS. Ninguno
+es un fallo real de esta rama; cada uno con qué es, por qué no bloquea y qué
+mirar después del despliegue:
+
+| Aviso | Qué es | Por qué no bloquea | Qué monitorizar tras el despliegue |
+|---|---|---|---|
+| Migración (fixture): datos sintéticos | La migración 17→31 se ensaya sobre un fixture, no sobre la base real | La mecánica (idempotencia, integridad, tablas) es la misma; la migración 30→31 solo crea 4 tablas nuevas | El script del despliegue mide el esquema antes (30) y después (31) y compara recuentos de orders/conversations/messages: tienen que ser idénticos |
+| Cobertura de canales: no evaluada | Sin copia real no hay catálogo de productos de despacho que comprobar | No cambia nada del despacho en esta rama; `dispatch_channels` sigue como estaba | `docker exec casamable-agent npm run dispatch:coverage` después, si se quiere el dato; no es de esta feature |
+| Interruptores generales: APP_MODE vacío | El PC de desarrollo no tiene APP_MODE | En el NAS `APP_MODE=production` está en el `.env`; el semáforo lee el entorno local | `readiness:runtime` en el contenedor tras el despliegue |
+| npm test: 5 omitidos | Tests que exigen `npx` con registro; en Windows se omiten siempre | 804 tests OK; los omitidos no cubren nada de esta rama | Nada |
+
+## Script de despliegue (sin placeholders a mano)
+
+`scripts/nas-deploy-cazador.sh` hace los pasos 3 a 9 del runbook con las
+variables declaradas UNA vez arriba. Pedro lo revisa entero y lo ejecuta en
+el NAS como root. Uso:
+
+```
+sudo SHA_MERGE=<sha completo del merge> bash /volume1/docker/CasamableAgent/repo-v3c/scripts/nas-deploy-cazador.sh
+```
+
+El script se niega a arrancar si el SHA no es de 40 caracteres, si está
+dentro de la franja 10:00–21:00 de Madrid (`FORCE_WINDOW=1` para forzar), si
+el esquema medido no es 30 o si falta `PRODUCT_HUNTER_SOURCE=internal` en el
+`.env`. Se detiene en el primer fallo, etiqueta la imagen anterior como
+`casamable-agent:pre-cazador`, hace backup fuera del repo, comprueba que el
+esquema queda en 31 con los recuentos intactos y que `/api/health/live`
+devuelve el SHA, lanza el sync de Dropea y el primer cruce de 20, e imprime
+el informe con los campos rellenados (los del panel se rellenan a mano).
+`SKIP_FIRST_RUN=1` despliega sin lanzar el sync ni el cruce.
+
+El script vive en el propio commit que se despliega: primero el checkout
+(el script hace fetch y checkout al SHA), así que la primera vez hay que
+traerlo con `docker run --rm -v /volume1/docker/CasamableAgent/repo-v3c:/git alpine/git:latest fetch origin release/casamable-v4.3`
+y `checkout <sha>` antes de poder ejecutarlo; a partir de ahí es idempotente.
+
+## Garantía del rollback (verificada en seco)
+
+Con `PRODUCT_HUNTER_SOURCE=off` el resto del sistema no lee ninguna tabla
+del esquema 31. Hay un test que lo demuestra de dos formas: estático (las
+tablas solo se nombran en el módulo interno, sus dos CLIs, la migración y el
+verificador; el proceso del bot no carga el Cazador) y dinámico (con la
+fuente en off, todas las operaciones de la ruta responden NOT_CONFIGURED y
+ninguna sentencia SQL nombra esas tablas). Un valor desconocido de la
+variable, como `internal` visto por un código anterior, cae en «off» sin
+reventar: volver a la imagen `pre-cazador` con el `.env` sin tocar también
+es seguro.
+
 ## Estado: listo para revisión y despliegue
 
 Guía de uso y activación: `PRODUCT-HUNTER-BACKEND-USO.md`. Plan e inventario:
