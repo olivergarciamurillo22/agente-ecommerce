@@ -4,7 +4,7 @@ Documento vivo: **lo que corre de verdad en el NAS**. Se actualiza en cada
 sesión de operación. El detalle de cómo se llegó a cada estado vive en
 `docs/archive/` — este es el snapshot, no el historial.
 
-**Última actualización: 08-09-2026** — la noche del 07-09 se desplegó `release/casamable-v4.3` en el NAS. Informe completo: `docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md`.
+**Última actualización: 08-09-2026 (noche)** — el 07-09 se desplegó `release/casamable-v4.3` (`22f8013`, informe `docs/deploy/DEPLOY-REPORT-v4.3-2026-09-07.md`) y el 08-09 los dos fixes de seguridad de la auditoría (`f2af494`, informe `docs/deploy/DEPLOY-REPORT-fixes-2026-09-08.md`). Recuentos del 08-09: 136 pedidos / 80 conversaciones / 474 mensajes.
 
 ---
 
@@ -13,7 +13,7 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 | | |
 |---|---|
 | Rama desplegada | `release/casamable-v4.3` (desplegada 07-09-2026 por la noche) |
-| Commit desplegado | **`22f8013e42e1bad2c8fedd76216f1ec92e12cf23`** (hotfix de plantilla sobre `ab5e3a8`). Confirmado por `/api/health/live` → `build`. Antes corría `adb2be7` (esquema 17) |
+| Commit desplegado | **`f2af4940639ec4a051404c3cb72868448d06bf8b`** (08-09-2026 ~23:40: fixes de seguridad `f427b9f` + `0228ad5` + docs, sobre `22f8013`). Confirmado por `/api/health/live` → `build`. Informe: `docs/deploy/DEPLOY-REPORT-fixes-2026-09-08.md` |
 | Esquema SQLite | **30** (era 17 antes del despliegue, no 15 ni 18 como decían los docs) |
 | Contenedor | `casamable-agent`, healthy, `restart: unless-stopped` |
 | NAS | UGREEN DXP2800, `192.168.2.109` |
@@ -28,7 +28,7 @@ sesión de operación. El detalle de cómo se llegó a cada estado vive en
 | Ad Library (Cazador) | desplegado; `META_AD_LIBRARY_ACCESS_TOKEN` caducado → la pestaña Competencia avisa y no encola nada |
 | Flags v4.3 | El informe del despliegue del 07-09 los dejó a 0. **Pedro confirma el 08-09 que la IA y el detector de direcciones ya funcionan en real**, así que al menos `ADDRESS_AI_VALIDATION_ENABLED` está a 1; el valor real de los cuatro (`ADDRESS_AI_VALIDATION_ENABLED`, `AUTO_DISPATCH_COOLDOWN_ENABLED`, `POST_CONFIRMATION_AI_ENABLED`, `DISPATCH_NOTICE_WHATSAPP_ENABLED`) hay que leerlo del `.env` del NAS y pegarlo aquí |
 | Plantillas WhatsApp | doctor 8 PASS / 1 DISABLED / 0 FAIL (07-09, tras el hotfix `22f8013`) |
-| Fixes de seguridad 08-09 | `f427b9f` (mark-to-send de Beeping respeta `EMERGENCY_STOP` y allowlist) y `0228ad5` (el token de Meta ya no se persiste en `ad_snapshot_url`) están en `release/casamable-v4.3` y en GitHub, **pendientes de desplegar** en la próxima ventana fuera de 10:00–21:00. Sin cambio de esquema (sigue en 30) |
+| Fixes de seguridad 08-09 | `f427b9f` (mark-to-send de Beeping respeta `EMERGENCY_STOP` y allowlist) y `0228ad5` (el token de Meta ya no se persiste en `ad_snapshot_url`; purga ejecutada: 0 filas afectadas) **desplegados el 08-09 ~23:40**. Esquema sin cambio (30). Imagen de rollback `casamable-agent:pre-fixes-0809` |
 | Dropea vs Beeping | **No es una decisión pendiente**: el enrutado ya es por producto (`dispatch_channels`). Lo que falta es que Beeping entregue la información de conexión (bloqueo externo) |
 
 ### Incidente cerrado el 07-09: confirmación bloqueada por la plantilla

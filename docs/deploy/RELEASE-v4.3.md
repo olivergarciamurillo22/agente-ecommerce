@@ -43,8 +43,9 @@ Anotar el SHA Git y el SHA de imagen anteriores. Comprobar que las copias contie
 git fetch origin
 git checkout <SHA-v4.3-aprobado>
 git rev-parse HEAD
-docker compose -p repo-v3c build casamable-agent
-docker compose -p repo-v3c up -d --no-build casamable-agent
+# La variable va INLINE con sudo: `export GIT_SHA` + `sudo docker compose` no la propaga (08-09).
+sudo GIT_SHA=<SHA-v4.3-aprobado> docker compose -p repo-v3c build casamable-agent
+sudo docker compose -p repo-v3c up -d --no-build casamable-agent
 ```
 
 No usar `down`, `down -v`, otro nombre de proyecto ni `up --build` en la ventana crítica.
