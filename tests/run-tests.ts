@@ -14307,7 +14307,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 30;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30");
+      assert.match(db, /export const SCHEMA_VERSION = 31;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30, Cazador interno 31");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -14668,6 +14668,401 @@ async function main(): Promise<void> {
     }
   }
 
+
+  // ============ V4.4 · Cazador de productos: BACKEND INTERNO (PRODUCT_HUNTER_SOURCE=internal) ============
+  console.log("\n— V4.4 · Cazador interno (Dropea, Ad Library, hechos manuales, cruce) —");
+  {
+    const INTERNAL_ENV = { PRODUCT_HUNTER_SOURCE: "internal", PRODUCT_HUNTER_API_URL: undefined, EMERGENCY_STOP: "0" };
+    const nowSec = Math.floor(Date.parse("2026-09-08T12:00:00Z") / 1000);
+    const raw = db.systemDbHandle();
+    const limpiar = () => { for (const t of ["hunter_cruces", "hunter_cruce_runs", "hunter_pipeline", "dropea_catalog"]) raw.prepare(`DELETE FROM ${t}`).run(); raw.prepare("DELETE FROM product_candidates WHERE source_url LIKE 'hunter://%' OR source_url LIKE 'https://interno.test/%'").run(); };
+
+    /** Catálogo de Dropea falso: 3 páginas de 100 no hacen falta; 2 productos en 1 página y otro en la 2. */
+    const catalogoFalso = async (page: number, limit: number) => {
+      assert.equal(limit, 100);
+      if (page === 1) return { items: Array.from({ length: 100 }, (_, i) => ({ id: 1000 + i, name: i === 0 ? "Cortaúñas Eléctrico 3 en 1 para mayores" : i === 1 ? "Barra de apoyo con ventosa baño" : `Relleno ${i}`, status: "active", variants: [{ variant_id: 5000 + i, sku: `SKU-${i}`, name: i === 0 ? "Cortaúñas Eléctrico 3 en 1" : i === 1 ? "Barra de apoyo ventosa 30 cm" : `Relleno ${i}`, price: i === 0 ? 7.9 : i === 1 ? 6.2 : 3, recommended_sale_price: i === 0 ? 29.99 : 24.99, currency: "EUR", stock: 40 }] })) };
+      if (page === 2) return { items: [{ id: 2000, name: "Almohada cervical ortopédica", variants: [{ variant_id: 7000, sku: "ALM-1", name: "Almohada cervical viscoelástica", price: 11.5, recommended_sale_price: 54.99 }] }] };
+      return { items: [] };
+    };
+
+    await test("INTERNO · migración 31: las cuatro tablas existen y la copia del catálogo de Dropea se sincroniza paginando con el cliente existente, sin peso ni medidas (declarado)", async () => {
+      for (const t of ["dropea_catalog", "hunter_pipeline", "hunter_cruce_runs", "hunter_cruces"]) assert.ok(raw.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t), t);
+      limpiar();
+      const { DropeaCatalogRepository, syncDropeaCatalog } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const repo = new DropeaCatalogRepository(raw);
+      const paginas: number[] = [];
+      const r = await syncDropeaCatalog({ repo, list: catalogoFalso as never, now: nowSec, onPage: (p) => paginas.push(p) });
+      assert.equal(r.ok, true);
+      assert.deepEqual(paginas, [1, 2], "para en la página incompleta");
+      assert.equal(r.variants, 101);
+      assert.equal(repo.count(), 101);
+      assert.equal(repo.lastSyncedAt(), nowSec);
+      // Búsqueda sin acentos ni mayúsculas, todas las palabras.
+      const b = repo.search("cortaunas electrico");
+      assert.equal(b.total, 1);
+      assert.equal(b.rows[0].variantId, 5000);
+      assert.equal(b.rows[0].costEur, 7.9, "coste mayorista real de Dropea");
+      assert.equal(b.rows[0].recommendedPriceEur, 29.99);
+      assert.equal(repo.search("relleno", { pageSize: 10, page: 2 }).rows.length, 10, "paginado");
+      // Idempotente: volver a sincronizar no duplica.
+      await syncDropeaCatalog({ repo, list: catalogoFalso as never, now: nowSec + 10 });
+      assert.equal(repo.count(), 101);
+      // Sin lectura habilitada y sin cliente inyectado: no llama y lo dice.
+      await withEnv({ DROPEA_API_ENABLED: undefined, DROPEA_API_KEY: undefined }, async () => {
+        const off = await syncDropeaCatalog({ repo, now: nowSec });
+        assert.equal(off.ok, false);
+        assert.match(off.reason ?? "", /DROPEA_API_KEY/);
+      });
+    });
+
+    await test("INTERNO · precio detectado en el texto del anuncio: tolerante con formatos, prefiere «solo/ahora», nunca inventa", async () => {
+      const { detectPriceInText } = await import("../src/lib/product-hunter/internal/price-detect");
+      assert.equal(detectPriceInText("Antes 49,99 € ahora solo 29,99€ con envío gratis")!.amount, 29.99);
+      assert.equal(detectPriceInText("Desde 19.99 EUR")!.amount, 19.99);
+      assert.equal(detectPriceInText("PVP: €34,90")!.amount, 34.9);
+      assert.equal(detectPriceInText("1.299,00 € el pack"), null, "fuera de rango (≥1000): no es un precio de producto COD");
+      assert.equal(detectPriceInText("-30 % de descuento, x2 unidades"), null);
+      assert.equal(detectPriceInText("Garantía 2 años, 100% satisfacción"), null);
+      assert.equal(detectPriceInText(null), null);
+      const dos = detectPriceInText("29,99 € o 2 por 49,99 €")!;
+      assert.equal(dos.amount, 29.99);
+      assert.equal(dos.candidates, 2, "con varios importes la elección es heurística y se dice");
+      assert.match(dos.quote, /29,99/);
+    });
+
+    await test("INTERNO · palabras clave, emparejamiento por texto y Score de Oportunidad Validada: fórmula explícita, sin match → sin validar, sin precio → margen no calculable", async () => {
+      const { productKeywords, bestMatch, scoreCruce, CRUCE_FORMULA } = await import("../src/lib/product-hunter/internal/cruce");
+      assert.deepEqual(productKeywords("Cortaúñas Eléctrico 3 en 1 para mayores NEW 2025"), ["cortaunas", "electrico", "mayores"]);
+      assert.deepEqual(productKeywords("Pack de 2 unidades"), [], "sin palabras útiles no se busca");
+      const grupo = (key: string, texto: string, activeAds = 3, noise = false) => ({ key, pageId: key, pageName: `Página ${key}`, fingerprint: "f", activeAds, oldestActiveAt: nowSec - 40 * 86400, noise, noiseReason: null, ads: [{ id: key + "-1", pageId: key, pageName: null, snapshotUrl: "https://www.facebook.com/ads/library/?id=1", bodies: [texto], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }] });
+      const kws = ["cortaunas", "electrico", "mayores"];
+      const claro = bestMatch(kws, [grupo("a", "Cortaúñas eléctrico para mayores: solo 29,99 €"), grupo("b", "Cortaúñas manual clásico", 9)])!;
+      assert.equal(claro.group.key, "a");
+      assert.equal(claro.verdict, "si");
+      assert.equal(claro.coverage, 1);
+      const dudoso = bestMatch(kws, [grupo("c", "Zapatos para mayores cómodos")])!;
+      assert.equal(dudoso.verdict, "dudoso", "una sola palabra genérica coincidente");
+      assert.equal(bestMatch(kws, [grupo("d", "Curso online de cocina")]), null);
+      assert.equal(bestMatch(kws, [grupo("e", "Cortaúñas eléctrico para mayores", 5, true)]), null, "el ruido no casa");
+
+      // Score con match claro y precio: validación + margen + confianza, desglosado.
+      const s = scoreCruce({ costEur: 7.9, match: claro, detectedPrice: 29.99, activeDays: 40, variants: 2, activeAds: 3, momentum: { status: "sin_historico", reason: "primera vez" } });
+      // validación: 40/60×20 = 13.33 + 2/3×10 = 6.67 + 3/5×10 = 6 → 26 · margen: (29.99−7.9)/29.99 = 0.7366 → (0.7366−0.3)/0.4 = 1 (tope) → 40 · confianza 20
+      assert.equal(s.breakdown.validacion.points, 26);
+      assert.equal(s.breakdown.margen.points, 40);
+      assert.equal(s.breakdown.confianza.points, 20);
+      assert.equal(s.score, 86);
+      assert.equal(s.marginEur, 22.09);
+      assert.equal(s.marginPct, 0.74);
+      assert.equal(s.breakdown.formula, CRUCE_FORMULA);
+      // Sin match: sin validar, score bajo pero NO descartado.
+      const sin = scoreCruce({ costEur: 7.9, match: null, detectedPrice: null, activeDays: null, variants: null, activeAds: null, momentum: { status: "sin_datos", reason: "" } });
+      assert.equal(sin.score, 0);
+      assert.match(sin.breakdown.validacion.detail, /sin validar/);
+      assert.equal(sin.breakdown.margen.calculable, false);
+      // Match sin precio: margen no calculable, sin número inventado.
+      const sinPrecio = scoreCruce({ costEur: 7.9, match: claro, detectedPrice: null, activeDays: 40, variants: 2, activeAds: 3, momentum: { status: "sin_historico", reason: "" } });
+      assert.equal(sinPrecio.marginEur, null);
+      assert.equal(sinPrecio.breakdown.margen.points, 0);
+      assert.match(sinPrecio.breakdown.margen.detail, /no calculable — falta precio de competencia/);
+      assert.equal(sinPrecio.score, 46);
+      // Dudoso: la validación se divide entre 2.
+      const dud = scoreCruce({ costEur: 7.9, match: dudoso, detectedPrice: null, activeDays: 40, variants: 2, activeAds: 3, momentum: { status: "sin_historico", reason: "" } });
+      assert.equal(dud.breakdown.validacion.points, 13);
+    });
+
+    /** Ad Library falsa por término: cortaúñas anunciado con precio; barra sin precio; almohada sin anunciante. */
+    const adlibFalsa = (peticiones: string[]) => (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      peticiones.push(url.searchParams.get("search_terms") ?? url.pathname);
+      const term = url.searchParams.get("search_terms") ?? "";
+      const data = term.includes("cortaunas")
+        ? [
+            { id: "ct-1", page_id: "p-ct", page_name: "Gadgets Senior", ad_snapshot_url: "https://www.facebook.com/ads/library/?id=ct1", ad_creative_bodies: ["Cortaúñas eléctrico para mayores. Antes 49,99 €, ahora solo 29,99 €. Envío gratis."], ad_creative_link_captions: ["gadgetsenior.es"], ad_delivery_start_time: "2026-07-30" },
+            { id: "ct-2", page_id: "p-ct", page_name: "Gadgets Senior", ad_creative_bodies: ["Cortaúñas eléctrico: seguro y sin esfuerzo para mayores"], ad_creative_link_captions: ["gadgetsenior.es"], ad_delivery_start_time: "2026-08-20" },
+          ]
+        : term.includes("barra")
+          ? [{ id: "ba-1", page_id: "p-ba", page_name: "Baño Seguro", ad_creative_bodies: ["Barra de apoyo con ventosa para el baño, instalación sin taladro"], ad_delivery_start_time: "2026-08-01" }]
+          : [];
+      return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+
+    await test("INTERNO · cruce por lotes: una petición por producto, persiste producto a producto, respeta el presupuesto de peticiones y EMERGENCY_STOP, y la segunda pasada mide momentum", async () => {
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DiscoveryBudget } = await import("../src/lib/hunter/discovery/budget");
+      const { runCruceBatch, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
+      const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const catalog = new DropeaCatalogRepository(raw);
+      const repo = new CruceRepository(raw);
+      assert.equal(catalog.count(), 101, "usa la copia sincronizada en el test anterior");
+      const peticiones: string[] = [];
+      const client = new AdLibraryClient("tok", adlibFalsa(peticiones), async () => {});
+      const vistos: string[] = [];
+      const r = await runCruceBatch({ token: "tok", now: nowSec, limit: 3, client, catalog, repo, onProduct: (c) => vistos.push(`${c.productName}:${c.match}`) });
+      assert.equal(r.processed, 3);
+      assert.equal(r.requests, 3, "una petición por producto");
+      assert.equal(r.stopReason, "completado");
+      assert.deepEqual(peticiones, ["cortaunas electrico", "barra apoyo ventosa", "relleno"], "términos = palabras clave del nombre de Dropea");
+      const ct = r.cruces.find((c) => c.variantId === 5000)!;
+      assert.equal(ct.match, "si");
+      assert.equal(ct.pageName, "Gadgets Senior");
+      assert.equal(ct.detectedPriceEur, 29.99);
+      assert.equal(ct.detectedPriceSource, "anuncio");
+      assert.equal(ct.costEur, 7.9);
+      assert.equal(ct.marginEur, 22.09);
+      assert.equal(ct.activeAds, 2);
+      assert.equal(ct.variants, 2);
+      assert.ok(ct.score! > 60, `score ${ct.score}`);
+      assert.match(ct.breakdown.priceQuote ?? "", /29,99/);
+      assert.equal(ct.breakdown.snapshotUrl, "https://www.facebook.com/ads/library/?id=ct1");
+      const ba = r.cruces.find((c) => c.variantId === 5001)!;
+      assert.equal(ba.match, "si");
+      assert.equal(ba.detectedPriceEur, null);
+      assert.equal(ba.marginEur, null, "sin precio en el anuncio no se inventa margen");
+      assert.match(ba.breakdown.margen.detail, /no calculable/);
+      const re = r.cruces.find((c) => c.variantId === 5002)!;
+      assert.equal(re.match, "no");
+      assert.equal(re.score, 0);
+      assert.match(re.breakdown.validacion.detail, /sin validar/);
+      // Persistido: el panel lo lee ordenado por score, con la fecha.
+      const ultimos = repo.latest({ country: "ES" });
+      assert.equal(ultimos.length, 3);
+      assert.equal(ultimos[0].variantId, 5000);
+      assert.equal(ultimos[0].capturedAt, nowSec);
+
+      // Presupuesto: con 2 peticiones máximas, el tercero no se procesa y lo dice; lo hecho queda.
+      const peticiones2: string[] = [];
+      const r2 = await runCruceBatch({ token: "tok", now: nowSec + 86400, limit: 3, skipCrossed: false, client: new AdLibraryClient("tok", adlibFalsa(peticiones2), async () => {}), budget: new DiscoveryBudget({ maxRequests: 2, deadlineAt: Date.now() + 60_000 }), catalog, repo });
+      assert.equal(r2.stopReason, "presupuesto_peticiones");
+      assert.equal(r2.processed, 2);
+      assert.equal(peticiones2.length, 2);
+      const run = raw.prepare("SELECT processed, stop_reason, finished_at FROM hunter_cruce_runs WHERE id=?").get(r2.runId) as { processed: number; stop_reason: string; finished_at: number };
+      assert.equal(run.processed, 2);
+      assert.equal(run.stop_reason, "presupuesto_peticiones");
+      assert.ok(run.finished_at);
+      // Segunda pasada del mismo producto: el momentum compara contra el cruce anterior.
+      const ct2 = r2.cruces.find((c) => c.variantId === 5000)!;
+      assert.match(ct2.breakdown.momentum.reason, /antes 2/);
+      assert.equal(repo.latestForVariant(5000)!.id, ct2.id, "el último manda");
+
+      // skipCrossed por defecto: los ya cruzados se saltan.
+      const r3 = await runCruceBatch({ token: "tok", now: nowSec, limit: 2, client: new AdLibraryClient("tok", adlibFalsa([]), async () => {}), catalog, repo });
+      assert.ok(r3.cruces.every((c) => ![5000, 5001, 5002].includes(c.variantId)));
+
+      // EMERGENCY_STOP: ni una petición.
+      await withEnv({ EMERGENCY_STOP: "1" }, async () => {
+        const p: string[] = [];
+        await assert.rejects(() => runCruceBatch({ token: "tok", now: nowSec, limit: 1, client: new AdLibraryClient("tok", adlibFalsa(p), async () => {}), catalog, repo }), /EMERGENCY_STOP/);
+        assert.equal(p.length, 0);
+      });
+    });
+
+    await test("INTERNO · el adaptador busca en las fuentes reales (Ad Library del discovery, locales, Dropea, cruces) con ids con prefijo y sin métricas prohibidas", async () => {
+      const adapter = await import("../src/lib/product-hunter/adapter");
+      const { findForbiddenMetricKeys } = await import("../src/lib/product-hunter/scoring");
+      await withEnv(INTERNAL_ENV, async () => {
+        const a = adapter.productHunterAvailability();
+        assert.equal(a.available, true);
+        assert.equal(a.source, "internal");
+        const ds = adapter.createProductHunterDataSource();
+        assert.equal(ds.source, "internal");
+
+        // Fuente Ad Library: se siembra una corrida del discovery (lo que hace Competencia).
+        const { DiscoveryRepository } = await import("../src/lib/hunter/discovery/repository");
+        const { groupAds } = await import("../src/lib/hunter/discovery/grouping");
+        const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+        const client = new AdLibraryClient("tok", adlibFalsa([]), async () => {});
+        const res = await client.search({ term: "cortaunas electrico", country: "ES", since: "2026-08-08", until: "2026-09-08" });
+        new DiscoveryRepository(raw).saveRun({ terms: ["cortaunas electrico"], country: "ES", days: 30, fields: ["id"], rawCount: res.ads.length, groups: groupAds(res.ads, nowSec, "ES"), rateLimit: null, now: nowSec });
+
+        const ad = await ds.search({ country: "ES", keywords: "cortaúñas", advanced: { source: "ad_library" } });
+        assert.ok(ad.results.length >= 1, "el grupo del discovery aparece");
+        const g = ad.results.find((r) => r.advertiser === "Gadgets Senior")!;
+        assert.match(g.id, /^adlib:ES:/);
+        assert.equal(g.detectedPrice?.amount, 29.99, "precio detectado en el texto del anuncio");
+        assert.equal(g.landingUrl, "https://gadgetsenior.es", "dominio DECLARADO en el caption");
+        assert.equal(g.format, null, "la Ad Library no da formato: null, no inventado");
+        assert.equal(g.dataStatus, "partial");
+        assert.ok(g.winnerScore && g.winnerScore.total !== null && g.winnerScore.signals.filter((s) => !s.missing).length === 4, "4 señales medibles; el resto missing");
+        assert.match(g.winnerScore!.reason ?? "", /Sin gasto, ventas ni CTR/);
+        assert.deepEqual(findForbiddenMetricKeys(JSON.parse(JSON.stringify(ad))), []);
+
+        // Fuente Dropea: la copia local, paginada.
+        const dr = await ds.search({ country: "ES", keywords: "cortaunas", advanced: { source: "dropea" } });
+        assert.equal(dr.total, 1);
+        assert.equal(dr.results[0].id, "dropea:5000");
+        assert.match(dr.results[0].adCopy ?? "", /coste mayorista 7.90 €/);
+        assert.ok(dr.results[0].winnerScore && dr.results[0].winnerScore.total !== null, "con cruce previo, el score viaja con el producto");
+        const drAll = await ds.search({ country: "ES", keywords: "", pageSize: 10, page: 2, advanced: { source: "dropea" } });
+        assert.equal(drAll.results.length, 10);
+        assert.equal(drAll.hasMore, true);
+
+        // Fuente cruce: lo persistido por el CLI, ordenado por score.
+        const cr = await ds.search({ country: "ES", keywords: "", advanced: { source: "cruce" } });
+        assert.ok(cr.results.length >= 3);
+        assert.match(cr.results[0].id, /^cruce:\d+$/);
+        assert.equal(cr.results[0].productName, "Cortaúñas Eléctrico 3 en 1");
+        assert.ok((cr.results[0].winnerScore?.total ?? 0) > (cr.results[cr.results.length - 1].winnerScore?.total ?? 0));
+        const sinMatch = cr.results.find((r) => r.productName === "Relleno 2")!;
+        assert.match(sinMatch.advertiser ?? "", /sin anunciante/);
+        assert.equal(sinMatch.winnerScore?.total, 0);
+        assert.equal(sinMatch.winnerScore?.confidence, "low");
+        assert.deepEqual(findForbiddenMetricKeys(JSON.parse(JSON.stringify(cr))), []);
+
+        // Fuente local: un candidato de hunter:add.
+        const { HunterRepository } = await import("../src/lib/hunter/repository");
+        const local = new HunterRepository(raw).upsert({ sourceUrl: "https://interno.test/asidero", sourceDomain: "interno.test", fetchedAt: nowSec, name: "Asidero de baño interno", category: null, unitCostEur: 5, salePriceEur: null, sourceCurrency: "EUR", sourceCost: 5, weightGrams: null, lengthCm: null, widthCm: null, heightCm: null, variants: null, specs: null, claims: null });
+        const lo = await ds.search({ country: "ES", keywords: "asidero", advanced: { source: "local" } });
+        assert.equal(lo.results[0].id, `local:${local.id}`);
+        assert.equal(lo.results[0].winnerScore, null, "sin anuncio no hay score de anuncio");
+        // Por defecto: Ad Library + locales juntos.
+        const todo = await ds.search({ country: "ES", keywords: "" });
+        assert.ok(todo.results.some((r) => r.id.startsWith("adlib:")) && todo.results.some((r) => r.id.startsWith("local:")));
+      });
+    });
+
+    await test("INTERNO · pipeline: guardar un producto de Dropea trae su coste real, faltan medidas (fail-closed), los hechos manuales completan y el motor hunter:score puntúa; economics, notas, movimientos y compare", async () => {
+      const adapter = await import("../src/lib/product-hunter/adapter");
+      await withEnv(INTERNAL_ENV, async () => {
+        const ds = adapter.createProductHunterDataSource();
+        const vivo = await ds.getCandidate("dropea:5000");
+        assert.ok(vivo && vivo.status === "discovered" && vivo.savedAt === null, "un id de fuente se resuelve en vivo aunque no esté guardado");
+        assert.equal(await ds.getCandidate("dropea:999999"), null);
+        assert.equal(await ds.getCandidate("otra:1"), null);
+
+        const saved = await ds.saveCandidate({ result: vivo!, note: "candidato del catálogo" });
+        assert.equal(saved.status, "saved");
+        assert.equal(saved.notes.length, 1);
+        assert.equal(saved.decisions[0].to, "saved");
+        assert.equal(saved.facts?.unitCostEur, 7.9, "coste REAL de Dropea");
+        assert.equal(saved.facts?.source, "dropea");
+        assert.equal(saved.facts?.weightGrams, null, "Dropea no da peso: null");
+        assert.equal(saved.hunterScore, null);
+        assert.ok(saved.hunterMissing?.some((m) => m.factor === "medidas"), "sin medidas, el motor no puntúa y lo dice");
+
+        // Hechos manuales desde el panel (F3): peso, medidas y PVP.
+        const conHechos = await ds.setFacts!("dropea:5000", { weightGrams: 180, lengthCm: 15, widthCm: 8, heightCm: 5, pvpEur: 29.99 });
+        assert.equal(conHechos.facts?.source, "manual", "el último origen manda y queda anotado");
+        assert.ok(conHechos.hunterScore, "con coste, PVP y medidas el motor puntúa");
+        assert.ok(conHechos.hunterScore!.score > 0 && conHechos.hunterScore!.unitMarginEur > 0);
+        assert.equal(conHechos.hunterScore!.shippingTier, "hasta_1kg");
+        assert.ok(conHechos.hunterScore!.reasons.some((r) => r.factor === "margen_unitario"));
+        const nota = (raw.prepare("SELECT nota_manual FROM product_candidates WHERE source_url='hunter://dropea:5000'").get() as { nota_manual: string }).nota_manual;
+        assert.match(nota, /\[dropea \d{4}-\d{2}-\d{2}\] coste_unitario_eur=7.9/);
+        assert.match(nota, /\[manual \d{4}-\d{2}-\d{2}\].*peso_gramos=180/);
+
+        // Economics del contrato: alimentan también al motor (coste/PVP manuales).
+        const eco = await ds.setEconomics("dropea:5000", { costEstimate: 8.5, salePriceEstimate: 34.99, shippingCost: 5.2, returnCost: 9.37 });
+        assert.equal(eco.economics?.costEstimate, 8.5);
+        assert.equal(eco.facts?.unitCostEur, 8.5);
+        assert.equal(eco.facts?.pvpEur, 34.99);
+        const nota2 = (raw.prepare("SELECT nota_manual FROM product_candidates WHERE source_url='hunter://dropea:5000'").get() as { nota_manual: string }).nota_manual;
+        assert.match(nota2, /sobrescribe dato previo: coste_unitario_eur, pvp_entrada_eur/, "si había dato y llega uno manual, gana el manual y queda constancia");
+        assert.ok(eco.hunterScore && eco.hunterScore.score > 0, "el motor recalcula con los nuevos coste y PVP");
+
+        // listSaved, move, note, compare.
+        const lista = await ds.listSaved();
+        assert.ok(lista.some((c) => c.id === "dropea:5000"));
+        const movido = await ds.moveCandidate("dropea:5000", "validate_supplier", "hablar con Dropea");
+        assert.equal(movido.status, "validate_supplier");
+        assert.equal(movido.decisions.at(-1)?.note, "hablar con Dropea");
+        const anotado = await ds.addNote("dropea:5000", "pedir muestra");
+        assert.equal(anotado.notes.length, 2);
+        await assert.rejects(() => ds.addNote("dropea:5000", "  "), /vacía/);
+        await assert.rejects(() => ds.moveCandidate("dropea:7000", "saved"), /no está guardado/);
+
+        // Guardar un candidato de la Ad Library y uno de cruce; compare con los tres.
+        const ad = await ds.search({ country: "ES", keywords: "cortaúñas", advanced: { source: "ad_library" } });
+        const adSaved = await ds.saveCandidate({ result: ad.results[0] });
+        assert.equal(adSaved.facts ?? null, null, "un anuncio no trae hechos logísticos");
+        const cr = await ds.search({ country: "ES", keywords: "barra", advanced: { source: "cruce" } });
+        const crSaved = await ds.saveCandidate({ result: cr.results[0], facts: { weightGrams: 300, lengthCm: 30, widthCm: 6, heightCm: 6, pvpEur: 24.99 } });
+        assert.equal(crSaved.facts?.unitCostEur, 6.2, "el cruce arrastra el coste de Dropea");
+        assert.ok(crSaved.hunterScore, "con hechos manuales al guardar, puntúa directamente");
+        const comp = await ds.compare(["dropea:5000", adSaved.id, crSaved.id]);
+        assert.equal(comp.candidates.length, 3);
+        await assert.rejects(() => ds.compare(["dropea:5000"]), /2/);
+        // Búsqueda: lo guardado aparece con su estado.
+        const dr = await ds.search({ country: "ES", keywords: "cortaunas", advanced: { source: "dropea" } });
+        assert.equal(dr.results[0].id, "dropea:5000");
+        const { findForbiddenMetricKeys } = await import("../src/lib/product-hunter/scoring");
+        // economics.salePriceEstimate es un campo del contrato ORIGINAL (supuesto de Pedro) que el detector de tokens
+        // marcaría por «sale»: se comprueba todo lo demás, que es lo que viene de las fuentes.
+        assert.deepEqual(findForbiddenMetricKeys(JSON.parse(JSON.stringify({ ...comp, candidates: comp.candidates.map((c) => ({ ...c, economics: null })) }))), []);
+      });
+    });
+
+    await test("INTERNO · la ruta del panel acepta source, facts al guardar y op=facts; el Studio recibe candidatos reales por op=candidates", async () => {
+      const { NextRequest } = await import("next/server");
+      const route = await import("../src/app/api/product-hunter/route");
+      const sessions = await import("../src/lib/auth/session");
+      raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-ph@test','Dueña Cazador','owner','x')").run();
+      const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-ph@test'").get() as { id: number }).id;
+      const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+      await withEnv(INTERNAL_ENV, async () => {
+        const av = await (await route.GET(new NextRequest("http://localhost/api/product-hunter?op=availability", { headers }))).json() as { availability: { source: string; available: boolean } };
+        assert.equal(av.availability.source, "internal");
+        const s = await (await route.GET(new NextRequest("http://localhost/api/product-hunter?op=search&country=ES&keywords=almohada&source=dropea", { headers }))).json() as { ok: boolean; results: Array<{ id: string }>; total: number };
+        assert.equal(s.ok, true);
+        assert.equal(s.results[0].id, "dropea:7000");
+        const save = await (await route.POST(new NextRequest("http://localhost/api/product-hunter", { method: "POST", headers, body: JSON.stringify({ op: "save", result: { id: "dropea:7000", productName: "Almohada" }, facts: { weightGrams: 900, lengthCm: 50, widthCm: 30, heightCm: 12, pvpEur: 54.99 } }) }))).json() as { ok: boolean; candidate: { facts: { unitCostEur: number; source: string }; hunterScore: { score: number } | null } };
+        assert.equal(save.ok, true);
+        assert.equal(save.candidate.facts.unitCostEur, 11.5);
+        assert.ok(save.candidate.hunterScore && save.candidate.hunterScore.score > 0);
+        const facts = await (await route.POST(new NextRequest("http://localhost/api/product-hunter", { method: "POST", headers, body: JSON.stringify({ op: "facts", id: "dropea:7000", facts: { pvpEur: 49.99 } }) }))).json() as { ok: boolean; candidate: { facts: { pvpEur: number } } };
+        assert.equal(facts.candidate.facts.pvpEur, 49.99);
+        const malo = await route.POST(new NextRequest("http://localhost/api/product-hunter", { method: "POST", headers, body: JSON.stringify({ op: "facts", id: "dropea:7000", facts: {} }) }));
+        assert.equal(malo.status, 400);
+        // F5 · Landing Studio: op=candidates devuelve los guardados del pipeline real.
+        const cands = await (await route.GET(new NextRequest("http://localhost/api/product-hunter?op=candidates", { headers }))).json() as { candidates: Array<{ id: string; savedAt: string }> };
+        assert.ok(cands.candidates.some((c) => c.id === "dropea:7000" && c.savedAt));
+        assert.ok(cands.candidates.some((c) => c.id === "dropea:5000"));
+      });
+      // Con mock en producción o api sin URL, el interno no se cuela.
+      await withEnv({ PRODUCT_HUNTER_SOURCE: "off" }, async () => {
+        const off = await (await route.GET(new NextRequest("http://localhost/api/product-hunter?op=availability", { headers }))).json() as { availability: { available: boolean; reason: string } };
+        assert.equal(off.availability.available, false);
+        assert.match(off.availability.reason, /internal/);
+      });
+    });
+
+    await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
+      const { spawnSync } = await import("node:child_process");
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));
+      const env = { ...process.env, DATA_DIR: dir, LOG_LEVEL: "silent" };
+      const run = (args: string[]) => spawnSync(process.execPath, ["--import", "tsx", "scripts/hunter-add.ts", ...args], { cwd: process.cwd(), encoding: "utf8", env, timeout: 120_000 });
+      // Sin URL y sin nombre: uso.
+      assert.match(run([]).stderr, /Uso:/);
+      // Manual completo, dry-run primero.
+      const dry = run(["--nombre", "Barra de apoyo Dropi", "--coste-eur", "6,2", "--peso-gramos", "300", "--largo-cm", "30", "--ancho-cm", "6", "--alto-cm", "6", "--pvp-eur", "24.99"]);
+      assert.equal(dry.status, 0, dry.stderr);
+      const dryJson = JSON.parse(dry.stdout) as { mode: string; facts: { unitCostEur: number; sourceUrl: string } };
+      assert.equal(dryJson.mode, "dry-run");
+      assert.equal(dryJson.facts.unitCostEur, 6.2, "coma decimal aceptada");
+      assert.match(dryJson.facts.sourceUrl, /^hunter:\/\/manual\/barra-de-apoyo-dropi$/);
+      // Con --apply: guardado con origen manual anotado.
+      const ap = run(["--nombre", "Barra de apoyo Dropi", "--apply", "--coste-eur", "6.2", "--peso-gramos", "300", "--largo-cm", "30", "--ancho-cm", "6", "--alto-cm", "6", "--pvp-eur", "24.99"]);
+      assert.equal(ap.status, 0, ap.stderr);
+      const saved = JSON.parse(ap.stdout) as { id: number; manualNote: string; unitCostEur: number; weightGrams: number };
+      assert.equal(saved.weightGrams, 300);
+      assert.match(saved.manualNote, /\[manual \d{4}-\d{2}-\d{2}\] coste_unitario_eur=6.2, pvp_entrada_eur=24.99, peso_gramos=300/);
+      // Puntúa.
+      const sc = spawnSync(process.execPath, ["--import", "tsx", "scripts/hunter-score.ts", "--id", String(saved.id)], { cwd: process.cwd(), encoding: "utf8", env, timeout: 120_000 });
+      assert.equal(sc.status, 0, sc.stderr);
+      const scored = JSON.parse(sc.stdout) as Array<{ scoring: { score: number; verdict: string } | null }>;
+      assert.ok(scored[0].scoring && scored[0].scoring.score > 0, "con coste, PVP y medidas manuales el motor puntúa");
+      // Sin medidas: sigue sin puntuar con el mismo mensaje honesto.
+      const ap2 = run(["--nombre", "Solo coste", "--apply", "--coste-eur", "4"]);
+      const saved2 = JSON.parse(ap2.stdout) as { id: number };
+      const sc2 = spawnSync(process.execPath, ["--import", "tsx", "scripts/hunter-score.ts", "--id", String(saved2.id)], { cwd: process.cwd(), encoding: "utf8", env, timeout: 120_000 });
+      assert.match(sc2.stdout, /faltan medidas del paquete de venta/);
+      // Valor manual inválido: rechazado.
+      assert.match(run(["--nombre", "X", "--apply", "--coste-eur", "-3"]).stderr, /no negativo/);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+    limpiar();
+  }
+
   // ============ V4 · Landing Studio: blueprint, viabilidad, claims y Shopify ==========
   console.log("\n— V4 · Landing Studio (blueprint, validación, versiones y exportación) —");
   {
@@ -14824,7 +15219,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs, db.migrateDiscoveryJobKinds]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs, db.migrateDiscoveryJobKinds, db.migrateProductHunterInternal]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -15047,6 +15442,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 29");
     db.migrateDiscoveryJobKinds(fixture);
     fixture.pragma("user_version = 30");
+    db.migrateProductHunterInternal(fixture);
+    fixture.pragma("user_version = 31");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);

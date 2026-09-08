@@ -16,6 +16,9 @@ import {
   type AdLibraryResult,
   type CandidateDecision,
   type CandidateEconomics,
+  type CandidateFactsInput,
+  type CandidateFactsView,
+  type HunterScoreView,
   type CandidateNote,
   type CreativeFormat,
   type DataStatus,
@@ -355,10 +358,57 @@ function normalizeDecisions(raw: unknown): CandidateDecision[] {
   return out;
 }
 
+const FACT_SOURCES = ["manual", "dropea", "scraping"] as const;
+
+export function normalizeFacts(raw: unknown): CandidateFactsView | null {
+  if (!isRecord(raw)) return null;
+  return {
+    unitCostEur: asNonNegativeNumber(raw.unitCostEur),
+    pvpEur: asNonNegativeNumber(raw.pvpEur),
+    weightGrams: asNonNegativeNumber(raw.weightGrams),
+    lengthCm: asNonNegativeNumber(raw.lengthCm),
+    widthCm: asNonNegativeNumber(raw.widthCm),
+    heightCm: asNonNegativeNumber(raw.heightCm),
+    source: asEnum(raw.source, FACT_SOURCES),
+  };
+}
+
+export function normalizeFactsInput(raw: unknown): CandidateFactsInput | null {
+  if (!isRecord(raw)) return null;
+  const out: CandidateFactsInput = {};
+  for (const k of ["unitCostEur", "pvpEur", "weightGrams", "lengthCm", "widthCm", "heightCm"] as const) {
+    if (k in raw) out[k] = asNonNegativeNumber(raw[k]);
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function normalizeHunterScore(raw: unknown): HunterScoreView | null {
+  if (!isRecord(raw)) return null;
+  const score = asNumber(raw.score);
+  if (score === null) return null;
+  const reasons = Array.isArray(raw.reasons)
+    ? raw.reasons.filter(isRecord).map((r) => ({ factor: asString(r.factor) ?? "", points: asNumber(r.points) ?? 0, detail: asString(r.detail) ?? "" }))
+    : [];
+  return {
+    score,
+    verdict: asString(raw.verdict) ?? "",
+    unitMarginEur: asNumber(raw.unitMarginEur) ?? 0,
+    maxCpaEur: asNumber(raw.maxCpaEur) ?? 0,
+    breakEvenDeliveryPct: asNumber(raw.breakEvenDeliveryPct) ?? 0,
+    shippingTier: asString(raw.shippingTier) ?? "",
+    reasons,
+  };
+}
+
 /** Igual que `normalizeAdLibraryResult` pero para el candidato completo. */
 export function normalizeCandidate(raw: unknown): WinningProductCandidate | null {
   const base = normalizeAdLibraryResult(raw);
   if (!base || !isRecord(raw)) return null;
+  const facts = normalizeFacts(raw.facts);
+  const hunterScore = normalizeHunterScore(raw.hunterScore);
+  const hunterMissing = Array.isArray(raw.hunterMissing)
+    ? raw.hunterMissing.filter(isRecord).map((r) => ({ factor: asString(r.factor) ?? "", detail: asString(r.detail) ?? "" }))
+    : undefined;
   return {
     ...base,
     status: asEnum(raw.status, PRODUCT_RESEARCH_STATUSES) ?? "discovered",
@@ -368,6 +418,9 @@ export function normalizeCandidate(raw: unknown): WinningProductCandidate | null
     savedAt: asString(raw.savedAt),
     risks: asStringArray(raw.risks),
     saturation: asEnum(raw.saturation, SATURATIONS),
+    ...(facts ? { facts } : {}),
+    ...(hunterScore ? { hunterScore } : {}),
+    ...(hunterMissing ? { hunterMissing } : {}),
   };
 }
 

@@ -89,7 +89,9 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     fixture.pragma("user_version = 29");
     migrations.migrateDiscoveryJobKinds(fixture);
     fixture.pragma("user_version = 30");
-    // Segunda pasada: las trece migraciones deben ser idempotentes.
+    migrations.migrateProductHunterInternal(fixture);
+    fixture.pragma("user_version = 31");
+    // Segunda pasada: las catorce migraciones deben ser idempotentes.
     migrations.migrateWorkspaceAuth(fixture);
     migrations.migrateProductCandidates(fixture);
     migrations.migrateHunterPredictive(fixture);
@@ -103,6 +105,7 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     migrations.migrateDiscoveryRunState(fixture);
     migrations.migrateDiscoveryJobs(fixture);
     migrations.migrateDiscoveryJobKinds(fixture);
+    migrations.migrateProductHunterInternal(fixture);
     const durationMs = Math.round((performance.now() - started) * 100) / 100;
 
     const counts = Object.fromEntries(Object.keys(EXPECTED).map((table) => {

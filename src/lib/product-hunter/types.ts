@@ -246,6 +246,45 @@ export interface CandidateDecision {
   note: string | null;
 }
 
+/**
+ * Hechos logísticos del producto, con su ORIGEN (08-09-2026, backend interno).
+ * "manual" = los tecleó Pedro; "dropea" = coste real del catálogo de Dropea;
+ * "scraping" = los sacó el ingestor de una ficha pública. Son lo que necesita
+ * el motor hunter:score; sin ellos no hay margen (fail-closed).
+ */
+export type CandidateFactsSource = "manual" | "dropea" | "scraping";
+
+export interface CandidateFactsView {
+  unitCostEur: number | null;
+  pvpEur: number | null;
+  weightGrams: number | null;
+  lengthCm: number | null;
+  widthCm: number | null;
+  heightCm: number | null;
+  source: CandidateFactsSource | null;
+}
+
+/** Entrada manual de hechos (F3): cualquier campo ausente se deja como está. */
+export interface CandidateFactsInput {
+  unitCostEur?: number | null;
+  pvpEur?: number | null;
+  weightGrams?: number | null;
+  lengthCm?: number | null;
+  widthCm?: number | null;
+  heightCm?: number | null;
+}
+
+/** Resultado del motor hunter:score (src/lib/hunter/scoring.ts), no un score inventado aquí. */
+export interface HunterScoreView {
+  score: number;
+  verdict: string;
+  unitMarginEur: number;
+  maxCpaEur: number;
+  breakEvenDeliveryPct: number;
+  shippingTier: string;
+  reasons: Array<{ factor: string; points: number; detail: string }>;
+}
+
 export type WinningProductCandidate = AdLibraryResult & {
   status: ProductResearchStatus;
   economics: CandidateEconomics | null;
@@ -254,6 +293,11 @@ export type WinningProductCandidate = AdLibraryResult & {
   savedAt: string | null;
   risks: string[];
   saturation: SaturationLevel | null;
+  /** Solo los rellena el backend interno; un backend externo puede omitirlos. */
+  facts?: CandidateFactsView | null;
+  hunterScore?: HunterScoreView | null;
+  /** Motivos por los que hunter:score NO puntúa (p. ej. faltan medidas). */
+  hunterMissing?: Array<{ factor: string; detail: string }>;
 };
 
 /** Candidato ya guardado: `savedAt` garantizado. */
@@ -269,6 +313,8 @@ export interface ProductHunterFilters {
 export interface SaveCandidateInput {
   result: AdLibraryResult;
   note?: string | null;
+  /** F3: hechos manuales (coste, peso, medidas, PVP) al guardar. */
+  facts?: CandidateFactsInput | null;
 }
 
 export interface CandidateComparison {
@@ -279,7 +325,10 @@ export interface CandidateComparison {
 
 // --- Fuente de datos (interfaz que implementan los adaptadores) ---
 
-export type ProductHunterSourceKind = "api" | "mock" | "off";
+export type ProductHunterSourceKind = "api" | "mock" | "off" | "internal";
+
+/** Fuentes que entiende el backend interno en `advanced.source`. */
+export type InternalSearchSource = "ad_library" | "local" | "dropea" | "cruce";
 
 export interface ProductHunterAvailability {
   available: boolean;
@@ -297,6 +346,8 @@ export interface ProductHunterDataSource {
   addNote(id: string, text: string): Promise<WinningProductCandidate>;
   setEconomics(id: string, economics: CandidateEconomics): Promise<WinningProductCandidate>;
   compare(ids: string[]): Promise<CandidateComparison>;
+  /** F3 (opcional: solo el backend interno). Hechos manuales sobre un candidato ya guardado. */
+  setFacts?(id: string, facts: CandidateFactsInput): Promise<WinningProductCandidate>;
 }
 
 /** Límites del comparador (también los valida el backend). */

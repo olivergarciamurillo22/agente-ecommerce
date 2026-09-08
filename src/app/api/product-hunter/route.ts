@@ -30,6 +30,7 @@ import {
   isProductResearchStatus,
   normalizeAdLibraryResult,
   normalizeEconomics,
+  normalizeFactsInput,
   ProductHunterInputError,
 } from "@/lib/product-hunter/scoring";
 import {
@@ -85,6 +86,9 @@ function parseSearch(sp: URLSearchParams): AdLibrarySearchParams {
     }
   }
   const activeOnlyRaw = sp.get("activeOnly");
+  // Fuente del backend interno (ad_library | local | dropea | cruce | all), sin cambiar el contrato: viaja en advanced.
+  const source = text(sp.get("source"), 20);
+  if (source && ["ad_library", "local", "dropea", "cruce", "all"].includes(source)) advanced = { ...(advanced ?? {}), source };
   return {
     country: /^[A-Z]{2}$/.test(country) ? country : "ES",
     keywords: text(sp.get("keywords"), 200) ?? "",
@@ -180,7 +184,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       const result = normalizeAdLibraryResult(body.result);
       if (!result) throw new ProductHunterInputError("falta el resultado a guardar (o no tiene id)");
       const note = typeof body.note === "string" ? body.note : null;
-      const candidate = await ds.saveCandidate({ result, note });
+      const facts = normalizeFactsInput(body.facts);
+      const candidate = await ds.saveCandidate({ result, note, facts });
       return NextResponse.json({ ok: true, candidate });
     }
     const id = typeof body.id === "string" ? body.id.trim() : "";
@@ -194,6 +199,14 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     if (op === "note") {
       const t = typeof body.text === "string" ? body.text : "";
       const candidate = await ds.addNote(id, t);
+      return NextResponse.json({ ok: true, candidate });
+    }
+    if (op === "facts") {
+      // F3: hechos manuales (coste, PVP, peso, medidas). Solo el backend interno los entiende.
+      const facts = normalizeFactsInput(body.facts);
+      if (!facts) throw new ProductHunterInputError("faltan los hechos (coste, PVP, peso o medidas)");
+      if (!ds.setFacts) throw new ProductHunterInputError("esta fuente no admite hechos manuales");
+      const candidate = await ds.setFacts(id, facts);
       return NextResponse.json({ ok: true, candidate });
     }
     if (op === "economics") {

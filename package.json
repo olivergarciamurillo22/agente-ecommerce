@@ -69,6 +69,8 @@
     "hunter:discovery:doctor": "tsx scripts/hunter-discovery-doctor.ts",
     "hunter:search": "tsx scripts/hunter-search.ts",
     "hunter:audit": "tsx scripts/hunter-audit.ts",
+    "hunter:dropea:sync": "tsx scripts/hunter-dropea-sync.ts",
+    "hunter:cruce-dropea": "tsx scripts/hunter-cruce-dropea.ts",
     "landing:build": "tsx scripts/landing-build.ts",
     "landing:sections": "tsx scripts/landing-sections.ts",
     "landing:lint": "tsx scripts/landing-lint.ts",
