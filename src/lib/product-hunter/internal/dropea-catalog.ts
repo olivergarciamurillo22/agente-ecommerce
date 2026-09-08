@@ -15,7 +15,7 @@
 // ============================================================
 
 import type Database from "better-sqlite3";
-import { systemDbHandle } from "../../db";
+import { getSetting, setSetting, systemDbHandle } from "../../db";
 import { listDropeaProducts } from "../../suppliers/dropea";
 import { dropeaReadEnabled } from "../../suppliers/dropea/client";
 import type { DropeaProduct } from "../../suppliers/dropea/types";
@@ -46,6 +46,34 @@ export interface DropeaSyncReport {
   variants: number;
   truncated: boolean;
   syncedAt: number;
+}
+
+/**
+ * Estado de la última sincronización, en settings. Si el sync se corta a
+ * mitad (red, 5xx, Ctrl-C), la copia NO queda corrupta: cada página se
+ * escribe en su propia transacción y las filas anteriores siguen ahí con su
+ * synced_at anterior. Lo que sí queda es una copia MEZCLADA (parte nueva,
+ * parte vieja), y eso hay que decirlo: aquí se guarda si la última pasada
+ * terminó entera o no, y hasta qué página llegó.
+ */
+export interface DropeaSyncState {
+  startedAt: number;
+  finishedAt: number | null;
+  complete: boolean;
+  pages: number;
+  variants: number;
+  error: string | null;
+}
+const SYNC_STATE_KEY = "dropea_catalog_sync_json";
+
+export function dropeaSyncState(): DropeaSyncState | null {
+  const raw = getSetting(SYNC_STATE_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw) as DropeaSyncState; } catch { return null; }
+}
+
+function writeSyncState(state: DropeaSyncState): void {
+  setSetting(SYNC_STATE_KEY, JSON.stringify(state));
 }
 
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() && Number.isFinite(Number(v)) ? Number(v) : null);
@@ -95,10 +123,15 @@ export class DropeaCatalogRepository {
     return (this.db.prepare("SELECT COUNT(*) AS n FROM dropea_catalog").get() as { n: number }).n;
   }
 
-  /** Fecha de la última sincronización (unixepoch) o null si nunca. */
+  /** Fecha de la última sincronización (unixepoch) o null si nunca. Puede ser de una pasada PARCIAL: ver dropeaSyncState(). */
   lastSyncedAt(): number | null {
     const r = this.db.prepare("SELECT MAX(synced_at) AS t FROM dropea_catalog").get() as { t: number | null };
     return r.t ?? null;
+  }
+
+  /** Filas que la última pasada (aunque fuera parcial) NO volvió a ver: pueden haber desaparecido de Dropea. */
+  staleCount(sinceSyncedAt: number): number {
+    return (this.db.prepare("SELECT COUNT(*) AS n FROM dropea_catalog WHERE synced_at < ?").get(sinceSyncedAt) as { n: number }).n;
   }
 
   byVariantId(variantId: number): DropeaCatalogRow | null {
@@ -142,7 +175,7 @@ export class DropeaCatalogRepository {
  * (autenticación, timeouts y errores ya resueltos allí). Con la lectura
  * deshabilitada no llama a nada y lo dice.
  */
-export async function syncDropeaCatalog(opts: { repo?: DropeaCatalogRepository; list?: typeof listDropeaProducts; now?: number; onPage?: (page: number, items: number) => void } = {}): Promise<DropeaSyncReport> {
+export async function syncDropeaCatalog(opts: { repo?: DropeaCatalogRepository; list?: typeof listDropeaProducts; now?: number; onPage?: (page: number, items: number) => void; /** false en tests con base ajena a settings */ persistState?: boolean } = {}): Promise<DropeaSyncReport> {
   const now = opts.now ?? Math.floor(Date.now() / 1000);
   if (!opts.list && !dropeaReadEnabled()) {
     return { ok: false, reason: "lectura de Dropea deshabilitada: hacen falta DROPEA_API_KEY y DROPEA_API_ENABLED=1", pages: 0, products: 0, variants: 0, truncated: false, syncedAt: now };
@@ -150,15 +183,30 @@ export async function syncDropeaCatalog(opts: { repo?: DropeaCatalogRepository; 
   const repo = opts.repo ?? new DropeaCatalogRepository();
   const list = opts.list ?? listDropeaProducts;
   let pages = 0, products = 0, variants = 0, truncated = false;
-  for (let page = 1; page <= DROPEA_SYNC_MAX_PAGES; page++) {
-    const res = await list(page, DROPEA_SYNC_PAGE_SIZE);
-    const items = res?.items ?? [];
-    pages = page;
-    products += items.length;
-    variants += repo.upsertProducts(items, now);
-    opts.onPage?.(page, items.length);
-    if (items.length < DROPEA_SYNC_PAGE_SIZE) break;
-    if (page === DROPEA_SYNC_MAX_PAGES) truncated = true;
+  const state: DropeaSyncState = { startedAt: now, finishedAt: null, complete: false, pages: 0, variants: 0, error: null };
+  if (opts.persistState !== false) writeSyncState(state);
+  try {
+    for (let page = 1; page <= DROPEA_SYNC_MAX_PAGES; page++) {
+      const res = await list(page, DROPEA_SYNC_PAGE_SIZE);
+      const items = res?.items ?? [];
+      pages = page;
+      products += items.length;
+      variants += repo.upsertProducts(items, now); // una transacción por página: o entra entera o no entra
+      state.pages = pages; state.variants = variants;
+      if (opts.persistState !== false) writeSyncState(state);
+      opts.onPage?.(page, items.length);
+      if (items.length < DROPEA_SYNC_PAGE_SIZE) break;
+      if (page === DROPEA_SYNC_MAX_PAGES) truncated = true;
+    }
+  } catch (err) {
+    // Corte a mitad: lo guardado se queda (por página, consistente); la copia
+    // queda MEZCLADA y el estado lo dice. Nunca se borra lo anterior.
+    const message = err instanceof Error ? err.message : String(err);
+    state.finishedAt = Math.floor(Date.now() / 1000); state.complete = false; state.error = message;
+    if (opts.persistState !== false) writeSyncState(state);
+    return { ok: false, reason: `sincronización cortada en la página ${pages + 1} (${message}): ${variants} variante(s) de ${pages} página(s) guardadas; el resto de la copia es de la pasada anterior. Vuelve a lanzar hunter:dropea:sync`, pages, products, variants, truncated: false, syncedAt: now };
   }
+  state.finishedAt = Math.floor(Date.now() / 1000); state.complete = !truncated;
+  if (opts.persistState !== false) writeSyncState(state);
   return { ok: true, reason: truncated ? `se alcanzó el tope de ${DROPEA_SYNC_MAX_PAGES} páginas: la copia puede estar INCOMPLETA` : null, pages, products, variants, truncated, syncedAt: now };
 }

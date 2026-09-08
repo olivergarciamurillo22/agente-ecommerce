@@ -60,9 +60,27 @@ export const CRUCE_MARGIN_CEIL = 0.7;
 export const CRUCE_FORMULA =
   "validación 40 (días/60×20 + variantes/3×10 + activos/5×10; dudoso ÷2; sin match 0) + margen 40 ((precio−coste)/precio, de 30 % → 0 a 70 % → 40; sin precio detectado: no calculable) + confianza del match 20 (cobertura de palabras clave × 20)";
 
-/** Palabras que no identifican un producto en un nombre de catálogo. */
-const STOP = new Set(["de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "con", "sin", "para", "por", "en", "a", "al", "the", "and", "for", "with", "of", "to",
-  "pack", "set", "kit", "lote", "unidad", "unidades", "uds", "ud", "pcs", "pieza", "piezas", "nuevo", "nueva", "oferta", "envio", "gratis", "color", "colores", "talla", "tamano", "modelo", "version", "premium", "pro", "plus", "mini", "max", "original", "casamable", "dropea"]);
+/**
+ * Palabras que no identifican un producto en un nombre de catálogo: relleno,
+ * cantidades, y las VARIANTES (talla, color, medida) que Dropea mete en el
+ * nombre de la variante («Faja reductora Negro XL», «Funda 20x30 cm»). Un
+ * color o una talla en el término de búsqueda solo sirve para NO encontrar
+ * al anunciante, que anuncia el producto, no la variante.
+ */
+const STOP = new Set([
+  "de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "con", "sin", "para", "por", "en", "a", "al", "the", "and", "for", "with", "of", "to",
+  "pack", "set", "kit", "lote", "unidad", "unidades", "uds", "ud", "pcs", "pieza", "piezas", "nuevo", "nueva", "oferta", "envio", "gratis", "modelo", "version", "premium", "pro", "plus", "mini", "max", "original", "casamable", "dropea",
+  // variantes
+  "color", "colores", "talla", "tallas", "tamano", "tamanos", "medida", "medidas", "unisex", "adulto", "adultos", "infantil",
+  "rojo", "roja", "azul", "negro", "negra", "blanco", "blanca", "gris", "verde", "rosa", "amarillo", "amarilla", "beige", "dorado", "dorada", "plateado", "plateada", "marron", "naranja", "morado", "morada", "violeta", "turquesa", "transparente", "multicolor",
+  "xs", "xxs", "xl", "xxl", "xxxl", "3xl", "4xl", "pequeno", "pequena", "mediano", "mediana", "grande", "grandes", "cm", "mm", "ml", "kg", "gr", "gramos", "litros", "pulgadas",
+]);
+
+/** Nombres con UNA sola palabra clave («Funda», «Soporte») casan con cualquier cosa: se marca genérico y la confianza se recorta a la mitad. */
+export const GENERIC_KEYWORD_LIMIT = 1;
+export function isGenericName(keywords: string[]): boolean {
+  return keywords.length <= GENERIC_KEYWORD_LIMIT;
+}
 
 /** 2–4 palabras clave del nombre de Dropea: sin marca ni relleno, en orden de aparición. */
 export function productKeywords(name: string): string[] {
@@ -70,7 +88,8 @@ export function productKeywords(name: string): string[] {
   const vistas = new Set<string>();
   const out: string[] = [];
   for (const t of tokens(limpio)) {
-    if (t.length < 3 || STOP.has(t) || /^\d+$/.test(t) || /^x\d+$/.test(t) || /^\d+x$/.test(t)) continue;
+    // números, «x2», «2x», medidas pegadas («20x30», «500ml», «30cm») y tallas
+    if (t.length < 3 || STOP.has(t) || /^\d+$/.test(t) || /^x\d+$/.test(t) || /^\d+x\d*$/.test(t) || /^\d+(cm|mm|ml|kg|gr?|l)$/.test(t) || /^[smlx]{1,4}$/.test(t)) continue;
     if (vistas.has(t)) continue;
     vistas.add(t);
     out.push(t);
@@ -100,11 +119,13 @@ export function bestMatch(keywords: string[], groups: DiscoveryGroup[]): GroupMa
     if (group.noise) continue;
     const text = ` ${groupText(group)} `;
     const hits = keywords.filter((k) => text.includes(` ${k} `) || text.includes(k)).length;
-    const coverage = hits / keywords.length;
+    let coverage = hits / keywords.length;
     let verdict: MatchVerdict = "no";
     if (hits >= 2 && coverage >= 0.75) verdict = "si";
     else if (hits >= 1) verdict = "dudoso"; // una sola palabra (o pocas) coincidente: baja confianza, y la cobertura lo penaliza
     if (verdict === "no") continue;
+    // Nombre genérico (una sola palabra clave): «si» es imposible y la cobertura se recorta a 0,5.
+    if (isGenericName(keywords)) { verdict = "dudoso"; coverage = Math.min(coverage, 0.5); }
     if (!best || coverage > best.coverage || (coverage === best.coverage && group.activeAds > best.group.activeAds)) best = { group, coverage, verdict };
   }
   return best;
@@ -312,7 +333,8 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     const freno = budget.check();
     if (freno) { stopReason = freno; break; }
     if (!canRunDiscovery()) { repo.finishRun(runId, "parada_emergencia", now); throw new DiscoveryHaltedError(); }
-    const keywords = productKeywords(producto.name ?? producto.productName ?? "");
+    // El nombre del PRODUCTO (sin la variante «Negro XL») manda; el de la variante solo si no hay otro.
+    const keywords = productKeywords(producto.productName ?? producto.name ?? "");
     let match: GroupMatch | null = null;
     let busquedaError: string | null = null;
     if (keywords.length) {
@@ -339,6 +361,7 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     const breakdown: CruceBreakdown = { ...s.breakdown, keywords, priceQuote: price?.quote ?? null, snapshotUrl: g?.ads.map((a) => a.snapshotUrl).find(Boolean) ?? null };
     if (busquedaError) breakdown.validacion.detail += ` · la consulta a la Ad Library falló (${busquedaError}): sin validar no significa que no anuncien`;
     if (!keywords.length) breakdown.validacion.detail = "el nombre del producto no deja palabras clave útiles: no se buscó";
+    if (keywords.length && isGenericName(keywords)) breakdown.confianza.detail += ` · nombre genérico (${keywords.join(", ")}): confianza recortada a la mitad; revisar a mano`;
     const row = repo.insert({
       runId, variantId: producto.variantId, productName: producto.name ?? producto.productName, costEur: producto.costEur, terms: keywords,
       match: match?.verdict ?? "no", matchConfidence: round2(match?.coverage ?? 0), adlibCandidateKey: g?.key ?? null, pageName: g?.pageName ?? null,

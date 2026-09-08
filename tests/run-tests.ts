@@ -5641,15 +5641,18 @@ async function main(): Promise<void> {
     assert.ok(w.missing.some((m) => m.includes("ads")));
   });
 
-  await test("A6 unit economics: con costes y ads → completo; margen y ROAS bruto/neto correctos", () => {
+  await test("A6 unit economics: con costes y ads → completo; margen y ROAS bruto/neto correctos", async () => {
     const ahora = Math.floor(Date.now() / 1000);
     const rows = [
       { id: 1, status: "delivered", closure: "delivered", total_price: "40.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 2, sku: "LIMP-001" }]) },
       { id: 2, status: "returned", closure: "refused", total_price: "20.00", currency: "EUR", raw_payload: payloadCon([{ title: "Limpiador", quantity: 1, sku: "LIMP-001" }]) },
     ];
     const costs = [{ sku: "LIMP-001", title: "Limpiador", product_cost: 5, shipping_cost: 4, cod_fee: 1, handling_cost: null, updated_at: 0 }];
-    const hoy = new Date();
-    const dia = `${hoy.getFullYear()}-${String(hoy.getMonth() + 1).padStart(2, "0")}-${String(hoy.getDate()).padStart(2, "0")}`;
+    // Día de NEGOCIO (Madrid), no del huso de la máquina: computeEconomics
+    // imputa el gasto en ads por madridParts. Con la fecha local esta prueba
+    // fallaba entre las 23:00 y las 00:00 de una máquina en UTC+1 (en verano
+    // Madrid ya va por el día siguiente). Diagnosticado el 08-09-2026.
+    const dia = (await import("../src/lib/time")).businessDay();
     const inicioDia = deliveryMetrics.startOfLocalDay();
     const w = unitEconomics.computeEconomics(rows, costs, new Map([[dia, 10]]), inicioDia, ahora + 1);
     assert.equal(w.complete, true);
@@ -14802,7 +14805,7 @@ async function main(): Promise<void> {
       assert.equal(r.processed, 3);
       assert.equal(r.requests, 3, "una petición por producto");
       assert.equal(r.stopReason, "completado");
-      assert.deepEqual(peticiones, ["cortaunas electrico", "barra apoyo ventosa", "relleno"], "términos = palabras clave del nombre de Dropea");
+      assert.deepEqual(peticiones, ["cortaunas electrico mayores", "barra apoyo ventosa bano", "relleno"], "términos = palabras clave del nombre del PRODUCTO de Dropea (no de la variante)");
       const ct = r.cruces.find((c) => c.variantId === 5000)!;
       assert.equal(ct.match, "si");
       assert.equal(ct.pageName, "Gadgets Senior");
@@ -15029,6 +15032,87 @@ async function main(): Promise<void> {
       });
     });
 
+
+    await test("INTERNO · sync de Dropea cortado a mitad: lo guardado por página se queda, la copia se declara MEZCLADA en settings y la siguiente pasada la completa", async () => {
+      limpiar();
+      const { DropeaCatalogRepository, syncDropeaCatalog, dropeaSyncState } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const repo = new DropeaCatalogRepository(raw);
+      // Copia previa: la de siempre (101 variantes) con fecha vieja.
+      await syncDropeaCatalog({ repo, list: catalogoFalso as never, now: nowSec - 86400 });
+      assert.equal(repo.count(), 101);
+      // Pasada que revienta en la página 2.
+      const roto = async (page: number, limit: number) => { if (page === 2) throw new Error("ECONNRESET"); return catalogoFalso(page, limit); };
+      const r = await syncDropeaCatalog({ repo, list: roto as never, now: nowSec });
+      assert.equal(r.ok, false);
+      assert.equal(r.pages, 1);
+      assert.equal(r.variants, 100);
+      assert.match(r.reason ?? "", /cortada en la página 2 \(ECONNRESET\)/);
+      assert.match(r.reason ?? "", /el resto de la copia es de la pasada anterior/);
+      // Consistente: 100 filas nuevas + 1 vieja, ninguna perdida ni corrupta.
+      assert.equal(repo.count(), 101);
+      assert.equal(repo.staleCount(nowSec), 1, "la almohada (página 2) se quedó con la fecha anterior");
+      assert.equal(repo.byVariantId(7000)!.syncedAt, nowSec - 86400);
+      assert.equal(repo.byVariantId(5000)!.syncedAt, nowSec);
+      const estado = dropeaSyncState()!;
+      assert.equal(estado.complete, false);
+      assert.equal(estado.pages, 1);
+      assert.match(estado.error ?? "", /ECONNRESET/);
+      // La siguiente pasada completa y lo deja dicho.
+      const r2 = await syncDropeaCatalog({ repo, list: catalogoFalso as never, now: nowSec + 60 });
+      assert.equal(r2.ok, true);
+      assert.equal(repo.staleCount(nowSec + 60), 0);
+      assert.equal(dropeaSyncState()!.complete, true);
+    });
+
+    await test("INTERNO · palabras clave con tallas, colores, medidas y caracteres raros; los nombres genéricos de una palabra solo pueden ser «dudoso» y con la confianza recortada", async () => {
+      const { productKeywords, bestMatch, isGenericName } = await import("../src/lib/product-hunter/internal/cruce");
+      assert.deepEqual(productKeywords("Faja reductora Negro XL"), ["faja", "reductora"], "color y talla fuera");
+      assert.deepEqual(productKeywords("Funda nórdica 20x30 cm (Rojo) - 500ml"), ["funda", "nordica"], "medidas pegadas, paréntesis y guiones fuera");
+      assert.deepEqual(productKeywords("Cortaúñas/Lima 2en1 ★ Talla M"), ["cortaunas", "lima", "2en1"], "signos y talla fuera; «2en1» se conserva porque identifica");
+      assert.deepEqual(productKeywords("Soporte"), ["soporte"]);
+      assert.ok(isGenericName(["soporte"]));
+      assert.ok(!isGenericName(["faja", "reductora"]));
+      assert.deepEqual(productKeywords("Pack 2 uds Color Azul XL"), [], "solo relleno y variante: nada que buscar");
+      const grupo = (key: string, texto: string, activeAds = 3) => ({ key, pageId: key, pageName: `Página ${key}`, fingerprint: "f", activeAds, oldestActiveAt: nowSec - 40 * 86400, noise: false, noiseReason: null, ads: [{ id: key + "-1", pageId: key, pageName: null, snapshotUrl: null, bodies: [texto], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }] });
+      // Nombre genérico: aunque la palabra aparezca, nunca «si» y cobertura ≤ 0,5.
+      const gen = bestMatch(["soporte"], [grupo("a", "Soporte para móvil de coche magnético")])!;
+      assert.equal(gen.verdict, "dudoso");
+      assert.equal(gen.coverage, 0.5);
+      // Con dos palabras claras, sí.
+      const claro = bestMatch(["faja", "reductora"], [grupo("b", "Faja reductora invisible, solo 19,99 €")])!;
+      assert.equal(claro.verdict, "si");
+    });
+
+    await test("INTERNO · en el cruce manda el nombre del PRODUCTO, no el de la variante, y un nombre genérico queda anotado en el desglose", async () => {
+      limpiar();
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runCruceBatch, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
+      const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const catalog = new DropeaCatalogRepository(raw);
+      catalog.upsertProducts([
+        { id: 9001, name: "Faja reductora postparto", variants: [{ variant_id: 9101, sku: "F-1", name: "Faja reductora Negro XL", price: 8 }] },
+        { id: 9002, name: "Soporte", variants: [{ variant_id: 9201, sku: "S-1", name: "Soporte", price: 3 }] },
+      ], nowSec);
+      const terminos: string[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        terminos.push(term);
+        const data = term.includes("faja")
+          ? [{ id: "f-1", page_id: "p-f", page_name: "Fajas Pro", ad_creative_bodies: ["Faja reductora postparto, resultados desde el primer día. Solo 24,99 €"], ad_delivery_start_time: "2026-08-01" }]
+          : term.includes("soporte") ? [{ id: "s-1", page_id: "p-s", page_name: "Autoshop", ad_creative_bodies: ["Soporte magnético para móvil de coche"], ad_delivery_start_time: "2026-08-01" }] : [];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const r = await runCruceBatch({ token: "tok", now: nowSec, limit: 2, client: new AdLibraryClient("tok", fetcher, async () => {}), catalog, repo: new CruceRepository(raw) });
+      assert.deepEqual(terminos, ["faja reductora postparto", "soporte"], "sin «negro xl»: se busca el producto");
+      const faja = r.cruces.find((c) => c.variantId === 9101)!;
+      assert.equal(faja.match, "si");
+      assert.equal(faja.detectedPriceEur, 24.99);
+      const soporte = r.cruces.find((c) => c.variantId === 9201)!;
+      assert.equal(soporte.match, "dudoso");
+      assert.equal(soporte.matchConfidence, 0.5);
+      assert.match(soporte.breakdown.confianza.detail, /nombre genérico \(soporte\): confianza recortada a la mitad/);
+      assert.ok((soporte.score ?? 0) < (faja.score ?? 0));
+    });
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
       const { spawnSync } = await import("node:child_process");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));

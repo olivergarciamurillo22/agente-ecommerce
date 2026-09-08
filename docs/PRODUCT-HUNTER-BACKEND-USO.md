@@ -137,7 +137,7 @@ cálculo con datos reales cuando corra en el NAS):
 | Dato | Valor |
 |---|---|
 | Producto Dropea | «Cortaúñas Eléctrico 3 en 1», coste 7,90 € |
-| Palabras clave | cortaunas, electrico |
+| Palabras clave | cortaunas, electrico, mayores (del nombre del producto «Cortaúñas Eléctrico 3 en 1 para mayores»; la variante «Negro XL» no cuenta) |
 | Match | «Gadgets Senior», 2 anuncios activos, el más antiguo desde el 30-07 (40 días), 2 textos distintos, cobertura 100 % |
 | Precio detectado | «ahora solo 29,99 €» |
 | Validación | 40/60×20 = 13,33 + 2/3×10 = 6,67 + 2/5×10 = 4 → **24,0** |

@@ -14,19 +14,23 @@
 import "./env-loader";
 
 async function main(): Promise<void> {
-  const { syncDropeaCatalog, DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+  const { syncDropeaCatalog, DropeaCatalogRepository, dropeaSyncState } = await import("../src/lib/product-hunter/internal/dropea-catalog");
   const repo = new DropeaCatalogRepository();
   const antes = repo.count();
   const ultima = repo.lastSyncedAt();
+  const estado = dropeaSyncState();
   console.log(`\n──── CATÁLOGO DE DROPEA · copia local ────\n`);
   console.log(`  Copia actual: ${antes} variante(s)${ultima ? `, sincronizada el ${new Date(ultima * 1000).toISOString().slice(0, 16).replace("T", " ")}` : " (nunca sincronizada)"}`);
+  if (estado && !estado.complete) console.log(`  ⚠ La última pasada NO terminó (${estado.pages} página(s); ${estado.error ?? "sin terminar"}): la copia está mezclada con la pasada anterior. Esta ejecución la completa.`);
   const r = await syncDropeaCatalog({ repo, onPage: (page, items) => console.log(`  página ${String(page).padStart(3)} · ${items} producto(s)`) });
   if (!r.ok) {
     console.error(`\n✗ ${r.reason}\n`);
-    process.exit(2);
+    process.exit(r.pages > 0 ? 3 : 2); // 3 = parcial: filas nuevas y viejas mezcladas; relanzar
   }
   console.log(`\n  ✓ ${r.pages} página(s) · ${r.products} producto(s) · ${r.variants} variante(s) guardadas · copia de ${new Date(r.syncedAt * 1000).toISOString().slice(0, 10)}`);
   if (r.truncated) console.log(`  ⚠ ${r.reason}`);
+  const noVistas = repo.staleCount(r.syncedAt);
+  if (noVistas > 0) console.log(`  ⚠ ${noVistas} variante(s) de la copia no aparecieron en esta pasada: pueden haber desaparecido de Dropea (se conservan, con su fecha anterior).`);
   console.log(`  Ahora en la copia: ${repo.count()} variante(s). Peso y medidas NO vienen de Dropea: se completan a mano (hunter:add --coste-eur … o el panel).\n`);
 }
 
