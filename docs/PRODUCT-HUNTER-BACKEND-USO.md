@@ -183,6 +183,98 @@ del discovery (tope de peticiones y tiempo), para con motivo
 producto: lo hecho no se pierde. Con 4.142 productos, cruzar todo el
 catálogo son ~42 lotes de 100 en días distintos; empieza por `--categoria`.
 
+## 4b · Sesión típica en el NAS, paso a paso
+
+Todo se ejecuta dentro del contenedor (`docker exec casamable-agent …`). Los
+comandos no tocan pedidos, WhatsApp ni Shopify: solo leen Dropea y Meta y
+escriben en tablas propias del Cazador.
+
+**1. Copia del catálogo (una vez, y cuando cambie el catálogo)**
+
+```
+docker exec casamable-agent npm run hunter:dropea:sync
+```
+
+Salida esperada (4.142 productos son ~42 páginas, un par de minutos):
+
+```
+──── CATÁLOGO DE DROPEA · copia local ────
+  Copia actual: 0 variante(s) (nunca sincronizada)
+  página   1 · 100 producto(s)
+  …
+  página  42 · 42 producto(s)
+  ✓ 42 página(s) · 4142 producto(s) · 4300 variante(s) guardadas · copia de 2026-09-09
+  Ahora en la copia: 4300 variante(s). Peso y medidas NO vienen de Dropea: se completan a mano (hunter:add --coste-eur … o el panel).
+```
+
+Si sale `✗ lectura de Dropea deshabilitada`: faltan `DROPEA_API_KEY` o
+`DROPEA_API_ENABLED=1` en el `.env` (código de salida 2). Si se corta a mitad
+(red, 5xx) sale con código 3 y dice en qué página; la copia queda mezclada
+(parte nueva, parte vieja), no corrupta: vuelve a lanzarlo y se completa.
+`⚠ N variante(s) … no aparecieron en esta pasada` = productos que Dropea
+ya no devuelve; se conservan con su fecha anterior.
+
+**2. Primer cruce, pequeño**
+
+```
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 20
+```
+
+```
+──── CRUCE DROPEA × AD LIBRARY · 20 producto(s) · ES · 30 días ────
+  Catálogo local: 4300 variantes (copia del 2026-09-09) · ya cruzados: 0 (se saltan)
+  [  1/20] Cortaúñas Eléctrico 3 en 1 para mayores        match si     score    84  margen 74 %
+  [  2/20] Barra de apoyo con ventosa baño                match si     score    38  margen no calculable
+  [  3/20] Funda                                          match dudoso score    18  margen no calculable
+  …
+  Parada: completado · 20 procesado(s) · 9 con match · 20 peticiones a Meta · 41 s (corrida 1)
+```
+
+y la tabla ordenada por score (producto, coste, match, anuncio desde,
+activos, precio anuncio, margen %, score, motivo `validación+margen+confianza`).
+Lectura: un **84 con precio detectado** es «hay demanda y el margen bruto es
+grande: revisar a mano el anuncio (enlace en la ficha del panel) y el
+proveedor»; un **38 sin precio** es «alguien lo anuncia desde hace semanas,
+pero no sabemos a cuánto»; un **18 dudoso** es «una sola palabra genérica
+coincidió: casi seguro otro producto».
+
+Paradas posibles: `presupuesto_peticiones` (tope del lote), `rate_limit`
+(Meta pide esperar: lo hecho queda, relanza más tarde), `deadline` (15 min),
+`parada_emergencia` (EMERGENCY_STOP=1).
+
+**3. Seguir por categoría o por tandas**
+
+```
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 50 --categoria "cocina"
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 100          # siguientes 100 sin cruzar
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 100 --dias 60
+```
+
+`--categoria` filtra por palabra en el nombre (Dropea no tiene categorías en
+su API). Por defecto se saltan los ya cruzados, así que repetir el comando
+avanza por el catálogo. Cada producto es una petición a Meta: 100 productos
+≈ 100 peticiones; el discovery de Competencia comparte el mismo token, no
+lances los dos a la vez.
+
+**4. Ver lo que hay y volver a medir**
+
+```
+docker exec casamable-agent npm run hunter:cruce-dropea -- --ver                 # top 50 por score, sin red
+docker exec casamable-agent npm run hunter:cruce-dropea -- --ver --buscar "faja" --limite 10
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 20 --repetir  # re-cruza los ya cruzados: momentum
+docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 20 --json /app/data/cruce.json
+```
+
+`--repetir` vuelve a cruzar productos ya cruzados: el nuevo cruce compara sus
+anuncios activos con el anterior (momentum «fuerte / débil», con la fecha
+contra la que compara). Una semana entre pasadas es un buen ritmo.
+
+**5. En el panel**: Cazador → Buscar → fuente «Cruce Dropea × Ad Library»,
+palabras vacías, Buscar. Ordenado por score; en cada ficha, «Puntuación»
+enseña la fórmula y cada señal con lo observado, y «Hechos del producto»
+permite completar peso y medidas para que `hunter:score` calcule el margen
+real con envío, picking y rechazos.
+
 ## 5 · Comparar, economics y Landing Studio
 
 - **Comparar**: 2–4 candidatos, vivos o guardados, con los mismos campos

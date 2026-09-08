@@ -32,6 +32,7 @@ const eur = (n: number | null) => (n === null ? "—" : `${n.toFixed(2)} €`);
 const fecha = (sec: number | null) => (sec === null ? "—" : new Date(sec * 1000).toISOString().slice(0, 10));
 
 function tabla(rows: Array<import("../src/lib/product-hunter/internal/cruce").CruceRow>): void {
+  if (!rows.length) { console.log("  (sin cruces todavía: lanza npm run hunter:cruce-dropea -- --limite 20)"); return; }
   console.table(rows.map((c) => ({
     producto: (c.productName ?? "?").slice(0, 38),
     coste: eur(c.costEur),
