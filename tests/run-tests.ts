@@ -15207,6 +15207,63 @@ async function main(): Promise<void> {
       });
     });
 
+
+    await test("INTERNO · ensayo del primer lote de 20 (nombres realistas de catálogo): palabras clave sanas, una petición por producto, y un 429 de Meta a mitad deja lo hecho persistido y para con rate_limit", async () => {
+      limpiar();
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runCruceBatch, CruceRepository, productKeywords } = await import("../src/lib/product-hunter/internal/cruce");
+      const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const catalog = new DropeaCatalogRepository(raw);
+      const nombres = [
+        "Cortaúñas Eléctrico 3 en 1 para Mayores", "Barra de Apoyo con Ventosa para Baño 30cm", "Almohada Cervical Viscoelástica Ortopédica", "Faja Reductora Postparto Invisible",
+        "Organizador de Ropa Compresible (Pack 3)", "DashCam Doble Cámara Full HD Coche", "Calcetines de 5 Dedos para Juanetes - Talla L", "Elimina Durezas Eléctrico Recargable USB",
+        "Soporte", "Funda", "Mini Picadora Inalámbrica 250ml", "Masajeador Cervical con Calor Infrarrojo", "Lámpara LED Sensor Movimiento Recargable",
+        "Zapatillas Ortopédicas Hombre Negro 42", "Cojín Lumbar Memory Foam Oficina", "Cepillo Limpieza Vasos Eléctrico 2024", "Reloj Despertador Digital Proyector",
+        "Colchón Antiescaras Aire con Motor", "Andador Plegable Aluminio Ruedas Azul", "Pack 2 uds Color Rojo XL",
+      ];
+      catalog.upsertProducts(nombres.map((name, i) => ({ id: 20000 + i, name, status: "active", variants: [{ variant_id: 21000 + i, sku: `L20-${i}`, name: `${name} Estándar`, price: 5 + i, recommended_sale_price: 29.99 }] })), nowSec);
+      // Palabras clave que saldrían: se inspeccionan una a una (esto es lo que se manda a Meta).
+      const kws = nombres.map((n) => productKeywords(n));
+      assert.deepEqual(kws[0], ["cortaunas", "electrico", "mayores"]);
+      assert.deepEqual(kws[1], ["barra", "apoyo", "ventosa", "bano"], "30cm fuera");
+      assert.deepEqual(kws[6], ["calcetines", "dedos", "juanetes"], "«Talla L» fuera");
+      assert.deepEqual(kws[13], ["zapatillas", "ortopedicas", "hombre"], "color y número de talla fuera");
+      assert.deepEqual(kws[15], ["cepillo", "limpieza", "vasos", "electrico"], "el año 2024 fuera (limpieza de títulos del Hunter)");
+      assert.deepEqual(kws[18], ["andador", "plegable", "aluminio", "ruedas"], "color fuera, máximo 4");
+      assert.deepEqual(kws[19], [], "solo relleno y variante: no se busca");
+      assert.ok(kws.filter((k) => k.length >= 2).length >= 16, `${kws.filter((k) => k.length >= 2).length} de 20 con ≥ 2 palabras clave`);
+      assert.ok(kws.every((k) => k.every((w) => !/^(rojo|negro|azul|xl|talla|pack|uds|cm|ml)$/.test(w))), "ninguna variante se cuela");
+
+      // Ad Library simulada: responde a todo hasta la petición 12; desde ahí, límite de cuota sostenido.
+      let peticiones = 0;
+      const fetcher = (async (input: string | URL | Request) => {
+        const term = new URL(String(input)).searchParams.get("search_terms") ?? "";
+        peticiones++;
+        // A partir de la petición 12, Meta corta de verdad (el cliente reintenta con espera y luego se rinde).
+        if (peticiones >= 12) return new Response(JSON.stringify({ error: { message: "(#4) Application request limit reached", code: 4 } }), { status: 400, headers: { "content-type": "application/json" } });
+        const data = term ? [{ id: `${term}-1`, page_id: `p-${term.slice(0, 6)}`, page_name: `Tienda ${term.split(" ")[0]}`, ad_creative_bodies: [`${term}: oferta solo hoy 24,99 €`], ad_delivery_start_time: "2026-08-10" }] : [];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const repo = new CruceRepository(raw);
+      const r = await runCruceBatch({ token: "tok", now: nowSec, limit: 20, client: new AdLibraryClient("tok", fetcher, async () => {}), catalog, repo });
+      // El producto sin palabras clave no gasta petición; el límite se reintenta (cada reintento cuenta) y luego se para.
+      assert.equal(r.stopReason, "rate_limit");
+      assert.ok(r.processed >= 11 && r.processed < 20, `procesados ${r.processed}: lo hecho queda, el resto espera a otra pasada`);
+      assert.equal(r.requests, peticiones, "cada petición real cuenta en el presupuesto, incluido el reintento");
+      const run = raw.prepare("SELECT processed, stop_reason FROM hunter_cruce_runs WHERE id=?").get(r.runId) as { processed: number; stop_reason: string };
+      assert.equal(run.stop_reason, "rate_limit");
+      assert.equal(run.processed, r.processed);
+      // Los cruzados tienen precio detectado y match; los primeros 11 nombres son buenos.
+      const ok = r.cruces.filter((c) => c.match === "si");
+      assert.ok(ok.length >= 8, `${ok.length} con match «si»`);
+      assert.ok(ok.every((c) => c.detectedPriceEur === 24.99));
+      // Relanzar (con la cuota recuperada): los ya cruzados se saltan y se sigue por donde iba.
+      peticiones = -1000;
+      const r2 = await runCruceBatch({ token: "tok", now: nowSec + 3600, limit: 20, client: new AdLibraryClient("tok", fetcher, async () => {}), catalog, repo });
+      assert.ok(r2.cruces.every((c) => !r.cruces.some((x) => x.variantId === c.variantId)), "sin repetir los ya cruzados");
+      assert.equal(repo.crossedVariantIds().size, r.processed + r2.processed);
+    });
+
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
       const { spawnSync } = await import("node:child_process");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));
