@@ -272,6 +272,21 @@ export function windowLabel(): string {
   return `${fmt(windowStartMinutes())}–${fmt(windowEndMinutes())} (${TIMEZONE()})`;
 }
 
+/**
+ * GATE CENTRAL de escrituras a PROVEEDORES (08-09-2026, auditoría §3.1).
+ * Hasta hoy `markOrderToSend` (Beeping) solo miraba su propio flag: con
+ * EMERGENCY_STOP=1 paraban WhatsApp y Shopify, pero el mark-to-send al
+ * almacén podía salir. Mismo criterio que los otros dos gates de proveedor
+ * del repo (`dropea/create-gate.ts` y `beeping/release.ts`): la parada de
+ * emergencia manda; el flag propio de cada proveedor lo comprueba su
+ * adaptador; APP_MODE y allowlist las decide el llamador por pedido
+ * (`orderActionAllowed`), como ya hacen confirmOrder y Dropea.
+ */
+export function canWriteToSupplier(): { ok: true } | { ok: false; reason: string } {
+  if (emergencyStop()) return { ok: false, reason: "EMERGENCY_STOP activo: ninguna acción externa puede salir" };
+  return { ok: true };
+}
+
 /** GATE CENTRAL de escrituras Shopify (hoy solo tagsAdd WA_CONFIRMED). */
 export function canWriteToShopify(): boolean {
   if (emergencyStop()) return false;

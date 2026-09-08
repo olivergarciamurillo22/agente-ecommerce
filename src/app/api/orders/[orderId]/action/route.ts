@@ -16,6 +16,7 @@ import { audit, safeOrder } from "@/lib/workspace";
 import { systemDbHandle } from "@/lib/db";
 import { resolveAddressAlert } from "@/lib/orders/address-validation";
 import { markOrderToSend } from "@/lib/suppliers/beeping";
+import { logIntegrationEvent } from "@/lib/system/repo";
 import { autoDispatchEnabled, dispatchNow } from "@/lib/orders/auto-dispatch";
 import { revertAiCancellation } from "@/lib/orders/ai-cancellation";
 
@@ -119,7 +120,14 @@ export async function POST(req: NextRequest, { params }: RouteContext): Promise<
     audit(auth.user, "resolve_address_alert", "order", id, { note });
     // Con el cooldown activo el despacho lo decide el temporizador/“despachar
     // ahora”; sin él, se libera aquí el mark-to-send inmediato que se retuvo.
-    if (order.status === "confirmed" && !autoDispatchEnabled()) void markOrderToSend(order.shopify_order_number);
+    // Cerrar la alerta no pasa por la allowlist (es interno), pero el
+    // mark-to-send que sigue SÍ es una acción externa sobre el pedido: misma
+    // comprobación que confirmOrder (auditoría 08-09 §3.1). EMERGENCY_STOP lo
+    // frena dentro de markOrderToSend.
+    if (order.status === "confirmed" && !autoDispatchEnabled()) {
+      if (orderActionAllowed(order)) void markOrderToSend(order.shopify_order_number);
+      else logIntegrationEvent("beeping", "beeping_mark_to_send_bloqueado", "warning", "mark-to-send retenido al cerrar la alerta: el pedido no está en la allowlist de TEST_MODE", order.shopify_order_number);
+    }
     return NextResponse.json({ ok: true, order: vistaDelPedido(id) });
   }
   // "Revertir cancelación" (07-09): deshace una cancelación AUTOMÁTICA por IA.

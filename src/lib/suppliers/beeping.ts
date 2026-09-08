@@ -4,11 +4,13 @@
 // proveedor debe hacerse cargo de cada pedido.
 
 import { logIntegrationEvent } from "../system/repo";
+import { canWriteToSupplier, logOnce } from "../safety";
 
 const DEFAULT_BASE_URL = "https://app.gobeeping.com";
 const DEFAULT_TIMEOUT_MS = 20_000;
 
 export type BeepingMarkToSendResult =
+  | { outcome: "blocked"; reason: string }
   | { outcome: "simulated" }
   | { outcome: "sent" }
   | { outcome: "not_found" }
@@ -22,6 +24,16 @@ function event(eventType: string, severity: "info" | "warning", message: string,
 export async function markOrderToSend(externalId: string | number): Promise<BeepingMarkToSendResult> {
   const id = String(externalId).trim();
   try {
+    // GATE (safety.ts, 08-09-2026): la parada de emergencia va ANTES que el
+    // flag propio. Con EMERGENCY_STOP=1 no sale ni la simulación: se registra
+    // como bloqueo, con motivo, y quien lo lea (auto-despacho) lo trata como
+    // no ejecutado.
+    const gate = canWriteToSupplier();
+    if (!gate.ok) {
+      event("beeping_mark_to_send_bloqueado", "warning", `mark-to-send BLOQUEADO por safety gate: ${gate.reason}`, id);
+      logOnce(`beeping-mts-blocked-${id}`, `[SAFE MODE] Beeping mark-to-send NO enviado | Pedido: ${id} | ${gate.reason}`);
+      return { outcome: "blocked", reason: gate.reason };
+    }
     if (process.env.BEEPING_INTEGRATION_ENABLED !== "1") {
       event("beeping_mark_to_send_simulado", "info", "se habria marcado el pedido para enviar en Beeping", id);
       return { outcome: "simulated" };

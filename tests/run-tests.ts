@@ -1151,6 +1151,93 @@ async function main(): Promise<void> {
     assert.ok(JSON.parse(l1.problems_json).includes("direccion_relleno_de_prueba"));
   });
 
+  await test("SEGURIDAD 08-09 · mark-to-send de Beeping pasa por el gate central: con EMERGENCY_STOP=1 se bloquea ANTES del flag propio, sin HTTP y con rastro", async () => {
+    const { markOrderToSend } = await import("../src/lib/suppliers/beeping");
+    const { canWriteToSupplier } = await import("../src/lib/safety");
+    const raw = db.systemDbHandle();
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch;
+    try {
+      // Parada activa + integración ENCENDIDA con credenciales: antes esto salía a Beeping.
+      await withEnv({ EMERGENCY_STOP: "1", BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
+        assert.equal(canWriteToSupplier().ok, false);
+        const r = await markOrderToSend("777001");
+        assert.equal(r.outcome, "blocked");
+        assert.match("reason" in r ? r.reason : "", /EMERGENCY_STOP/);
+        assert.equal(calls, 0, "cero HTTP a Beeping con la parada activa");
+        const ev = raw.prepare("SELECT event_type, severity, message FROM integration_events WHERE order_ref='777001' ORDER BY id DESC LIMIT 1").get() as { event_type: string; severity: string; message: string };
+        assert.equal(ev.event_type, "beeping_mark_to_send_bloqueado");
+        assert.equal(ev.severity, "warning");
+        assert.match(ev.message, /EMERGENCY_STOP/);
+      });
+      // Con la parada activa tampoco se "simula": el bloqueo va antes que el flag.
+      await withEnv({ EMERGENCY_STOP: "1", BEEPING_INTEGRATION_ENABLED: "0" }, async () => {
+        assert.equal((await markOrderToSend("777002")).outcome, "blocked");
+        assert.equal(calls, 0);
+      });
+      // Sin parada, el flujo real sigue igual que antes: flag apagado simula, flag encendido envía.
+      await withEnv({ EMERGENCY_STOP: "0", BEEPING_INTEGRATION_ENABLED: "0" }, async () => {
+        assert.equal((await markOrderToSend("777003")).outcome, "simulated");
+        assert.equal(calls, 0);
+      });
+      await withEnv({ EMERGENCY_STOP: "0", BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto", BEEPING_API_BASE_URL: "https://beeping.test" }, async () => {
+        assert.equal(canWriteToSupplier().ok, true);
+        assert.equal((await markOrderToSend("777004")).outcome, "sent");
+        assert.equal(calls, 1, "sin parada y con flag, la petición sale");
+      });
+    } finally { globalThis.fetch = realFetch; }
+  });
+
+  await test("SEGURIDAD 08-09 · resolve_address_alert: cerrar la alerta sigue funcionando con EMERGENCY_STOP=1, pero el mark-to-send que arrastra NO sale; y fuera de la allowlist se retiene con rastro", async () => {
+    const { NextRequest } = await import("next/server");
+    const route = await import("../src/app/api/orders/[orderId]/action/route");
+    const sessions = await import("../src/lib/auth/session");
+    const raw = db.systemDbHandle();
+    raw.prepare("INSERT OR IGNORE INTO users(email,name,role,password_hash) VALUES('owner-gate@test','Dueña Gate','owner','x')").run();
+    const userId = (raw.prepare("SELECT id FROM users WHERE email='owner-gate@test'").get() as { id: number }).id;
+    const headers = { cookie: `${sessions.SESSION_COOKIE}=${sessions.createSession(userId)}`, "content-type": "application/json" };
+    const realFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (async () => { calls++; return new Response(null, { status: 204 }); }) as typeof fetch;
+    try {
+      // 1 · Pedido confirmado con alerta abierta, parada ACTIVA, integración encendida.
+      const o1 = mkAddrOrder("41", { address_line1: "asdasd" });
+      addrVal.runAddressValidationLayer1(o1);
+      raw.prepare("UPDATE orders SET status='confirmed' WHERE id=?").run(o1.id);
+      await withEnv({ EMERGENCY_STOP: "1", BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto", TEST_MODE: "0" }, async () => {
+        const res = await route.POST(new NextRequest(`http://localhost/api/orders/${o1.id}/action`, { method: "POST", headers, body: JSON.stringify({ action: "resolve_address_alert", note: "ok" }) }), { params: Promise.resolve({ orderId: String(o1.id) }) });
+        assert.equal(res.status, 200, "la alerta se cierra igual: es interno");
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(addrVal.hasOpenAddressAlert(o1.id), false);
+        assert.equal(calls, 0, "con la parada, el mark-to-send NO sale");
+        assert.ok(raw.prepare("SELECT 1 FROM integration_events WHERE event_type='beeping_mark_to_send_bloqueado' AND order_ref=?").get(o1.shopify_order_number));
+      });
+      // 2 · Sin parada pero pedido FUERA de la allowlist de TEST_MODE: se retiene, con rastro.
+      const o2 = mkAddrOrder("42", { address_line1: "asdasd" });
+      addrVal.runAddressValidationLayer1(o2);
+      raw.prepare("UPDATE orders SET status='confirmed' WHERE id=?").run(o2.id);
+      await withEnv({ EMERGENCY_STOP: "0", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: "34600999999", BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto" }, async () => {
+        const res = await route.POST(new NextRequest(`http://localhost/api/orders/${o2.id}/action`, { method: "POST", headers, body: JSON.stringify({ action: "resolve_address_alert" }) }), { params: Promise.resolve({ orderId: String(o2.id) }) });
+        assert.equal(res.status, 200);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(calls, 0, "fuera de la allowlist no se toca el almacén");
+        const ev = raw.prepare("SELECT message FROM integration_events WHERE event_type='beeping_mark_to_send_bloqueado' AND order_ref=? ORDER BY id DESC LIMIT 1").get(o2.shopify_order_number) as { message: string };
+        assert.match(ev.message, /allowlist/);
+      });
+      // 3 · Sin parada y en la allowlist: el mark-to-send sale como siempre.
+      const o3 = mkAddrOrder("43", { address_line1: "asdasd" });
+      addrVal.runAddressValidationLayer1(o3);
+      raw.prepare("UPDATE orders SET status='confirmed' WHERE id=?").run(o3.id);
+      await withEnv({ EMERGENCY_STOP: "0", TEST_MODE: "1", TEST_PHONE_ALLOWLIST: o3.phone, BEEPING_INTEGRATION_ENABLED: "1", BEEPING_ACCOUNT_EMAIL: "pedro@example.com", BEEPING_ACCOUNT_PASSWORD: "secreto", BEEPING_API_BASE_URL: "https://beeping.test" }, async () => {
+        const res = await route.POST(new NextRequest(`http://localhost/api/orders/${o3.id}/action`, { method: "POST", headers, body: JSON.stringify({ action: "resolve_address_alert" }) }), { params: Promise.resolve({ orderId: String(o3.id) }) });
+        assert.equal(res.status, 200);
+        await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        assert.equal(calls, 1, "el flujo real de despacho no se ha roto");
+      });
+    } finally { globalThis.fetch = realFetch; }
+  });
+
   await test("DIRECCIÓN API · el propietario cierra la alerta desde la ficha; queda en audit_log con su nombre", async () => {
     const order = mkAddrOrder("18", { address_line1: "asdasd" });
     addrVal.runAddressValidationLayer1(order);
