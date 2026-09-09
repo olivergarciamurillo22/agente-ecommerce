@@ -34,6 +34,8 @@ export interface CatalogProduct {
   productType: string | null;
   priceMin: number | null;
   priceMax: number | null;
+  /** Precio «antes» (compare_at_price) más alto de las variantes, si la tienda lo muestra. */
+  compareAtMax?: number | null;
   variants: number;
   images: number;
   available: boolean | null;
@@ -221,6 +223,7 @@ function toProduct(origin: string, p: ShopifyProductJson): CatalogProduct | null
   if (!title || !handle) return null;
   const precios = (p.variants ?? []).map((v) => Number(v.price)).filter((n) => Number.isFinite(n) && n >= 0);
   const disponibles = (p.variants ?? []).map((v) => v.available).filter((v): v is boolean => typeof v === "boolean");
+  const antes = (p.variants ?? []).map((v) => Number((v as { compare_at_price?: unknown }).compare_at_price)).filter((n) => Number.isFinite(n) && n > 0);
   return {
     title: title.slice(0, 200),
     handle: handle.slice(0, 200),
@@ -228,6 +231,7 @@ function toProduct(origin: string, p: ShopifyProductJson): CatalogProduct | null
     productType: p.product_type ? strip(String(p.product_type)).slice(0, 120) : null,
     priceMin: precios.length ? Math.min(...precios) : null,
     priceMax: precios.length ? Math.max(...precios) : null,
+    compareAtMax: antes.length ? Math.max(...antes) : null,
     variants: (p.variants ?? []).length,
     images: Array.isArray(p.images) ? p.images.length : 0,
     available: disponibles.length ? disponibles.some(Boolean) : null,

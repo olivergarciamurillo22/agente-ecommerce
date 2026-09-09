@@ -2249,6 +2249,11 @@ export function migrateHunterDeepDive(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_hunter_cod_stores_page ON hunter_cod_stores(page_id, captured_at DESC);
   `);
+  const colsCod = new Set((db.prepare("PRAGMA table_info(hunter_cod_stores)").all() as Array<{ name: string }>).map((c) => c.name));
+  for (const [nombre, tipo] of [["cod_generic", "INTEGER"], ["site_products", "INTEGER"]] as const) {
+    if (colsCod.has(nombre)) continue;
+    try { db.exec(`ALTER TABLE hunter_cod_stores ADD COLUMN ${nombre} ${tipo}`); } catch (err) { if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err; }
+  }
   // Radiografía de la cuenta (paso 0, 09-09): columna aditiva sobre la misma tabla.
   // Pipeline completo (09-09): recomendación, competencia, otros productos, vídeo, coherencia de precio, informe entero.
   const cols = new Set((db.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).map((c) => c.name));

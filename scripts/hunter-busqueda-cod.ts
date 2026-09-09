@@ -11,7 +11,9 @@
 // FASE 2 (cara: radiografía ≤ 5 peticiones + deep dive por producto en Dropea; SIEMPRE lote explícito):
 //   npm run hunter:busqueda-cod -- --auditar --ids <page_id1,page_id2>
 //   npm run hunter:busqueda-cod -- --auditar --top 20              (los 20 primeros del último barrido AÚN NO auditados; máx. 30 por tanda)
-//   opciones: --max-productos 4 · --sin-vision · --sin-video · --sin-probar-video · --json informe.json
+//   opciones: --max-productos 4 · --sin-vision · --sin-video · --sin-probar-video · --sin-catalogo-sitio · --json informe.json
+//   (el catálogo REAL del sitio se lee en fase 2: dominio del anuncio → /products.json, 2–4 peticiones HTTP por tienda;
+//    si falla se sigue con el texto minado y se dice; perfil_tienda_cod_generica = veredicto a nivel de tienda)
 //
 // INFORME CONSOLIDADO (solo lectura, 0 peticiones): todas las tiendas auditadas, una fila por producto con
 // señal fuerte sin proveedor o ganador_probable en Dropea, madurez del ángulo entre --min-dias y --max-dias:
@@ -57,10 +59,16 @@ function pintarTienda(titulo: string, a: Audit): void {
     p(`  · diversidad del catálogo: ${x.diversity.level.toUpperCase()} — ${x.diversity.note}`);
     p(`  · avatar: ${x.avatar.summary ?? "sin señales"}`);
   }
+  p(`PERFIL DE TIENDA COD GENÉRICA: ${a.profile?.codGenerica ? "SÍ" : "NO"} — ${a.profile?.reason ?? "no calculado (auditoría anterior)"}`);
+  if (a.siteCatalog) {
+    p(`Catálogo real del sitio: ${a.siteCatalog.status === "ok" ? `${a.siteCatalog.domain} · ${a.siteCatalog.products} productos${a.siteCatalog.truncated ? "+" : ""}${a.siteCatalog.brand ? ` · marca ${a.siteCatalog.brand}` : ""}${a.siteCatalog.diversity ? ` · ${a.siteCatalog.diversity.level}` : ""} · ${a.siteCatalog.requests} peticiones` : (a.siteCatalog.reason ?? a.siteCatalog.status)}`);
+    for (const it of a.siteCatalog.items.slice(0, 12)) p(`    · ${it.title.slice(0, 70)} · ${it.price !== null ? `${it.price} €` : "—"}${it.discountPct ? ` (antes ${it.compareAt} €, −${it.discountPct} %)` : ""}`);
+    if (a.siteCatalog.items.length > 12) p(`    … y ${a.siteCatalog.items.length - 12} más`);
+  }
   p(`Productos ganadores detectados (${a.products.length}):`);
   for (const x of a.products) {
     const pr = x.product;
-    p(`  ■ «${pr.label}» · ${pr.ads} activos · ${pr.longestActiveDays ?? "?"} días el más antiguo · tiene_video: ${x.video.status === "si" ? `sí (${x.video.withVideo} de ${x.video.checked} comprobados)` : x.video.status === "no" ? `no (${x.video.checked} comprobados)` : `no comprobado (${x.video.reason ?? "—"})`} · palabras: ${x.keywords.join(", ")} · ${pr.adLink}${x.video.status === "si" ? " ← con vídeo" : ""}`);
+    p(`  ■ ${x.realName ? `«${x.realName}»${x.siteMatch?.price !== null && x.siteMatch?.price !== undefined ? ` a ${x.siteMatch.price} €${x.siteMatch.discountPct ? ` (−${x.siteMatch.discountPct} %)` : ""}` : ""} (nombre real del sitio; anuncio: «${pr.label}»)` : `«${pr.label}»`} · ${pr.ads} activos · ${pr.longestActiveDays ?? "?"} días el más antiguo · tiene_video: ${x.video.status === "si" ? `sí (${x.video.withVideo} de ${x.video.checked} comprobados)` : x.video.status === "no" ? `no (${x.video.checked} comprobados)` : `no comprobado (${x.video.reason ?? "—"})`} · palabras: ${x.keywords.join(", ")} · ${pr.adLink}${x.video.status === "si" ? " ← con vídeo" : ""}`);
     if (x.deepDive) {
       const d = x.deepDive;
       p(`    EN DROPEA: «${x.dropea.match!.name}» (${x.dropea.match!.costEur !== null ? `${x.dropea.match!.costEur.toFixed(2)} €` : "sin coste"}) · gate: ${x.dropea.gate?.reason ?? "—"}`);
@@ -94,7 +102,7 @@ async function main(): Promise<void> {
     const rows = repo.stores({ limit: Number.parseInt(arg("limite") ?? "", 10) || 50 });
     console.log(`\n──── TIENDAS COD AUDITADAS · ${rows.length} ────\n`);
     if (!rows.length) console.log("  (ninguna todavía)");
-    console.table(rows.map((r) => ({ id: r.id, page_id: r.pageId, tienda: (r.pageName ?? "—").slice(0, 28), prioridad: r.priority ?? "—", productos: r.products, "en Dropea": r.inDropea, "fuerte sin prov.": r.strongWithoutSupplier, catalogo: r.diversity ?? "—", fecha: new Date(r.capturedAt * 1000).toISOString().slice(0, 10) })));
+    console.table(rows.map((r) => ({ id: r.id, page_id: r.pageId, tienda: (r.pageName ?? "—").slice(0, 28), prioridad: r.priority ?? "—", "perfil COD": r.codGeneric ? "SÍ" : "no", productos: r.products, "en sitio": r.siteProducts ?? "—", "en Dropea": r.inDropea, "fuerte sin prov.": r.strongWithoutSupplier, catalogo: r.diversity ?? "—", fecha: new Date(r.capturedAt * 1000).toISOString().slice(0, 10) })));
     return;
   }
   if (hasFlag("informe")) {
@@ -103,9 +111,11 @@ async function main(): Promise<void> {
     if (!Number.isFinite(minDays) || !Number.isFinite(maxDays) || minDays < 0 || maxDays < minDays) { console.error("✗ --min-dias y --max-dias deben ser enteros con min ≤ max"); process.exit(2); }
     const rows = repo.stores({ limit: 5000 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! }));
     const filas = consolidatedReport(rows, { minDays, maxDays });
-    console.log(`\n──── INFORME CONSOLIDADO · ${rows.length} tienda(s) auditada(s) · madurez del ángulo entre ${minDays} y ${maxDays} días · ${filas.length} producto(s) · 0 peticiones ────\n`);
+    const tiendasPerfil = new Set(filas.filter((f) => f.storeProfile).map((f) => f.pageId)).size;
+    const soloPorPerfil = filas.filter((f) => f.verdict === "perfil_tienda_cod_generica").length;
+    console.log(`\n──── INFORME CONSOLIDADO · ${rows.length} tienda(s) auditada(s) · madurez del ángulo entre ${minDays} y ${maxDays} días · ${filas.length} fila(s) · ${tiendasPerfil} tienda(s) con perfil COD genérico (${soloPorPerfil} entran SOLO por el perfil, antes no aparecían) · 0 peticiones ────\n`);
     if (!filas.length) console.log("  (ningún producto cumple el filtro)");
-    console.table(filas.map((f) => ({ tienda: f.store.slice(0, 24), dominio: f.domain ?? "—", producto: f.product.slice(0, 36), video: f.hasVideo, dias: f.maturityDays, activos: f.activeAds, "en Dropea": f.inDropea ? `sí${f.marginPct !== null ? ` (margen ${Math.round(f.marginPct * 100)} %)` : ""}` : "no", catalogo: f.diversity, auditoria: f.auditedAt, "#": f.auditId })));
+    console.table(filas.map((f) => ({ "perfil COD": f.storeProfile ? "SÍ" : "no", veredicto: f.verdict.replace(" (Dropea)", "").slice(0, 26), tienda: f.store.slice(0, 24), dominio: f.domain ?? "—", producto: f.product.slice(0, 36), video: f.hasVideo, dias: f.maturityDays, activos: f.activeAds, "en Dropea": f.inDropea ? `sí${f.marginPct !== null ? ` (margen ${Math.round(f.marginPct * 100)} %)` : ""}` : "no", catalogo: f.diversity, auditoria: f.auditedAt, "#": f.auditId })));
     for (const f of filas) console.log(`  ${f.store} · «${f.product}» · ${f.maturityDays} días · ${f.adLink}${f.hasVideo === "si" ? " ← vídeo" : ""}`);
     console.log(`\n  ${CONSOLIDATED_RULE}\n`);
     if (arg("json")) fs.writeFileSync(path.resolve(arg("json")!), JSON.stringify(filas, null, 2));
@@ -174,7 +184,7 @@ async function main(): Promise<void> {
   for (const pageId of pageIds) {
     if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activado a mitad: se para aquí, lo hecho queda.\n"); break; }
     const sw = sweep?.result?.stores.find((s) => s.pageId === pageId) ?? null;
-    const a = await auditCodStore({ client, pageId, pageName: sw?.pageName ?? null, country: pais, now, sweep: sw, dropeaSearch, maxProducts: Number.parseInt(arg("max-productos") ?? "", 10) || 4, accountSummarize: makeAccountSummarizer(), deepDive: { token, vision, video, skipVideo: hasFlag("sin-video"), videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), dropeaLookup }, probeVideo: !hasFlag("sin-probar-video"), maxVideoProbesPerProduct: Number.parseInt(arg("max-render") ?? "", 10) || 3 });
+    const a = await auditCodStore({ client, pageId, pageName: sw?.pageName ?? null, country: pais, now, sweep: sw, dropeaSearch, maxProducts: Number.parseInt(arg("max-productos") ?? "", 10) || 4, accountSummarize: makeAccountSummarizer(), deepDive: { token, vision, video, skipVideo: hasFlag("sin-video"), videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), dropeaLookup }, siteCatalog: !hasFlag("sin-catalogo-sitio"), probeVideo: !hasFlag("sin-probar-video"), maxVideoProbesPerProduct: Number.parseInt(arg("max-render") ?? "", 10) || 3 });
     if (!a.account) {
       console.log(`\n  ✗ ${sw?.pageName ?? pageId}: cuenta no leída (${a.incomplete.map((i) => i.reason).join("; ")}). NO se persiste: volverá a entrar en la siguiente tanda.`);
       if (/token|OAuth|permis/i.test(a.incomplete.map((i) => i.reason).join(" "))) { console.error("\n✗ Token o permisos: se para la tanda.\n"); break; }

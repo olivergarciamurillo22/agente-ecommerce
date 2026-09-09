@@ -16005,6 +16005,7 @@ async function main(): Promise<void> {
       const { CodHuntRepository } = await import("../src/lib/hunter/deep-dive/cod-repository");
       const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
       const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { productKeywords } = await import("../src/lib/product-hunter/internal/cruce");
       const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
       const crudo = (id: string, page: [string, string], body: string, start: string, caption: string, stop?: string, title?: string) => ({ id, page_id: page[0], page_name: page[1], ad_creative_bodies: [body], ad_creative_link_titles: title ? [title] : [], ad_creative_link_captions: [caption], ad_delivery_start_time: start, ...(stop ? { ad_delivery_stop_time: stop } : {}) });
       const TK: [string, string] = ["8001", "Takuyi"]; const GH: [string, string] = ["8002", "ghd"]; const NO: [string, string] = ["8003", "SinFrase"];
@@ -16102,11 +16103,16 @@ async function main(): Promise<void> {
       assert.equal(marca.verdict, "senal_debil_sin_proveedor", "marca propia: nunca fuerte");
       assert.match(a.summary, /«Takuyi» \(ES\): anuncia desde/); assert.match(a.summary, /EN DROPEA como «Purificador de aire ozono portátil»: ganador probable, margen real 64 %/); assert.match(a.summary, /NO en Dropea: senal debil sin proveedor/);
       const cuentas = urls.filter((u) => u.host === "graph.facebook.com" && u.searchParams.get("search_page_ids")); assert.equal(cuentas.length, 1, "la cuenta se lee UNA vez por tienda, aunque haya 2 deep dives");
-      assert.equal(a.requests, 1 + 5 + 2 * (1 + 2 + 1), "cuenta + 5 render_ad de sondeo (2+2+1) + por producto en Dropea: búsqueda, portada, catálogo y el render_ad del propio deep dive");
-      assert.match(a.summary, /«Purificador de aire ozono» \(2 activos, 120 días, vídeo en 1\)/);
+      assert.equal(a.requests, 1 + 2 + 5 + 2 * (1 + 2 + 1), "cuenta + catálogo real del sitio (portada + products.json) + 5 render_ad de sondeo (2+2+1) + por producto en Dropea: búsqueda, portada, catálogo y el render_ad del propio deep dive");
+      // Catálogo REAL del sitio y nombre real del producto: el purificador se empareja con el título del sitio; la báscula no está en el sitio.
+      assert.equal(a.siteCatalog.status, "ok"); assert.equal(a.siteCatalog.domain, "takuyi.es"); assert.equal(a.siteCatalog.products, 2); assert.equal(a.siteCatalog.requests, 2);
+      assert.equal(purif.realName, "Purificador de aire con ozono Takuyi"); assert.equal(purif.siteMatch?.price, 39.99); assert.equal(basc.realName, null); assert.equal(gafas.realName, "Gafas de sol polarizadas");
+      // Perfil de tienda COD genérica: Takuyi (disperso, 3 minados, 120 días) = SÍ.
+      assert.equal(a.profile.codGenerica, true); assert.equal(a.profile.distinctProducts, 3); assert.equal(a.profile.productsSource, "anuncios+sitio"); assert.match(a.profile.reason, /^SÍ:/); assert.match(a.summary, /Perfil de tienda COD genérica: SÍ/); assert.match(a.summary, /«Purificador de aire con ozono Takuyi» a 39.99 € \[anuncio: «Purificador de aire ozono»\]/);
+      assert.match(a.summary, /\[anuncio: «Purificador de aire ozono»\] \(2 activos, 120 días, vídeo en 1\)/);
       // Persistencia por tienda + reimpresión.
       const sid = repo.insertStore(a, sweepId);
-      const fila = repo.storeById(sid)!; assert.equal(fila.inDropea, 2); assert.equal(fila.strongWithoutSupplier, 0); assert.equal(fila.diversity, "disperso"); assert.equal(fila.audit?.products.length, 3); assert.equal(repo.stores()[0].id, sid); assert.ok(repo.auditedPageIds().has("8001"));
+      const fila = repo.storeById(sid)!; assert.equal(fila.codGeneric, true); assert.equal(fila.siteProducts, 2); assert.equal(fila.inDropea, 2); assert.equal(fila.strongWithoutSupplier, 0); assert.equal(fila.diversity, "disperso"); assert.equal(fila.audit?.products.length, 3); assert.equal(repo.stores()[0].id, sid); assert.ok(repo.auditedPageIds().has("8001"));
       const dd = new DeepDiveRepository(raw);
       const ddId = dd.insert({ cruceId: null, variantId: 901, adlibCandidateKey: "ES:8001:cod", adId: "t1", keywords: ["purificador", "aire", "ozono"], report: purif.deepDive!, capturedAt: nowSec });
       assert.equal(dd.byId(ddId)!.verdict, "ganador_probable");
@@ -16120,12 +16126,47 @@ async function main(): Promise<void> {
       assert.equal(filas[0].marginPct, 0.82); assert.equal(filas[0].diversity, "disperso"); assert.equal(filas[0].hasVideo, "no"); assert.equal(filas[0].store, "Takuyi"); assert.equal(filas[0].domain, "takuyi.es"); assert.match(CONSOLIDATED_RULE, /min-dias/);
       const amplio = consolidatedReport(repo.stores({ limit: 100 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! })), { minDays: 0, maxDays: 365 });
       assert.deepEqual(amplio.map((f) => f.maturityDays), [120, 90], "de más maduro a menos"); assert.equal(amplio[0].adLink, "https://www.facebook.com/ads/library/?id=t1b", "el enlace prioriza el anuncio con vídeo");
+      // Perfil puro: Venygo-like (10 productos ™ en el sitio, solo 2 minados, 20 días, ningún producto ≥ 30 días) = SÍ; ghd-like (concentrado) = NO; sitio caído → se usa lo minado.
+      const { storeProfile, readSiteCatalog, PROFILE_RULE } = await import("../src/lib/hunter/deep-dive/cod-hunt");
+      const { catalogDiversity } = await import("../src/lib/hunter/deep-dive/account");
+      const prod = (label: string, keywords: string[], dias: number) => ({ label, keywords, ads: 1, adIds: [], oldestActiveStart: null, longestActiveDays: dias, sample: "", adLink: "l", isOriginal: false });
+      const cuentaBase = { ...a.account!, daysAdvertising: 20, firstAdStart: dia(20) };
+      const venygoMinados = [prod("Pago contra reembolso y envío 24h", ["reembolso", "envio"], 12), prod("DuchaPura™ filtro ducha", ["duchapura", "filtro", "ducha"], 9)];
+      const venygoSitio = ["DuchaPura™ | Filtro Purificador para la Ducha", "AquaBrush™ Cepillo Pulverizador 2 en 1", "BatteryGuard™ Protector de Batería", "LimpiaPro™", "Sellafresh™", "Otoscopio Pro™", "Cortauñas Eléctrico 3 en 1™", "TurboVac™", "Masajeador cervical™", "Lámpara solar™"].map((t) => ({ label: t, keywords: productKeywords(t), ads: 0, adIds: [], oldestActiveStart: null, longestActiveDays: null, sample: "", adLink: "u", isOriginal: false }));
+      const sitioOk = { domain: "venygo.com", status: "ok" as const, reason: null, products: 10, truncated: false, brand: "Venygo", items: [], diversity: catalogDiversity(venygoSitio, ["venygo"]), requests: 2 };
+      const venygo = storeProfile({ ...cuentaBase, products: venygoMinados, diversity: catalogDiversity(venygoMinados, ["venygo"]) }, sitioOk);
+      assert.equal(venygo.codGenerica, true, "10 productos reales dispersos + 20 días: perfil SÍ aunque ningún producto pase de 12 días"); assert.equal(venygo.distinctProducts, 10); assert.equal(venygo.productsSource, "anuncios+sitio"); assert.equal(venygo.diversity, "disperso"); assert.equal(venygo.rule, PROFILE_RULE);
+      const sitioCaido = { domain: "lacesta.es", status: "no_accesible" as const, reason: "catálogo del sitio no accesible (fetch failed): usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 1 };
+      const sinSitio = storeProfile({ ...cuentaBase, products: venygoMinados, diversity: catalogDiversity(venygoMinados, []) }, sitioCaido);
+      assert.equal(sinSitio.codGenerica, false, "sin sitio, solo 2 minados: no llega a 3"); assert.match(sinSitio.reason, /menos de 3 productos distintos/); assert.equal(sinSitio.productsSource, "anuncios");
+      const ghdMinados = [prod("ghd Platinum+ plancha", ["ghd", "platinum", "plancha"], 60), prod("ghd Gold plancha", ["ghd", "gold", "plancha"], 40), prod("ghd Chronos styler plancha", ["ghd", "chronos", "styler", "plancha"], 30), prod("ghd Helios secador", ["ghd", "helios", "secador"], 20)];
+      const ghd = storeProfile({ ...cuentaBase, daysAdvertising: 400, products: ghdMinados, diversity: catalogDiversity(ghdMinados, ["ghd"]) }, sitioCaido);
+      assert.equal(ghd.codGenerica, false, "concentrado: marca propia, no sube aunque tenga 4 productos"); assert.match(ghd.reason, /catálogo concentrado/);
+      assert.equal(storeProfile({ ...cuentaBase, daysAdvertising: 5, products: venygoMinados }, sitioOk).codGenerica, false, "menos de 14 días anunciando");
+      assert.equal(storeProfile(null, sitioCaido).codGenerica, false);
+      const sinDominio = await readSiteCatalog(null, fetcher); assert.equal(sinDominio.status, "sin_dominio"); assert.match(sinDominio.reason!, /usando texto minado/);
+      const caido = await readSiteCatalog("caido.es", (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch); assert.equal(caido.status, "no_accesible"); assert.match(caido.reason!, /usando texto minado del anuncio/);
+      // Informe consolidado: una tienda con perfil SÍ y sin ningún producto en señal fuerte entra igualmente, y sube por encima de las demás.
+      const auditVenygo = { ...a, pageId: "9009", pageName: "Venygo", account: { ...cuentaBase, products: venygoMinados, diversity: catalogDiversity(venygoMinados, ["venygo"]) }, products: venygoMinados.map((pr) => ({ product: pr, keywords: pr.keywords, video: { status: "no_comprobado" as const, checked: 0, withVideo: 0, videoAdIds: [], reason: null }, realName: null, siteMatch: null, dropea: { searched: true, candidates: [], match: null, gate: null }, deepDive: null, signal: { verdict: "senal_debil_sin_proveedor" as const, reason: "x" }, recommendation: { action: "no_testear" as const, reason: "x", sourcing: "alternativo" as const } })), siteCatalog: sitioOk, profile: venygo };
+      const sidV = repo.insertStore(auditVenygo, sweepId);
+      const { consolidatedReport: informe } = await import("../src/lib/hunter/deep-dive/cod-hunt");
+      const filasP = informe(repo.stores({ limit: 100 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! })), { minDays: 20, maxDays: 90 });
+      const fv = filasP.find((f) => f.store === "Venygo")!; assert.ok(fv, "Venygo entra en el informe aunque ningún producto llegue a señal fuerte ni a 20 días"); assert.equal(fv.verdict, "perfil_tienda_cod_generica"); assert.equal(fv.maturityDays, 12); assert.equal(fv.storeProfile, true);
+      assert.ok(filasP.every((f, i) => i === 0 || Number(f.storeProfile) <= Number(filasP[i - 1].storeProfile)), "las tiendas con perfil van antes que las que no lo tienen (Takuyi también lo tiene, y con más madurez va primero)");
+      assert.ok(filasP.filter((f) => f.store === "Venygo").length === 1, "una sola fila por tienda cuando entra solo por el perfil");
+      assert.ok(repo.stores().slice(0, 2).some((r) => r.id === sidV), "y en --ver-tiendas va arriba con las de perfil"); assert.equal(repo.storeById(sidV)!.codGeneric, true);
+      // Auditoría antigua (sin profile ni siteCatalog persistidos): el perfil se calcula al vuelo con lo persistido.
+      const { profile: _p, siteCatalog: _s, ...antigua } = auditVenygo; void _p; void _s;
+      const sidA = repo.insertStore({ ...(antigua as typeof auditVenygo), pageId: "9010", pageName: "Antigua" }, sweepId);
+      const filasA = informe([{ id: sidA, capturedAt: nowSec, audit: JSON.parse(JSON.stringify({ ...antigua, pageId: "9010", pageName: "Antigua" })) }], { minDays: 20, maxDays: 90 });
+      assert.equal(filasA.length, 0, "sin catálogo del sitio solo hay 2 productos minados: el perfil retroactivo no la sube");
       // Sin catálogo local: todo queda «no en Dropea» y se declara.
-      const sinCat = await auditCodStore({ client, pageId: "8001", country: "ES", now: nowSec, dropeaSearch: null, maxProducts: 2, deepDive: { fetcher }, probeVideo: false });
+      const sinCat = await auditCodStore({ client, pageId: "8001", country: "ES", now: nowSec, dropeaSearch: null, maxProducts: 2, deepDive: { fetcher }, probeVideo: false, siteCatalog: false });
+      assert.equal(sinCat.siteCatalog.status, "desactivado"); assert.equal(sinCat.profile.productsSource, "anuncios");
       assert.ok(sinCat.products.every((p) => p.video.status === "no_comprobado"));
       assert.ok(sinCat.incomplete.some((i) => i.part === "dropea")); assert.ok(sinCat.products.every((p) => !p.dropea.searched && p.signal));
       // Cuenta vacía / fallo: se dice.
-      const vacia = await auditCodStore({ client, pageId: "8002", country: "ES", now: nowSec, dropeaSearch: dropea, deepDive: { fetcher }, probeVideo: false });
+      const vacia = await auditCodStore({ client, pageId: "8002", country: "ES", now: nowSec, dropeaSearch: dropea, deepDive: { fetcher }, probeVideo: false, siteCatalog: false });
       assert.equal(vacia.products.length, 0); assert.match(vacia.summary, /Sin productos minados/);
     });
 

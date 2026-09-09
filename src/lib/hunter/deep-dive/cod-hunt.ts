@@ -32,7 +32,9 @@ import { productKeywords } from "../../product-hunter/internal/cruce";
 import { readAccountXray, adLibraryLink, accountDateWindow, type AccountXray, type AccountProduct, type AccountXrayInput } from "./account";
 import { productGate, type ProductGate } from "./product-gate";
 import { parseRenderAdHtml, renderAdUrl, DEEP_DIVE_USER_AGENT } from "./render-ad";
-import { runDeepDive, type DeepDiveReport, type DeepDiveInput } from "./deep-dive";
+import { runDeepDive, matchCatalogProduct, type DeepDiveReport, type DeepDiveInput } from "./deep-dive";
+import { readStore, type CatalogProduct } from "../audit/store";
+import { catalogDiversity, type CatalogDiversity } from "./account";
 
 const DAY = 86_400;
 
@@ -162,10 +164,47 @@ export type DropeaSearchFn = (term: string) => DropeaCandidate[];
 /** Presencia de vídeo entre los anuncios activos del producto (render_ad, 1 petición por anuncio comprobado). */
 export interface ProductVideo { status: "si" | "no" | "no_comprobado"; checked: number; withVideo: number; videoAdIds: string[]; reason: string | null }
 
+/** Catálogo REAL del sitio (fase 2, 2–4 peticiones HTTP por tienda; nunca en fase 1). */
+export interface SiteCatalog {
+  domain: string | null;
+  status: "ok" | "no_accesible" | "no_shopify" | "sin_dominio" | "desactivado";
+  reason: string | null;
+  products: number;
+  truncated: boolean;
+  brand: string | null;
+  items: Array<{ title: string; price: number | null; compareAt: number | null; discountPct: number | null; url: string }>;
+  /** Diversidad calculada sobre los títulos reales del sitio (más precisa que la de los anuncios). */
+  diversity: CatalogDiversity | null;
+  requests: number;
+}
+
+/**
+ * Perfil de tienda COD genérica (10-09, referencia: Venygo, LaCesta): agregador
+ * disperso de productos genéricos con «™», descuento uniforme y contra
+ * reembolso como gancho. Es señal de valor A NIVEL DE TIENDA aunque ningún
+ * producto llegue por separado al umbral de señal fuerte.
+ */
+export interface StoreProfile {
+  codGenerica: boolean;
+  distinctProducts: number;
+  /** De dónde sale el recuento: los anuncios minados, el catálogo real del sitio, o el mayor de los dos. */
+  productsSource: "anuncios" | "sitio" | "anuncios+sitio";
+  daysAdvertising: number | null;
+  diversity: CatalogDiversity["level"];
+  reason: string;
+  rule: string;
+}
+export const PROFILE_MIN_PRODUCTS = 3;
+export const PROFILE_MIN_DAYS = 14;
+export const PROFILE_RULE = "perfil_tienda_cod_generica = catálogo NO concentrado (por anuncios o, si se leyó, por el sitio) ∧ ≥ 3 productos distintos (activos minados o del catálogo real del sitio, el mayor) ∧ la cuenta anuncia desde hace ≥ 14 días; ningún producto necesita 30 días por separado";
+
 export interface StoreProductAudit {
   product: AccountProduct;
   keywords: string[];
   video: ProductVideo;
+  /** Nombre real del producto en el catálogo del sitio, si se pudo emparejar (gate estricto); si no, queda el texto minado. */
+  realName: string | null;
+  siteMatch: { title: string; price: number | null; compareAt: number | null; discountPct: number | null; url: string; coverage: number } | null;
   dropea: { searched: boolean; candidates: DropeaCandidate[]; match: DropeaCandidate | null; gate: ProductGate | null };
   /** Camino con Dropea: el deep dive completo. */
   deepDive: DeepDiveReport | null;
@@ -181,6 +220,8 @@ export interface StoreAudit {
   sweep: SweepStore | null;
   account: AccountXray | null;
   products: StoreProductAudit[];
+  siteCatalog: SiteCatalog;
+  profile: StoreProfile;
   /** Veredicto por TIENDA: en texto claro, con la tabla de productos resumida. */
   summary: string;
   requests: number;
@@ -236,6 +277,8 @@ export interface StoreAuditInput {
   accountMaxPages?: number;
   /** Lo que el deep dive normal necesita (visión, vídeo, token, fetcher…) para los productos que SÍ están en Dropea. */
   deepDive?: Partial<Pick<DeepDiveInput, "fetcher" | "token" | "vision" | "video" | "skipVideo" | "videoBudgetExhausted" | "dropeaLookup" | "search">>;
+  /** Leer el catálogo REAL del sitio (dominio del anuncio → /products.json). false = no gastar. */
+  siteCatalog?: boolean;
   /** Comprobar vídeo por producto (render_ad de hasta N anuncios activos; usa deepDive.token/fetcher). false = no gastar. */
   probeVideo?: boolean;
   maxVideoProbesPerProduct?: number;
@@ -264,6 +307,40 @@ export function pickNextBatch(stores: SweepStore[], audited: Set<string>, n: num
   return stores.filter((s) => !audited.has(s.pageId)).slice(0, Math.max(0, n));
 }
 
+/** Lee el catálogo real del sitio con readStore (portada + /products.json). Degrada con gracia. */
+export async function readSiteCatalog(domain: string | null, fetcher: typeof fetch, brandTokens: string[] = []): Promise<SiteCatalog> {
+  if (!domain) return { domain: null, status: "sin_dominio", reason: "el anuncio no declara dominio: catálogo del sitio no accesible, usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
+  try {
+    const r = await readStore(domain, fetcher);
+    const items = r.catalog.products.map((p) => ({ title: p.title, price: p.priceMin, compareAt: p.compareAtMax ?? null, discountPct: p.compareAtMax && p.priceMin !== null && p.compareAtMax > p.priceMin ? Math.round(((p.compareAtMax - p.priceMin) / p.compareAtMax) * 100) : null, url: p.url }));
+    if (r.catalog.status !== "ok") return { domain, status: r.catalog.status === "no_shopify" ? "no_shopify" : "no_accesible", reason: `catálogo del sitio no accesible (${r.catalog.reason ?? r.catalog.status}): usando texto minado del anuncio`, products: 0, truncated: false, brand: r.profile.brandName, items: [], diversity: null, requests: r.requests };
+    const pseudo: AccountProduct[] = r.catalog.products.map((p) => ({ label: p.title, keywords: productKeywords(p.title), ads: 0, adIds: [], oldestActiveStart: null, longestActiveDays: null, sample: "", adLink: p.url, isOriginal: false }));
+    return { domain, status: "ok", reason: null, products: items.length, truncated: r.catalog.truncated, brand: r.profile.brandName, items, diversity: catalogDiversity(pseudo, [...brandTokens, ...(r.profile.brandName ?? "").split(/\s+/), domain.split(".")[0]]), requests: r.requests };
+  } catch (err) {
+    return { domain, status: "no_accesible", reason: `catálogo del sitio no accesible (${err instanceof Error ? err.message.slice(0, 100) : String(err)}): usando texto minado del anuncio`, products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 1 };
+  }
+}
+
+/** Perfil de tienda COD genérica. Puro, testeable. */
+export function storeProfile(account: AccountXray | null, site: SiteCatalog): StoreProfile {
+  if (!account) return { codGenerica: false, distinctProducts: 0, productsSource: "anuncios", daysAdvertising: null, diversity: "insuficiente", reason: "cuenta no leída", rule: PROFILE_RULE };
+  const minados = account.products.length;
+  const sitio = site.status === "ok" ? site.products : 0;
+  const distinct = Math.max(minados, sitio);
+  const source: StoreProfile["productsSource"] = sitio && minados ? "anuncios+sitio" : sitio ? "sitio" : "anuncios";
+  // Diversidad efectiva: la del sitio manda si se leyó y es concluyente; si no, la de los anuncios.
+  const div = site.diversity && site.diversity.level !== "insuficiente" ? site.diversity : account.diversity;
+  const noConcentrado = div.level !== "concentrado";
+  const dias = account.daysAdvertising;
+  const ok = noConcentrado && distinct >= PROFILE_MIN_PRODUCTS && (dias ?? 0) >= PROFILE_MIN_DAYS;
+  const partes = [`catálogo ${div.level}${site.diversity && site.diversity.level !== "insuficiente" ? " (por el sitio)" : " (por los anuncios)"}`, `${distinct} productos distintos (${source === "anuncios+sitio" ? `${minados} minados, ${sitio} en el sitio` : source === "sitio" ? `${sitio} en el sitio` : `${minados} minados`})`, `anuncia desde hace ${dias ?? "?"} días`];
+  const fallos: string[] = [];
+  if (!noConcentrado) fallos.push("catálogo concentrado (posible marca propia)");
+  if (distinct < PROFILE_MIN_PRODUCTS) fallos.push(`menos de ${PROFILE_MIN_PRODUCTS} productos distintos`);
+  if ((dias ?? 0) < PROFILE_MIN_DAYS) fallos.push(`menos de ${PROFILE_MIN_DAYS} días anunciando`);
+  return { codGenerica: ok, distinctProducts: distinct, productsSource: source, daysAdvertising: dias, diversity: div.level, reason: ok ? `SÍ: ${partes.join(" · ")} → agregador COD genérico y disperso, señal de valor a nivel de tienda` : `NO: ${partes.join(" · ")} → ${fallos.join("; ")}`, rule: PROFILE_RULE };
+}
+
 export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit> {
   const now = input.now ?? Math.floor(Date.now() / 1000);
   const country = (input.country ?? "ES").toUpperCase();
@@ -279,6 +356,13 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
   } catch (err) {
     incomplete.push({ part: "cuenta", reason: `fallo al leer la cuenta: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` });
   }
+  // Catálogo REAL del sitio (fase 2): dominio del barrido o de los captions de la cuenta.
+  const domain = input.sweep?.domains[0] ?? declaredDomains(ads).filter((d) => !/(^|\.)(facebook|instagram|whatsapp|fb|messenger)\.(com|me)$/i.test(d))[0] ?? null;
+  let site: SiteCatalog;
+  if (input.siteCatalog === false) site = { domain, status: "desactivado", reason: "lectura del catálogo del sitio desactivada: usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
+  else { site = await readSiteCatalog(domain, input.deepDive?.fetcher ?? fetch, brand); requests += site.requests; }
+  if (site.status !== "ok" && site.status !== "desactivado") incomplete.push({ part: "catálogo del sitio", reason: site.reason ?? site.status });
+  const siteProducts: CatalogProduct[] = site.status === "ok" ? site.items.map((i) => ({ title: i.title, handle: i.url.split("/").pop() ?? "", vendor: null, productType: null, priceMin: i.price, priceMax: i.price, compareAtMax: i.compareAt, variants: 1, images: 0, available: null, createdAt: null, url: i.url })) : [];
   const products: StoreProductAudit[] = [];
   if (account) {
     if (!input.dropeaSearch) incomplete.push({ part: "dropea", reason: "sin catálogo local de Dropea: ningún producto se puede casar (hunter:dropea:sync)" });
@@ -288,6 +372,16 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
       let searched = false;
       if (input.dropeaSearch && keywords.length) { try { candidates = input.dropeaSearch(keywords.slice(0, 3).join(" ")).slice(0, 8); searched = true; } catch { candidates = []; } }
       const { match, gate } = matchDropea(keywords, candidates);
+      // Nombre REAL del producto según el catálogo del sitio (mismo gate estricto); si no casa, queda el texto minado.
+      let realName: string | null = null;
+      let siteMatch: StoreProductAudit["siteMatch"] = null;
+      if (siteProducts.length) {
+        const m = matchCatalogProduct(keywords, siteProducts);
+        if (m && productGate(keywords, m.product, m.coverage, siteProducts.length).passed) {
+          const it = site.items.find((i) => i.title === m.product.title)!;
+          realName = m.product.title; siteMatch = { title: it.title, price: it.price, compareAt: it.compareAt, discountPct: it.discountPct, url: it.url, coverage: m.coverage };
+        }
+      }
       let adsProducto = ads.filter((a) => p.adIds.includes(a.id));
       const oldest = p.oldestActiveStart ? Math.floor(Date.parse(p.oldestActiveStart) / 1000) : null;
       // Vídeo: presencia entre los activos del producto; el anuncio con vídeo pasa a ser el enlace principal y el primero del deep dive.
@@ -307,17 +401,18 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
         const rec: StoreProductAudit["recommendation"] = dd.recommendation.action === "contactar_dropea_muestra" ? { action: "contactar_dropea_muestra", reason: dd.recommendation.reason, sourcing: "dropea" }
           : dd.recommendation.action === "verificar_manual" ? { action: "verificar_manual", reason: dd.recommendation.reason, sourcing: "dropea" }
           : { action: "descartar", reason: dd.recommendation.reason, sourcing: "dropea" };
-        products.push({ product: p, keywords, video, dropea: { searched, candidates, match, gate }, deepDive: dd, signal: null, recommendation: rec });
+        products.push({ product: p, keywords, video, realName, siteMatch, dropea: { searched, candidates, match, gate }, deepDive: dd, signal: null, recommendation: rec });
       } else {
         const signal = signalVerdict(p, account);
         const rec: StoreProductAudit["recommendation"] = signal.verdict === "senal_fuerte_sin_proveedor"
           ? { action: "testear", reason: `señal fuerte en la cuenta, pero NO está en Dropea: la decisión de sourcing (AliExpress u otro) es de Pedro; sin margen calculable`, sourcing: "alternativo" }
           : { action: "no_testear", reason: `señal débil y sin proveedor: no compensa buscar sourcing alternativo`, sourcing: "alternativo" };
-        products.push({ product: p, keywords, video, dropea: { searched, candidates, match: null, gate }, deepDive: null, signal, recommendation: rec });
+        products.push({ product: p, keywords, video, realName, siteMatch, dropea: { searched, candidates, match: null, gate }, deepDive: null, signal, recommendation: rec });
       }
     }
   }
-  const audit: StoreAudit = { pageId: input.pageId, pageName: account?.pageName ?? input.pageName ?? input.sweep?.pageName ?? null, country, sweep: input.sweep ?? null, account, products, summary: "", requests, incomplete, rules: `${SIGNAL_RULES} · deep dive: reglas del informe de cada producto`, capturedAt: now };
+  const profile = storeProfile(account, site);
+  const audit: StoreAudit = { pageId: input.pageId, pageName: account?.pageName ?? input.pageName ?? input.sweep?.pageName ?? null, country, sweep: input.sweep ?? null, account, products, siteCatalog: site, profile, summary: "", requests, incomplete, rules: `${PROFILE_RULE} · ${SIGNAL_RULES} · deep dive: reglas del informe de cada producto`, capturedAt: now };
   audit.summary = summarizeStore(audit);
   return audit;
 }
@@ -328,14 +423,17 @@ export function summarizeStore(a: StoreAudit): string {
   if (!a.account) { p.push(`${nombre}: cuenta no leída (${a.incomplete.map((i) => i.reason).join("; ") || "sin motivo"}).`); return p.join(" "); }
   const acc = a.account;
   p.push(`${nombre} (${a.country}): anuncia desde ${acc.firstAdStart ?? "?"} (${acc.daysAdvertising ?? "?"} días), ${acc.totalAds} anuncios, ${acc.activeAds} activos, ritmo de testeo ${acc.testing?.level ?? "?"}, catálogo ${acc.diversity.level}${acc.diversity.level === "concentrado" ? " (posible marca propia: baja prioridad)" : ""}.`);
+  p.push(`Perfil de tienda COD genérica: ${a.profile.reason}.`);
+  p.push(a.siteCatalog.status === "ok" ? `Catálogo real del sitio ${a.siteCatalog.domain}: ${a.siteCatalog.products} productos${a.siteCatalog.truncated ? "+" : ""}${a.siteCatalog.diversity ? `, ${a.siteCatalog.diversity.level}` : ""}.` : `Catálogo del sitio: ${a.siteCatalog.reason ?? a.siteCatalog.status}.`);
   if (acc.winner) p.push(`Ángulo ganador de la cuenta: ${acc.winner.label.toLowerCase()}, «${acc.winner.quote}», ${acc.winner.daysActive} días activo.`);
   if (acc.avatar.summary) p.push(`Avatar: ${acc.avatar.summary}.`);
   if (!a.products.length) p.push("Sin productos minados entre los activos.");
   for (const x of a.products) {
     const dias = x.product.longestActiveDays ?? "?";
     const vid = x.video.status === "si" ? `, vídeo en ${x.video.withVideo}` : x.video.status === "no" ? ", sin vídeo" : "";
-    if (x.deepDive) p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días${vid}) → EN DROPEA como «${x.dropea.match!.name}»: ${x.deepDive.verdict.replace(/_/g, " ")}${x.deepDive.marginPct !== null ? `, margen real ${Math.round(x.deepDive.marginPct * 100)} %` : ""} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.recommendation.reason}.`);
-    else p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días${vid}) → NO en Dropea: ${x.signal!.verdict.replace(/_/g, " ")} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.signal!.reason}.`);
+    const nombre = x.realName ? `«${x.realName}»${x.siteMatch?.price !== null && x.siteMatch?.price !== undefined ? ` a ${x.siteMatch.price} €${x.siteMatch.discountPct ? ` (−${x.siteMatch.discountPct} %)` : ""}` : ""} [anuncio: «${x.product.label}»]` : `«${x.product.label}»`;
+    if (x.deepDive) p.push(`· ${nombre} (${x.product.ads} activos, ${dias} días${vid}) → EN DROPEA como «${x.dropea.match!.name}»: ${x.deepDive.verdict.replace(/_/g, " ")}${x.deepDive.marginPct !== null ? `, margen real ${Math.round(x.deepDive.marginPct * 100)} %` : ""} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.recommendation.reason}.`);
+    else p.push(`· ${nombre} (${x.product.ads} activos, ${dias} días${vid}) → NO en Dropea: ${x.signal!.verdict.replace(/_/g, " ")} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.signal!.reason}.`);
   }
   return p.join(" ");
 }
@@ -345,6 +443,8 @@ export function summarizeStore(a: StoreAudit): string {
 // ------------------------------------------------------------
 
 export interface ConsolidatedRow {
+  /** true = la tienda tiene perfil COD genérico: sube en el ranking aunque el producto no llegue a señal fuerte. */
+  storeProfile: boolean;
   auditId: number;
   pageId: string;
   store: string;
@@ -361,25 +461,40 @@ export interface ConsolidatedRow {
   auditedAt: string;
 }
 
-export const CONSOLIDATED_RULE = "entran: senal_fuerte_sin_proveedor, o en Dropea con veredicto ganador_probable; madurez = días del anuncio activo más antiguo del producto sin cambios, dentro de [--min-dias, --max-dias]; orden: más maduro primero";
+export const CONSOLIDATED_RULE = "entran: senal_fuerte_sin_proveedor, o en Dropea con veredicto ganador_probable, con madurez (días del anuncio activo más antiguo del producto sin cambios) dentro de [--min-dias, --max-dias]; ADEMÁS, toda tienda con perfil_tienda_cod_generica = SÍ entra con su producto activo más maduro aunque no llegue a señal fuerte ni al rango; orden: perfil de tienda primero, luego más maduro primero";
 
 /** Aplana las auditorías persistidas a una fila por producto que cumpla el filtro. Puro, testeable. */
 export function consolidatedReport(audits: Array<{ id: number; capturedAt: number; audit: StoreAudit }>, opts: { minDays: number; maxDays: number }): ConsolidatedRow[] {
   const rows: ConsolidatedRow[] = [];
   for (const { id, capturedAt, audit } of audits) {
+    // Auditorías anteriores a este criterio: el perfil se calcula al vuelo con lo persistido (sin catálogo del sitio).
+    const profile = audit.profile ?? storeProfile(audit.account, { domain: audit.sweep?.domains[0] ?? null, status: "desactivado", reason: "auditoría anterior al catálogo del sitio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 });
+    const perfil = profile.codGenerica;
+    let filasTienda = 0;
     for (const x of audit.products) {
       const fuerte = x.signal?.verdict === "senal_fuerte_sin_proveedor";
       const ganadorDropea = Boolean(x.deepDive && x.dropea.match && x.deepDive.verdict === "ganador_probable");
       if (!fuerte && !ganadorDropea) continue;
       const dias = x.product.longestActiveDays;
       if (dias === null || dias < opts.minDays || dias > opts.maxDays) continue;
+      filasTienda++;
       rows.push({
-        auditId: id, pageId: audit.pageId, store: audit.pageName ?? audit.pageId, domain: x.deepDive?.domain ?? audit.sweep?.domains[0] ?? null,
-        product: x.product.label, adLink: x.product.adLink, hasVideo: x.video?.status ?? "no_comprobado", maturityDays: dias, activeAds: x.product.ads,
+        storeProfile: perfil, auditId: id, pageId: audit.pageId, store: audit.pageName ?? audit.pageId, domain: x.deepDive?.domain ?? audit.siteCatalog?.domain ?? audit.sweep?.domains[0] ?? null,
+        product: x.realName ?? x.product.label, adLink: x.product.adLink, hasVideo: x.video?.status ?? "no_comprobado", maturityDays: dias, activeAds: x.product.ads,
         inDropea: ganadorDropea, marginPct: x.deepDive?.marginPct ?? null, verdict: ganadorDropea ? "ganador_probable (Dropea)" : "senal_fuerte_sin_proveedor",
-        diversity: audit.account?.diversity.level ?? "insuficiente", auditedAt: new Date(capturedAt * 1000).toISOString().slice(0, 10),
+        diversity: profile.diversity, auditedAt: new Date(capturedAt * 1000).toISOString().slice(0, 10),
+      });
+    }
+    // Perfil de tienda sin ninguna fila de producto: entra con su producto activo más maduro (sin exigir señal fuerte ni rango).
+    if (perfil && !filasTienda) {
+      const top = audit.products.slice().sort((a, b) => (b.product.longestActiveDays ?? -1) - (a.product.longestActiveDays ?? -1))[0];
+      rows.push({
+        storeProfile: true, auditId: id, pageId: audit.pageId, store: audit.pageName ?? audit.pageId, domain: audit.siteCatalog?.domain ?? audit.sweep?.domains[0] ?? null,
+        product: top ? (top.realName ?? top.product.label) : "(sin producto minado)", adLink: top?.product.adLink ?? audit.sweep?.adLink ?? "", hasVideo: top?.video?.status ?? "no_comprobado",
+        maturityDays: top?.product.longestActiveDays ?? 0, activeAds: top?.product.ads ?? 0, inDropea: false, marginPct: null, verdict: "perfil_tienda_cod_generica",
+        diversity: profile.diversity, auditedAt: new Date(capturedAt * 1000).toISOString().slice(0, 10),
       });
     }
   }
-  return rows.sort((a, b) => b.maturityDays - a.maturityDays || b.activeAds - a.activeAds);
+  return rows.sort((a, b) => Number(b.storeProfile) - Number(a.storeProfile) || b.maturityDays - a.maturityDays || b.activeAds - a.activeAds);
 }

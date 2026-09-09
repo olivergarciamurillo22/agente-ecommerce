@@ -499,6 +499,51 @@ Ejemplo del informe consolidado (base local sembrada con red inyectada):
   Takuyi · «Gafas de sol polarizadas» · 60 días · https://www.facebook.com/ads/library/?id=t4
 ```
 
+### Perfil de tienda COD genérica + catálogo real del sitio (10-09, referencia: Venygo y LaCesta)
+
+Pedro quiere priorizar tiendas como Venygo o LaCesta: catálogo pequeño-mediano
+(15–25 productos), sin marca identificable, nombres genéricos con «™»,
+descuento uniforme, contra reembolso y envío 24-48 h como gancho. Hasta hoy
+esas tiendas quedaban enterradas porque el ranking dependía de UN producto
+con señal fuerte (≥ 30 días, ≥ 2 activos); el patrón de la tienda entera ya
+es la señal.
+
+- **Veredicto a nivel de tienda** (`storeProfile`, regla literal
+  `PROFILE_RULE`): `perfil_tienda_cod_generica = SÍ` cuando el catálogo NO es
+  concentrado (por los anuncios o, si se leyó, por el sitio) ∧ ≥ 3 productos
+  distintos (activos minados o del catálogo real del sitio, el mayor) ∧ la
+  cuenta anuncia desde hace ≥ 14 días. Ningún producto necesita 30 días por
+  separado. Es ADICIONAL a los veredictos por producto. Persistido en
+  `hunter_cod_stores.cod_generic`; `--ver-tiendas` y el informe lo ponen
+  arriba; `--informe` añade una fila «perfil_tienda_cod_generica» con el
+  producto activo más maduro a las tiendas que no tenían ninguna fila (sin
+  exigir señal fuerte ni rango) y ordena: perfil de tienda primero, luego
+  madurez. Para las auditorías anteriores a este criterio, el perfil se
+  calcula al vuelo con lo persistido (sin catálogo del sitio) y el encabezado
+  dice cuántas tiendas entran SOLO por el perfil.
+- **Catálogo real del sitio** (fase 2, `readSiteCatalog`, 2–4 peticiones HTTP
+  por tienda; `--sin-catalogo-sitio` para no gastar; nunca en fase 1): dominio
+  del anuncio → `readStore` (portada + `/products.json`, el mismo lector del
+  deep dive). Extrae nombre, precio y descuento mostrado (`compare_at_price`).
+  Se usa para (a) el **nombre real** del producto minado cuando casa (gate
+  estricto; si no, queda el texto del anuncio y se dice) y (b) el **número de
+  productos reales** y su diversidad, más precisos que lo que aparece en los
+  anuncios. Si falla (caído, no Shopify, protegido) sigue el flujo con el
+  texto minado y el informe dice «catálogo del sitio no accesible: usando
+  texto minado del anuncio».
+
+Comprobado desde el PC (10-09), con el lector real:
+
+```
+venygo.com: ok · 10 productos · marca Venygo · diversidad disperso (sin raíz dominante, solape medio 0) · 2 peticiones
+   · DuchaPura™ | Filtro Purificador para la Ducha · 29.99 € (antes 42.99 €, −30 %)
+   · LimpiaPro™ · 34.99 € (antes 61.99 €, −44 %) · Sellafresh™ · 24.99 € (−55 %) · Otoscopio Pro™ · 34.99 € (−46 %) · …
+   PERFIL COD GENÉRICA: SÍ — catálogo disperso (por el sitio) · 10 productos distintos (2 minados, 10 en el sitio) · 20 días
+lacesta.es: no_accesible — catálogo del sitio no accesible (fetch failed): usando texto minado del anuncio
+   (el dominio rechaza el 443 y por http redirige a otro sitio; el dominio del anuncio puede ser otro)
+   PERFIL COD GENÉRICA: NO — 2 productos minados, sin sitio: menos de 3 productos distintos
+```
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

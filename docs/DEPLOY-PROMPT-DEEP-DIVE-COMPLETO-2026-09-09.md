@@ -157,6 +157,12 @@ sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --informe --min-
 sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --auditar --top 20 --json /app/data/auditoria-cod-2.json
 ```
 Anota: B3_INFORME_FILAS= B3_TOP_SALTADAS= B3_TOP_TANDA= B3_CON_VIDEO=<n productos con tiene_video sí>
+Perfil de tienda y catálogo real (el informe dice cuántas tiendas entran SOLO por el perfil; la tanda lee el catálogo del sitio de cada tienda, 2–4 peticiones HTTP más por tienda):
+```
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --informe --min-dias 20 --max-dias 90
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --auditar --top 3
+```
+Anota: B3_PERFIL_SOLO=<tiendas que entran solo por el perfil> B3_CATALOGO_OK=<tiendas con catálogo del sitio ok / total de la tanda> B3_EJEMPLO_CATALOGO=<tienda · N productos · 2 títulos> B3_EJEMPLO_FALLBACK=<tienda · motivo>
 Anota: B3_PETICIONES= B3_ANUNCIOS_UNICOS= B3_TIENDAS_CON_FRASE= B3_PAGINAS_SIN_FRASE= B3_TOP3=<page_id · tienda · activos · días · prioridad>
 Pega la tabla entera en el chat (es la calibración de frases).
 Fase 2 solo sobre 2 tiendas (≤ 5 peticiones de cuenta + deep dive por producto en Dropea):
