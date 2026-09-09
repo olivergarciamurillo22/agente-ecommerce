@@ -52,14 +52,16 @@ import { detectPricesInText } from "../../product-hunter/internal/price-detect";
 import { parseRenderAdHtml, renderAdUrl, DEEP_DIVE_USER_AGENT } from "./render-ad";
 import { readAccountXray, accountDateWindow, adLibraryLink, type AccountXray, type AccountXrayInput, type AccountProduct } from "./account";
 import { DEEP_DIVE_VIDEO_MAX_BYTES, type VideoAnalysis, type VideoFn, type VideoStatus } from "./video";
+import { productGate, type ProductGate } from "./product-gate";
 
 const DAY = 86_400;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 /** La búsqueda por palabra mira los últimos 30 días, como el cruce del nivel 1. */
 export const SEARCH_DAYS = 30;
 
-export type DeepDiveVerdict = "ganador_probable" | "senal_debil" | "descartar" | "no_verificable";
-export type Recommendation = "contactar_dropea_muestra" | "descartar" | "verificar_manual";
+/** skip_no_match = corte temprano por coste (gate de producto), NO un veredicto completo. */
+export type DeepDiveVerdict = "ganador_probable" | "senal_debil" | "descartar" | "no_verificable" | "skip_no_match";
+export type Recommendation = "contactar_dropea_muestra" | "descartar" | "verificar_manual" | "skip_no_match";
 
 export interface CreativeAnalysis {
   model: string;
@@ -161,6 +163,10 @@ export interface DeepDiveReport {
   store: { status: StoreProfile["homepageStatus"]; reason: string | null; isShopify: boolean; brand: string | null } | null;
   catalog: { status: string; reason: string | null; products: number; truncated: boolean } | null;
   match: CatalogMatch | null;
+  /** Gate de producto (3b): por qué se siguió o se cortó. */
+  gate: ProductGate | null;
+  /** Corte temprano por coste: qué se saltó. null en un informe completo. */
+  earlyExit: { stage: "gate_producto"; reason: string; skipped: string[] } | null;
   priceEur: number | null;
   priceMaxEur: number | null;
   costEur: number | null;
@@ -192,6 +198,7 @@ export const DEEP_DIVE_RULES =
   "no_verificable = sin dominio, catálogo no accesible, producto no encontrado o sin coste (no se estima nada)";
 
 export const RECOMMENDATION_RULES =
+  "marca establecida: catálogo de la cuenta concentrado (≥ 3 productos de la misma familia) = nunca contactar, verificar_manual · " +
   "búsqueda 2 (país ≠ ES): 1+ anuncios activos en España con match = descartar (ya se vende aquí); España sin comprobar = nunca contactar, verificar_manual · " +
   "contactar_dropea_muestra = ganador_probable ∧ precio del anuncio coherente con el catálogo ∧ ≤ 2 tiendas compitiendo · " +
   "verificar_manual = ganador_probable con precio incoherente o ≥ 3 competidores; senal_debil con margen ≥ 50 % y ángulo ganador ≥ 30 días (o cuenta no leída); no_verificable · " +
@@ -230,13 +237,15 @@ export function priceCoherence(ads: AdLibraryAd[], catalogMin: number | null, ca
 }
 
 /** Recomendación explícita con motivo en una frase. Puro, testeable. */
-export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; opportunity?: Opportunity; spainActiveAds?: number | null; country?: string }): { action: Recommendation; reason: string } {
+export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; opportunity?: Opportunity; spainActiveAds?: number | null; country?: string; catalogConcentrated?: boolean; diversityNote?: string | null }): { action: Recommendation; reason: string } {
   // Búsqueda 2: la regla dura va antes que todo lo demás.
   if (x.opportunity === "ya_en_espana") return { action: "descartar", reason: `ya se anuncia en España: ${x.spainActiveAds ?? "1+"} anuncio(s) activo(s) con match; no es una oportunidad «aún no vendida aquí» aunque esté validado en ${x.country ?? "el otro país"}` };
   const base = recommendBase(x);
   if (x.opportunity === "no_verificado" && base.action === "contactar_dropea_muestra") return { action: "verificar_manual", reason: `${base.reason}; PERO la competencia en España no se pudo comprobar: no se recomienda contactar sin esa comprobación` };
-  if (x.opportunity === "sin_competencia_es" && base.action === "contactar_dropea_muestra") return { action: base.action, reason: `${base.reason}; 0 anuncios activos en España (verificado)` };
-  return base;
+  const conEs = x.opportunity === "sin_competencia_es" && base.action === "contactar_dropea_muestra" ? { action: base.action, reason: `${base.reason}; 0 anuncios activos en España (verificado)` } : base;
+  // Marca establecida, no dropshipper: catálogo concentrado → un nivel menos, nunca «contactar» a ciegas.
+  if (x.catalogConcentrated && conEs.action === "contactar_dropea_muestra") return { action: "verificar_manual", reason: `${conEs.reason}; PERO ${x.diversityNote ?? "posible marca propia, no dropshipper — catálogo poco disperso"}: competir contra el fabricante con producto de Dropea no tiene sentido sin mirarlo a mano` };
+  return conEs;
 }
 
 function recommendBase(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }> }): { action: Recommendation; reason: string } {
@@ -297,6 +306,55 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   } else if (!input.client) incomplete.push({ part: "competencia", reason: "sin cliente de la Ad Library no se mide cuántas tiendas anuncian lo mismo" });
   else if (input.search === false) incomplete.push({ part: "competencia", reason: "búsqueda por palabra desactivada: sin saturación cruzada" });
 
+  // 1 · dominio
+  let domain: string | null = null;
+  let domainSource: DeepDiveReport["domainSource"] = null;
+  if (input.domainOverride) { domain = input.domainOverride.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]; domainSource = "manual"; }
+  else {
+    const dominios = declaredDomains(ads).filter((d) => !/(^|\.)(facebook|instagram|whatsapp|fb|messenger)\.(com|me)$/i.test(d));
+    if (dominios.length) { domain = dominios[0]; domainSource = "caption"; }
+  }
+  if (!domain) incomplete.push({ part: "tienda", reason: ads.length ? "el anuncio no declara ningún dominio en sus captions (y la URL de destino no está disponible en la API ni en render_ad)" : "sin anuncios del candidato (ni guardados ni de la búsqueda): no hay captions de los que sacar el dominio" });
+
+  // 2 · portada + catálogo
+  let store: DeepDiveReport["store"] = null;
+  let catalog: DeepDiveReport["catalog"] = null;
+  let products: CatalogProduct[] = [];
+  if (domain) {
+    const r = await readStore(domain, fetcher);
+    requests += r.requests;
+    store = { status: r.profile.homepageStatus, reason: r.profile.homepageReason, isShopify: r.profile.isShopify, brand: r.profile.brandName };
+    catalog = { status: r.catalog.status, reason: r.catalog.reason, products: r.catalog.products.length, truncated: r.catalog.truncated };
+    products = r.catalog.products;
+    if (r.catalog.status !== "ok") incomplete.push({ part: "catálogo", reason: r.catalog.status === "no_shopify" ? `${domain} no es Shopify o no publica /products.json: catálogo no accesible` : (r.catalog.reason ?? r.catalog.status) });
+  }
+
+  // 3 · producto
+  const match = products.length ? matchCatalogProduct(input.keywords, products) : null;
+  // (si hay catálogo y no casa nada, lo dice el gate de abajo y corta)
+
+  // 3b · GATE DE PRODUCTO: ¿es el mismo producto? Antes de gastar cuenta, España, minería, render_ad y vídeo.
+  const gate = productGate(input.keywords, match?.product ?? null, match?.coverage ?? 0, products.length);
+  if (!gate.passed) {
+    const adLinkCorte = ads[0] ? adLibraryLink(ads[0].id) : null;
+    incomplete.push({ part: "producto", reason: gate.reason });
+    const early: DeepDiveReport["earlyExit"] = { stage: "gate_producto", reason: gate.reason, skipped: ["radiografía de cuenta", "minería de otros productos", country !== "ES" ? "comprobación de España" : null, "coherencia de precio", "creatividad (imagen/vídeo)"].filter((x): x is string => Boolean(x)) };
+    const report: DeepDiveReport = {
+      adLink: adLinkCorte, adLinks: [...new Set(ads.map((a) => adLibraryLink(a.id)))].slice(0, 10), country, competitors, spainCheck: null, opportunity: country !== "ES" ? "no_verificado" : "no_aplica", account: null, otherProducts: [],
+      domain, domainSource, store, catalog, match, gate, earlyExit: early,
+      priceEur: null, priceMaxEur: null, costEur: input.costEur, marginEur: null, marginPct: null,
+      priceCoherence: { status: "sin_catalogo", adPrices: [], catalogMin: null, catalogMax: null, note: "no evaluada: corte temprano por producto distinto" },
+      angles: null, creative: null, creativeStatus: "sin_vision", video: null, videoStatus: "sin_video",
+      activeAds: input.activeAds, daysActive, verdict: "skip_no_match",
+      reasoning: gate.reason,
+      recommendation: { action: "skip_no_match", reason: `corte temprano por coste: ${gate.reason}` },
+      summary: "", incomplete, requests, rules: `gate: ${gate.rule} · ${DEEP_DIVE_RULES} · recomendación: ${RECOMMENDATION_RULES}`,
+    };
+    report.summary = `«${input.keywords.join(" ")}»${domain ? ` en ${domain}` : ""}: SKIP NO MATCH (corte temprano, no es un veredicto completo). ${gate.reason}. No se ejecutaron: ${early.skipped.join(", ")}.${adLinkCorte ? ` Comprobar a mano: ${adLinkCorte}` : ""}`;
+    return report;
+  }
+  const brandTokens = [...(domain ? domain.split(".")[0].split(/[-_]/) : []), ...(store?.brand ? store.brand.split(/\s+/) : [])];
+
   // 0c · búsqueda 2: comprobación OBLIGATORIA de España cuando el país no es ES.
   let spainCheck: SpainCheck | null = null;
   let opportunity: Opportunity = "no_aplica";
@@ -342,7 +400,7 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   else if (!input.client || !pageId) incomplete.push({ part: "cuenta", reason: !pageId ? "sin page_id del anunciante (modo manual o candidato sin página)" : "sin cliente de la Ad Library (falta el token)" });
   else {
     try {
-      account = await readAccountXray({ client: input.client, pageId, country, now, maxPages: input.accountMaxPages, summarize: input.accountSummarize ?? null, originalKeywords: input.keywords });
+      account = await readAccountXray({ client: input.client, pageId, country, now, maxPages: input.accountMaxPages, summarize: input.accountSummarize ?? null, originalKeywords: input.keywords, brandTokens });
       requests += account.requests;
       if (account.truncated) incomplete.push({ part: "cuenta", reason: `la cuenta tiene más anuncios de los leídos (${account.totalAds} en ${account.pages} páginas): antigüedad y volumen son cota inferior` });
       if (account.stopReason !== "completado") incomplete.push({ part: "cuenta", reason: `lectura de la cuenta cortada: ${account.stopReason}` });
@@ -360,33 +418,6 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
       otherProducts.push({ ...p, dropea: { searched, matches } });
     }
   }
-
-  // 1 · dominio
-  let domain: string | null = null;
-  let domainSource: DeepDiveReport["domainSource"] = null;
-  if (input.domainOverride) { domain = input.domainOverride.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0]; domainSource = "manual"; }
-  else {
-    const dominios = declaredDomains(ads).filter((d) => !/(^|\.)(facebook|instagram|whatsapp|fb|messenger)\.(com|me)$/i.test(d));
-    if (dominios.length) { domain = dominios[0]; domainSource = "caption"; }
-  }
-  if (!domain) incomplete.push({ part: "tienda", reason: ads.length ? "el anuncio no declara ningún dominio en sus captions (y la URL de destino no está disponible en la API ni en render_ad)" : "sin anuncios del candidato (ni guardados ni de la búsqueda): no hay captions de los que sacar el dominio" });
-
-  // 2 · portada + catálogo
-  let store: DeepDiveReport["store"] = null;
-  let catalog: DeepDiveReport["catalog"] = null;
-  let products: CatalogProduct[] = [];
-  if (domain) {
-    const r = await readStore(domain, fetcher);
-    requests += r.requests;
-    store = { status: r.profile.homepageStatus, reason: r.profile.homepageReason, isShopify: r.profile.isShopify, brand: r.profile.brandName };
-    catalog = { status: r.catalog.status, reason: r.catalog.reason, products: r.catalog.products.length, truncated: r.catalog.truncated };
-    products = r.catalog.products;
-    if (r.catalog.status !== "ok") incomplete.push({ part: "catálogo", reason: r.catalog.status === "no_shopify" ? `${domain} no es Shopify o no publica /products.json: catálogo no accesible` : (r.catalog.reason ?? r.catalog.status) });
-  }
-
-  // 3 · producto
-  const match = products.length ? matchCatalogProduct(input.keywords, products) : null;
-  if (products.length && !match) incomplete.push({ part: "producto", reason: `ninguno de los ${products.length} productos del catálogo contiene las palabras «${input.keywords.join(" ")}»` });
 
   // 4 · precio y margen REALES + coherencia con el anuncio
   const priceEur = match?.product.priceMin ?? null;
@@ -469,11 +500,11 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   // 7 · veredicto, recomendación y texto claro
   const { verdict, reasoning: base } = decide({ catalogOk: catalog?.status === "ok", match, marginPct, activeAds: input.activeAds, daysActive, costEur: input.costEur, domain, priceEur });
   const reasoning = account ? `${base} · cuenta: ${accountSummary(account)}` : base;
-  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete, opportunity, spainActiveAds: spainCheck?.activeAds ?? null, country });
+  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete, opportunity, spainActiveAds: spainCheck?.activeAds ?? null, country, catalogConcentrated: account?.diversity.level === "concentrado", diversityNote: account?.diversity.note ?? null });
   const adLink = adId ? adLibraryLink(adId) : null;
   const adLinks = [...new Set(ads.map((a) => adLibraryLink(a.id)))].slice(0, 10);
 
-  const report: DeepDiveReport = { adLink, adLinks, country, competitors, spainCheck, opportunity, account, otherProducts, domain, domainSource, store, catalog, match, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, priceCoherence: coherence, angles, creative, creativeStatus, video, videoStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, recommendation, summary: "", incomplete, requests, rules: `${DEEP_DIVE_RULES} · recomendación: ${RECOMMENDATION_RULES}` };
+  const report: DeepDiveReport = { adLink, adLinks, country, competitors, spainCheck, opportunity, account, otherProducts, domain, domainSource, store, catalog, match, gate, earlyExit: null, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, priceCoherence: coherence, angles, creative, creativeStatus, video, videoStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, recommendation, summary: "", incomplete, requests, rules: `${DEEP_DIVE_RULES} · recomendación: ${RECOMMENDATION_RULES}` };
   report.summary = summarize(report, input.keywords);
   return report;
 }
@@ -495,6 +526,7 @@ export function summarize(r: DeepDiveReport, keywords: string[]): string {
   p.push(gancho);
   const avatar = r.account?.avatar.summary ? `A quién le habla: ${r.account.avatar.summary}${r.account.avatar.summarySource === "claude" ? " (redactado por Claude a partir de los textos)" : " (heurística de texto)"}.` : r.creative?.avatar ? `A quién le habla (según la imagen): ${r.creative.avatar}.` : r.video?.interpretation?.avatar ? `A quién le habla (según el guion): ${r.video.interpretation.avatar}.` : "Avatar: sin señales suficientes.";
   p.push(avatar);
+  if (r.account && r.account.diversity.level !== "insuficiente") p.push(`Catálogo de la cuenta: ${r.account.diversity.note}.`);
   if (r.account) p.push(`La tienda anuncia desde ${r.account.firstAdStart ?? "?"} (${r.account.daysAdvertising ?? "?"} días): ${r.account.totalAds} anuncios, ${r.account.activeAds} activos. Ritmo de testeo ${r.account.testing?.level ?? "?"} (${r.account.testing?.newAds30d ?? "?"} nuevos en 30 días, ${r.account.testing?.perWeek30d ?? "?"}/semana); madurez del ángulo ganador: ${r.account.winner ? `${r.account.winner.daysActive} días` : "sin ángulo activo"}.`);
   p.push(`Precio real ${r.priceEur !== null ? `${r.priceEur} €` : "no verificable"}${r.costEur !== null ? `, coste Dropea ${r.costEur} €` : ""}${r.marginPct !== null ? `, margen real ${Math.round(r.marginPct * 100)} %` : ", margen no calculable"}. ${r.priceCoherence.status === "difiere" ? r.priceCoherence.note : `Precio del anuncio: ${r.priceCoherence.status.replace(/_/g, " ")}.`}`);
   if (r.spainCheck) p.push(r.spainCheck.verified ? `Competencia en España: ${r.spainCheck.activeAds} anuncios activos (verificado con «${r.spainCheck.keywords.join(" ")}» en ES)${r.spainCheck.pages.length ? `: ${r.spainCheck.pages.slice(0, 3).map((c) => c.pageName ?? c.pageId).join(", ")}` : ""}. ${r.opportunity === "ya_en_espana" ? "YA SE VENDE AQUÍ: no es oportunidad de esta búsqueda." : "Sin competencia visible en España ahora mismo."}` : `Competencia en España: NO VERIFICADA (${r.spainCheck.reason ?? "sin motivo"}).`);

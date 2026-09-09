@@ -15257,7 +15257,7 @@ async function main(): Promise<void> {
       assert.deepEqual(intrusos.map((f) => path.relative(process.cwd(), f)), [], "ningún fichero del bot, del scheduler, de WhatsApp, pedidos o Shopify nombra las tablas nuevas");
       // El módulo interno solo lo importa el selector de fuente del Cazador, y nada del proceso del bot.
       const importadores = ficheros.filter((f) => !f.includes(path.join("product-hunter", "internal")) && (fs.readFileSync(f, "utf8").includes("product-hunter/internal/") || fs.readFileSync(f, "utf8").includes('from "./internal/')));
-      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/hunter/deep-dive/translate.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
+      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/hunter/deep-dive/product-gate.ts", "src/lib/hunter/deep-dive/translate.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
       const bot = fs.readFileSync(path.join(process.cwd(), "scripts/start-bot.ts"), "utf8");
       assert.ok(!/product-hunter/.test(bot), "el proceso del bot no carga el Cazador");
 
@@ -15897,6 +15897,106 @@ async function main(): Promise<void> {
       const fa = repo.byId(idA)!; assert.equal(fa.country, "IT"); assert.equal(fa.spainActiveAds, 0); assert.equal(fa.opportunity, "sin_competencia_es"); assert.equal(fa.report?.spainCheck?.verified, true);
       const idC = repo.insert({ cruceId: null, variantId: 502, adlibCandidateKey: null, adId: null, keywords: base.keywords, report: c, capturedAt: nowSec });
       assert.equal(repo.byId(idC)!.spainActiveAds, null, "sin verificar no se persiste un 0 que parezca comprobado");
+    });
+
+    await test("GATE DE PRODUCTO · los falsos positivos reales del 09-09 (Peine piojos, Purificador de aire ozono, Botella reutilizable, Ventilador doble) cortan ANTES de la radiografía, España, minería y render_ad; los matches legítimos (Soporte abdominales, Tapas de silicona, Cojín gel silla 67 %) siguen; sin catálogo el gate no aplica; SKIP_NO_MATCH se persiste como corte temprano", async () => {
+      limpiar();
+      const { productGate, GATE_MIN_COVERAGE, GENERIC_PRODUCT_WORDS } = await import("../src/lib/hunter/deep-dive/product-gate");
+      const { runDeepDive, matchCatalogProduct } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const { productKeywords } = await import("../src/lib/product-hunter/internal/cruce");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const mk = (title: string, productType: string | null = null) => ({ title, handle: title.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/[^a-z0-9]+/g, "-"), vendor: null, productType, priceMin: 12, priceMax: 12, variants: 1, images: 0, available: true, createdAt: null, url: "u" });
+      const evalua = (nombre: string, catalogo: ReturnType<typeof mk>[]) => { const k = productKeywords(nombre); const m = matchCatalogProduct(k, catalogo); return productGate(k, m?.product ?? null, m?.coverage ?? 0, catalogo.length); };
+      assert.equal(GATE_MIN_COVERAGE, 0.6); assert.ok(GENERIC_PRODUCT_WORDS.has("aire") && GENERIC_PRODUCT_WORDS.has("plastico") && !GENERIC_PRODUCT_WORDS.has("peine"));
+      // Falsos positivos reales de hoy: deben cortar.
+      const peine = evalua("Peine piojos", [mk("PEINE PUA ESPECIAL CARBONO")]);
+      assert.equal(peine.passed, false); assert.equal(peine.coverage, 0.5); assert.match(peine.reason, /cobertura 50 % < 60 %/); assert.match(peine.reason, /buscaba «peine piojos» y el catálogo solo ofrece «PEINE PUA ESPECIAL CARBONO»/);
+      const purif = evalua("Purificador de aire ozono", [mk("Detector de calidad del aire 6 en 1", "Detectores")]);
+      assert.equal(purif.passed, false); assert.match(purif.reason, /falta la palabra principal «purificador»/); assert.match(purif.reason, /solo coinciden palabras genéricas \(aire\)/); assert.equal(purif.typeCheck, "contradice");
+      const botella = evalua("Botella de plástico reutilizable 900ML", [mk("Botella Soluto Champú")]);
+      assert.equal(botella.passed, false); assert.equal(botella.headPresent, true, "«botella» está, pero 33 % no basta"); assert.match(botella.reason, /cobertura 33 %/);
+      const venti = evalua("Ventilador doble", [mk("Mini PC Intel N100 16GB"), mk("Mini PC Ryzen 7")]);
+      assert.equal(venti.passed, false); assert.equal(venti.found, null); assert.match(venti.reason, /ninguno de los 2 productos del catálogo contiene «ventilador doble»/);
+      // Matches legítimos: deben pasar.
+      const soporte = evalua("SOPORTE PARA ABDOMINALES", [mk("Soporte para abdominales plegable")]);
+      assert.equal(soporte.passed, true); assert.equal(soporte.coverage, 1); assert.deepEqual(soporte.specificPresent, ["abdominales"], "«soporte» es genérica; «abdominales» es la que prueba el producto");
+      const tapas = evalua("Tapas de silicona 6X", [mk("Tapas de silicona elásticas reutilizables (6 uds)", "Cocina")]);
+      assert.equal(tapas.passed, true);
+      const cojin = evalua("Cojín gel silla", [mk("Cojín Ergonómico de Gel CloudCore™ | Alivio de coxis, lumbares y ciática"), mk("Almohada cervical")]);
+      assert.equal(cojin.passed, true, "67 % con la principal «cojin» presente: es el candidato #255 real, no se corta"); assert.deepEqual(cojin.missing, ["silla"]);
+      // Raíz: «cojines» cuenta como «cojin».
+      assert.equal(evalua("Cojín gel silla", [mk("Cojines de gel para sillas de oficina")]).passed, true);
+      // Sin catálogo: no aplica (no_verificable sigue siendo el veredicto correcto).
+      const sinCat = productGate(["plancha", "pelo"], null, 0, 0); assert.equal(sinCat.applicable, false); assert.equal(sinCat.passed, true);
+
+      // Pipeline: el corte ocurre ANTES de la cuenta (search_page_ids), de España y de render_ad; solo se gastan la búsqueda por palabra y la tienda.
+      const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
+      const crudo = (id: string, page: [string, string], body: string, caption: string) => ({ id, page_id: page[0], page_name: page[1], ad_creative_bodies: [body], ad_creative_link_captions: [caption], ad_delivery_start_time: dia(60) });
+      const urls: URL[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); urls.push(u);
+        if (u.host === "graph.facebook.com") {
+          if (u.searchParams.get("search_page_ids")) throw new Error("la radiografía NO debe ejecutarse tras el corte");
+          return new Response(JSON.stringify({ data: [crudo("p1", ["4001", "PeinesYa"], "Peine para piojos con púas de acero, pago contra reembolso", "peinesya.es")], paging: {} }), { headers: { "content-type": "application/json" } });
+        }
+        if (u.host === "peinesya.es") {
+          if (u.pathname === "/") return new Response(`<html><head><title>PeinesYa</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
+          if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "PEINE PUA ESPECIAL CARBONO", handle: "peine-pua-carbono", product_type: "", vendor: "", variants: [{ price: "5.99", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
+          return new Response("", { status: 404 });
+        }
+        if (u.host === "www.facebook.com") throw new Error("render_ad NO debe ejecutarse tras el corte");
+        throw new Error(`red no permitida en test: ${u.host}`);
+      }) as typeof fetch;
+      const client = new AdLibraryClient("TOKEN-gate", fetcher, async () => {});
+      const r = await runDeepDive({ keywords: ["peine", "piojos"], ads: [], costEur: 17.7, activeAds: 3, oldestActiveAt: nowSec - 60 * 86400, now: nowSec, fetcher, token: "TOKEN-gate", vision: async () => null, video: null, client, country: "IT", spainKeywords: ["peine", "piojos"], accountSummarize: async () => { throw new Error("no debe llamarse"); }, dropeaLookup: () => { throw new Error("no debe llamarse"); } });
+      assert.equal(r.verdict, "skip_no_match"); assert.equal(r.recommendation.action, "skip_no_match"); assert.equal(r.earlyExit?.stage, "gate_producto");
+      assert.equal(r.account, null); assert.equal(r.spainCheck, null); assert.equal(r.opportunity, "no_verificado", "con país ≠ ES, España no se comprobó: nunca queda como verificada"); assert.deepEqual(r.otherProducts, []); assert.equal(r.video, null); assert.equal(r.creative, null);
+      assert.equal(r.domain, "peinesya.es"); assert.equal(r.catalog?.products, 1); assert.equal(r.match?.product.title, "PEINE PUA ESPECIAL CARBONO"); assert.equal(r.gate?.passed, false);
+      assert.deepEqual(r.earlyExit?.skipped, ["radiografía de cuenta", "minería de otros productos", "comprobación de España", "coherencia de precio", "creatividad (imagen/vídeo)"]);
+      assert.equal(r.marginPct, null, "no se calcula el margen de un producto que no es el candidato"); assert.match(r.summary, /SKIP NO MATCH \(corte temprano, no es un veredicto completo\)/); assert.match(r.summary, /No se ejecutaron:/);
+      assert.deepEqual(urls.map((u) => u.host), ["graph.facebook.com", "peinesya.es", "peinesya.es"], "1 búsqueda por palabra + portada + catálogo; nada más");
+      assert.equal(r.requests, 3);
+      assert.equal(r.adLink, "https://www.facebook.com/ads/library/?id=p1", "el enlace para comprobarlo a mano sí se conserva");
+      // Persistencia: constancia del intento, marcado como corte temprano (la CHECK de la tabla guarda no_verificable; se reconstruye skip_no_match).
+      const repo = new DeepDiveRepository(raw);
+      const id = repo.insert({ cruceId: 77, variantId: 7701, adlibCandidateKey: "IT:4001:f", adId: "p1", keywords: ["peine", "piojos"], report: r, capturedAt: nowSec });
+      const fila = repo.byId(id)!;
+      assert.equal(fila.verdict, "skip_no_match"); assert.equal(fila.earlyExit, "gate_producto"); assert.equal(fila.recommendation, "skip_no_match"); assert.equal(fila.spainActiveAds, null); assert.equal(fila.report?.gate?.passed, false);
+      assert.equal((raw.prepare("SELECT verdict, early_exit FROM hunter_deep_dives WHERE id=?").get(id) as { verdict: string; early_exit: string }).verdict, "no_verificable");
+      assert.ok(repo.latest().some((x) => x.id === id), "aparece en --ver y cuenta como hecho (no se repite con --min-score)");
+    });
+
+    await test("DIVERSIDAD DEL CATÁLOGO · marca establecida (ghd: solo planchas) queda «concentrado» y baja la recomendación a verificar_manual; dropshipper (Takuyi: purificador, báscula, luces LED, gafas) queda «disperso» y no cambia nada; la marca/página/dominio no cuenta como raíz dominante", async () => {
+      const { catalogDiversity, DIVERSITY_RULE } = await import("../src/lib/hunter/deep-dive/account");
+      const { recommend } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const prod = (label: string, keywords: string[]) => ({ label, keywords, ads: 1, adIds: ["x"], oldestActiveStart: null, longestActiveDays: 30, sample: label, adLink: "l", isOriginal: false });
+      // ghd (caso real de hoy: catálogo bloqueado, 25 competidores, solo planchas): con la marca fuera, «plancha» domina.
+      const ghd = catalogDiversity([
+        prod("ghd Platinum+ plancha de pelo", ["ghd", "platinum", "plancha", "pelo"]),
+        prod("ghd Gold plancha profesional", ["ghd", "gold", "plancha", "profesional"]),
+        prod("ghd Chronos styler plancha", ["ghd", "chronos", "styler", "plancha"]),
+        prod("ghd Helios secador de pelo", ["ghd", "helios", "secador", "pelo"]),
+      ], ["ghd"]);
+      assert.equal(ghd.level, "concentrado"); assert.equal(ghd.dominant?.stem, "planc"); assert.equal(ghd.dominant?.share, 0.75); assert.match(ghd.note, /posible marca propia, no dropshipper — catálogo poco disperso/); assert.equal(ghd.rule, DIVERSITY_RULE);
+      // Takuyi (caso real de hoy): productos sin relación.
+      const takuyi = catalogDiversity([
+        prod("Purificador de aire con ozono", ["purificador", "aire", "ozono"]),
+        prod("Báscula digital de baño", ["bascula", "digital", "bano"]),
+        prod("Tira de luces LED 5 m", ["tira", "luces", "led"]),
+        prod("Gafas de sol polarizadas", ["gafas", "sol", "polarizadas"]),
+      ], ["takuyi"]);
+      assert.equal(takuyi.level, "disperso"); assert.ok((takuyi.dominant?.share ?? 0) < 0.7); assert.ok((takuyi.meanJaccard ?? 1) < 0.25); assert.match(takuyi.note, /señal normal de tienda COD/);
+      // La marca en todos los títulos (CloudCore™) no convierte un catálogo disperso en concentrado.
+      const cc = catalogDiversity([prod("Cojín CloudCore", ["cloudcore", "cojin", "gel"]), prod("Almohada CloudCore", ["cloudcore", "almohada", "cervical"]), prod("Reposapiés CloudCore", ["cloudcore", "reposapies", "escritorio"])], ["cloudcore"]);
+      assert.equal(cc.level, "disperso");
+      assert.equal(catalogDiversity([prod("a", ["a"]), prod("b", ["b"])]).level, "insuficiente");
+      // Recomendación: concentrado baja de contactar a verificar_manual; disperso no cambia.
+      const base = { verdict: "ganador_probable" as const, reasoning: "x", coherence: "coincide" as const, competitors: 1, marginPct: 0.7, winnerDays: 90, incomplete: [] };
+      const bajada = recommend({ ...base, catalogConcentrated: true, diversityNote: ghd.note });
+      assert.equal(bajada.action, "verificar_manual"); assert.match(bajada.reason, /posible marca propia/);
+      assert.equal(recommend({ ...base, catalogConcentrated: false }).action, "contactar_dropea_muestra");
+      assert.equal(recommend({ ...base, verdict: "descartar", catalogConcentrated: true }).action, "descartar", "solo baja un nivel desde «contactar»; lo demás no sube ni baja");
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

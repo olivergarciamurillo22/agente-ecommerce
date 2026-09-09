@@ -333,6 +333,61 @@ Con 2 anuncios activos de «SillaConfort» en España, el mismo candidato sale
 `ya_en_espana` y `DESCARTAR — ya se anuncia en España: 2 anuncio(s) activo(s)
 con match; no es una oportunidad «aún no vendida aquí» aunque esté validado en IT`.
 
+## Gate de producto y diversidad del catálogo (10-09, tras 20 candidatos reales)
+
+**Problema visto en producción** (09-09): con cobertura del 33–50 % el
+producto que casa en `/products.json` casi siempre es OTRO («Peine piojos» →
+«PEINE PUA ESPECIAL CARBONO», margen −196 %; «Purificador de aire ozono» →
+«Detector de calidad del aire 6 en 1»; «Botella reutilizable» → «Botella
+Soluto Champú», margen −57 %; «Ventilador doble» → cuenta de mini-PCs), y el
+pipeline gastaba igualmente radiografía, España, minería, render_ad y vídeo.
+
+**Orden nuevo**: 0a búsqueda → 1 dominio → 2 catálogo → 3 producto →
+**3b gate** → (solo si pasa) 0c España → 0b cuenta → minería → 4 precio y
+coherencia → 5 ángulos → 6 creatividad → 7 veredicto.
+
+Gate (`product-gate.ts`, reglas literales en `GATE_RULE`), solo cuando SÍ hay
+catálogo (sin catálogo no hay nada que comparar y sigue `no_verificable`):
+
+1. cobertura ≥ 0,6 por raíz («cojines» cuenta como «cojín»): 2 palabras, las
+   dos; 3, al menos 2; 4, al menos 3;
+2. la palabra principal del nombre (la primera: «peine», «purificador»,
+   «botella») tiene que estar;
+3. al menos una palabra específica presente: «aire», «digital», «plástico»,
+   «soporte»… son genéricas (`GENERIC_PRODUCT_WORDS`) y no prueban nada;
+4. si el catálogo declara `product_type` y no comparte raíz con ninguna
+   palabra clave, contradice: solo se tolera con cobertura ≥ 0,75;
+5. catálogo accesible y ningún producto que case → también corta.
+
+Calibrado con los casos reales: cortan Peine piojos (50 %), Purificador
+(33 %, falta «purificador», solo «aire»), Botella (33 %), Ventilador doble
+(nada casa); pasan SOPORTE PARA ABDOMINALES (100 %), Tapas de silicona
+(100 %), Cojín gel silla (67 %, el #255 real). Test «GATE DE PRODUCTO».
+
+**Resultado del corte**: `verdict = skip_no_match`, `recommendation =
+skip_no_match`, `earlyExit = { stage: "gate_producto", reason, skipped[] }`;
+se persiste (columna `early_exit`; por la `CHECK` de la tabla el veredicto se
+guarda como `no_verificable` y se reconstruye al leer). Cuenta como hecho
+para `--min-score`. El CLI imprime un bloque corto y distinto (tienda,
+buscaba, encontró, cobertura, motivo, qué no se ejecutó, peticiones).
+
+**Ahorro por candidato cortado**: a Meta se gasta 1 petición (la búsqueda por
+palabra) en vez de 3–8 (búsqueda + cuenta 1–5 + render_ad + España si país
+≠ ES): **2–7 peticiones a Meta menos**, más 0–2 descargas de fbcdn y 0–3
+llamadas de IA (visión, vídeo, avatar). La tienda cuesta igual (2–4).
+
+**Segundo problema**: «Mini plancha pelo» casó bien con ghd (marca global,
+catálogo bloqueado, 25 competidores): producto correcto, oportunidad falsa.
+Señal barata sobre la minería ya hecha (`catalogDiversity`, regla en
+`DIVERSITY_RULE`): con ≥ 3 productos minados, si una raíz de palabra (fuera
+marca/página/dominio) aparece en ≥ 70 % de ellos o el solape medio de
+palabras es ≥ 0,25, el catálogo es «concentrado» → «posible marca propia, no
+dropshipper — catálogo poco disperso» y la recomendación baja de
+`contactar_dropea_muestra` a `verificar_manual`. Disperso (Takuyi:
+purificador, báscula, luces LED, gafas) no cambia nada. Test «DIVERSIDAD DEL
+CATÁLOGO» con ambos casos (ghd reconstruido de memoria: planchas y un
+secador; el JSON real está en el NAS).
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

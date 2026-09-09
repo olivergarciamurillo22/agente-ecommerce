@@ -105,6 +105,23 @@ export interface AccountProduct {
   isOriginal: boolean;
 }
 
+/**
+ * Diversidad del catálogo de la cuenta (10-09): una tienda de dropshipping
+ * prueba productos sin relación entre sí (purificador, báscula, luces LED,
+ * gafas); una marca establecida vende solo su línea (ghd: planchas y más
+ * planchas). Con ≥ 3 productos minados, si una misma raíz de palabra (fuera
+ * la marca/página/dominio) domina ≥ 70 % de ellos o el solape medio de
+ * palabras es ≥ 0,25, el catálogo es «concentrado»: posible marca propia.
+ */
+export interface CatalogDiversity {
+  products: number;
+  level: "concentrado" | "disperso" | "insuficiente";
+  dominant: { stem: string; share: number } | null;
+  meanJaccard: number | null;
+  note: string;
+  rule: string;
+}
+
 export interface AccountXray {
   pageId: string;
   pageName: string | null;
@@ -123,6 +140,8 @@ export interface AccountXray {
   winner: AccountWinner | null;
   /** Productos distintos detectados entre los activos (minería de más ganadores de la misma tienda). */
   products: AccountProduct[];
+  /** ¿Catálogo disperso (COD/dropshipping) o concentrado (posible marca propia)? */
+  diversity: CatalogDiversity;
   avatar: { signals: AvatarSignal[]; summary: string | null; summarySource: "heuristica" | "claude" | null };
   requests: number;
   pages: number;
@@ -239,8 +258,34 @@ export function clusterProducts(ads: AdLibraryAd[], now: number, originalKeyword
   }).sort((a, b) => (b.longestActiveDays ?? -1) - (a.longestActiveDays ?? -1) || b.ads - a.ads);
 }
 
+export const DIVERSITY_RULE = "concentrado si ≥ 3 productos y (una raíz de palabra, fuera marca/página/dominio, aparece en ≥ 70 % de ellos ∨ solape medio de palabras ≥ 0,25); disperso en caso contrario; < 3 productos = insuficiente";
+const stem5 = (t: string) => (t.length > 5 ? t.slice(0, 5) : t);
+
+/** Diversidad del catálogo a partir de los productos minados. Puro, testeable. */
+export function catalogDiversity(products: AccountProduct[], brandTokens: string[] = []): CatalogDiversity {
+  const marca = new Set(brandTokens.map((t) => stem5(normalizeAngleText(t))).filter((t) => t.length >= 3));
+  const sets = products.map((p) => new Set(p.keywords.map(stem5).filter((s) => !marca.has(s))));
+  if (products.length < 3) return { products: products.length, level: "insuficiente", dominant: null, meanJaccard: null, note: `${products.length} producto(s) minado(s): no se puede juzgar la dispersión`, rule: DIVERSITY_RULE };
+  const conteo = new Map<string, number>();
+  for (const s of sets) for (const t of s) conteo.set(t, (conteo.get(t) ?? 0) + 1);
+  let dominant: CatalogDiversity["dominant"] = null;
+  for (const [t, n] of conteo) { const share = n / sets.length; if (!dominant || share > dominant.share) dominant = { stem: t, share: Math.round(share * 100) / 100 }; }
+  let suma = 0, pares = 0;
+  for (let i = 0; i < sets.length; i++) for (let j = i + 1; j < sets.length; j++) {
+    const a = sets[i], b = sets[j];
+    const inter = [...a].filter((t) => b.has(t)).length; const uni = new Set([...a, ...b]).size;
+    suma += uni ? inter / uni : 0; pares++;
+  }
+  const meanJaccard = pares ? Math.round((suma / pares) * 100) / 100 : 0;
+  const concentrado = (dominant !== null && dominant.share >= 0.7) || meanJaccard >= 0.25;
+  const note = concentrado
+    ? `posible marca propia, no dropshipper — catálogo poco disperso: ${dominant && dominant.share >= 0.7 ? `la raíz «${dominant.stem}» aparece en el ${Math.round(dominant.share * 100)} % de los ${sets.length} productos` : `solape medio de palabras ${meanJaccard}`}`
+    : `catálogo disperso (${sets.length} productos sin raíz dominante: máx. «${dominant?.stem ?? "—"}» ${Math.round((dominant?.share ?? 0) * 100)} %, solape medio ${meanJaccard}): señal normal de tienda COD`;
+  return { products: sets.length, level: concentrado ? "concentrado" : "disperso", dominant, meanJaccard, note, rule: DIVERSITY_RULE };
+}
+
 /** Radiografía a partir de los anuncios ya bajados (sin red): separable para tests. */
-export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, meta: { requests: number; pages: number; truncated: boolean; stopReason: StopReason }, originalKeywords: string[] = []): AccountXray {
+export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, meta: { requests: number; pages: number; truncated: boolean; stopReason: StopReason }, originalKeywords: string[] = [], brandTokens: string[] = []): AccountXray {
   const vistos = new Set<string>();
   const unicos = ads.filter((a) => (vistos.has(a.id) ? false : (vistos.add(a.id), true))); // el primero manda (paginación: el mismo id no vuelve a contar)
   const activos = unicos.filter(isActive);
@@ -280,6 +325,7 @@ export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, met
     testing: testingRhythm(unicos, now),
     winner,
     products: clusterProducts(unicos, now, originalKeywords),
+    diversity: catalogDiversity(clusterProducts(unicos, now, originalKeywords), [...brandTokens, ...(unicos.find((a) => a.pageName)?.pageName ?? "").split(/\s+/)]),
     avatar: { signals: avatarSignals(unicos).slice(0, 5), summary: null, summarySource: null },
     requests: meta.requests, pages: meta.pages, truncated: meta.truncated, stopReason: meta.stopReason,
     nature: "heuristica_sobre_texto_real",
@@ -295,6 +341,8 @@ export interface AccountXrayInput {
   maxPages?: number;
   /** Palabras clave del candidato original, para marcar cuál de los productos detectados es el suyo. */
   originalKeywords?: string[];
+  /** Marca/dominio de la tienda: sus palabras no cuentan como «raíz dominante» al medir la dispersión del catálogo. */
+  brandTokens?: string[];
   /** Consolidación del avatar en texto (Claude por OpenRouter). Opcional; si falla, queda la heurística. */
   summarize?: ((bodies: string[], signals: AvatarSignal[]) => Promise<string | null>) | null;
 }
@@ -304,7 +352,7 @@ export async function readAccountXray(input: AccountXrayInput): Promise<AccountX
   const { since, until } = accountDateWindow(input.now);
   const antes = budget.requests;
   const r = await input.client.search({ term: "", pageIds: [input.pageId], country: input.country, since, until, activeStatus: "ALL", budget, maxPages: input.maxPages ?? ACCOUNT_MAX_PAGES });
-  const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason }, input.originalKeywords ?? []);
+  const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason }, input.originalKeywords ?? [], input.brandTokens ?? []);
   if (input.summarize && r.ads.length) {
     try {
       const bodies = [...new Set(r.ads.flatMap((a) => a.bodies).map((b) => b.trim()).filter(Boolean))].slice(0, 40);

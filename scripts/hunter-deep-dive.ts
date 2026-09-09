@@ -38,6 +38,17 @@ type Informe = import("../src/lib/hunter/deep-dive/deep-dive").DeepDiveReport;
 
 function pintar(titulo: string, r: Informe): void {
   const p = (s: string) => console.log("  " + s);
+  if (r.earlyExit) {
+    // Corte temprano: corto y distinto a un informe completo, porque el resto NO se ejecutó.
+    console.log(`\n─── ${titulo} · SKIP_NO_MATCH (corte temprano, no es un veredicto) ───`);
+    p(`Tienda: ${r.domain ?? "no localizable"} · catálogo ${r.catalog ? `${r.catalog.status}, ${r.catalog.products} productos` : "no leído"}`);
+    p(`Buscaba: «${r.gate?.searched ?? "?"}»`);
+    p(`Encontró: ${r.gate?.found ? `«${r.gate.found}»` : "nada que case"} · cobertura ${Math.round((r.gate?.coverage ?? 0) * 100)} %${r.gate?.missing.length ? ` · faltan: ${r.gate.missing.join(", ")}` : ""}`);
+    p(`Motivo del corte: ${r.earlyExit.reason}`);
+    p(`No ejecutado (ahorro): ${r.earlyExit.skipped.join(", ")} · peticiones gastadas: ${r.requests}`);
+    if (r.adLink) p(`Anuncio: ${r.adLink}`);
+    return;
+  }
   console.log(`\n═══ ${titulo} ═══`);
   p(`VEREDICTO: ${r.verdict.toUpperCase()} — ${r.reasoning}`);
   p(`RECOMENDACIÓN: ${r.recommendation.action.toUpperCase()} — ${r.recommendation.reason}`);
@@ -66,6 +77,8 @@ function pintar(titulo: string, r: Informe): void {
     p(`  · ritmo de testeo de la cuenta: ${a.testing ? `${a.testing.level.toUpperCase()} · ${a.testing.newAds30d} anuncios nuevos en 30 días (${a.testing.perWeek30d}/semana), ${a.testing.newAds90d} en 90` : "sin fechas"}`);
     p(`  · madurez del ángulo ganador: ${a.winner ? `${a.winner.label} · ${a.winner.daysActive} días activo sin cambios (desde ${a.winner.since}) · «${a.winner.quote}» · ${a.winner.adLink}` : "ningún ángulo activo clasificado"}`);
     p(`  · productos distintos entre los activos (agrupación por texto): ${a.products.length}`);
+    p(`  · diversidad del catálogo: ${a.diversity.level.toUpperCase()} — ${a.diversity.note}`);
+    if (r.gate) p(`Gate de producto: pasó — ${r.gate.reason}`);
   }
   if (r.competitors) {
     p(`Competencia: ${r.competitors.count} tienda(s) más anunciando lo mismo ahora · ${r.competitors.basis}`);
@@ -114,7 +127,7 @@ async function main(): Promise<void> {
     const rows = repo.latest({ limit: Number.parseInt(arg("limite") ?? "", 10) || 50 });
     console.log(`\n──── DEEP DIVES PERSISTIDOS · ${rows.length} ────\n`);
     if (!rows.length) console.log("  (ninguno todavía)");
-    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—", recomendacion: r.recommendation ?? "—", competencia: r.competitors ?? "—", "otros prod.": r.otherProducts ?? "—", video: r.videoStatus ?? "—", pais: r.country ?? "ES", "ES activos": r.spainActiveAds ?? (r.country && r.country !== "ES" ? "no verif." : "—"), oportunidad: r.opportunity ?? "—" })));
+    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—", recomendacion: r.earlyExit ? "SKIP_NO_MATCH" : (r.recommendation ?? "—"), competencia: r.competitors ?? "—", "otros prod.": r.otherProducts ?? "—", video: r.videoStatus ?? "—", pais: r.country ?? "ES", "ES activos": r.spainActiveAds ?? (r.country && r.country !== "ES" ? "no verif." : "—"), oportunidad: r.opportunity ?? "—" })));
     return;
   }
   if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activo: el deep dive no sale a Internet.\n"); process.exit(2); }

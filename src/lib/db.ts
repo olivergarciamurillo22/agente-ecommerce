@@ -2220,7 +2220,7 @@ export function migrateHunterDeepDive(db: Database.Database): void {
   // Radiografía de la cuenta (paso 0, 09-09): columna aditiva sobre la misma tabla.
   // Pipeline completo (09-09): recomendación, competencia, otros productos, vídeo, coherencia de precio, informe entero.
   const cols = new Set((db.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).map((c) => c.name));
-  for (const [nombre, tipo] of [["account_json", "TEXT"], ["ad_link", "TEXT"], ["recommendation", "TEXT"], ["recommendation_reason", "TEXT"], ["competitors", "INTEGER"], ["other_products", "INTEGER"], ["video_status", "TEXT"], ["price_coherence", "TEXT"], ["summary", "TEXT"], ["report_json", "TEXT"], ["country", "TEXT"], ["spain_active_ads", "INTEGER"], ["opportunity", "TEXT"]] as const) {
+  for (const [nombre, tipo] of [["account_json", "TEXT"], ["ad_link", "TEXT"], ["recommendation", "TEXT"], ["recommendation_reason", "TEXT"], ["competitors", "INTEGER"], ["other_products", "INTEGER"], ["video_status", "TEXT"], ["price_coherence", "TEXT"], ["summary", "TEXT"], ["report_json", "TEXT"], ["country", "TEXT"], ["spain_active_ads", "INTEGER"], ["opportunity", "TEXT"], ["early_exit", "TEXT"]] as const) {
     if (cols.has(nombre)) continue;
     try {
       db.exec(`ALTER TABLE hunter_deep_dives ADD COLUMN ${nombre} ${tipo}`);
