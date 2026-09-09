@@ -72,7 +72,7 @@ function parseUsage(headers: Headers): Record<string, unknown> | null {
 
 export class AdLibraryClient {
   constructor(private readonly token: string, private readonly fetcher: typeof fetch = fetch, private readonly wait = sleep) {}
-  async page(params: { term: string; country: string; since: string; until: string; after?: string; fields?: readonly string[]; pageIds?: readonly string[] }): Promise<AdLibraryPage> {
+  async page(params: { term: string; country: string; since: string; until: string; after?: string; fields?: readonly string[]; pageIds?: readonly string[]; /** ACTIVE por defecto; ALL = activos e inactivos (radiografía de cuenta, nivel 2). */ activeStatus?: "ACTIVE" | "ALL" | "INACTIVE" }): Promise<AdLibraryPage> {
     // GATE (safety.ts): aqui abajo, para que ningun camino nuevo lo esquive.
     if (!canRunDiscovery()) throw new DiscoveryHaltedError();
     const version = process.env.META_AD_LIBRARY_API_VERSION || process.env.META_GRAPH_API_VERSION || process.env.META_ADS_API_VERSION || META_ADS_DEFAULT_API_VERSION;
@@ -83,7 +83,7 @@ export class AdLibraryClient {
     if (params.pageIds && params.pageIds.length) url.searchParams.set("search_page_ids", JSON.stringify(params.pageIds.slice(0, 10)));
     else url.searchParams.set("search_terms", params.term);
     url.searchParams.set("ad_reached_countries", JSON.stringify([params.country]));
-    url.searchParams.set("ad_type", "ALL"); url.searchParams.set("ad_active_status", "ACTIVE");
+    url.searchParams.set("ad_type", "ALL"); url.searchParams.set("ad_active_status", params.activeStatus ?? "ACTIVE");
     url.searchParams.set("ad_delivery_date_min", params.since); url.searchParams.set("ad_delivery_date_max", params.until);
     url.searchParams.set("fields", (params.fields ?? ADLIB_FIELDS).join(",")); url.searchParams.set("limit", "100");
     if (params.after) url.searchParams.set("after", params.after);
@@ -131,7 +131,7 @@ export class AdLibraryClient {
    * Un token inválido sí se propaga (no hay nada que salvar reintentando).
    */
   async search(params: {
-    term: string; country: string; since: string; until: string; fields?: readonly string[]; pageIds?: readonly string[];
+    term: string; country: string; since: string; until: string; fields?: readonly string[]; pageIds?: readonly string[]; activeStatus?: "ACTIVE" | "ALL" | "INACTIVE";
     budget?: DiscoveryBudget; maxPages?: number;
   }): Promise<{ ads: AdLibraryAd[]; rateLimit: Record<string, unknown> | null; stopReason: StopReason; pages: number; error: string | null }> {
     const ads: AdLibraryAd[] = []; let after: string | undefined; let rateLimit: Record<string, unknown> | null = null;

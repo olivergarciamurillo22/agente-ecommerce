@@ -15464,7 +15464,7 @@ async function main(): Promise<void> {
       assert.equal(r.creativeStatus, "analizada"); assert.equal(r.creative?.hook, "Adiós al dolor de coxis"); assert.equal(r.creative?.visiblePrice, null);
       assert.deepEqual(visto, [{ mime: "image/jpeg", bytes: 8, keywords: ["cojin", "gel", "silla"] }]);
       assert.equal(r.daysActive, 40); assert.equal(r.verdict, "ganador_probable"); assert.match(r.reasoning, /cumple las cuatro condiciones/);
-      assert.equal(r.incomplete.length, 0); assert.equal(r.rules, DEEP_DIVE_RULES);
+      assert.deepEqual(r.incomplete.map((i) => i.part), ["cuenta"], "sin cliente ni page_id, la única carencia declarada es la radiografía de la cuenta (paso 0)"); assert.equal(r.rules, DEEP_DIVE_RULES);
       assert.deepEqual(peticiones, ["cloudcore.es/", "cloudcore.es/products.json", "www.facebook.com/ads/archive/render_ad/", "scontent.xx.fbcdn.net/v/t45/creativo_n.jpg"], "4 peticiones: portada, catálogo, render_ad, imagen");
 
       // Persistencia y lectura.
@@ -15510,6 +15510,102 @@ async function main(): Promise<void> {
       const ads = new DeepDiveRepository(raw).adsForCandidateKey("ES:dd:1");
       assert.equal(ads.length, 1); assert.deepEqual(ads[0].captions, ["cloudcore.es"]);
       assert.deepEqual(new DeepDiveRepository(raw).adsForCandidateKey("no-existe"), []);
+    });
+
+    await test("DEEP DIVE · paso 0, radiografía de la cuenta: search_page_ids + ad_active_status=ALL, 1 petición por cada 100 anuncios; antigüedad real, activos/inactivos, ángulos con el activo más antiguo primero (con cita) y avatar; se persiste en account_json", async () => {
+      limpiar();
+      const { xrayFromAds, readAccountXray, ACCOUNT_MAX_PAGES, ACCOUNT_SINCE, avatarSignals } = await import("../src/lib/hunter/deep-dive/account");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { runDeepDive, accountSummary } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const { makeAccountSummarizer } = await import("../src/lib/hunter/deep-dive/account-summary");
+      const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
+      const ad = (id: string, body: string, start: string, stop: string | null) => ({ id, pageId: "555", pageName: "CloudCore", snapshotUrl: null, bodies: [body], captions: ["cloudcore.es"], titles: [], platforms: [], languages: [], creationTime: null, startTime: start, stopTime: stop, impressions: null, audience: null });
+      const cuenta = [
+        ad("a1", "Cojín de gel: alivia el dolor de espalda si trabajas sentado en la oficina. Envío gratis.", dia(400), dia(300)), // el más antiguo de la cuenta, apagado
+        ad("a2", "Alivia el dolor de coxis. Pago contra reembolso.", dia(200), null),                                          // activo más antiguo: dolor + envío
+        ad("a3", "Oferta: solo hoy 34,99 €. Garantía 30 días. Para mayores que pasan horas sentados.", dia(90), null),                 // activo: precio, garantía, dolor(no), avatar mayores
+        ad("a4", "Oferta de lanzamiento", dia(10), dia(5)),                                                                    // apagado
+        ad("a2", "duplicado que no debe contar", dia(200), null),
+      ];
+      const x = xrayFromAds("555", cuenta, nowSec, { requests: 1, pages: 1, truncated: false, stopReason: "completado" });
+      assert.equal(x.totalAds, 4, "los ids repetidos se cuentan una vez"); assert.equal(x.activeAds, 2); assert.equal(x.inactiveAds, 2);
+      assert.equal(x.firstAdStart, dia(400)); assert.equal(x.daysAdvertising, 400, "antigüedad REAL: el anuncio más antiguo de toda la cuenta, aunque esté apagado");
+      assert.equal(x.oldestActiveStart, dia(200)); assert.equal(x.pageName, "CloudCore");
+      assert.equal(x.angles[0].id, "dolor_beneficio", "el ángulo cuyo activo más antiguo lleva más tiempo va primero (ganador)");
+      assert.equal(x.angles[0].longestActiveDays, 200); assert.equal(x.angles[0].ads, 2); assert.equal(x.angles[0].activeAds, 1);
+      assert.equal(x.angles[0].evidence?.adId, "a2"); assert.match(x.angles[0].evidence!.quote, /coxis/);
+      const envio = x.angles.find((g) => g.id === "envio_pago")!; assert.equal(envio.ads, 2); assert.equal(envio.activeAds, 1); assert.equal(envio.longestActiveDays, 200);
+      const precio = x.angles.find((g) => g.id === "precio_oferta")!; assert.equal(precio.ads, 2); assert.equal(precio.activeAds, 1); assert.equal(precio.longestActiveDays, 90);
+      assert.ok(x.angles.every((g, i) => i === 0 || (g.longestActiveDays ?? -1) <= (x.angles[i - 1].longestActiveDays ?? -1)), "orden por días del activo más antiguo, descendente");
+      assert.ok(x.avatar.signals.some((s) => s.label === "personas mayores / seniors" && s.ads === 1 && /mayores/.test(s.evidence.quote)));
+      assert.ok(x.avatar.signals.some((s) => /oficina/.test(s.label)));
+      assert.equal(x.nature, "heuristica_sobre_texto_real"); assert.equal(x.avatar.summary, null, "sin red no hay resumen todavía");
+      assert.deepEqual(avatarSignals([]), []);
+
+      // Con red inyectada: la URL lleva search_page_ids y ad_active_status=ALL (no search_terms), el mismo endpoint y límite de 100; 2 páginas = 2 peticiones.
+      const urls: URL[] = [];
+      const crudo = (a: ReturnType<typeof ad>) => ({ id: a.id, page_id: a.pageId, page_name: a.pageName, ad_creative_bodies: a.bodies, ad_creative_link_captions: a.captions, ad_delivery_start_time: a.startTime, ad_delivery_stop_time: a.stopTime ?? undefined });
+      const fetcher = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); urls.push(u);
+        const segunda = u.searchParams.get("after") === "CURSOR2";
+        return new Response(JSON.stringify({ data: (segunda ? cuenta.slice(2, 4) : cuenta.slice(0, 2)).map(crudo), paging: segunda ? {} : { cursors: { after: "CURSOR2" }, next: "https://graph.facebook.com/next" } }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const client = new AdLibraryClient("TOKEN-test", fetcher, async () => {});
+      const resumenes: Array<{ bodies: number; signals: string[] }> = [];
+      const xr = await readAccountXray({ client, pageId: "555", country: "ES", now: nowSec, summarize: async (bodies, signals) => { resumenes.push({ bodies: bodies.length, signals: signals.map((s) => s.label) }); return "Habla a adultos mayores con dolor de espalda que pasan horas sentados."; } });
+      assert.equal(urls.length, 2, "2 páginas de la cuenta = 2 peticiones (1 por cada 100 anuncios)"); assert.equal(xr.requests, 2); assert.equal(xr.pages, 2);
+      for (const u of urls) {
+        assert.equal(u.pathname.split("/").pop(), "ads_archive", "mismo endpoint que la búsqueda por palabra");
+        assert.equal(u.searchParams.get("search_page_ids"), JSON.stringify(["555"])); assert.equal(u.searchParams.get("search_terms"), null, "por página, no por palabra");
+        assert.equal(u.searchParams.get("ad_active_status"), "ALL", "activos E inactivos"); assert.equal(u.searchParams.get("limit"), "100");
+        assert.equal(u.searchParams.get("ad_delivery_date_min"), ACCOUNT_SINCE); assert.equal(u.searchParams.get("ad_delivery_date_max"), new Date(nowSec * 1000).toISOString().slice(0, 10));
+        assert.ok(u.searchParams.get("fields")!.includes("ad_delivery_stop_time"), "hace falta la fecha de apagado");
+      }
+      assert.equal(xr.totalAds, 4); assert.equal(xr.daysAdvertising, 400); assert.equal(xr.truncated, false);
+      assert.equal(xr.avatar.summarySource, "claude"); assert.match(xr.avatar.summary!, /mayores/); assert.deepEqual(resumenes, [{ bodies: 4, signals: xr.avatar.signals.map((s) => s.label) }]);
+      // Sin consolidador (o si falla): resumen heurístico con las señales, nunca vacío si hay señales.
+      const xh = await readAccountXray({ client, pageId: "555", country: "ES", now: nowSec, summarize: async () => { throw new Error("openrouter caído"); } });
+      assert.equal(xh.avatar.summarySource, "heuristica"); assert.match(xh.avatar.summary!, /anuncio/);
+      // Tope de páginas: con maxPages 1 se lee una y se marca truncada (cota inferior).
+      urls.length = 0;
+      const xt = await readAccountXray({ client, pageId: "555", country: "ES", now: nowSec, maxPages: 1 });
+      assert.equal(urls.length, 1); assert.equal(xt.pages, 1); assert.equal(xt.truncated, true); assert.equal(xt.totalAds, 2);
+      assert.equal(ACCOUNT_MAX_PAGES, 5, "tope: 5 peticiones por cuenta como máximo");
+      assert.equal(makeAccountSummarizer({}), null, "sin OPENROUTER_API_KEY no hay consolidación por Claude");
+
+      // Integrado en el pipeline como paso 0: informe con cuenta, razonamiento con la cuenta (sin cambiar el veredicto), peticiones sumadas, y persistencia en account_json.
+      const tienda = (async (input: string | URL | Request) => {
+        const u = new URL(String(input));
+        if (u.host === "graph.facebook.com") return fetcher(input);
+        if (u.pathname === "/") return new Response(`<html><head><title>CloudCore</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
+        if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "Cojín de Gel para silla", handle: "cojin-gel-silla", product_type: "", vendor: "", variants: [{ price: "34.99", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
+        return new Response("", { status: 404 });
+      }) as typeof fetch;
+      const r = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", country: "ES", accountSummarize: async () => "Adultos mayores con dolor de espalda." });
+      assert.equal(r.verdict, "ganador_probable"); assert.ok(r.account); assert.equal(r.account!.totalAds, 4); assert.equal(r.account!.daysAdvertising, 400);
+      assert.match(r.reasoning, /cuenta: anuncia desde .* \(400 días\) · 4 anuncios, 2 activos · ángulos más longevos: dolor y beneficio 200 días/);
+      assert.equal(r.requests, 4, "2 de la cuenta + portada + catálogo"); assert.ok(!r.incomplete.some((i) => i.part === "cuenta"));
+      assert.equal(accountSummary(r.account!).startsWith("anuncia desde"), true);
+      const repo = new DeepDiveRepository(raw);
+      const id = repo.insert({ cruceId: null, variantId: 7, adlibCandidateKey: "ES:555:f", adId: "a2", keywords: ["cojin"], report: r, capturedAt: nowSec });
+      const fila = repo.byId(id)!; assert.equal(fila.account?.totalAds, 4); assert.equal(fila.account?.angles[0].id, "dolor_beneficio"); assert.equal(fila.account?.avatar.summarySource, "claude");
+      assert.ok(!(raw.prepare("SELECT account_json AS t FROM hunter_deep_dives WHERE id=?").get(id) as { t: string }).t.includes("TOKEN-test"), "el token no se persiste");
+      // Sin page_id (modo manual) o con --sin-cuenta: se omite con motivo; el veredicto no cambia.
+      const sinPagina = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: null });
+      assert.equal(sinPagina.account, null); assert.ok(sinPagina.incomplete.some((i) => i.part === "cuenta" && /page_id/.test(i.reason))); assert.equal(sinPagina.verdict, "ganador_probable");
+      const omitida = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", skipAccount: true });
+      assert.equal(omitida.account, null); assert.ok(omitida.incomplete.some((i) => i.part === "cuenta" && /sin-cuenta/.test(i.reason)));
+      // Si la Ad Library falla, la cuenta queda como carencia y el resto del informe sigue.
+      const roto = new AdLibraryClient("TOKEN-test", (async () => new Response(JSON.stringify({ error: { message: "boom", code: 1 } }), { status: 500, headers: { "content-type": "application/json" } })) as typeof fetch, async () => {});
+      const conFallo = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client: roto, pageId: "555" });
+      assert.equal(conFallo.verdict, "ganador_probable"); assert.ok(conFallo.incomplete.some((i) => i.part === "cuenta"));
+      // Migración: la columna account_json existe y añadirla otra vez no rompe.
+      const Database = (await import("better-sqlite3")).default;
+      const mem = new Database(":memory:");
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateProductHunterInternal, db.migrateHunterDeepDive, db.migrateHunterDeepDive]) m(mem);
+      assert.ok((mem.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).some((c) => c.name === "account_json"));
+      mem.close();
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

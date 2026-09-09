@@ -10,6 +10,9 @@
 //   · cloudcore.es/products.json responde (Shopify): el cojín está a 34,99 €.
 //
 // Por candidato, en orden, cada paso con su motivo si no se pudo:
+//   0 · radiografía de la CUENTA: todos los anuncios de la página
+//       (search_page_ids, activos e inactivos) → antigüedad real, volumen,
+//       ángulos que más tiempo llevan activos y avatar consolidado (account.ts);
 //   1 · dominio declarado en los captions (sin red);
 //   2 · portada + catálogo público /products.json (readStore, ya existente);
 //   3 · producto del catálogo que casa con las palabras clave del cruce;
@@ -28,6 +31,8 @@ import { readStore, type CatalogProduct, type StoreProfile } from "../audit/stor
 import { extractAngles, type AngleReport } from "../audit/angles";
 import { tokens } from "../../product-hunter/internal/dropea-catalog";
 import { parseRenderAdHtml, renderAdUrl, DEEP_DIVE_USER_AGENT } from "./render-ad";
+import { readAccountXray, type AccountXray, type AccountXrayInput } from "./account";
+import type { AdLibraryClient } from "../discovery/client";
 
 const DAY = 86_400;
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -61,6 +66,13 @@ export interface DeepDiveInput {
   vision?: VisionFn | null;
   /** Dominio forzado (modo manual del CLI). */
   domainOverride?: string | null;
+  /** Paso 0 · radiografía de la cuenta: hace falta cliente de la Ad Library, page_id y país. Sin ellos se omite (con motivo). */
+  client?: AdLibraryClient | null;
+  pageId?: string | null;
+  country?: string | null;
+  accountSummarize?: AccountXrayInput["summarize"];
+  accountMaxPages?: number;
+  skipAccount?: boolean;
 }
 
 export interface CatalogMatch {
@@ -70,6 +82,8 @@ export interface CatalogMatch {
 }
 
 export interface DeepDiveReport {
+  /** Paso 0 · la cuenta entera (null si no se pudo, con motivo en incomplete). */
+  account: AccountXray | null;
   domain: string | null;
   domainSource: "caption" | "manual" | null;
   store: { status: StoreProfile["homepageStatus"]; reason: string | null; isShopify: boolean; brand: string | null } | null;
@@ -120,6 +134,21 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   const incomplete: DeepDiveReport["incomplete"] = [];
   let requests = 0;
   const daysActive = input.oldestActiveAt !== null ? Math.max(0, Math.floor((now - input.oldestActiveAt) / DAY)) : null;
+
+  // 0 · radiografía de la cuenta (todos los anuncios de la página, activos e inactivos)
+  let account: AccountXray | null = null;
+  if (input.skipAccount) incomplete.push({ part: "cuenta", reason: "radiografía de la cuenta omitida (--sin-cuenta)" });
+  else if (!input.client || !input.pageId) incomplete.push({ part: "cuenta", reason: !input.pageId ? "sin page_id del anunciante (modo manual o candidato sin página)" : "sin cliente de la Ad Library (falta el token)" });
+  else {
+    try {
+      account = await readAccountXray({ client: input.client, pageId: input.pageId, country: input.country ?? "ES", now, maxPages: input.accountMaxPages, summarize: input.accountSummarize ?? null });
+      requests += account.requests;
+      if (account.truncated) incomplete.push({ part: "cuenta", reason: `la cuenta tiene más anuncios de los leídos (${account.totalAds} en ${account.pages} páginas): antigüedad y volumen son cota inferior` });
+      if (account.stopReason !== "completado") incomplete.push({ part: "cuenta", reason: `lectura de la cuenta cortada: ${account.stopReason}` });
+    } catch (err) {
+      incomplete.push({ part: "cuenta", reason: `fallo al leer la cuenta: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` });
+    }
+  }
 
   // 1 · dominio
   let domain: string | null = null;
@@ -193,9 +222,18 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   }
 
   // 7 · veredicto
-  const { verdict, reasoning } = decide({ catalogOk: catalog?.status === "ok", match, marginPct, activeAds: input.activeAds, daysActive, costEur: input.costEur, domain, priceEur });
+  const { verdict, reasoning: base } = decide({ catalogOk: catalog?.status === "ok", match, marginPct, activeAds: input.activeAds, daysActive, costEur: input.costEur, domain, priceEur });
+  const reasoning = account ? `${base} · cuenta: ${accountSummary(account)}` : base;
 
-  return { domain, domainSource, store, catalog, match, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, angles, creative, creativeStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, incomplete, requests, rules: DEEP_DIVE_RULES };
+  return { account, domain, domainSource, store, catalog, match, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, angles, creative, creativeStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, incomplete, requests, rules: DEEP_DIVE_RULES };
+}
+
+/** Resumen de la cuenta para el razonamiento (informa; no cambia el veredicto: las reglas siguen siendo las escritas). */
+export function accountSummary(a: AccountXray): string {
+  const edad = a.daysAdvertising === null ? "antigüedad desconocida" : `anuncia desde ${a.firstAdStart} (${a.daysAdvertising} días)`;
+  const vol = `${a.totalAds} anuncios, ${a.activeAds} activos${a.truncated ? " (cota inferior)" : ""}`;
+  const top = a.angles.filter((g) => g.longestActiveDays !== null).slice(0, 2).map((g) => `${g.label.toLowerCase()} ${g.longestActiveDays} días`);
+  return [edad, vol, top.length ? `ángulos más longevos: ${top.join(", ")}` : "sin ángulo activo clasificado"].join(" · ");
 }
 
 function decide(x: { catalogOk: boolean; match: CatalogMatch | null; marginPct: number | null; activeAds: number | null; daysActive: number | null; costEur: number | null; domain: string | null; priceEur: number | null }): { verdict: DeepDiveVerdict; reasoning: string } {

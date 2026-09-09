@@ -6,11 +6,12 @@
 //   npm run hunter:deep-dive -- --min-score 60 --limite 5      (los N mejores cruces con match, aún sin deep dive)
 //   npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --coste 9.5
 //                                                             (modo manual: sin base del cruce; datos reales de la tienda)
-//   opciones: --sin-vision · --json informe.json · --ver (lista lo persistido, sin red)
+//   opciones: --sin-vision · --sin-cuenta · --page-id N (modo manual) · --json informe.json · --ver (lista lo persistido, sin red)
 //
 // NUNCA recorre el catálogo entero: exige --ids, --min-score+--limite o
-// --dominio. Por candidato: 2–4 peticiones a la tienda, 0–1 a render_ad
-// (solo con visión), 0–1 a OpenRouter. Respeta EMERGENCY_STOP.
+// --dominio. Por candidato: paso 0 (radiografía de la cuenta) 1 petición a
+// /ads_archive por cada 100 anuncios de la página (tope 5), 2–4 a la tienda,
+// 0–1 a render_ad (solo con visión), 0–2 a OpenRouter. Respeta EMERGENCY_STOP.
 // ============================================================
 
 import "./env-loader";
@@ -38,7 +39,17 @@ function pintar(titulo: string, r: Informe): void {
   p(`Catálogo: ${r.catalog ? `${r.catalog.status} · ${r.catalog.products} productos${r.catalog.truncated ? "+" : ""}` : "no leído"}`);
   if (r.match) p(`Producto: «${r.match.product.title}» (match ${r.match.verdict}, cobertura ${Math.round(r.match.coverage * 100)} %) · ${r.match.product.url}`);
   p(`Precio real: ${eur(r.priceEur)}${r.priceMaxEur !== null && r.priceMaxEur !== r.priceEur ? ` – ${eur(r.priceMaxEur)}` : ""} · coste Dropea: ${eur(r.costEur)} · margen real: ${eur(r.marginEur)} (${pct(r.marginPct)})`);
-  p(`Anuncios: ${r.activeAds ?? "?"} activos · ${r.daysActive ?? "?"} días el más antiguo`);
+  p(`Anuncios del producto: ${r.activeAds ?? "?"} activos · ${r.daysActive ?? "?"} días el más antiguo`);
+  if (r.account) {
+    const a = r.account;
+    p(`Cuenta completa ${a.pageName ? `«${a.pageName}» ` : ""}(page ${a.pageId}) · ${a.requests} petición(es), ${a.pages} página(s)${a.truncated ? " · TRUNCADA: cota inferior" : ""}:`);
+    p(`  · anuncia desde: ${a.firstAdStart ?? "?"}${a.daysAdvertising !== null ? ` (${a.daysAdvertising} días)` : ""} · activo más antiguo desde ${a.oldestActiveStart ?? "—"}`);
+    p(`  · anuncios: ${a.totalAds} en total · ${a.activeAds} activos ahora · ${a.inactiveAds} apagados`);
+    if (a.angles.length) { p("  · ángulos de la cuenta (activo más antiguo primero = ganadores):"); for (const g of a.angles.slice(0, 5)) p(`      ${g.label}: ${g.ads} anuncios, ${g.activeAds} activos${g.longestActiveDays !== null ? `, el más longevo ${g.longestActiveDays} días (desde ${g.oldestActiveStart})` : ", ninguno activo"}${g.evidence ? ` — «${g.evidence.quote}»` : ""}`); }
+    else p("  · ángulos: ninguno clasificado por texto");
+    p(`  · avatar consolidado${a.avatar.summarySource ? ` (${a.avatar.summarySource})` : ""}: ${a.avatar.summary ?? "sin señales de avatar en el texto"}`);
+    for (const s of a.avatar.signals.slice(0, 3)) p(`      ${s.label}: ${s.ads} anuncios — «${s.evidence.quote}»`);
+  }
   if (r.angles && r.angles.angles.length) { p("Ángulos del texto del anuncio (cita literal):"); for (const a of r.angles.angles.slice(0, 6)) p(`  · ${a.label}: «${a.evidence[0]?.quote ?? ""}»`); }
   p(`Creatividad: ${r.creativeStatus}${r.creative ? ` (${r.creative.model})` : ""}`);
   if (r.creative) { for (const [k, v] of Object.entries({ gancho: r.creative.hook, angulo: r.creative.angle, dolor: r.creative.pain, deseo: r.creative.desire, avatar: r.creative.avatar, "precio visible": r.creative.visiblePrice })) if (v) p(`  · ${k}: ${v}`); }
@@ -51,6 +62,8 @@ async function main(): Promise<void> {
   const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
   const { makeOpenRouterVision, visionAvailable, visionModel } = await import("../src/lib/hunter/deep-dive/vision");
   const { productKeywords, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
+  const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+  const { makeAccountSummarizer } = await import("../src/lib/hunter/deep-dive/account-summary");
   const repo = new DeepDiveRepository();
   const now = Math.floor(Date.now() / 1000);
 
@@ -58,7 +71,7 @@ async function main(): Promise<void> {
     const rows = repo.latest({ limit: Number.parseInt(arg("limite") ?? "", 10) || 50 });
     console.log(`\n──── DEEP DIVES PERSISTIDOS · ${rows.length} ────\n`);
     if (!rows.length) console.log("  (ninguno todavía)");
-    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus })));
+    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—" })));
     return;
   }
   if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activo: el deep dive no sale a Internet.\n"); process.exit(2); }
@@ -67,16 +80,19 @@ async function main(): Promise<void> {
   const disp = visionAvailable();
   const vision = sinVision ? null : makeOpenRouterVision();
   const token = (process.env.META_AD_LIBRARY_ACCESS_TOKEN ?? process.env.META_ADS_ACCESS_TOKEN ?? "").trim() || null;
-  console.log(`\n──── DEEP DIVE · visión: ${sinVision ? "desactivada (--sin-vision)" : disp.ok ? `OpenRouter ${visionModel()}` : disp.reason} ────`);
+  const sinCuenta = hasFlag("sin-cuenta");
+  const client = token && !sinCuenta ? new AdLibraryClient(token) : null;
+  const accountSummarize = sinCuenta ? null : makeAccountSummarizer();
+  console.log(`\n──── DEEP DIVE · visión: ${sinVision ? "desactivada (--sin-vision)" : disp.ok ? `OpenRouter ${visionModel()}` : disp.reason} · cuenta: ${sinCuenta ? "omitida (--sin-cuenta)" : client ? `search_page_ids, activos+inactivos${accountSummarize ? ", avatar por Claude" : ", avatar heurístico"}` : "sin token de la Ad Library"} ────`);
 
   // Trabajos: manual, por ids o por score.
-  type Trabajo = { titulo: string; cruceId: number | null; variantId: number | null; candidateKey: string | null; keywords: string[]; ads: import("../src/lib/hunter/discovery/types").AdLibraryAd[]; costEur: number | null; activeAds: number | null; oldestActiveAt: number | null; domainOverride: string | null };
+  type Trabajo = { titulo: string; cruceId: number | null; variantId: number | null; candidateKey: string | null; keywords: string[]; ads: import("../src/lib/hunter/discovery/types").AdLibraryAd[]; costEur: number | null; activeAds: number | null; oldestActiveAt: number | null; domainOverride: string | null; pageId: string | null; country: string };
   const trabajos: Trabajo[] = [];
   if (arg("dominio")) {
     const palabras = arg("palabras");
     if (!palabras) { console.error("✗ --dominio exige --palabras \"…\""); process.exit(2); }
     const coste = arg("coste") !== undefined ? Number(String(arg("coste")).replace(",", ".")) : null;
-    trabajos.push({ titulo: `manual · ${arg("dominio")} · «${palabras}»`, cruceId: null, variantId: null, candidateKey: null, keywords: productKeywords(palabras), ads: [], costEur: Number.isFinite(coste as number) ? coste : null, activeAds: Number.parseInt(arg("activos") ?? "", 10) || null, oldestActiveAt: null, domainOverride: arg("dominio")! });
+    trabajos.push({ titulo: `manual · ${arg("dominio")} · «${palabras}»`, cruceId: null, variantId: null, candidateKey: null, keywords: productKeywords(palabras), ads: [], costEur: Number.isFinite(coste as number) ? coste : null, activeAds: Number.parseInt(arg("activos") ?? "", 10) || null, oldestActiveAt: null, domainOverride: arg("dominio")!, pageId: arg("page-id") ?? null, country: (arg("pais") ?? "ES").toUpperCase() });
   } else {
     const cruces = new CruceRepository();
     let filas: Array<import("../src/lib/product-hunter/internal/cruce").CruceRow> = [];
@@ -87,13 +103,14 @@ async function main(): Promise<void> {
       filas = cruces.latest({ limit: 5000 }).filter((c) => c.match !== "no" && (c.score ?? 0) >= min && !hechos.has(c.variantId)).slice(0, limite);
     } else { console.error("✗ Indica --ids 1,2,3 · --min-score N --limite M · o --dominio X --palabras \"…\". Nunca el catálogo entero."); process.exit(2); }
     if (!filas.length) { console.log("  Nada que analizar con ese filtro."); return; }
-    for (const c of filas) trabajos.push({ titulo: `cruce #${c.id} · ${c.productName ?? "?"}`, cruceId: c.id, variantId: c.variantId, candidateKey: c.adlibCandidateKey, keywords: c.terms, ads: c.adlibCandidateKey ? repo.adsForCandidateKey(c.adlibCandidateKey) : [], costEur: c.costEur, activeAds: c.activeAds, oldestActiveAt: c.oldestActiveAt, domainOverride: null });
+    for (const c of filas) trabajos.push({ titulo: `cruce #${c.id} · ${c.productName ?? "?"}`, cruceId: c.id, variantId: c.variantId, candidateKey: c.adlibCandidateKey, keywords: c.terms, ads: c.adlibCandidateKey ? repo.adsForCandidateKey(c.adlibCandidateKey) : [], costEur: c.costEur, activeAds: c.activeAds, oldestActiveAt: c.oldestActiveAt, domainOverride: null, pageId: null, country: c.country });
+    for (const t of trabajos) t.pageId = t.ads.find((a) => a.pageId)?.pageId ?? null;
   }
 
   const informes: Array<{ id: number; titulo: string; report: Informe }> = [];
   for (const t of trabajos) {
     if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activado a mitad: se para aquí, lo hecho queda.\n"); break; }
-    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, domainOverride: t.domainOverride });
+    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, domainOverride: t.domainOverride, client, pageId: t.pageId, country: t.country, accountSummarize, skipAccount: sinCuenta });
     const id = repo.insert({ cruceId: t.cruceId, variantId: t.variantId, adlibCandidateKey: t.candidateKey, adId: t.ads[0]?.id ?? null, keywords: t.keywords, report, capturedAt: now });
     pintar(`${t.titulo} → deep dive #${id}`, report);
     informes.push({ id, titulo: t.titulo, report });

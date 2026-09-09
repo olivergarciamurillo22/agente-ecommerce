@@ -2217,6 +2217,15 @@ export function migrateHunterDeepDive(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_variant ON hunter_deep_dives(variant_id, captured_at DESC);
     CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_verdict ON hunter_deep_dives(verdict, captured_at DESC);
   `);
+  // Radiografía de la cuenta (paso 0, 09-09): columna aditiva sobre la misma tabla.
+  const cols = new Set((db.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).map((c) => c.name));
+  if (!cols.has("account_json")) {
+    try {
+      db.exec("ALTER TABLE hunter_deep_dives ADD COLUMN account_json TEXT");
+    } catch (err) {
+      if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+    }
+  }
 }
 
 export const SCHEMA_VERSION = 32;

@@ -71,10 +71,10 @@ export interface AngleReport {
   adsWithoutText: number;
 }
 
-const normalize = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
+export const normalizeAngleText = (s: string) => s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/\s+/g, " ").trim();
 
 /** Divide un texto en frases cortas para citar solo la que contiene el patrón. */
-function sentences(text: string): string[] {
+export function sentences(text: string): string[] {
   return text
     .split(/(?<=[.!?…])\s+|\n+|\s[•·▪►✔✅]\s?/)
     .map((s) => s.trim())
@@ -108,7 +108,7 @@ export function extractAngles(ads: AdLibraryAd[]): AngleReport {
         algunTexto = true;
         if (!primerTexto) primerTexto = texto.trim();
         for (const frase of sentences(texto)) {
-          const plano = normalize(frase);
+          const plano = normalizeAngleText(frase);
           for (const rule of ANGLE_RULES) {
             if (!rule.patterns.some((re) => re.test(plano))) continue;
             clasificado = true;

@@ -68,7 +68,7 @@ npm run hunter:deep-dive -- --ids 12,45,78              # cruces concretos (id d
 npm run hunter:deep-dive -- --min-score 60 --limite 5   # los N mejores con match, aún sin deep dive
 npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --coste 9.5 --activos 2
 npm run hunter:deep-dive -- --ver                       # lo persistido, sin red
-opciones: --sin-vision · --json informe.json
+opciones: --sin-vision · --sin-cuenta · --page-id N (manual) · --json informe.json
 ```
 
 Nunca recorre el catálogo entero. Por candidato, en orden y cada paso con
@@ -76,6 +76,7 @@ su motivo si no se pudo (`src/lib/hunter/deep-dive/deep-dive.ts`):
 
 | Paso | Fuente | Si falla |
 |---|---|---|
+| 0 · Cuenta | `search_page_ids=<page_id>`, `ad_active_status=ALL`, ≤ 5 páginas de 100 (ver «Paso 0») | «cuenta»: sin page_id, sin token o `--sin-cuenta`; el informe sigue |
 | 1 · Dominio | `ad_creative_link_captions` del último snapshot del candidato (sin red) | «tienda no localizable»: la URL de destino no está en la API ni en render_ad |
 | 2 · Catálogo | `readStore` (portada + `/products.json`, hasta 4 páginas, UA propio, bloqueos declarados) | «catálogo no accesible» (no Shopify, 404, anti-bot). Sin browser headless, sin bypass |
 | 3 · Producto | palabras clave del cruce contra título + handle + tipo, por palabra ENTERA; «si» con cobertura ≥ 0,75 y ≥ 2 aciertos, si no «dudoso» | «producto no encontrado» |
@@ -96,8 +97,8 @@ dominio, catálogo, producto casado y URL, precio, coste, margen, ángulos,
 análisis de la creatividad, activos y días, veredicto, razonamiento,
 carencias, peticiones. El token nunca se persiste (hay test).
 
-Coste por candidato: 2–4 peticiones a la tienda, 1 a render_ad y 1 a
-OpenRouter solo con visión. `EMERGENCY_STOP` corta antes de cada candidato.
+Coste por candidato: ≤ 5 peticiones a /ads_archive para la cuenta (paso 0, ver
+abajo), 2–4 a la tienda, 1 a render_ad y 1–2 a OpenRouter solo con clave. `EMERGENCY_STOP` corta antes de cada candidato.
 
 ### Ejecución real desde el PC (09-09, modo manual, sin base del cruce)
 
@@ -114,6 +115,61 @@ La cobertura del 67 % es honesta: el título no contiene «silla». Con el
 coste real de Dropea (en el NAS) y los activos/días del cruce, el mismo
 comando por `--ids` da el veredicto completo; con `--coste 9.5` de ejemplo
 sale «senal_debil, margen real 73 %, falta: match dudoso, menos de 14 días».
+
+## Paso 0 · Radiografía de la cuenta completa (añadido el 09-09, pedido de Pedro)
+
+En cuanto un candidato tiene match, antes de mirar la tienda se pide a
+`/ads_archive` **todo lo de esa página**: `search_page_ids=["<page_id>"]` en
+vez de `search_terms`, con `ad_active_status=ALL` (activos **e** inactivos) y
+una ventana de fechas amplia (`2018-01-01` → hoy). Cada anuncio trae
+`ad_delivery_start_time` y, si está apagado, `ad_delivery_stop_time`.
+Código: `src/lib/hunter/deep-dive/account.ts` (`readAccountXray`,
+`xrayFromAds`); consolidación opcional del avatar en
+`account-summary.ts`.
+
+Lo que sale de ahí, y que no se ve mirando un solo anuncio:
+
+| Campo | Cómo se calcula | Naturaleza |
+|---|---|---|
+| Antigüedad real de la tienda anunciando | fecha de inicio del anuncio **más antiguo de toda la cuenta**, esté activo o apagado (`firstAdStart`, `daysAdvertising`) | dato de la API |
+| Total de anuncios / activos ahora / apagados | anuncios únicos por id; activo = sin `ad_delivery_stop_time` | dato de la API |
+| Ángulos que repite y cuáles lleva más tiempo sin apagar (ganadores) | cada anuncio se clasifica con las mismas reglas de texto del auditor (`ANGLE_RULES`, cita literal); por ángulo: nº de anuncios, activos y el **activo más antiguo** (`longestActiveDays`). Orden: el de activo más longevo primero. Si no funcionaran, los habrían apagado | heurística sobre texto real, con cita |
+| Target / avatar consolidado | `AVATAR_RULES` (mayores, madres, oficina, dolor articular, mascotas…) con cita por señal; con `OPENROUTER_API_KEY`, Claude (mismo modelo que la visión) redacta 2–4 frases SOLO a partir de los textos, marcado `summarySource: "claude"`; sin clave, resumen heurístico | heurística con cita / texto de Claude, marcado |
+
+**Coste**: 1 petición por cada 100 anuncios de la cuenta (mismo endpoint y
+mismo límite `limit=100` que la búsqueda por palabra), con tope
+`ACCOUNT_MAX_PAGES = 5` (≤ 5 peticiones por candidato) y presupuesto
+`DiscoveryBudget`. Si se alcanza el tope, el informe lo marca `truncated` y
+antigüedad/volumen se declaran «cota inferior». Con `OPENROUTER_API_KEY`, +1
+llamada de texto a OpenRouter. El test «DEEP DIVE · paso 0» comprueba con red
+inyectada que la URL lleva `search_page_ids`, `ad_active_status=ALL`, no lleva
+`search_terms`, y que 2 páginas = 2 peticiones.
+
+**Confirmación en vivo (pendiente del NAS)**: la sonda tiene ahora un paso 5
+que hace UNA petición por `search_page_ids` con `ad_active_status=ALL` y
+reporta HTTP, milisegundos, cuántos anuncios devuelve, cuántos traen
+`ad_delivery_stop_time`, el más antiguo y si hay `paging.next` (= más de 100,
+cada 100 cuesta 1 petición más):
+
+```
+npm run hunter:deep-dive:probe -- --termino "cojin gel silla"     # pasos 1–5 (el 5 con el page_id del anuncio)
+npm run hunter:deep-dive:probe -- --page-id 123456789012345       # solo el paso 5
+```
+
+Hasta tener esa salida, «search_page_ids se comporta como la búsqueda por
+palabra» es lo que dice la documentación de Meta y lo que asume el cliente
+(`AdLibraryClient.search` ya lo usaba para el auditor de tiendas), no un dato
+observado con inactivos incluidos.
+
+**En el informe**: sección «Cuenta completa» del CLI (antigüedad real,
+total/activos/apagados, ángulos con el activo más antiguo y su cita, avatar
+consolidado y su fuente), columna `account_json` en `hunter_deep_dives`
+(aditiva, dentro de la migración 32 con `ALTER TABLE` guardado), y el
+razonamiento del veredicto añade «· cuenta: anuncia desde … · N anuncios, M
+activos · ángulos más longevos: …». **La cuenta informa; no cambia el
+veredicto**: las reglas escritas siguen siendo las de arriba. Se omite con
+`--sin-cuenta`, sin token de la Ad Library, o en modo manual sin `--page-id`;
+en los tres casos queda declarado en «No se pudo completar».
 
 ## Diseño original previsto (superado por la sonda)
 

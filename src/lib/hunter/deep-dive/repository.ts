@@ -5,6 +5,7 @@ import type Database from "better-sqlite3";
 import { systemDbHandle } from "../../db";
 import type { AdLibraryAd } from "../discovery/types";
 import type { DeepDiveReport, DeepDiveVerdict } from "./deep-dive";
+import type { AccountXray } from "./account";
 
 export interface DeepDiveRow {
   id: number;
@@ -29,6 +30,8 @@ export interface DeepDiveRow {
   reasoning: string;
   incomplete: Array<{ part: string; reason: string }>;
   capturedAt: number;
+  /** Radiografía de la cuenta anunciante (paso 0), si se hizo. */
+  account: AccountXray | null;
   report: DeepDiveReport | null;
 }
 
@@ -39,11 +42,11 @@ export class DeepDiveRepository {
 
   insert(input: { cruceId: number | null; variantId: number | null; adlibCandidateKey: string | null; adId: string | null; keywords: string[]; report: DeepDiveReport; capturedAt: number }): number {
     const r = input.report;
-    const info = this.db.prepare(`INSERT INTO hunter_deep_dives(cruce_id,variant_id,adlib_candidate_key,ad_id,keywords_json,domain,domain_source,catalog_status,catalog_products,matched_title,matched_url,match_coverage,match_verdict,price_eur,price_max_eur,cost_eur,margin_eur,margin_pct,angles_json,creative_json,creative_status,active_ads,days_active,verdict,reasoning,incomplete_json,requests,captured_at)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    const info = this.db.prepare(`INSERT INTO hunter_deep_dives(cruce_id,variant_id,adlib_candidate_key,ad_id,keywords_json,domain,domain_source,catalog_status,catalog_products,matched_title,matched_url,match_coverage,match_verdict,price_eur,price_max_eur,cost_eur,margin_eur,margin_pct,angles_json,creative_json,creative_status,active_ads,days_active,verdict,reasoning,incomplete_json,requests,captured_at,account_json)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       input.cruceId, input.variantId, input.adlibCandidateKey, input.adId, JSON.stringify(input.keywords), r.domain, r.domainSource, r.catalog?.status ?? null, r.catalog?.products ?? null,
       r.match?.product.title ?? null, r.match?.product.url ?? null, r.match?.coverage ?? null, r.match?.verdict ?? null, r.priceEur, r.priceMaxEur, r.costEur, r.marginEur, r.marginPct,
-      r.angles ? JSON.stringify(r.angles) : null, r.creative ? JSON.stringify(r.creative) : null, r.creativeStatus, r.activeAds, r.daysActive, r.verdict, r.reasoning, JSON.stringify(r.incomplete), r.requests, input.capturedAt);
+      r.angles ? JSON.stringify(r.angles) : null, r.creative ? JSON.stringify(r.creative) : null, r.creativeStatus, r.activeAds, r.daysActive, r.verdict, r.reasoning, JSON.stringify(r.incomplete), r.requests, input.capturedAt, r.account ? JSON.stringify(r.account) : null);
     return Number(info.lastInsertRowid);
   }
 
@@ -79,6 +82,6 @@ function rowOf(r: Record<string, unknown>): DeepDiveRow {
     matchCoverage: r.match_coverage === null ? null : Number(r.match_coverage), priceEur: r.price_eur === null ? null : Number(r.price_eur), costEur: r.cost_eur === null ? null : Number(r.cost_eur),
     marginEur: r.margin_eur === null ? null : Number(r.margin_eur), marginPct: r.margin_pct === null ? null : Number(r.margin_pct), creativeStatus: String(r.creative_status),
     activeAds: r.active_ads === null ? null : Number(r.active_ads), daysActive: r.days_active === null ? null : Number(r.days_active), verdict: r.verdict as DeepDiveVerdict, reasoning: String(r.reasoning),
-    incomplete: parse<Array<{ part: string; reason: string }>>(r.incomplete_json, []), capturedAt: Number(r.captured_at), report: null,
+    incomplete: parse<Array<{ part: string; reason: string }>>(r.incomplete_json, []), capturedAt: Number(r.captured_at), account: parse<AccountXray | null>(r.account_json, null), report: null,
   };
 }

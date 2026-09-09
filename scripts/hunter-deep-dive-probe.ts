@@ -5,6 +5,7 @@
 //   npm run hunter:deep-dive:probe -- --termino "cojin gel silla"
 //   npm run hunter:deep-dive:probe -- --termino "cojin gel silla" --ad-id 1234567890123456
 //   npm run hunter:deep-dive:probe -- ... --json /app/data/deep-dive-probe.json
+//   npm run hunter:deep-dive:probe -- --page-id 123456789 (solo el paso 5, sin buscar por palabra)
 //
 // Cuatro comprobaciones con UN anuncio real, 4–5 peticiones en total, sin
 // persistir nada:
@@ -15,6 +16,10 @@
 //       desafío? (esperado; no se esquiva).
 //   4 · si hay tienda: ¿responde a una petición simple? ¿es Shopify? ¿precio?
 //       ¿y la primera imagen del anuncio se descarga sin sesión?
+//   5 · RADIOGRAFÍA DE LA CUENTA: /ads_archive con search_page_ids=<page_id>
+//       y ad_active_status=ALL, UNA página de 100: ¿cuántos anuncios devuelve,
+//       cuántos inactivos (con ad_delivery_stop_time), cuál es el más antiguo,
+//       hay paging.next (más de 100)? Coste: 1 petición por cada 100 anuncios.
 //
 // El token NUNCA sale en la salida: se recorta de cualquier URL. Respeta
 // EMERGENCY_STOP como todo lo que sale a Internet.
@@ -40,7 +45,8 @@ async function main(): Promise<void> {
 
   const termino = arg("termino");
   const adIdPedido = arg("ad-id");
-  if (!termino && !adIdPedido) { console.error('Uso: npm run hunter:deep-dive:probe -- --termino "cojin gel silla" [--ad-id N] [--pais ES] [--json informe.json]'); process.exit(2); }
+  const pageIdPedido = arg("page-id");
+  if (!termino && !adIdPedido && !pageIdPedido) { console.error('Uso: npm run hunter:deep-dive:probe -- --termino "cojin gel silla" [--ad-id N] [--pais ES] [--json informe.json]'); process.exit(2); }
   if (!canRunDiscovery()) { console.error("✗ EMERGENCY_STOP activo: la sonda no sale a Internet."); process.exit(2); }
   const token = (process.env.META_AD_LIBRARY_ACCESS_TOKEN ?? process.env.META_ADS_ACCESS_TOKEN ?? "").trim();
   if (!token) { console.error("✗ Falta META_AD_LIBRARY_ACCESS_TOKEN. Esta sonda se ejecuta donde esté el token (el NAS)."); process.exit(2); }
@@ -48,7 +54,32 @@ async function main(): Promise<void> {
   const version = process.env.META_AD_LIBRARY_API_VERSION || process.env.META_GRAPH_API_VERSION || process.env.META_ADS_API_VERSION || META_ADS_DEFAULT_API_VERSION;
   const informe: Record<string, unknown> = { fecha: new Date().toISOString(), termino, pais, version };
   const p = (s: string) => console.log(s);
-  p(`\n──── SONDA DEEP DIVE · «${termino ?? adIdPedido}» · ${pais} ────\n`);
+  p(`\n──── SONDA DEEP DIVE · «${termino ?? adIdPedido ?? `page ${pageIdPedido}`}» · ${pais} ────\n`);
+
+  // 5 · radiografía de la cuenta (search_page_ids, activos e inactivos), UNA página.
+  async function paso5(pageId: string): Promise<void> {
+    const u = new URL(`https://graph.facebook.com/${version}/ads_archive`);
+    u.searchParams.set("search_page_ids", JSON.stringify([pageId]));
+    u.searchParams.set("ad_reached_countries", JSON.stringify([pais]));
+    u.searchParams.set("ad_type", "ALL"); u.searchParams.set("ad_active_status", "ALL");
+    u.searchParams.set("ad_delivery_date_min", "2018-01-01"); u.searchParams.set("ad_delivery_date_max", new Date().toISOString().slice(0, 10));
+    u.searchParams.set("fields", ADLIB_FIELDS.join(",")); u.searchParams.set("limit", "100");
+    const t0 = Date.now();
+    const r5 = await fetch(u, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+    const j5 = await r5.json() as { data?: Array<Record<string, unknown>>; paging?: { next?: string }; error?: unknown };
+    const ads5 = j5.data ?? [];
+    const conStop = ads5.filter((a) => a.ad_delivery_stop_time).length;
+    const inicios = ads5.map((a) => Date.parse(String(a.ad_delivery_start_time ?? ""))).filter(Number.isFinite);
+    const masAntiguo = inicios.length ? new Date(Math.min(...inicios)).toISOString().slice(0, 10) : null;
+    const masReciente = inicios.length ? new Date(Math.max(...inicios)).toISOString().slice(0, 10) : null;
+    informe.paso5 = { pageId, http: r5.status, ms: Date.now() - t0, error: j5.error ?? null, anuncios: ads5.length, activos: ads5.length - conStop, inactivos: conStop, masAntiguo, masReciente, hayMasPaginas: Boolean(j5.paging?.next), camposDevueltos: ads5[0] ? Object.keys(ads5[0]) : [], peticiones: 1, estimacionPeticionesCuentaCompleta: j5.paging?.next ? "≥ 2 (1 por cada 100 anuncios; el pipeline para en 5 páginas)" : "1" };
+    p(`\n5 · cuenta page_id ${pageId}: /ads_archive?search_page_ids HTTP ${r5.status} · ${Date.now() - t0} ms · ${ads5.length} anuncio(s) en la primera página`);
+    if (j5.error) p(`    error: ${JSON.stringify(j5.error)}`);
+    p(`    activos: ${ads5.length - conStop} · inactivos (con ad_delivery_stop_time): ${conStop} · más antiguo: ${masAntiguo ?? "?"} · más reciente: ${masReciente ?? "?"}`);
+    p(`    ¿hay más páginas?: ${j5.paging?.next ? "SÍ (la cuenta tiene más de 100: cada 100 cuesta 1 petición más)" : "NO (toda la cuenta cabe en 1 petición)"}`);
+    p(`    campos: ${ads5[0] ? Object.keys(ads5[0]).join(", ") : "—"}`);
+  }
+  if (pageIdPedido && !termino && !adIdPedido) { await paso5(pageIdPedido); escribir(informe); return; }
 
   // 1 · JSON crudo de /ads_archive.
   const url = new URL(`https://graph.facebook.com/${version}/ads_archive`);
@@ -114,6 +145,9 @@ async function main(): Promise<void> {
       p(`    imagen del anuncio: HTTP ${ri.status} · ${ri.headers.get("content-type")} · ${buf.byteLength} bytes ${ri.ok && buf.byteLength > 1000 ? "→ descargable sin sesión" : "→ NO descargable"}`);
     } catch (e) { informe.imagen = { error: e instanceof Error ? e.message : String(e) }; p(`    imagen del anuncio: error ${e instanceof Error ? e.message : String(e)}`); }
   }
+  const pageIdCuenta = pageIdPedido ?? (anuncio.page_id ? String(anuncio.page_id) : null);
+  if (pageIdCuenta) await paso5(pageIdCuenta);
+  else p("\n5 · cuenta: el anuncio no trae page_id; pásalo con --page-id");
   escribir(informe);
   p("\n  Sonda terminada. Pega este JSON (ya sin token) en el chat.\n");
 
