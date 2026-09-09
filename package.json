@@ -72,6 +72,7 @@
     "hunter:dropea:sync": "tsx scripts/hunter-dropea-sync.ts",
     "hunter:cruce-dropea": "tsx scripts/hunter-cruce-dropea.ts",
     "hunter:deep-dive:probe": "tsx scripts/hunter-deep-dive-probe.ts",
+    "hunter:deep-dive": "tsx scripts/hunter-deep-dive.ts",
     "landing:build": "tsx scripts/landing-build.ts",
     "landing:sections": "tsx scripts/landing-sections.ts",
     "landing:lint": "tsx scripts/landing-lint.ts",

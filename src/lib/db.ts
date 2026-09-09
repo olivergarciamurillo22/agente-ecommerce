@@ -1752,6 +1752,7 @@ function build() {
   migrateDiscoveryJobs(db);
   migrateDiscoveryJobKinds(db);
   migrateProductHunterInternal(db);
+  migrateHunterDeepDive(db);
   // Pase de datos, una sola vez por base (ver purgeAccessTokensFromAdlibRows).
   if (!db.prepare("SELECT 1 FROM settings WHERE key = ?").get(ADLIB_TOKEN_PURGE_SETTING)) {
     const purged = purgeAccessTokensFromAdlibRows(db);
@@ -2174,7 +2175,51 @@ export function purgeAccessTokensFromAdlibRows(db: Database.Database): { snapsho
   return out;
 }
 
-export const SCHEMA_VERSION = 31;
+/**
+ * Migración 32 (09-09-2026) — Nivel 2 «deep dive» del Cazador
+ * (docs/HUNTER-DEEP-DIVE.md). Aditiva: una tabla con el informe por
+ * candidato (tienda, catálogo, producto casado, precio y margen REALES,
+ * ángulos del texto, análisis de la creatividad, veredicto con reglas).
+ */
+export function migrateHunterDeepDive(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hunter_deep_dives (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cruce_id INTEGER,
+      variant_id INTEGER,
+      adlib_candidate_key TEXT,
+      ad_id TEXT,
+      keywords_json TEXT NOT NULL,
+      domain TEXT,
+      domain_source TEXT,
+      catalog_status TEXT,
+      catalog_products INTEGER,
+      matched_title TEXT,
+      matched_url TEXT,
+      match_coverage REAL,
+      match_verdict TEXT,
+      price_eur REAL,
+      price_max_eur REAL,
+      cost_eur REAL,
+      margin_eur REAL,
+      margin_pct REAL,
+      angles_json TEXT,
+      creative_json TEXT,
+      creative_status TEXT NOT NULL,
+      active_ads INTEGER,
+      days_active INTEGER,
+      verdict TEXT NOT NULL CHECK(verdict IN ('ganador_probable','senal_debil','descartar','no_verificable')),
+      reasoning TEXT NOT NULL,
+      incomplete_json TEXT NOT NULL DEFAULT '[]',
+      requests INTEGER NOT NULL DEFAULT 0,
+      captured_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_variant ON hunter_deep_dives(variant_id, captured_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_verdict ON hunter_deep_dives(verdict, captured_at DESC);
+  `);
+}
+
+export const SCHEMA_VERSION = 32;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

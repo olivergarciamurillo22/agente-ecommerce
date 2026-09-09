@@ -47,7 +47,75 @@ el pipeline**: las cuatro decisiones de diseño (de dónde sale la tienda, si
 la creatividad es descargable, si el precio se lee sin browser, si el vídeo
 es viable) dependen de ella.
 
-## Diseño previsto (condicionado a la sonda)
+## Resultado de la sonda real (09-09, «cojin gel silla», NAS)
+
+- `render_ad` con token carga, pero **no trae enlace de salida**
+  (`outboundUrls: []`): la URL de destino del anuncio NO está disponible.
+  Se descarta seguirla. Sí trae la imagen del anuncio en `fbcdn`, descargable
+  sin sesión.
+- `ad_creative_link_captions` (paso 1, ya en el nivel 1) trae el **dominio**
+  de la tienda: `cloudcore.es`.
+- `cloudcore.es/products.json` responde (Shopify, 2 productos): «Cojín
+  Ergonómico de Gel CloudCore™» a **34,99 €**. Verificado desde el PC.
+- `anthropic/claude-haiku-4.5` en OpenRouter declara `input_modalities:
+  [text, image, file]` (consulta pública a `/api/v1/models`, 09-09): **hay
+  modelo de visión bajo el mismo proveedor y la misma clave**. Sin OpenAI.
+
+## Diseño final (implementado el 09-09)
+
+```
+npm run hunter:deep-dive -- --ids 12,45,78              # cruces concretos (id de hunter_cruces)
+npm run hunter:deep-dive -- --min-score 60 --limite 5   # los N mejores con match, aún sin deep dive
+npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --coste 9.5 --activos 2
+npm run hunter:deep-dive -- --ver                       # lo persistido, sin red
+opciones: --sin-vision · --json informe.json
+```
+
+Nunca recorre el catálogo entero. Por candidato, en orden y cada paso con
+su motivo si no se pudo (`src/lib/hunter/deep-dive/deep-dive.ts`):
+
+| Paso | Fuente | Si falla |
+|---|---|---|
+| 1 · Dominio | `ad_creative_link_captions` del último snapshot del candidato (sin red) | «tienda no localizable»: la URL de destino no está en la API ni en render_ad |
+| 2 · Catálogo | `readStore` (portada + `/products.json`, hasta 4 páginas, UA propio, bloqueos declarados) | «catálogo no accesible» (no Shopify, 404, anti-bot). Sin browser headless, sin bypass |
+| 3 · Producto | palabras clave del cruce contra título + handle + tipo, por palabra ENTERA; «si» con cobertura ≥ 0,75 y ≥ 2 aciertos, si no «dudoso» | «producto no encontrado» |
+| 4 · Precio y margen REALES | `variants[].price` mínimo del producto casado; margen = (precio − coste Dropea) / precio | sin coste → «margen no calculable»; nunca se estima |
+| 5 · Ángulos | `extractAngles` sobre el texto del anuncio (cita literal) | — |
+| 6 · Creatividad (opcional) | `render_ad` con token en memoria → primera imagen `fbcdn` → OpenRouter (`DEEP_DIVE_VISION_MODEL`, por defecto `anthropic/claude-haiku-4.5`), JSON: gancho, ángulo, dolor, deseo, avatar, precio visible | `sin_vision` (sin `OPENROUTER_API_KEY` o `--sin-vision`), `sin_token`, `sin_imagen`, `video_no_soportado` (sin ffmpeg; el informe sigue), `error` |
+| 7 · Veredicto | reglas literales, guardadas con el informe | — |
+
+```
+ganador_probable = catálogo ok ∧ producto casado (cobertura ≥ 0,75) ∧ margen real ≥ 50 % ∧ activos ≥ 2 ∧ días ≥ 14
+senal_debil      = producto casado ∧ margen real ≥ 30 % pero falla activos, días o el match es dudoso
+descartar        = producto casado ∧ margen real < 30 %, o producto no disponible
+no_verificable   = sin dominio, catálogo no accesible, producto no encontrado o sin coste
+```
+
+Persistencia: `hunter_deep_dives` (migración 32, aditiva): candidato,
+dominio, catálogo, producto casado y URL, precio, coste, margen, ángulos,
+análisis de la creatividad, activos y días, veredicto, razonamiento,
+carencias, peticiones. El token nunca se persiste (hay test).
+
+Coste por candidato: 2–4 peticiones a la tienda, 1 a render_ad y 1 a
+OpenRouter solo con visión. `EMERGENCY_STOP` corta antes de cada candidato.
+
+### Ejecución real desde el PC (09-09, modo manual, sin base del cruce)
+
+```
+npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --activos 2 --sin-vision
+  Tienda: cloudcore.es (manual) · portada ok · Shopify · CloudCore
+  Catálogo: ok · 2 productos
+  Producto: «Cojín Ergonómico de Gel CloudCore™ | Alivio de coxis, lumbares y ciática» (match dudoso, cobertura 67 %)
+  Precio real: 34.99 € · coste Dropea: — · margen real: —
+  VEREDICTO: NO_VERIFICABLE — sin coste de Dropea no hay margen real
+```
+
+La cobertura del 67 % es honesta: el título no contiene «silla». Con el
+coste real de Dropea (en el NAS) y los activos/días del cruce, el mismo
+comando por `--ids` da el veredicto completo; con `--coste 9.5` de ejemplo
+sale «senal_debil, margen real 73 %, falta: match dudoso, menos de 14 días».
+
+## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`
   + `adlib_candidate_key` + `ad_id`), tienda detectada o «no localizable»,

@@ -14403,7 +14403,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 31;/, "predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30, Cazador interno 31");
+      assert.match(db, /export const SCHEMA_VERSION = 32;/, "deep dive 32 · predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30, Cazador interno 31");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -15252,12 +15252,12 @@ async function main(): Promise<void> {
       // 1 · Estático: las tablas nuevas solo se nombran en el módulo interno, sus CLIs, la migración y el verificador.
       const walk = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : [path.join(dir, e.name)]));
       const ficheros = [...walk(path.join(process.cwd(), "src")), ...walk(path.join(process.cwd(), "scripts"))].filter((f) => /\.(ts|tsx)$/.test(f));
-      const permitidos = [/src[\\/]lib[\\/]product-hunter[\\/]internal[\\/]/, /src[\\/]lib[\\/]db\.ts$/, /scripts[\\/]hunter-dropea-sync\.ts$/, /scripts[\\/]hunter-cruce-dropea\.ts$/, /scripts[\\/]migration-verify\.ts$/];
+      const permitidos = [/src[\\/]lib[\\/]product-hunter[\\/]internal[\\/]/, /src[\\/]lib[\\/]hunter[\\/]deep-dive[\\/]/, /src[\\/]lib[\\/]db\.ts$/, /scripts[\\/]hunter-dropea-sync\.ts$/, /scripts[\\/]hunter-cruce-dropea\.ts$/, /scripts[\\/]hunter-deep-dive\.ts$/, /scripts[\\/]migration-verify\.ts$/];
       const intrusos = ficheros.filter((f) => !permitidos.some((re) => re.test(f)) && /dropea_catalog|hunter_pipeline|hunter_cruce/.test(fs.readFileSync(f, "utf8")));
       assert.deepEqual(intrusos.map((f) => path.relative(process.cwd(), f)), [], "ningún fichero del bot, del scheduler, de WhatsApp, pedidos o Shopify nombra las tablas nuevas");
       // El módulo interno solo lo importa el selector de fuente del Cazador, y nada del proceso del bot.
       const importadores = ficheros.filter((f) => !f.includes(path.join("product-hunter", "internal")) && (fs.readFileSync(f, "utf8").includes("product-hunter/internal/") || fs.readFileSync(f, "utf8").includes('from "./internal/')));
-      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-dropea-sync.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador y sus dos CLIs");
+      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
       const bot = fs.readFileSync(path.join(process.cwd(), "scripts/start-bot.ts"), "utf8");
       assert.ok(!/product-hunter/.test(bot), "el proceso del bot no carga el Cazador");
 
@@ -15421,6 +15421,95 @@ async function main(): Promise<void> {
       assert.ok(u.includes(TOKEN));
       assert.ok(!redactToken(u).includes(TOKEN));
       assert.ok(!redactToken(JSON.stringify({ a: u, b: [u] })).includes(TOKEN));
+    });
+
+    await test("DEEP DIVE · pipeline con red inyectada: dominio del caption → catálogo Shopify → producto → precio y margen REALES → ángulos del texto → visión con la imagen de render_ad → veredicto con reglas; y cada carencia se declara", async () => {
+      limpiar();
+      const { runDeepDive, matchCatalogProduct, DEEP_DIVE_RULES } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const { parseCreativeJson, visionAvailable } = await import("../src/lib/hunter/deep-dive/vision");
+      const TOKEN = "EAABtokenDeepDive123";
+      const ad = (id: string, body: string, caption: string | null) => ({ id, pageId: "p-cc", pageName: "CloudCore", snapshotUrl: `https://www.facebook.com/ads/library/?id=${id}`, bodies: [body], captions: caption ? [caption] : [], titles: [], platforms: [], languages: [], creationTime: null, startTime: "2026-08-01", stopTime: null, impressions: null, audience: null });
+      const ads = [ad("9001", "Cojín de gel para silla: adiós al dolor de coxis. Envío gratis y pago contra reembolso. Garantía 30 días.", "cloudcore.es"), ad("9002", "Solo hoy 34,99 €", "CLOUDCORE.ES")];
+      const peticiones: string[] = [];
+      const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input)); peticiones.push(url.host + url.pathname);
+        if (url.host === "cloudcore.es") {
+          if (url.pathname === "/") return new Response(`<html><head><title>CloudCore</title><meta property="og:site_name" content="CloudCore"><script src="https://cdn.shopify.com/x.js"></script></head><body></body></html>`, { headers: { "content-type": "text/html" } });
+          if (url.pathname === "/products.json") return new Response(JSON.stringify({ products: [
+            { id: 1, title: "Cojín Ergonómico de Gel CloudCore™ para silla | Alivio de coxis", handle: "cojin-gel-silla", product_type: "Cojines", vendor: "CloudCore", variants: [{ price: "34.99", available: true }, { price: "39.99", available: true }], images: [] },
+            { id: 2, title: "Almohada cervical", handle: "almohada", product_type: "Almohadas", vendor: "CloudCore", variants: [{ price: "24.99", available: true }], images: [] },
+          ] }), { headers: { "content-type": "application/json" } });
+          return new Response("", { status: 404 });
+        }
+        if (url.host === "www.facebook.com" && url.pathname.startsWith("/ads/archive/render_ad/")) {
+          assert.equal(url.searchParams.get("access_token"), TOKEN, "render_ad va con el token, solo en memoria");
+          return new Response(`<html><body><img src="https://scontent.xx.fbcdn.net/v/t45/creativo_n.jpg?oh=1"><p>Cojín gel</p></body></html>`, { headers: { "content-type": "text/html" } });
+        }
+        if (url.host === "scontent.xx.fbcdn.net") { assert.ok(!new Headers(init?.headers).has("cookie"), "sin sesión"); return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xdb, 1, 2, 3, 4]), { headers: { "content-type": "image/jpeg" } }); }
+        throw new Error(`red no permitida en test: ${url.host}`);
+      }) as typeof fetch;
+      const visto: Array<{ mime: string; bytes: number; keywords: string[] }> = [];
+      const vision = async (img: { bytes: Uint8Array; mime: string }, ctx: { keywords: string[]; adText: string }) => { visto.push({ mime: img.mime, bytes: img.bytes.byteLength, keywords: ctx.keywords }); return parseCreativeJson(JSON.stringify({ hook: "Adiós al dolor de coxis", angle: "dolor", pain: "dolor al estar sentado", desire: "sentarse sin molestias", avatar: "adultos 45+ que trabajan sentados", visiblePrice: null }), "modelo-test"); };
+
+      // Caso feliz: todo verificable → ganador_probable.
+      const r = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads, costEur: 9.5, activeAds: 3, oldestActiveAt: nowSec - 40 * 86400, now: nowSec, fetcher, token: TOKEN, vision });
+      assert.equal(r.domain, "cloudcore.es"); assert.equal(r.domainSource, "caption");
+      assert.equal(r.store?.isShopify, true); assert.equal(r.catalog?.status, "ok"); assert.equal(r.catalog?.products, 2);
+      assert.equal(r.match?.product.handle, "cojin-gel-silla"); assert.equal(r.match?.coverage, 1); assert.equal(r.match?.verdict, "si");
+      assert.equal(r.priceEur, 34.99); assert.equal(r.priceMaxEur, 39.99);
+      assert.equal(r.marginEur, 25.49); assert.equal(r.marginPct, 0.73, "margen REAL = (34,99 − 9,50) / 34,99, del catálogo, no del texto del anuncio");
+      assert.ok(r.angles!.angles.some((a) => a.id === "envio_pago" && /contra reembolso/.test(a.evidence[0].quote)));
+      assert.ok(r.angles!.angles.some((a) => a.id === "garantia_devolucion"));
+      assert.equal(r.creativeStatus, "analizada"); assert.equal(r.creative?.hook, "Adiós al dolor de coxis"); assert.equal(r.creative?.visiblePrice, null);
+      assert.deepEqual(visto, [{ mime: "image/jpeg", bytes: 8, keywords: ["cojin", "gel", "silla"] }]);
+      assert.equal(r.daysActive, 40); assert.equal(r.verdict, "ganador_probable"); assert.match(r.reasoning, /cumple las cuatro condiciones/);
+      assert.equal(r.incomplete.length, 0); assert.equal(r.rules, DEEP_DIVE_RULES);
+      assert.deepEqual(peticiones, ["cloudcore.es/", "cloudcore.es/products.json", "www.facebook.com/ads/archive/render_ad/", "scontent.xx.fbcdn.net/v/t45/creativo_n.jpg"], "4 peticiones: portada, catálogo, render_ad, imagen");
+
+      // Persistencia y lectura.
+      const repo = new DeepDiveRepository(raw);
+      const id = repo.insert({ cruceId: null, variantId: 4242, adlibCandidateKey: "ES:p-cc:f", adId: "9001", keywords: ["cojin", "gel", "silla"], report: r, capturedAt: nowSec });
+      const fila = repo.byId(id)!;
+      assert.equal(fila.verdict, "ganador_probable"); assert.equal(fila.priceEur, 34.99); assert.equal(fila.marginPct, 0.73); assert.equal(fila.matchedUrl, "https://cloudcore.es/products/cojin-gel-silla"); assert.equal(fila.creativeStatus, "analizada");
+      assert.equal(repo.latest()[0].id, id);
+      assert.ok(!(raw.prepare("SELECT creative_json || angles_json || reasoning AS t FROM hunter_deep_dives WHERE id=?").get(id) as { t: string }).t.includes(TOKEN), "el token no se persiste");
+
+      // Reglas: margen bajo → descartar; match dudoso → senal_debil; sin coste → no_verificable; dominio no Shopify → no_verificable; sin dominio → no_verificable.
+      const caro = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads, costEur: 30, activeAds: 3, oldestActiveAt: nowSec - 40 * 86400, now: nowSec, fetcher, token: null, vision: null });
+      assert.equal(caro.verdict, "descartar"); assert.match(caro.reasoning, /por debajo del 30 %/); assert.equal(caro.creativeStatus, "sin_vision");
+      const dudoso = await runDeepDive({ keywords: ["cojin", "gel", "silla", "ortopedico", "memory"], ads, costEur: 9.5, activeAds: 3, oldestActiveAt: nowSec - 40 * 86400, now: nowSec, fetcher, token: null, vision });
+      assert.equal(dudoso.match?.verdict, "dudoso"); assert.equal(dudoso.verdict, "senal_debil"); assert.match(dudoso.reasoning, /match dudoso/); assert.equal(dudoso.creativeStatus, "sin_token");
+      const sinCoste = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads, costEur: null, activeAds: 3, oldestActiveAt: null, now: nowSec, fetcher, token: null, vision: null });
+      assert.equal(sinCoste.verdict, "no_verificable"); assert.equal(sinCoste.marginPct, null); assert.ok(sinCoste.incomplete.some((i) => i.part === "margen"));
+      const noShopify = await runDeepDive({ keywords: ["cojin", "gel"], ads: [ad("1", "x", "otratienda.es")], costEur: 9, activeAds: 1, oldestActiveAt: null, now: nowSec, fetcher: (async (i: string | URL | Request) => { const u = new URL(String(i)); return u.pathname === "/" ? new Response("<html><title>Otra</title></html>", { headers: { "content-type": "text/html" } }) : new Response("", { status: 404 }); }) as typeof fetch, token: null, vision: null });
+      assert.equal(noShopify.verdict, "no_verificable"); assert.equal(noShopify.catalog?.status, "no_shopify"); assert.ok(noShopify.incomplete.some((i) => i.part === "catálogo" && /no es Shopify/.test(i.reason)));
+      const sinDominio = await runDeepDive({ keywords: ["cojin"], ads: [ad("1", "x", null)], costEur: 9, activeAds: 1, oldestActiveAt: null, now: nowSec, fetcher, token: null, vision: null });
+      assert.equal(sinDominio.verdict, "no_verificable"); assert.equal(sinDominio.domain, null); assert.ok(sinDominio.incomplete.some((i) => i.part === "tienda"));
+      // Vídeo: no soportado, se dice y el informe sigue.
+      const fVideo = (async (i: string | URL | Request, init?: RequestInit) => { const u = new URL(String(i)); return u.host === "www.facebook.com" ? new Response(`<video src="https://video.xx.fbcdn.net/v/t42/clip.mp4?oh=1"></video>`, { headers: { "content-type": "text/html" } }) : fetcher(i, init); }) as typeof fetch;
+      const video = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads, costEur: 9.5, activeAds: 3, oldestActiveAt: nowSec - 40 * 86400, now: nowSec, fetcher: fVideo, token: TOKEN, vision });
+      assert.equal(video.creativeStatus, "video_no_soportado"); assert.equal(video.verdict, "ganador_probable", "la creatividad no decide el veredicto");
+      // Matching por palabra entera y utilidades.
+      assert.equal(matchCatalogProduct(["cama", "gato"], [{ title: "Cámara de vigilancia para tu gato", handle: "camara-gato", vendor: null, productType: null, priceMin: 1, priceMax: 1, variants: 1, images: 0, available: true, createdAt: null, url: "u" }])?.coverage, 0.5, "«cama» no está en «cámara»: solo casa «gato»");
+      assert.equal(parseCreativeJson("no es json", "m"), null);
+      assert.equal(visionAvailable({}).ok, false); assert.equal(visionAvailable({ OPENROUTER_API_KEY: "k" }).ok, true);
+    });
+
+    await test("DEEP DIVE · migración 32 aditiva e idempotente; adsForCandidateKey lee el último snapshot", async () => {
+      const Database = (await import("better-sqlite3")).default;
+      const mem = new Database(":memory:");
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateProductHunterInternal, db.migrateHunterDeepDive, db.migrateHunterDeepDive]) m(mem);
+      assert.ok(mem.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hunter_deep_dives'").get());
+      mem.close();
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      raw.prepare("INSERT OR IGNORE INTO adlib_candidates(candidate_key,page_id,page_name,fingerprint) VALUES('ES:dd:1','dd','DD','f')").run();
+      const cid = Number((raw.prepare("SELECT id FROM adlib_candidates WHERE candidate_key='ES:dd:1'").get() as { id: number }).id);
+      const qid = Number(raw.prepare("INSERT INTO adlib_queries(terms_json,country,days,fields_json,result_count,passed_noise_count,group_count,queried_at) VALUES('[]','ES',30,'[]',1,1,1,?)").run(nowSec).lastInsertRowid);
+      raw.prepare("INSERT INTO adlib_candidate_snapshots(query_id,candidate_id,captured_at,active_ads,oldest_active_at,momentum,previous_active_ads,noise,noise_reason,ads_json) VALUES(?,?,?,1,?,'sin_historico',NULL,0,NULL,?)").run(qid, cid, nowSec, nowSec, JSON.stringify([{ id: "a1", captions: ["cloudcore.es"], bodies: ["x"], titles: [] }]));
+      const ads = new DeepDiveRepository(raw).adsForCandidateKey("ES:dd:1");
+      assert.equal(ads.length, 1); assert.deepEqual(ads[0].captions, ["cloudcore.es"]);
+      assert.deepEqual(new DeepDiveRepository(raw).adsForCandidateKey("no-existe"), []);
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
@@ -15616,7 +15705,7 @@ async function main(): Promise<void> {
       const Database = require("better-sqlite3") as typeof import("better-sqlite3");
       const raw = new Database(copy);
       db.assertSchemaNotNewer(raw, copy);
-      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs, db.migrateDiscoveryJobKinds, db.migrateProductHunterInternal]) m(raw);
+      for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateAddressValidation, db.migrateAutoDispatch, db.migrateDispatchChannels, db.migrateAiCancellations, db.migrateDispatchNotice, db.migrateAiCallLog, db.migrateDiscoveryRunState, db.migrateDiscoveryJobs, db.migrateDiscoveryJobKinds, db.migrateProductHunterInternal, db.migrateHunterDeepDive]) m(raw);
       raw.pragma(`user_version = ${db.SCHEMA_VERSION}`);
       raw.close();
       return db.SCHEMA_VERSION;
@@ -15841,6 +15930,8 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 30");
     db.migrateProductHunterInternal(fixture);
     fixture.pragma("user_version = 31");
+    db.migrateHunterDeepDive(fixture);
+    fixture.pragma("user_version = 32");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
