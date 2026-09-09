@@ -17,8 +17,9 @@
 //   1 · cobertura ≥ 0,6 (2 palabras: las dos; 3: al menos 2; 4: al menos 3);
 //   2 · la palabra PRINCIPAL del nombre (la primera: «peine», «purificador»,
 //       «botella», «ventilador») tiene que estar (exacta o por raíz);
-//   3 · al menos una palabra ESPECÍFICA presente: «aire», «digital»,
-//       «plástico»… son genéricas y no cuentan como coincidencia;
+//   3 · cobertura de las palabras ESPECÍFICAS ≥ 0,6: «aire», «digital»,
+//       «plástico»… son genéricas y no cuentan («báscula de cocina digital»
+//       no es «báscula digital de baño»: la específica «baño» falta);
 //   4 · si el catálogo declara product_type y ese tipo no comparte raíz con
 //       ninguna palabra clave, contradice: solo se tolera con cobertura ≥ 0,75.
 // Solo aplica cuando SÍ hay catálogo: sin catálogo no hay nada que comparar y
@@ -30,7 +31,7 @@ import { tokens } from "../../product-hunter/internal/dropea-catalog";
 
 export const GATE_MIN_COVERAGE = 0.6;
 export const GATE_RULE =
-  "pasa si cobertura ≥ 0,6 ∧ la palabra principal (primera del nombre) está ∧ al menos una palabra específica (no genérica) está ∧ el product_type del catálogo, si lo hay, no contradice (o cobertura ≥ 0,75)";
+  "pasa si cobertura ≥ 0,6 ∧ la palabra principal (primera del nombre) está ∧ cobertura de las palabras específicas (no genéricas) ≥ 0,6 ∧ el product_type del catálogo, si lo hay, no contradice (o cobertura ≥ 0,75)";
 
 /** Palabras que describen cualquier cosa: no prueban que sea el mismo producto. */
 export const GENERIC_PRODUCT_WORDS = new Set([
@@ -38,7 +39,7 @@ export const GENERIC_PRODUCT_WORDS = new Set([
   "plastico", "silicona", "acero", "inoxidable", "aluminio", "madera", "cristal", "vidrio", "tela", "algodon", "cuero", "metal", "goma",
   "mini", "doble", "triple", "grande", "pequeno", "pequena", "universal", "profesional", "multifuncion", "multifuncional", "recargable", "led", "usb", "smart", "inteligente",
   "reutilizable", "reutilizables", "ajustable", "ajustables", "plegable", "plegables", "portable", "compacto", "compacta", "ergonomico", "ergonomica", "especial", "extra", "super", "ultra", "max", "pro", "plus",
-  "hogar", "casa", "cocina", "bano", "coche", "oficina", "viaje", "deporte", "mascotas", "bebe", "ninos", "adultos", "mujer", "hombre",
+  // OJO: «cocina», «baño», «coche», «bebé»… NO son genéricas: distinguen productos (báscula de cocina ≠ báscula de baño).
   "set", "kit", "pack", "lote", "unidades", "piezas", "juego", "conjunto", "accesorio", "accesorios", "soporte", "base", "funda", "cable", "adaptador",
   "calidad", "premium", "original", "nuevo", "nueva", "moderno", "moderna", "clasico", "clasica", "elegante", "practico", "practica", "facil",
 ]);
@@ -87,7 +88,10 @@ export function productGate(keywords: string[], product: CatalogProduct | null, 
   const fallos: string[] = [];
   if (cov < GATE_MIN_COVERAGE) fallos.push(`cobertura ${Math.round(cov * 100)} % < 60 %`);
   if (!headPresent) fallos.push(`falta la palabra principal «${head}»`);
+  const specificKeywords = keywords.filter((k) => !GENERIC_PRODUCT_WORDS.has(k));
+  const specificCov = specificKeywords.length ? specificPresent.length / specificKeywords.length : 0;
   if (!specificPresent.length) fallos.push(`solo coinciden palabras genéricas (${present.join(", ") || "ninguna"})`);
+  else if (specificCov < GATE_MIN_COVERAGE) fallos.push(`faltan palabras específicas: ${specificKeywords.filter((k) => !specificPresent.includes(k)).map((k) => `«${k}»`).join(", ")} (${Math.round(specificCov * 100)} % de las específicas)`);
   if (typeCheck === "contradice" && cov < 0.75) fallos.push(`el tipo del catálogo «${product.productType}» no casa con «${searched}»`);
   const passed = fallos.length === 0;
   const reason = passed

@@ -88,7 +88,7 @@ sudo docker exec casamable-agent npm run db:health -- --full
 sudo docker exec casamable-agent node -e "const D=require('better-sqlite3');const d=new D('/app/data/messages.db',{readonly:true});console.log('schema',d.pragma('user_version',{simple:true}));console.log('cols',d.prepare('PRAGMA table_info(hunter_deep_dives)').all().map(c=>c.name).join(','))"
 sudo docker exec casamable-agent npm run doctor:v43
 ```
-Acepta si: schema = 32 y `cols` incluye `account_json, ad_link, recommendation, competitors, other_products, video_status, price_coherence, summary, report_json`.
+Acepta si: schema = 32, `cols` incluye `account_json, ad_link, recommendation, competitors, other_products, video_status, price_coherence, summary, report_json, country, spain_active_ads, opportunity, early_exit`, y existen las tablas `hunter_cod_sweeps` y `hunter_cod_stores` (`SELECT name FROM sqlite_master WHERE name LIKE 'hunter_cod%'`).
 Anota: POST_DEPLOY_SCHEMA= · COLUMNAS_NUEVAS=sí/no · DB_HEALTH= · DOCTOR_V43=
 No continúes si faltan columnas: rollback (bloque 10).
 
@@ -144,6 +144,21 @@ sudo docker exec casamable-agent npm run hunter:deep-dive -- --ids <id>
 Anota: B2_DD_ID= B2_VEREDICTO= B2_COMPETENCIA_ESPANA=<N anuncios activos (verificado) | NO VERIFICADA> B2_OPORTUNIDAD= B2_RECOMENDACION=
 
 ==================================================
+8c · BÚSQUEDA 3 (caza directa COD) — solo si el SHA desplegado la incluye
+==================================================
+Fase 1 (≤ 12 peticiones, no audita nada):
+```
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --paginas 3 --json /app/data/barrido-cod.json
+```
+Anota: B3_PETICIONES= B3_ANUNCIOS_UNICOS= B3_TIENDAS_CON_FRASE= B3_PAGINAS_SIN_FRASE= B3_TOP3=<page_id · tienda · activos · días · prioridad>
+Pega la tabla entera en el chat (es la calibración de frases).
+Fase 2 solo sobre 2 tiendas (≤ 5 peticiones de cuenta + deep dive por producto en Dropea):
+```
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --auditar --top 2 --json /app/data/auditoria-cod.json
+```
+Pega la salida de cada «═══ tienda … ═══». Anota por tienda: B3_TIENDA= B3_PRODUCTOS= B3_EN_DROPEA= B3_FUERTE_SIN_PROV= B3_CATALOGO=disperso/concentrado B3_PETICIONES=
+
+==================================================
 9 · VALIDAR QUE EL NÚCLEO COD SIGUE IGUAL
 ==================================================
 ```
@@ -189,5 +204,6 @@ TEMPLATES=
 ERRORES_LOG=
 ROLLBACK_REQUIRED=
 B2: PAISES_OK= B2_PAIS= B2_PROCESADOS= B2_CON_MATCH= B2_DD_ID= B2_COMPETENCIA_ESPANA= B2_OPORTUNIDAD= B2_RECOMENDACION=
+B3: B3_PETICIONES= B3_TIENDAS_CON_FRASE= B3_PAGINAS_SIN_FRASE= B3_TIENDA_1= B3_TIENDA_2=
 FINAL_VERDICT=
 ```

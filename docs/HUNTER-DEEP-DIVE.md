@@ -388,6 +388,71 @@ purificador, báscula, luces LED, gafas) no cambia nada. Test «DIVERSIDAD DEL
 CATÁLOGO» con ambos casos (ghd reconstruido de memoria: planchas y un
 secador; el JSON real está en el NAS).
 
+## Búsqueda 3 · caza directa de tiendas COD por «pago contra reembolso» (10-09)
+
+Inversa de las búsquedas 1 y 2: parte de la Ad Library, busca quien habla de
+pago contra reembolso (la señal más fuerte de operación COD como Casamable),
+agrupa por tienda, prioriza barato y audita a fondo solo el lote que decide
+Pedro. Captura ganadores cuyo nombre en el anuncio nunca coincidiría con el
+de Dropea. Código: `src/lib/hunter/deep-dive/cod-hunt.ts`, CLI
+`scripts/hunter-busqueda-cod.ts`, tablas `hunter_cod_sweeps` y
+`hunter_cod_stores` (aditivas, migración 32).
+
+```
+npm run hunter:busqueda-cod                                     # FASE 1: 4 frases × ≤ 5 páginas, ES, 180 días (≤ 20 peticiones)
+npm run hunter:busqueda-cod -- --frases "pago contra reembolso|paga al recibir" --paginas 3 --dias 90 --json barrido.json
+npm run hunter:busqueda-cod -- --ver                            # último barrido, sin red
+npm run hunter:busqueda-cod -- --auditar --ids 1051601004698822 # FASE 2: lote explícito
+npm run hunter:busqueda-cod -- --auditar --top 3                # los 3 primeros del barrido aún no auditados (máx. 10)
+npm run hunter:busqueda-cod -- --ver-tiendas · --ver-tienda <id>
+```
+
+**Fase 1 (barata, no audita)**: por frase (`COD_PHRASES_DEFAULT`: «pago
+contra reembolso», «paga al recibir», «pago en efectivo al recibir»,
+«contrareembolso»), `search_terms` con `ad_active_status=ALL` y
+`ad_reached_countries=ES`, hasta `--paginas` (5) páginas de 100. Agrupación
+en memoria por `page_id`: anuncios encontrados, activos, **anuncios que dicen
+de verdad la frase** (`COD_EVIDENCE`; Meta devuelve «parecidos» y esas
+páginas quedan fuera, contadas aparte), activo más antiguo y sus días,
+dominios declarados, cita literal y enlace. Prioridad barata (`SWEEP_FORMULA`,
+0–100, **no es veredicto**): `min(activos, 10) × 5 + min(días, 180) / 180 × 50`.
+Se persiste entera (`hunter_cod_sweeps`) para que `--top` no repita tiendas.
+
+**Fase 2 (cara, siempre lote explícito)**, por tienda:
+
+| Paso | Qué | Coste |
+|---|---|---|
+| Radiografía | `readAccountXray` tal cual (antigüedad real, activos/inactivos, ángulos con madurez, avatar, ritmo de testeo), con la marca/dominio excluidos de la dispersión | ≤ 5 |
+| Minería + diversidad | los mismos `products` y `diversity` del pipeline; «concentrado» = posible marca propia | 0 |
+| Producto → Dropea | por producto minado (hasta `--max-productos`, 4): palabras del título + una del grupo (`productSearchKeywords`), búsqueda LOCAL en Dropea y **gate estricto** contra el nombre de Dropea (`matchDropea`: mismas reglas que el gate del catálogo; «báscula digital de baño» ≠ «báscula de cocina digital») | 0 |
+| Si está en Dropea | `runDeepDive` completo con la radiografía ya hecha (`accountPrecomputed`, no se vuelve a pedir la cuenta): precio real, margen, coherencia, competencia, veredicto, recomendación. Se guarda también en `hunter_deep_dives` | 1 búsqueda + 2–4 tienda + creatividad |
+| Si NO está | **fuerza de la señal** (`SIGNAL_RULES`): `senal_fuerte_sin_proveedor` = activo más antiguo ≥ 30 días ∧ ≥ 2 activos ∧ catálogo no concentrado; si no, `senal_debil_sin_proveedor`. Sin margen, sin «contactar a Dropea»: «requiere sourcing alternativo (AliExpress u otro proveedor)». Recomendación `testear` / `no_testear` con sourcing `alternativo` | 0 |
+| Veredicto por tienda | texto claro con la tabla de productos: cuáles en Dropea y cuáles no, recomendación y motivo de cada uno | — |
+
+**Verificación pendiente en el NAS (antes de calibrar frases)**: la fase 1
+real. El comando de arriba con `--paginas 3` cuesta ≤ 12 peticiones; la
+tabla dice cuántas tiendas distintas salen y cuántas páginas devolvió Meta
+«por parecido» sin decir la frase. Con eso Pedro decide si el volumen es
+manejable o hay que afinar `--frases`. La fase 2 está construida y probada con
+red inyectada (test «BÚSQUEDA 3»: Takuyi con purificador y gafas en Dropea,
+cepillo de vapor fuerte sin proveedor, báscula débil y rechazada por el gate).
+
+Ejemplo (red inyectada, misma forma que el informe real):
+
+```
+FASE 1 · 4 peticiones · 4 anuncios únicos · 2 tiendas con la frase
+ page_id  tienda   activos  con frase  dias  prioridad  dominio     evidencia
+ 8002     ghd      1        1          400   55         ghd.com     ghd Platinum+ plancha: pago contra reembolso dispo
+ 8001     Takuyi   3        3          120   48.3       takuyi.es   Pago contra reembolso, envío 24h.
+
+■ «Purificador de aire ozono» · 2 activos · 120 días
+  EN DROPEA: «Purificador de aire ozono portátil» (14.2 €) · DEEP DIVE: GANADOR_PROBABLE — … margen real 64 % → CONTACTAR_DROPEA_MUESTRA
+■ «Cepillo de vapor» · 2 activos · 70 días
+  NO EN DROPEA (buscado «cepillo vapor ropa»: 0 candidatos) · SEÑAL: SENAL_FUERTE_SIN_PROVEEDOR → TESTEAR (sourcing alternativo): la decisión de sourcing es de Pedro; sin margen calculable
+■ «Báscula digital» · 1 activo · 20 días
+  NO EN DROPEA (mejor «Báscula de cocina digital 5 kg»: faltan palabras específicas: «bano») · SENAL_DEBIL_SIN_PROVEEDOR → NO_TESTEAR
+```
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

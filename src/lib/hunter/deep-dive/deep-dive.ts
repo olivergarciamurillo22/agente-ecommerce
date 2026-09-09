@@ -106,6 +106,8 @@ export interface DeepDiveInput {
   accountSummarize?: AccountXrayInput["summarize"];
   accountMaxPages?: number;
   skipAccount?: boolean;
+  /** Radiografía ya hecha (búsqueda 3): se usa tal cual y no se vuelve a pedir la cuenta. */
+  accountPrecomputed?: AccountXray | null;
   dropeaLookup?: DropeaLookupFn | null;
   /** Búsqueda 2: palabras clave EN ESPAÑOL para la comprobación de España (si el país no es ES). Por defecto, las mismas. */
   spainKeywords?: string[];
@@ -396,7 +398,8 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
 
   // 0b · radiografía de la cuenta (todos los anuncios de la página, activos e inactivos)
   let account: AccountXray | null = null;
-  if (input.skipAccount) incomplete.push({ part: "cuenta", reason: "radiografía de la cuenta omitida (--sin-cuenta)" });
+  if (input.accountPrecomputed) account = input.accountPrecomputed;
+  else if (input.skipAccount) incomplete.push({ part: "cuenta", reason: "radiografía de la cuenta omitida (--sin-cuenta)" });
   else if (!input.client || !pageId) incomplete.push({ part: "cuenta", reason: !pageId ? "sin page_id del anunciante (modo manual o candidato sin página)" : "sin cliente de la Ad Library (falta el token)" });
   else {
     try {

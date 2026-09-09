@@ -2217,6 +2217,38 @@ export function migrateHunterDeepDive(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_variant ON hunter_deep_dives(variant_id, captured_at DESC);
     CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_verdict ON hunter_deep_dives(verdict, captured_at DESC);
   `);
+  // Búsqueda 3 (10-09): barridos COD y auditorías por tienda. Aditiva, misma migración 32.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS hunter_cod_sweeps (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      country TEXT NOT NULL,
+      phrases_json TEXT NOT NULL,
+      days INTEGER NOT NULL,
+      max_pages INTEGER NOT NULL,
+      requests INTEGER NOT NULL DEFAULT 0,
+      ads_total INTEGER NOT NULL DEFAULT 0,
+      stores INTEGER NOT NULL DEFAULT 0,
+      result_json TEXT NOT NULL,
+      captured_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS hunter_cod_stores (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sweep_id INTEGER,
+      page_id TEXT NOT NULL,
+      page_name TEXT,
+      country TEXT NOT NULL,
+      priority REAL,
+      products INTEGER NOT NULL DEFAULT 0,
+      in_dropea INTEGER NOT NULL DEFAULT 0,
+      strong_without_supplier INTEGER NOT NULL DEFAULT 0,
+      diversity TEXT,
+      summary TEXT NOT NULL,
+      audit_json TEXT NOT NULL,
+      requests INTEGER NOT NULL DEFAULT 0,
+      captured_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_hunter_cod_stores_page ON hunter_cod_stores(page_id, captured_at DESC);
+  `);
   // Radiografía de la cuenta (paso 0, 09-09): columna aditiva sobre la misma tabla.
   // Pipeline completo (09-09): recomendación, competencia, otros productos, vídeo, coherencia de precio, informe entero.
   const cols = new Set((db.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).map((c) => c.name));

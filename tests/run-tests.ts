@@ -15257,7 +15257,7 @@ async function main(): Promise<void> {
       assert.deepEqual(intrusos.map((f) => path.relative(process.cwd(), f)), [], "ningún fichero del bot, del scheduler, de WhatsApp, pedidos o Shopify nombra las tablas nuevas");
       // El módulo interno solo lo importa el selector de fuente del Cazador, y nada del proceso del bot.
       const importadores = ficheros.filter((f) => !f.includes(path.join("product-hunter", "internal")) && (fs.readFileSync(f, "utf8").includes("product-hunter/internal/") || fs.readFileSync(f, "utf8").includes('from "./internal/')));
-      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/hunter/deep-dive/product-gate.ts", "src/lib/hunter/deep-dive/translate.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
+      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-busqueda-cod.ts", "scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/cod-hunt.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/hunter/deep-dive/product-gate.ts", "src/lib/hunter/deep-dive/translate.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
       const bot = fs.readFileSync(path.join(process.cwd(), "scripts/start-bot.ts"), "utf8");
       assert.ok(!/product-hunter/.test(bot), "el proceso del bot no carga el Cazador");
 
@@ -15997,6 +15997,115 @@ async function main(): Promise<void> {
       assert.equal(bajada.action, "verificar_manual"); assert.match(bajada.reason, /posible marca propia/);
       assert.equal(recommend({ ...base, catalogConcentrated: false }).action, "contactar_dropea_muestra");
       assert.equal(recommend({ ...base, verdict: "descartar", catalogConcentrated: true }).action, "descartar", "solo baja un nivel desde «contactar»; lo demás no sube ni baja");
+    });
+
+    await test("BÚSQUEDA 3 · fase 1: N frases COD × ≤ P páginas con ad_active_status=ALL, agrupación por tienda con evidencia literal de la frase y prioridad barata (no veredicto); fase 2: radiografía + minería + diversidad, cada producto contra Dropea con gate estricto → deep dive normal si está, «señal sin proveedor» si no (sin margen ni contactar); persistencia", async () => {
+      limpiar();
+      const { sweepCodStores, groupSweep, sweepPriority, codQuote, matchDropea, signalVerdict, auditCodStore, COD_PHRASES_DEFAULT, SWEEP_FORMULA, productSearchKeywords } = await import("../src/lib/hunter/deep-dive/cod-hunt");
+      const { CodHuntRepository } = await import("../src/lib/hunter/deep-dive/cod-repository");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
+      const crudo = (id: string, page: [string, string], body: string, start: string, caption: string, stop?: string, title?: string) => ({ id, page_id: page[0], page_name: page[1], ad_creative_bodies: [body], ad_creative_link_titles: title ? [title] : [], ad_creative_link_captions: [caption], ad_delivery_start_time: start, ...(stop ? { ad_delivery_stop_time: stop } : {}) });
+      const TK: [string, string] = ["8001", "Takuyi"]; const GH: [string, string] = ["8002", "ghd"]; const NO: [string, string] = ["8003", "SinFrase"];
+      // Fase 1: dos frases devuelven páginas solapadas; una página (SinFrase) la devuelve Meta «por parecido» sin decir la frase.
+      const porFrase: Record<string, unknown[]> = {
+        "pago contra reembolso": [
+          crudo("t1", TK, "Purificador de aire con ozono. Pago contra reembolso, envío 24h.", dia(120), "takuyi.es", undefined, "Purificador de aire ozono"),
+          crudo("t2", TK, "Báscula digital de baño: paga al recibir.", dia(20), "takuyi.es", undefined, "Báscula digital"),
+          crudo("g1", GH, "ghd Platinum+ plancha: pago contra reembolso disponible.", dia(400), "ghd.com", undefined, "ghd Platinum+ plancha"),
+          crudo("n1", NO, "Reloj inteligente con envío gratis", dia(5), "sinfrase.es"),
+        ],
+        "paga al recibir": [
+          crudo("t2", TK, "Báscula digital de baño: paga al recibir.", dia(20), "takuyi.es", undefined, "Báscula digital"),
+          crudo("t3", TK, "Tira de luces LED 5 m, pago al recibir en casa.", dia(60), "takuyi.es", dia(10), "Tira luces LED"),
+        ],
+      };
+      const urls: URL[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); urls.push(u);
+        if (u.host === "graph.facebook.com") {
+          if (u.searchParams.get("search_page_ids")) {
+            const pid = JSON.parse(u.searchParams.get("search_page_ids")!)[0];
+            const cuenta = pid === "8001" ? [
+              crudo("t1", TK, "Purificador de aire con ozono. Pago contra reembolso, envío 24h.", dia(120), "takuyi.es", undefined, "Purificador de aire ozono"),
+              crudo("t1b", TK, "Purificador de aire ozono para casa: adiós a los olores", dia(45), "takuyi.es", undefined, "Purificador de aire ozono"),
+              crudo("t2", TK, "Báscula digital de baño: paga al recibir.", dia(20), "takuyi.es", undefined, "Báscula digital"),
+              crudo("t3", TK, "Tira de luces LED 5 m, pago al recibir en casa.", dia(60), "takuyi.es", dia(10), "Tira luces LED"),
+              crudo("t4", TK, "Gafas de sol polarizadas para conducir", dia(90), "takuyi.es", undefined, "Gafas de sol polarizadas"),
+              crudo("t4b", TK, "Gafas de sol polarizadas, protección UV400", dia(35), "takuyi.es", undefined, "Gafas de sol polarizadas"),
+            ] : [];
+            return new Response(JSON.stringify({ data: cuenta, paging: {} }), { headers: { "content-type": "application/json" } });
+          }
+          const term = u.searchParams.get("search_terms")!;
+          assert.equal(u.searchParams.get("ad_reached_countries"), JSON.stringify(["ES"]));
+          if (porFrase[term]) assert.equal(u.searchParams.get("ad_active_status"), "ALL", "el barrido pide activos E inactivos");
+          return new Response(JSON.stringify({ data: porFrase[term] ?? [], paging: {} }), { headers: { "content-type": "application/json" } });
+        }
+        if (u.host === "takuyi.es") {
+          if (u.pathname === "/") return new Response(`<html><head><title>Takuyi</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
+          if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "Purificador de aire con ozono Takuyi", handle: "purificador-aire-ozono", product_type: "", vendor: "Takuyi", variants: [{ price: "39.99", available: true }], images: [] }, { id: 2, title: "Gafas de sol polarizadas", handle: "gafas-sol", product_type: "", vendor: "Takuyi", variants: [{ price: "19.99", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
+          return new Response("", { status: 404 });
+        }
+        throw new Error(`red no permitida en test: ${u.host}`);
+      }) as typeof fetch;
+      const client = new AdLibraryClient("T", fetcher, async () => {});
+      const sweep = await sweepCodStores({ client, country: "ES", phrases: ["pago contra reembolso", "paga al recibir"], maxPages: 2, now: nowSec });
+      assert.equal(sweep.requests, 2, "1 página por frase (sin paging.next)"); assert.equal(sweep.adsTotal, 6); assert.equal(sweep.adsUnique, 5, "t2 salió en las dos frases: cuenta una vez");
+      assert.deepEqual(sweep.stores.map((s) => s.pageName), ["ghd", "Takuyi"], "prioridad barata por fórmula: ghd 1×5 + 50 (400 días, topado a 180) = 55 > Takuyi 2×5 + 33,3 (120 días) = 43,3; es prioridad, no veredicto"); assert.equal(sweep.storesWithoutEvidence, 1, "SinFrase no dice la frase: fuera de la tabla");
+      const tk = sweep.stores[1]; assert.equal(tk.activeAds, 2); assert.equal(tk.adsFound, 3); assert.equal(tk.codAds, 3); assert.equal(tk.oldestActiveDays, 120); assert.deepEqual(tk.domains, ["takuyi.es"]); assert.match(tk.evidence!.quote, /Pago contra reembolso/); assert.equal(tk.priority, sweepPriority(2, 120)); assert.equal(tk.adLink, "https://www.facebook.com/ads/library/?id=t1");
+      assert.equal(sweepPriority(2, 120), 43.3); assert.equal(sweep.stores[0].priority, 55); assert.equal(sweepPriority(10, 180), 100); assert.equal(sweepPriority(0, null), 0); assert.equal(sweep.formula, SWEEP_FORMULA); assert.equal(COD_PHRASES_DEFAULT.length, 4);
+      assert.equal(codQuote({ id: "x", pageId: "1", pageName: null, snapshotUrl: null, bodies: ["Envío gratis. Pagas cuando lo recibas en casa."], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }), "Pagas cuando lo recibas en casa.");
+      assert.deepEqual(groupSweep([], nowSec), { stores: [], adsUnique: 0, storesWithoutEvidence: 0 });
+      const repo = new CodHuntRepository(raw);
+      const sweepId = repo.insertSweep(sweep); assert.equal(repo.sweep({ country: "ES" })?.id, sweepId); assert.equal(repo.sweep({ country: "ES" })?.result?.stores.length, 2);
+
+      // Fase 2 sobre Takuyi: 3 productos minados entre los activos; purificador y gafas SÍ en Dropea (gate estricto), báscula y luces NO.
+      const dropea = (term: string) => {
+        if (/purificador/.test(term)) return [{ variantId: 901, name: "Purificador de aire ozono portátil", costEur: 14.2 }, { variantId: 902, name: "Ambientador de aire para coche", costEur: 2.1 }];
+        if (/gafas/.test(term)) return [{ variantId: 903, name: "Gafas de sol polarizadas unisex", costEur: 3.5 }];
+        if (/bascula/.test(term)) return [{ variantId: 904, name: "Báscula de cocina digital 5 kg", costEur: 4 }]; // otro producto: el gate debe rechazarlo
+        return [];
+      };
+      const mm = matchDropea(["purificador", "aire", "ozono"], dropea("purificador aire ozono"));
+      assert.equal(mm.match?.variantId, 901, "gana el que pasa el gate, no el ambientador"); assert.equal(mm.gate?.passed, true);
+      const mb = matchDropea(["bascula", "digital", "bano"], dropea("bascula digital bano"));
+      assert.equal(mb.match, null, "báscula de cocina ≠ báscula de baño: 67 % en total, pero de las específicas (bascula, bano) solo casa la mitad y «digital» es genérica"); assert.equal(mb.gate?.passed, false);
+      assert.deepEqual(matchDropea(["x"], []), { match: null, gate: null });
+      urls.length = 0;
+      const a = await auditCodStore({ client, pageId: "8001", pageName: "Takuyi", country: "ES", now: nowSec, sweep: tk, dropeaSearch: dropea, maxProducts: 4, deepDive: { fetcher, token: null, vision: null, video: null, dropeaLookup: null } });
+      assert.equal(a.account?.totalAds, 6); assert.equal(a.account?.activeAds, 5); assert.equal(a.account?.diversity.level, "disperso", "Takuyi: purificador, gafas, báscula, luces → disperso (dropshipper)");
+      assert.equal(a.products.length, 3, "purificador, gafas y báscula: las luces LED están apagadas y la minería solo agrupa activos");
+      const purif = a.products.find((p) => /Purificador/.test(p.product.label))!; const gafas = a.products.find((p) => /Gafas/.test(p.product.label))!; const basc = a.products.find((p) => /Báscula/.test(p.product.label))!;
+      assert.deepEqual(productSearchKeywords(purif.product), ["purificador", "aire", "ozono", "adios"], "título + una palabra del grupo"); assert.deepEqual(productSearchKeywords(basc.product), ["bascula", "digital", "bano"]);
+      // Camino con Dropea: deep dive normal, con la radiografía ya hecha (no se vuelve a pedir la cuenta).
+      assert.equal(purif.dropea.match?.variantId, 901); assert.ok(purif.deepDive); assert.equal(purif.deepDive!.account, a.account); assert.equal(purif.deepDive!.domain, "takuyi.es"); assert.equal(purif.deepDive!.priceEur, 39.99); assert.equal(purif.deepDive!.costEur, 14.2); assert.equal(purif.deepDive!.marginPct, 0.64);
+      assert.equal(purif.deepDive!.verdict, "ganador_probable", "2 activos, 120 días, 64 %, cobertura 100 %"); assert.equal(purif.recommendation.sourcing, "dropea"); assert.equal(purif.recommendation.action, "contactar_dropea_muestra"); assert.equal(purif.signal, null);
+      assert.equal(gafas.dropea.match?.variantId, 903); assert.equal(gafas.deepDive!.verdict, "ganador_probable"); assert.equal(gafas.deepDive!.marginPct, 0.82);
+      // Camino sin Dropea: fuerza de la señal, sin margen ni «contactar».
+      assert.equal(basc.dropea.match, null); assert.equal(basc.deepDive, null); assert.equal(basc.signal!.verdict, "senal_debil_sin_proveedor", "1 activo de 20 días"); assert.equal(basc.recommendation.action, "no_testear"); assert.equal(basc.recommendation.sourcing, "alternativo"); assert.match(basc.signal!.reason, /requiere sourcing alternativo/);
+      const luces = a.products.find((p) => /luces/i.test(p.product.label));
+      assert.equal(luces, undefined, "las luces LED están apagadas: la minería solo agrupa activos");
+      // Señal fuerte sin proveedor: producto con recorrido en cuenta dispersa.
+      const fuerte = signalVerdict({ label: "x", keywords: ["x"], ads: 3, adIds: [], oldestActiveStart: dia(90), longestActiveDays: 90, sample: "", adLink: "", isOriginal: false }, a.account!);
+      assert.equal(fuerte.verdict, "senal_fuerte_sin_proveedor"); assert.match(fuerte.reason, /no disponible en Dropea/);
+      const marca = signalVerdict({ label: "x", keywords: ["x"], ads: 3, adIds: [], oldestActiveStart: dia(90), longestActiveDays: 90, sample: "", adLink: "", isOriginal: false }, { ...a.account!, diversity: { ...a.account!.diversity, level: "concentrado" } });
+      assert.equal(marca.verdict, "senal_debil_sin_proveedor", "marca propia: nunca fuerte");
+      assert.match(a.summary, /«Takuyi» \(ES\): anuncia desde/); assert.match(a.summary, /EN DROPEA como «Purificador de aire ozono portátil»: ganador probable, margen real 64 %/); assert.match(a.summary, /NO en Dropea: senal debil sin proveedor/);
+      const cuentas = urls.filter((u) => u.host === "graph.facebook.com" && u.searchParams.get("search_page_ids")); assert.equal(cuentas.length, 1, "la cuenta se lee UNA vez por tienda, aunque haya 2 deep dives");
+      assert.equal(a.requests, 1 + 2 * (1 + 2), "cuenta + por producto en Dropea: búsqueda por palabra + portada + catálogo");
+      // Persistencia por tienda + reimpresión.
+      const sid = repo.insertStore(a, sweepId);
+      const fila = repo.storeById(sid)!; assert.equal(fila.inDropea, 2); assert.equal(fila.strongWithoutSupplier, 0); assert.equal(fila.diversity, "disperso"); assert.equal(fila.audit?.products.length, 3); assert.equal(repo.stores()[0].id, sid); assert.ok(repo.auditedPageIds().has("8001"));
+      const dd = new DeepDiveRepository(raw);
+      const ddId = dd.insert({ cruceId: null, variantId: 901, adlibCandidateKey: "ES:8001:cod", adId: "t1", keywords: ["purificador", "aire", "ozono"], report: purif.deepDive!, capturedAt: nowSec });
+      assert.equal(dd.byId(ddId)!.verdict, "ganador_probable");
+      // Sin catálogo local: todo queda «no en Dropea» y se declara.
+      const sinCat = await auditCodStore({ client, pageId: "8001", country: "ES", now: nowSec, dropeaSearch: null, maxProducts: 2, deepDive: { fetcher } });
+      assert.ok(sinCat.incomplete.some((i) => i.part === "dropea")); assert.ok(sinCat.products.every((p) => !p.dropea.searched && p.signal));
+      // Cuenta vacía / fallo: se dice.
+      const vacia = await auditCodStore({ client, pageId: "8002", country: "ES", now: nowSec, dropeaSearch: dropea, deepDive: { fetcher } });
+      assert.equal(vacia.products.length, 0); assert.match(vacia.summary, /Sin productos minados/);
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

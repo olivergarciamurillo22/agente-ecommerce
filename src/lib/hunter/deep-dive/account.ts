@@ -343,6 +343,8 @@ export interface AccountXrayInput {
   originalKeywords?: string[];
   /** Marca/dominio de la tienda: sus palabras no cuentan como «raíz dominante» al medir la dispersión del catálogo. */
   brandTokens?: string[];
+  /** Recibe los anuncios bajados (búsqueda 3: para no volver a pedirlos). */
+  onAds?: (ads: AdLibraryAd[]) => void;
   /** Consolidación del avatar en texto (Claude por OpenRouter). Opcional; si falla, queda la heurística. */
   summarize?: ((bodies: string[], signals: AvatarSignal[]) => Promise<string | null>) | null;
 }
@@ -352,6 +354,7 @@ export async function readAccountXray(input: AccountXrayInput): Promise<AccountX
   const { since, until } = accountDateWindow(input.now);
   const antes = budget.requests;
   const r = await input.client.search({ term: "", pageIds: [input.pageId], country: input.country, since, until, activeStatus: "ALL", budget, maxPages: input.maxPages ?? ACCOUNT_MAX_PAGES });
+  input.onAds?.(r.ads);
   const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason }, input.originalKeywords ?? [], input.brandTokens ?? []);
   if (input.summarize && r.ads.length) {
     try {
