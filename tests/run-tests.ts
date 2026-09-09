@@ -15464,7 +15464,7 @@ async function main(): Promise<void> {
       assert.equal(r.creativeStatus, "analizada"); assert.equal(r.creative?.hook, "Adiós al dolor de coxis"); assert.equal(r.creative?.visiblePrice, null);
       assert.deepEqual(visto, [{ mime: "image/jpeg", bytes: 8, keywords: ["cojin", "gel", "silla"] }]);
       assert.equal(r.daysActive, 40); assert.equal(r.verdict, "ganador_probable"); assert.match(r.reasoning, /cumple las cuatro condiciones/);
-      assert.deepEqual(r.incomplete.map((i) => i.part), ["cuenta"], "sin cliente ni page_id, la única carencia declarada es la radiografía de la cuenta (paso 0)"); assert.equal(r.rules, DEEP_DIVE_RULES);
+      assert.deepEqual(r.incomplete.map((i) => i.part), ["competencia", "cuenta"], "sin cliente ni page_id, las únicas carencias declaradas son la saturación cruzada y la radiografía de la cuenta (pasos 0a/0b)"); assert.ok(r.rules.startsWith(DEEP_DIVE_RULES), "las reglas del veredicto van literales en el informe");
       assert.deepEqual(peticiones, ["cloudcore.es/", "cloudcore.es/products.json", "www.facebook.com/ads/archive/render_ad/", "scontent.xx.fbcdn.net/v/t45/creativo_n.jpg"], "4 peticiones: portada, catálogo, render_ad, imagen");
 
       // Persistencia y lectura.
@@ -15582,7 +15582,7 @@ async function main(): Promise<void> {
         if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "Cojín de Gel para silla", handle: "cojin-gel-silla", product_type: "", vendor: "", variants: [{ price: "34.99", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
         return new Response("", { status: 404 });
       }) as typeof fetch;
-      const r = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", country: "ES", accountSummarize: async () => "Adultos mayores con dolor de espalda." });
+      const r = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", country: "ES", search: false, accountSummarize: async () => "Adultos mayores con dolor de espalda." });
       assert.equal(r.verdict, "ganador_probable"); assert.ok(r.account); assert.equal(r.account!.totalAds, 4); assert.equal(r.account!.daysAdvertising, 400);
       assert.match(r.reasoning, /cuenta: anuncia desde .* \(400 días\) · 4 anuncios, 2 activos · ángulos más longevos: dolor y beneficio 200 días/);
       assert.equal(r.requests, 4, "2 de la cuenta + portada + catálogo"); assert.ok(!r.incomplete.some((i) => i.part === "cuenta"));
@@ -15592,13 +15592,13 @@ async function main(): Promise<void> {
       const fila = repo.byId(id)!; assert.equal(fila.account?.totalAds, 4); assert.equal(fila.account?.angles[0].id, "dolor_beneficio"); assert.equal(fila.account?.avatar.summarySource, "claude");
       assert.ok(!(raw.prepare("SELECT account_json AS t FROM hunter_deep_dives WHERE id=?").get(id) as { t: string }).t.includes("TOKEN-test"), "el token no se persiste");
       // Sin page_id (modo manual) o con --sin-cuenta: se omite con motivo; el veredicto no cambia.
-      const sinPagina = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: null });
+      const sinPagina = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: null, search: false });
       assert.equal(sinPagina.account, null); assert.ok(sinPagina.incomplete.some((i) => i.part === "cuenta" && /page_id/.test(i.reason))); assert.equal(sinPagina.verdict, "ganador_probable");
-      const omitida = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", skipAccount: true });
+      const omitida = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client, pageId: "555", skipAccount: true, search: false });
       assert.equal(omitida.account, null); assert.ok(omitida.incomplete.some((i) => i.part === "cuenta" && /sin-cuenta/.test(i.reason)));
       // Si la Ad Library falla, la cuenta queda como carencia y el resto del informe sigue.
       const roto = new AdLibraryClient("TOKEN-test", (async () => new Response(JSON.stringify({ error: { message: "boom", code: 1 } }), { status: 500, headers: { "content-type": "application/json" } })) as typeof fetch, async () => {});
-      const conFallo = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client: roto, pageId: "555" });
+      const conFallo = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: cuenta.slice(1, 3), costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher: tienda, token: null, vision: null, client: roto, pageId: "555", search: false });
       assert.equal(conFallo.verdict, "ganador_probable"); assert.ok(conFallo.incomplete.some((i) => i.part === "cuenta"));
       // Migración: la columna account_json existe y añadirla otra vez no rompe.
       const Database = (await import("better-sqlite3")).default;
@@ -15652,6 +15652,147 @@ async function main(): Promise<void> {
       }
       // Antes del fix la petición del 09-09 llevaba min=2018-01-01 y max=2026-09-09 (UTC): queda constancia para el informe.
       assert.deepEqual(accountDateWindow(Date.UTC(2026, 8, 9, 10, 0, 0) / 1000), { since: "2018-05-07", until: "2026-09-09" });
+    });
+
+    await test("DEEP DIVE · pipeline completo: búsqueda por palabra (saturación cruzada), ritmo de testeo vs. madurez del ángulo ganador, coherencia de precio anuncio/catálogo, vídeo (guion por transcripción, solo audio), minería de otros productos de la tienda con búsqueda en Dropea, recomendación con motivo, texto claro, enlace público y persistencia del informe entero", async () => {
+      limpiar();
+      const { runDeepDive, priceCoherence, recommend, summarize, RECOMMENDATION_RULES } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const { clusterProducts, testingRhythm, productTokens, TESTING_RULE } = await import("../src/lib/hunter/deep-dive/account");
+      const { analyzeTranscript, parseInterpretation, composeVideoAnalysis, videoAvailable, videoDailyLimit, DEEP_DIVE_VIDEO_MAX_BYTES, VIDEO_LIMITS } = await import("../src/lib/hunter/deep-dive/video");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const { detectPricesInText } = await import("../src/lib/product-hunter/internal/price-detect");
+      const TOKEN = "EAABtokenFull";
+      const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
+      type Ad = { id: string; page_id: string; page_name: string; ad_creative_bodies: string[]; ad_creative_link_titles?: string[]; ad_creative_link_captions?: string[]; ad_delivery_start_time: string; ad_delivery_stop_time?: string };
+      const crudo = (id: string, page: [string, string], body: string, start: string, stop: string | null, title?: string, caption = "cloudcore.es"): Ad => ({ id, page_id: page[0], page_name: page[1], ad_creative_bodies: [body], ad_creative_link_titles: title ? [title] : [], ad_creative_link_captions: [caption], ad_delivery_start_time: start, ...(stop ? { ad_delivery_stop_time: stop } : {}) });
+      const CC: [string, string] = ["555", "CloudCore"];
+      // La cuenta entera: el cojín (2 activos + 1 apagado), una almohada cervical (activa, 120 días), un reposapiés (activo, 15 días), y 6 anuncios nuevos en los últimos 30 días (ritmo alto).
+      const cuenta: Ad[] = [
+        crudo("c1", CC, "Cojín de gel para silla: alivia el dolor de coxis. Pago contra reembolso. Solo 34,99 €.", dia(200), null, "Cojín de Gel CloudCore"),
+        crudo("c2", CC, "Cojín ergonómico de gel para tu silla de oficina. Envío gratis.", dia(60), null, "Cojín de Gel CloudCore"),
+        crudo("c0", CC, "Cojín de gel para silla, oferta de lanzamiento", dia(400), dia(300)),
+        crudo("a1", CC, "Almohada cervical viscoelástica: duerme sin dolor de cuello. Garantía 30 días.", dia(120), null, "Almohada cervical CloudCore"),
+        crudo("r1", CC, "Reposapiés ergonómico para escritorio: piernas descansadas en el teletrabajo.", dia(15), null, "Reposapiés CloudCore"),
+        ...Array.from({ length: 6 }, (_, i) => crudo(`n${i}`, CC, `Cojín de gel para silla, prueba ${i}: alivia el dolor al estar sentado`, dia(2 + i * 4), null, "Cojín de Gel CloudCore")),
+      ];
+      // Búsqueda por palabra: CloudCore + 2 competidores que casan + 1 página que no casa.
+      const busqueda: Ad[] = [
+        cuenta[0], cuenta[1],
+        crudo("k1", ["777", "SillaConfort"], "Cojín de gel para silla con envío 24h", dia(20), null, undefined, "sillaconfort.es"),
+        crudo("k2", ["888", "OrtoHogar"], "El cojín gel silla que recomiendan los fisios", dia(40), null, undefined, "ortohogar.es"),
+        crudo("k3", ["999", "MascotasYa"], "Cama para perros grandes", dia(10), null, undefined, "mascotasya.es"),
+      ];
+      const urls: URL[] = [];
+      const fetcher = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); urls.push(u);
+        if (u.host === "graph.facebook.com") {
+          const porPagina = u.searchParams.get("search_page_ids");
+          const data = porPagina ? cuenta : busqueda;
+          if (!porPagina) { assert.equal(u.searchParams.get("search_terms"), "cojin gel silla"); assert.equal(u.searchParams.get("ad_active_status"), "ACTIVE"); }
+          return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+        }
+        if (u.host === "cloudcore.es") {
+          if (u.pathname === "/") return new Response(`<html><head><title>CloudCore</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
+          if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [
+            { id: 1, title: "Cojín Ergonómico de Gel CloudCore para silla", handle: "cojin-gel-silla", product_type: "", vendor: "CloudCore", variants: [{ price: "39.99", available: true }], images: [] },
+            { id: 2, title: "Almohada cervical", handle: "almohada-cervical", product_type: "", vendor: "CloudCore", variants: [{ price: "24.99", available: true }], images: [] },
+          ] }), { headers: { "content-type": "application/json" } });
+          return new Response("", { status: 404 });
+        }
+        if (u.host === "www.facebook.com" && u.pathname.startsWith("/ads/archive/render_ad/")) {
+          assert.equal(u.searchParams.get("access_token"), TOKEN);
+          return new Response(`<html><body><video src="https://video.xx.fbcdn.net/v/t42/clip.mp4?oh=1"></video><img src="https://scontent.xx.fbcdn.net/v/t45/thumb_n.jpg?oh=1"></body></html>`, { headers: { "content-type": "text/html" } });
+        }
+        if (u.host === "scontent.xx.fbcdn.net") return new Response(new Uint8Array([0xff, 0xd8, 0xff, 1, 2, 3]), { headers: { "content-type": "image/jpeg" } });
+        if (u.host === "video.xx.fbcdn.net") return new Response(new Uint8Array(2048), { headers: { "content-type": "video/mp4" } });
+        throw new Error(`red no permitida en test: ${u.host}`);
+      }) as typeof fetch;
+      const client = new AdLibraryClient(TOKEN, fetcher, async () => {});
+      const vision = async () => ({ model: "vision-test", hook: "Adiós al dolor de coxis", angle: "dolor", pain: "dolor sentado", desire: "sentarse sin molestias", avatar: "adultos 45+ de oficina", visiblePrice: null, raw: "{}" });
+      const transcribe = async (v: { bytes: Uint8Array; mime: string }) => { assert.equal(v.mime, "video/mp4"); assert.equal(v.bytes.byteLength, 2048); return { text: "¿Te duele el coxis al estar sentado? Este cojín de gel lo cambia todo. Pídelo ahora contra reembolso.", language: "es", durationSec: 12, segments: [{ start: 0, end: 3.5, text: "¿Te duele el coxis al estar sentado?" }, { start: 3.5, end: 8, text: "Este cojín de gel lo cambia todo." }, { start: 8, end: 12, text: "Pídelo ahora contra reembolso." }] }; };
+      const interpret = async (t: string) => { assert.match(t, /coxis/); return parseInterpretation(JSON.stringify({ hook: "pregunta por el dolor de coxis", angle: "dolor", pain: "dolor al sentarse", desire: "sentarse sin dolor", avatar: "adultos que pasan horas sentados", cta: "Pídelo ahora contra reembolso", rhythm: "rápido" })); };
+      const video = composeVideoAnalysis(transcribe, interpret, { transcribe: "whisper-1", interpret: "claude-test" });
+      const dropeaLookup = (keywords: string[]) => (keywords.includes("almohada") || keywords.includes("cervical") ? [{ variantId: 9001, name: "Almohada cervical viscoelástica", costEur: 6.4 }] : []);
+
+      const r = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: [], costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher, token: TOKEN, vision, video, client, pageId: null, country: "ES", accountSummarize: null, dropeaLookup });
+
+      // 0a · búsqueda: los anuncios del candidato salen de la búsqueda (no había snapshot), el page_id también, y la saturación cuenta las OTRAS páginas que casan.
+      assert.equal(r.domain, "cloudcore.es"); assert.equal(r.domainSource, "caption");
+      assert.equal(r.adLink, "https://www.facebook.com/ads/library/?id=c1", "enlace público del anuncio para comprobarlo a mano"); assert.ok(r.adLinks.includes("https://www.facebook.com/ads/library/?id=c2"));
+      assert.equal(r.competitors?.count, 2, "SillaConfort y OrtoHogar anuncian lo mismo; MascotasYa no casa; CloudCore es el propio candidato");
+      assert.deepEqual(r.competitors!.pages.map((c) => c.pageName).sort(), ["OrtoHogar", "SillaConfort"]); assert.match(r.competitors!.basis, /últimos 30 días/);
+      // 0b · cuenta, madurez separada del volumen.
+      assert.equal(r.account?.pageId, "555"); assert.equal(r.account?.totalAds, 11); assert.equal(r.account?.activeAds, 10); assert.equal(r.account?.daysAdvertising, 400);
+      assert.equal(r.account?.testing?.level, "medio", "7 nuevos en 30 días = 1,6/semana: medio con la regla escrita"); assert.equal(r.account?.testing?.newAds30d, 7, "6 pruebas nuevas + el reposapiés en 30 días"); assert.equal(r.account?.testing?.rule, TESTING_RULE);
+      assert.equal(r.account?.winner?.daysActive, 200, "madurez del ángulo ganador = días del activo más antiguo de ese ángulo, no el volumen"); assert.equal(r.account?.winner?.adId, "c1"); assert.match(r.account!.winner!.quote, /coxis/); assert.equal(r.account?.winner?.adLink, "https://www.facebook.com/ads/library/?id=c1");
+      // minería: productos distintos entre los activos; el cojín es el original; almohada y reposapiés son «otros», y la almohada está en Dropea.
+      const prods = r.account!.products;
+      assert.ok(prods.length >= 3, `al menos cojín, almohada y reposapiés: ${prods.map((p) => p.label).join(" | ")}`);
+      assert.ok(prods.find((p) => p.isOriginal && /coj/i.test(p.label)), "el cojín se marca como el producto original");
+      assert.deepEqual(r.otherProducts.map((o) => o.isOriginal), r.otherProducts.map(() => false));
+      const almohada = r.otherProducts.find((o) => /almohada/i.test(o.label))!; assert.ok(almohada, "la almohada cervical aparece como otro posible ganador"); assert.equal(almohada.longestActiveDays, 120); assert.equal(almohada.dropea.searched, true); assert.equal(almohada.dropea.matches[0]?.variantId, 9001);
+      const reposapies = r.otherProducts.find((o) => /reposapi/i.test(o.label))!; assert.ok(reposapies); assert.deepEqual(reposapies.dropea.matches, []);
+      // 4 · precio real y coherencia: el anuncio dice 34,99 y el catálogo 39,99 → ALERTA.
+      assert.equal(r.priceEur, 39.99); assert.equal(r.marginPct, 0.76);
+      assert.equal(r.priceCoherence.status, "difiere"); assert.deepEqual(r.priceCoherence.adPrices.map((p) => p.amount), [34.99]); assert.match(r.priceCoherence.note, /ALERTA/);
+      assert.ok(r.incomplete.some((i) => i.part === "precio"));
+      // 6 · imagen + vídeo: la imagen va a visión; el vídeo se descarga y se transcribe (solo audio, declarado).
+      assert.equal(r.creativeStatus, "analizada"); assert.equal(r.videoStatus, "analizada_audio");
+      assert.equal(r.video?.hookFirstSeconds, "¿Te duele el coxis al estar sentado? Este cojín de gel lo cambia todo.", "gancho = lo dicho en los primeros 5 s (segmentos que empiezan antes de 5 s)");
+      assert.equal(r.video?.wordsPerMinute, 90, "18 palabras en 12 s"); assert.equal(r.video?.durationSec, 12); assert.equal(r.video?.interpretation?.cta, "Pídelo ahora contra reembolso"); assert.equal(r.video?.limits, VIDEO_LIMITS); assert.equal(r.video?.interpretModel, "claude-test");
+      assert.ok(r.incomplete.some((i) => i.part === "vídeo" && /movimiento/.test(i.reason)), "lo visual no analizado se declara siempre");
+      // 7 · veredicto, recomendación y texto claro.
+      assert.equal(r.verdict, "ganador_probable");
+      assert.equal(r.recommendation.action, "verificar_manual", "cumple las reglas pero el precio del anuncio no cuadra: no se pide muestra a ciegas"); assert.match(r.recommendation.reason, /precio del anuncio no cuadra/);
+      assert.match(r.summary, /GANADOR PROBABLE/); assert.match(r.summary, /Gancho\/ángulo ganador: dolor y beneficio, «.*coxis.*», activo sin cambios desde .* \(200 días\)/); assert.match(r.summary, /Ritmo de testeo medio \(7 nuevos en 30 días, 1\.6\/semana\)/); assert.match(r.summary, /Competencia: 2 tiendas/); assert.match(r.summary, /ALERTA/); assert.match(r.summary, /Almohada/); assert.match(r.summary, /Comprobar a mano: https:\/\/www\.facebook\.com\/ads\/library\/\?id=c1/);
+      assert.ok(r.rules.includes(RECOMMENDATION_RULES));
+      const grafo = urls.filter((u) => u.host === "graph.facebook.com"); assert.equal(grafo.length, 2, "1 búsqueda por palabra + 1 página de la cuenta");
+      assert.equal(r.requests, 2 + 2 + 1 + 1 + 1, "búsqueda, cuenta, portada, catálogo, render_ad, imagen, vídeo");
+      // Persistencia: informe entero + columnas nuevas; el token no se persiste.
+      const repo = new DeepDiveRepository(raw);
+      const id = repo.insert({ cruceId: 1, variantId: 4242, adlibCandidateKey: "ES:555:f", adId: "c1", keywords: ["cojin", "gel", "silla"], report: r, capturedAt: nowSec });
+      const fila = repo.byId(id)!;
+      assert.equal(fila.recommendation, "verificar_manual"); assert.equal(fila.competitors, 2); assert.equal(fila.otherProducts, r.otherProducts.length); assert.equal(fila.videoStatus, "analizada_audio"); assert.equal(fila.priceCoherence, "difiere"); assert.equal(fila.adLink, r.adLink); assert.equal(fila.summary, r.summary);
+      assert.equal(fila.report?.video?.transcript, r.video?.transcript); assert.equal(fila.report?.account?.winner?.daysActive, 200);
+      assert.ok(!(raw.prepare("SELECT report_json || account_json AS t FROM hunter_deep_dives WHERE id=?").get(id) as { t: string }).t.includes(TOKEN), "el token no se persiste");
+      assert.ok(repo.latest()[0].report);
+
+      // Recomendación pura: las cuatro salidas con motivo.
+      const inc: Array<{ part: string; reason: string }> = [];
+      assert.equal(recommend({ verdict: "ganador_probable", reasoning: "x", coherence: "coincide", competitors: 1, marginPct: 0.7, winnerDays: 90, incomplete: inc }).action, "contactar_dropea_muestra");
+      assert.equal(recommend({ verdict: "ganador_probable", reasoning: "x", coherence: "coincide", competitors: 3, marginPct: 0.7, winnerDays: 90, incomplete: inc }).action, "verificar_manual");
+      assert.equal(recommend({ verdict: "senal_debil", reasoning: "a → falta: match dudoso", coherence: "coincide", competitors: 0, marginPct: 0.6, winnerDays: 45, incomplete: inc }).action, "verificar_manual");
+      assert.equal(recommend({ verdict: "senal_debil", reasoning: "a → falta: menos de 14 días", coherence: "coincide", competitors: 0, marginPct: 0.6, winnerDays: 5, incomplete: inc }).action, "descartar");
+      assert.equal(recommend({ verdict: "senal_debil", reasoning: "a → falta: match dudoso", coherence: "coincide", competitors: null, marginPct: 0.7, winnerDays: null, incomplete: inc }).action, "verificar_manual", "sin radiografía no se descarta un margen del 70 % a ciegas");
+      assert.equal(recommend({ verdict: "descartar", reasoning: "margen bajo", coherence: "coincide", competitors: 0, marginPct: 0.1, winnerDays: null, incomplete: inc }).action, "descartar");
+      const nv = recommend({ verdict: "no_verificable", reasoning: "x", coherence: "sin_catalogo", competitors: null, marginPct: null, winnerDays: null, incomplete: [{ part: "catálogo", reason: "no shopify" }] });
+      assert.equal(nv.action, "verificar_manual"); assert.match(nv.reason, /falta: catálogo/);
+      // Coherencia de precio pura.
+      const adx = (body: string) => ({ id: "z", pageId: "1", pageName: null, snapshotUrl: null, bodies: [body], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null });
+      assert.equal(priceCoherence([adx("Solo hoy 34,99 €")], 34.99, 39.99).status, "coincide");
+      assert.equal(priceCoherence([adx("Pack de 2 por 59,90 €")], 34.99, 34.99).status, "difiere");
+      assert.equal(priceCoherence([adx("Sin precio aquí")], 34.99, null).status, "sin_precio_en_anuncio");
+      assert.equal(priceCoherence([adx("Solo 34,99 €")], null, null).status, "sin_catalogo");
+      assert.deepEqual(detectPricesInText("Antes 49,99 € ahora 34,99 € (envío 4,99 €)").map((p) => p.amount), [49.99, 34.99], "todos los importes, sin el envío");
+      // Ritmo de testeo y clustering puros.
+      const t = testingRhythm(cuenta.map((a) => ({ id: a.id, pageId: "555", pageName: null, snapshotUrl: null, bodies: a.ad_creative_bodies, captions: [], titles: a.ad_creative_link_titles ?? [], platforms: [], languages: [], creationTime: null, startTime: a.ad_delivery_start_time, stopTime: a.ad_delivery_stop_time ?? null, impressions: null, audience: null })), nowSec)!;
+      assert.equal(t.perWeek30d, 1.6); assert.equal(t.level, "medio");
+      assert.deepEqual(productTokens(adx("Envío gratis y oferta: cojín de gel para silla")), ["cojin", "silla"], "fuera envío/oferta/gratis, fuera palabras cortas; queda el producto");
+      assert.deepEqual(clusterProducts([], nowSec), []);
+      // Vídeo puro: transcripción vacía, límite de tamaño, disponibilidad y tope.
+      assert.equal(analyzeTranscript({ text: "", language: null, durationSec: null, segments: [] }).transcript, "");
+      assert.equal(analyzeTranscript({ text: "Hola mundo. Adiós.", language: "es", durationSec: null, segments: [{ start: 0, end: 2, text: "Hola mundo." }, { start: 6, end: 8, text: "Adiós." }] }).hookFirstSeconds, "Hola mundo.");
+      assert.equal(await video({ bytes: new Uint8Array(DEEP_DIVE_VIDEO_MAX_BYTES + 1), mime: "video/mp4" }, { keywords: [], adText: "" }), null, "más de 25 MB no se manda");
+      assert.equal(parseInterpretation("nada"), null);
+      assert.equal(videoAvailable({}).ok, false); assert.equal(videoAvailable({ OPENAI_API_KEY: "k" }).ok, true); assert.equal(videoDailyLimit({}), 50); assert.equal(videoDailyLimit({ DEEP_DIVE_VIDEO_DAILY_LIMIT: "0" }), 0);
+      // Sin OPENAI_API_KEY y con vídeo: se dice, no se finge; y el tope diario también.
+      const sinKey = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: [], costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher, token: TOKEN, vision: null, video: null, client, country: "ES", search: true, skipAccount: true });
+      assert.equal(sinKey.videoStatus, "sin_openai_key"); assert.ok(sinKey.incomplete.some((i) => i.part === "vídeo" && /no disponible/.test(i.reason))); assert.match(sinKey.summary, /Vídeo detectado, análisis de audio\/movimiento no disponible/);
+      const tope = await runDeepDive({ keywords: ["cojin", "gel", "silla"], ads: [], costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 200 * 86400, now: nowSec, fetcher, token: TOKEN, vision: null, video, videoBudgetExhausted: true, client, country: "ES", skipAccount: true });
+      assert.equal(tope.videoStatus, "tope_diario");
+      // Texto claro también sin cuenta ni competencia.
+      assert.match(summarize({ ...tope, account: null, competitors: null }, ["cojin"]), /Competencia: no medida/);
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

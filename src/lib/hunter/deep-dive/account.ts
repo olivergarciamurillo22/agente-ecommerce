@@ -70,6 +70,41 @@ export interface AvatarSignal {
   evidence: { adId: string; quote: string };
 }
 
+/** Ritmo de testeo de la cuenta: cuántos anuncios NUEVOS estrena por semana (últimos 30 días). */
+export interface AccountTesting {
+  newAds30d: number;
+  newAds90d: number;
+  perWeek30d: number;
+  level: "alto" | "medio" | "bajo";
+  /** Regla literal, para que el informe se pueda reconstruir. */
+  rule: string;
+}
+
+/** Madurez del ángulo ganador: el anuncio ACTIVO más antiguo de ese ángulo, sin interrupción. */
+export interface AccountWinner {
+  angle: AngleId;
+  label: string;
+  adId: string;
+  since: string;
+  daysActive: number;
+  quote: string;
+  adLink: string;
+}
+
+/** Un producto físico distinto detectado entre los anuncios ACTIVOS de la cuenta (agrupación por texto). */
+export interface AccountProduct {
+  label: string;
+  keywords: string[];
+  ads: number;
+  adIds: string[];
+  oldestActiveStart: string | null;
+  longestActiveDays: number | null;
+  sample: string;
+  adLink: string;
+  /** true si es el producto que originó la búsqueda (casa con las palabras clave del candidato). */
+  isOriginal: boolean;
+}
+
 export interface AccountXray {
   pageId: string;
   pageName: string | null;
@@ -83,6 +118,11 @@ export interface AccountXray {
   oldestActiveStart: string | null;
   /** Ángulos, los de activos más antiguos primero: los «ganadores» de esa tienda. */
   angles: AccountAngle[];
+  /** Señal de madurez (dos números separados a propósito): ritmo de testeo de la cuenta y madurez del ángulo ganador. */
+  testing: AccountTesting | null;
+  winner: AccountWinner | null;
+  /** Productos distintos detectados entre los activos (minería de más ganadores de la misma tienda). */
+  products: AccountProduct[];
   avatar: { signals: AvatarSignal[]; summary: string | null; summarySource: "heuristica" | "claude" | null };
   requests: number;
   pages: number;
@@ -138,8 +178,69 @@ export function avatarSignals(ads: AdLibraryAd[]): AvatarSignal[] {
   return [...porLabel.values()].sort((a, b) => b.ads - a.ads);
 }
 
+export const adLibraryLink = (adId: string) => `https://www.facebook.com/ads/library/?id=${adId}`;
+
+/**
+ * Ritmo de testeo: anuncios estrenados en los últimos 30 días, por semana.
+ * ≥ 5/semana = alto (sigue probando o refresca creatividad por fatiga),
+ * ≥ 1,5/semana = medio, si no bajo (mantiene lo que ya tiene).
+ */
+export const TESTING_RULE = "alto ≥ 5 anuncios nuevos/semana (últimos 30 días) · medio ≥ 1,5 · bajo < 1,5";
+export function testingRhythm(ads: AdLibraryAd[], now: number): AccountTesting | null {
+  const inicios = ads.map(startSec).filter((n): n is number => n !== null);
+  if (!inicios.length) return null;
+  const newAds30d = inicios.filter((t) => now - t <= 30 * DAY).length;
+  const newAds90d = inicios.filter((t) => now - t <= 90 * DAY).length;
+  const perWeek30d = Math.round((newAds30d / 30) * 7 * 10) / 10;
+  return { newAds30d, newAds90d, perWeek30d, level: perWeek30d >= 5 ? "alto" : perWeek30d >= 1.5 ? "medio" : "bajo", rule: TESTING_RULE };
+}
+
+/** Palabras que hablan de CÓMO se vende, no de QUÉ: fuera al agrupar por producto. */
+const PRODUCT_STOP = new Set(["de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas", "y", "o", "con", "sin", "para", "por", "en", "a", "al", "que", "es", "se", "su", "sus", "tu", "tus", "te", "lo", "le", "mi", "mis", "ya", "no", "si", "más", "mas", "muy", "como", "este", "esta", "esto", "ese", "esa", "eso", "hay", "hoy", "ahora", "aqui", "aquí", "solo", "sólo", "todo", "toda", "todos", "todas", "cada", "cualquier", "gratis", "envio", "envío", "envios", "oferta", "ofertas", "descuento", "rebaja", "rebajas", "precio", "precios", "euros", "eur", "unidades", "unidad", "pack", "compra", "compralo", "cómpralo", "pide", "pidelo", "pídelo", "consigue", "consiguelo", "aprovecha", "ultimas", "últimas", "ultimos", "últimos", "dias", "días", "garantia", "garantía", "devolucion", "devolución", "contra", "reembolso", "pago", "paga", "recibir", "entrega", "24h", "48h", "nuevo", "nueva", "nuevos", "nuevas", "mejor", "mejores", "mas", "menos", "desde", "hasta", "sobre", "entre", "porque", "cuando", "donde", "dónde", "quieres", "quiere", "puedes", "puede", "tienes", "tiene", "hacer", "haz", "ideal", "perfecto", "perfecta", "facil", "fácil", "rapido", "rápido", "calidad", "premium", "original", "oficial", "tienda", "online", "web", "link", "enlace", "bio", "click", "clic", "aqui", "www", "com", "shop", "casa", "hogar"]);
+export function productTokens(ad: AdLibraryAd): string[] {
+  const texto = [...ad.titles, ...sentences(ad.bodies.join("\n")).slice(0, 2), ...(ad.descriptions ?? []).slice(0, 1)].join(" ");
+  const out = new Set<string>();
+  for (const t of normalizeAngleText(texto).replace(/[^a-z0-9 ]+/g, " ").split(/\s+/)) if (t.length >= 4 && !PRODUCT_STOP.has(t) && !/^\d+$/.test(t)) out.add(t);
+  return [...out];
+}
+
+/**
+ * Agrupa los anuncios ACTIVOS por producto físico: dos anuncios son el mismo
+ * producto si comparten ≥ 3 palabras de producto o ≥ 50 % de las del más corto.
+ * Es una heurística de texto (la misma familia que la de ángulos) y así se declara.
+ */
+export function clusterProducts(ads: AdLibraryAd[], now: number, originalKeywords: string[] = []): AccountProduct[] {
+  type C = { tokens: Map<string, number>; ads: AdLibraryAd[] };
+  const clusters: C[] = [];
+  for (const ad of ads.filter(isActive)) {
+    const toks = productTokens(ad);
+    if (!toks.length) continue;
+    let hit: C | null = null;
+    for (const c of clusters) {
+      const shared = toks.filter((t) => c.tokens.has(t)).length;
+      const minLen = Math.min(toks.length, c.tokens.size);
+      if (shared >= 3 || (minLen > 0 && shared / minLen >= 0.5)) { hit = c; break; }
+    }
+    if (!hit) { hit = { tokens: new Map(), ads: [] }; clusters.push(hit); }
+    hit.ads.push(ad);
+    for (const t of toks) hit.tokens.set(t, (hit.tokens.get(t) ?? 0) + 1);
+  }
+  const iso = (sec: number) => new Date(sec * 1000).toISOString().slice(0, 10);
+  const orig = new Set(originalKeywords.map((k) => normalizeAngleText(k)));
+  return clusters.map((c) => {
+    const keywords = [...c.tokens.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([t]) => t);
+    const inicios = c.ads.map(startSec).filter((n): n is number => n !== null);
+    const oldest = inicios.length ? Math.min(...inicios) : null;
+    const primero = c.ads.slice().sort((a, b) => (startSec(a) ?? Infinity) - (startSec(b) ?? Infinity))[0];
+    const titulo = c.ads.map((a) => a.titles[0]).find(Boolean) ?? sentences(primero.bodies.join("\n"))[0] ?? "";
+    const allTokens = [...c.tokens.keys()];
+    const isOriginal = orig.size > 0 && [...orig].filter((k) => allTokens.some((t) => t === k || t.startsWith(k) || k.startsWith(t))).length / orig.size >= 0.5;
+    return { label: titulo.slice(0, 120) || keywords.join(" "), keywords, ads: c.ads.length, adIds: c.ads.map((a) => a.id), oldestActiveStart: oldest === null ? null : iso(oldest), longestActiveDays: oldest === null ? null : Math.max(0, Math.floor((now - oldest) / DAY)), sample: (primero.bodies[0] ?? titulo).trim().slice(0, 180), adLink: adLibraryLink(primero.id), isOriginal };
+  }).sort((a, b) => (b.longestActiveDays ?? -1) - (a.longestActiveDays ?? -1) || b.ads - a.ads);
+}
+
 /** Radiografía a partir de los anuncios ya bajados (sin red): separable para tests. */
-export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, meta: { requests: number; pages: number; truncated: boolean; stopReason: StopReason }): AccountXray {
+export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, meta: { requests: number; pages: number; truncated: boolean; stopReason: StopReason }, originalKeywords: string[] = []): AccountXray {
   const vistos = new Set<string>();
   const unicos = ads.filter((a) => (vistos.has(a.id) ? false : (vistos.add(a.id), true))); // el primero manda (paginación: el mismo id no vuelve a contar)
   const activos = unicos.filter(isActive);
@@ -167,6 +268,8 @@ export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, met
   const angles = [...porAngulo.values()]
     .sort((x, y) => (y.longestActiveDays ?? -1) - (x.longestActiveDays ?? -1) || y.activeAds - x.activeAds || y.ads - x.ads)
     .map(({ _oldest, ...rest }) => rest);
+  const top = angles.find((g) => g.longestActiveDays !== null && g.evidence && g.oldestActiveStart);
+  const winner: AccountWinner | null = top ? { angle: top.id, label: top.label, adId: top.evidence!.adId, since: top.oldestActiveStart!, daysActive: top.longestActiveDays!, quote: top.evidence!.quote, adLink: adLibraryLink(top.evidence!.adId) } : null;
 
   return {
     pageId, pageName: unicos.find((a) => a.pageName)?.pageName ?? null,
@@ -174,6 +277,9 @@ export function xrayFromAds(pageId: string, ads: AdLibraryAd[], now: number, met
     firstAdStart: iso(first), daysAdvertising: first === null ? null : Math.max(0, Math.floor((now - first) / DAY)),
     oldestActiveStart: iso(oldestActive),
     angles,
+    testing: testingRhythm(unicos, now),
+    winner,
+    products: clusterProducts(unicos, now, originalKeywords),
     avatar: { signals: avatarSignals(unicos).slice(0, 5), summary: null, summarySource: null },
     requests: meta.requests, pages: meta.pages, truncated: meta.truncated, stopReason: meta.stopReason,
     nature: "heuristica_sobre_texto_real",
@@ -187,6 +293,8 @@ export interface AccountXrayInput {
   now: number;
   budget?: DiscoveryBudget;
   maxPages?: number;
+  /** Palabras clave del candidato original, para marcar cuál de los productos detectados es el suyo. */
+  originalKeywords?: string[];
   /** Consolidación del avatar en texto (Claude por OpenRouter). Opcional; si falla, queda la heurística. */
   summarize?: ((bodies: string[], signals: AvatarSignal[]) => Promise<string | null>) | null;
 }
@@ -196,7 +304,7 @@ export async function readAccountXray(input: AccountXrayInput): Promise<AccountX
   const { since, until } = accountDateWindow(input.now);
   const antes = budget.requests;
   const r = await input.client.search({ term: "", pageIds: [input.pageId], country: input.country, since, until, activeStatus: "ALL", budget, maxPages: input.maxPages ?? ACCOUNT_MAX_PAGES });
-  const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason });
+  const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason }, input.originalKeywords ?? []);
   if (input.summarize && r.ads.length) {
     try {
       const bodies = [...new Set(r.ads.flatMap((a) => a.bodies).map((b) => b.trim()).filter(Boolean))].slice(0, 40);

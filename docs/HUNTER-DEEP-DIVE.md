@@ -185,6 +185,86 @@ veredicto**: las reglas escritas siguen siendo las de arriba. Se omite con
 `--sin-cuenta`, sin token de la Ad Library, o en modo manual sin `--page-id`;
 en los tres casos queda declarado en «No se pudo completar».
 
+## Pipeline completo (construido el 09-09, tras las cuatro verificaciones)
+
+Objetivo: el informe que sustituye a «mirar el anuncio a mano 20 minutos».
+Por candidato, en orden (`src/lib/hunter/deep-dive/deep-dive.ts`):
+
+| Paso | Qué hace | Fuente / coste | Si falla |
+|---|---|---|---|
+| 0a · Búsqueda por palabra | Repite la búsqueda del nivel 1 (últimos 30 días, 1 página): anuncios frescos del candidato (el cruce NO guarda los anuncios, solo la clave y el score), el `page_id` si faltaba y la **saturación cruzada**: cuántas OTRAS páginas casan con las mismas palabras clave (`competitors`, con nombre, activos, cobertura y enlace) | 1 petición a `/ads_archive` | «competencia» no medida; el resto sigue |
+| 0b · Cuenta | `search_page_ids`, activos e inactivos: antigüedad real, total/activos/apagados, ángulos con el activo más antiguo (cita), avatar (heurística + Claude opcional) | ≤ 5 peticiones | «cuenta» con motivo |
+| 0b · Madurez (nuevo) | **Dos números separados a propósito**: `testing` = ritmo de testeo de la cuenta (anuncios NUEVOS en 30 días, por semana: alto ≥ 5, medio ≥ 1,5, bajo) y `winner` = madurez del ángulo ganador (días que lleva ACTIVO sin interrupción el anuncio más antiguo de ese ángulo, con cita y enlace). Una cuenta que estrena decenas de anuncios está probando; un anuncio que lleva 200 días encendido es el que ya ganó | sin peticiones extra | — |
+| 0b · Minería (nuevo) | Los anuncios ACTIVOS de la cuenta se agrupan por **producto físico** (palabras de producto, no de ángulo: fuera «envío gratis», «oferta», «garantía»…; dos anuncios son el mismo producto si comparten ≥ 3 palabras o ≥ 50 % de las del más corto). Por producto: etiqueta, palabras, nº de anuncios, días del más antiguo, enlace, y si es el original. Los demás se buscan en el catálogo LOCAL de Dropea por sus 3 palabras más frecuentes (`otherProducts[].dropea`) | sin peticiones extra (búsqueda local) | lista vacía |
+| 1 · Dominio | `ad_creative_link_captions` | — | «tienda» |
+| 2 · Catálogo | portada + `/products.json` | 2–4 peticiones | «catálogo» (no Shopify, 404, anti-bot: no se fuerza) |
+| 3 · Producto | palabras clave contra título/handle/tipo | — | «producto» |
+| 4 · Precio y margen REALES | `variants[].price` mínimo; margen contra coste de Dropea | — | «margen»: nunca se estima |
+| 4 · Coherencia (nuevo) | Todos los importes del TEXTO del anuncio (`detectPricesInText`) contra el rango del catálogo (±2 %): `coincide`, `difiere` (**ALERTA** explícita: oferta solo por anuncio, pack distinto o matching equivocado), `sin_precio_en_anuncio`, `sin_catalogo` | — | — |
+| 5 · Ángulos | `extractAngles` (cita literal) | — | — |
+| 6 · Imagen | render_ad → imagen fbcdn → visión por OpenRouter | 1 + 1 peticiones, 1 OpenRouter | `sin_vision`, `sin_imagen`, `video_no_soportado`… |
+| 6 · Vídeo (nuevo) | Si render_ad trae `<video>`: descarga de fbcdn y **transcripción con OpenAI** (`/audio/transcriptions`, whisper-1, el mp4 tal cual). De ahí: guion, gancho (lo dicho antes del segundo 5), duración, palabras/min; Claude (OpenRouter) interpreta gancho/ángulo/dolor/deseo/avatar/CTA/ritmo | 1 petición fbcdn, 1 OpenAI, 1 OpenRouter | `sin_openai_key`, `tope_diario`, `video_no_descargable`, `video_demasiado_grande` (> 25 MB), `sin_audio`, `error`: siempre «vídeo detectado, análisis no disponible», nunca se finge |
+| 7 · Veredicto | mismas reglas escritas + **recomendación con motivo** (`contactar_dropea_muestra` / `verificar_manual` / `descartar`, reglas literales en `RECOMMENDATION_RULES`) + **texto claro** (`summary`) + enlace público `facebook.com/ads/library/?id=<ad_id>` | — | — |
+
+Persistencia: columnas aditivas en `hunter_deep_dives` (ALTER guardado dentro
+de la migración 32): `ad_link`, `recommendation`, `recommendation_reason`,
+`competitors`, `other_products`, `video_status`, `price_coherence`, `summary`
+y `report_json` (el informe entero). `--ver-id N` lo reimprime sin red.
+
+```
+npm run hunter:deep-dive -- --ids 12,45          # cruces concretos
+npm run hunter:deep-dive -- --min-score 60 --limite 3
+opciones: --sin-vision · --sin-video · --sin-cuenta · --sin-busqueda · --json x.json · --ver · --ver-id N
+```
+
+Coste por candidato: 1 búsqueda + ≤ 5 de cuenta a la Ad Library, 2–4 a la
+tienda, 1 render_ad, 0–1 imagen, 0–1 vídeo, 0–2 OpenRouter, 0–1 OpenAI.
+
+### Vídeo/audio con OpenAI: qué se verificó y qué queda para el NAS
+
+Decisión de Pedro (09-09): usar la API de OpenAI (la `OPENAI_API_KEY` que ya
+existe para direcciones e intención) **solo** para el vídeo del anuncio; todo
+lo demás sigue en Claude por OpenRouter.
+
+Comprobado contra el SDK instalado (`openai` 6.38.0, `node_modules/openai/resources`):
+
+- **La API no acepta vídeo como entrada del modelo.** Ni Chat Completions ni
+  Responses tienen una parte `video`; la entrada de audio de chat
+  (`input_audio`) solo admite `wav`/`mp3` en base64. La premisa «GPT-4o
+  entiende vídeo de forma nativa por API» no se cumple hoy.
+- **`/audio/transcriptions` sí acepta el archivo tal cual**: «flac, mp3, mp4,
+  mpeg, mpga, m4a, ogg, wav, or webm», máximo 25 MB. `whisper-1` con
+  `verbose_json` devuelve segmentos con tiempos (de ahí el gancho de los
+  primeros 5 s y las palabras por minuto); `gpt-4o-transcribe` solo texto.
+
+Por eso el pipeline manda el mp4 entero a transcripciones, sin ffmpeg y sin
+extraer nada, y **lo visual (movimiento, planos, texto en pantalla) no se
+analiza**; el informe lo declara siempre (`video.limits`). Lo que solo se
+puede confirmar en el NAS (paso 6 de la sonda, `--max-render 6`): que
+`render_ad` trae `<video>` en un anuncio real y que fbcdn sirve el mp4 sin
+sesión (como la imagen), y que OpenAI lo acepta con ese `content-type`.
+Si no es descargable, el pipeline cae a imagen + texto para esos casos con
+«vídeo detectado, análisis de audio/movimiento no disponible».
+
+```
+npm run hunter:deep-dive:probe -- --termino "cojin gel silla" --max-render 6
+```
+
+### Estado real de ejecución (09-09)
+
+- Desde el PC (sin token de Meta ni clave de OpenAI en este entorno): modo
+  manual contra `cloudcore.es` real → catálogo, precio real, margen,
+  coherencia, recomendación y texto claro; cuenta, competencia y vídeo
+  declarados como no disponibles (ver «Ejecución real» arriba).
+- Con red inyectada (test «DEEP DIVE · pipeline completo»): los 7 pasos, con
+  saturación (2 competidores), ritmo medio, ángulo ganador 200 días, alerta de
+  precio (34,99 en el anuncio vs 39,99 en el catálogo), vídeo transcrito,
+  almohada cervical encontrada en Dropea, `verificar_manual` con motivo.
+- **Pendiente en el NAS**: `--ids` de «Cojín gel silla» y «Tapas de silicona
+  6X» (los de más señal del lote de 300) con token y `OPENAI_API_KEY`. Es la
+  primera vez que el modo `--ids` corre con datos: el cruce no guarda anuncios,
+  así que el dominio y el `page_id` salen de la búsqueda del paso 0a.
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

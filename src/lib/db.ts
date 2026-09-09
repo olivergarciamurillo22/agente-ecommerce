@@ -2218,10 +2218,12 @@ export function migrateHunterDeepDive(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_hunter_deep_dives_verdict ON hunter_deep_dives(verdict, captured_at DESC);
   `);
   // Radiografía de la cuenta (paso 0, 09-09): columna aditiva sobre la misma tabla.
+  // Pipeline completo (09-09): recomendación, competencia, otros productos, vídeo, coherencia de precio, informe entero.
   const cols = new Set((db.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).map((c) => c.name));
-  if (!cols.has("account_json")) {
+  for (const [nombre, tipo] of [["account_json", "TEXT"], ["ad_link", "TEXT"], ["recommendation", "TEXT"], ["recommendation_reason", "TEXT"], ["competitors", "INTEGER"], ["other_products", "INTEGER"], ["video_status", "TEXT"], ["price_coherence", "TEXT"], ["summary", "TEXT"], ["report_json", "TEXT"]] as const) {
+    if (cols.has(nombre)) continue;
     try {
-      db.exec("ALTER TABLE hunter_deep_dives ADD COLUMN account_json TEXT");
+      db.exec(`ALTER TABLE hunter_deep_dives ADD COLUMN ${nombre} ${tipo}`);
     } catch (err) {
       if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
     }

@@ -20,6 +20,12 @@
 //       y ad_active_status=ALL, UNA página de 100: ¿cuántos anuncios devuelve,
 //       cuántos inactivos (con ad_delivery_stop_time), cuál es el más antiguo,
 //       hay paging.next (más de 100)? Coste: 1 petición por cada 100 anuncios.
+//   6 · VÍDEO: busca entre los anuncios (los del paso 1 y los de la cuenta del
+//       paso 5) uno con vídeo pidiendo render_ad (tope --max-render, 6), lo
+//       descarga de fbcdn sin sesión (HTTP, tipo, bytes) y, si hay
+//       OPENAI_API_KEY, lo manda TAL CUAL a /audio/transcriptions (whisper-1,
+//       verbose_json): la API de OpenAI no acepta vídeo como entrada de chat
+//       (SDK 6.38.0), solo el audio por transcripción. Sin ffmpeg, sin frames.
 //
 // El token NUNCA sale en la salida: se recorta de cualquier URL. Respeta
 // EMERGENCY_STOP como todo lo que sale a Internet.
@@ -43,6 +49,7 @@ async function main(): Promise<void> {
   const { renderAdUrl, parseRenderAdHtml, redactToken, DEEP_DIVE_USER_AGENT } = await import("../src/lib/hunter/deep-dive/render-ad");
   const { readStoreProfile } = await import("../src/lib/hunter/audit/store");
   const { accountDateWindow } = await import("../src/lib/hunter/deep-dive/account");
+  const { makeOpenAiTranscribe, analyzeTranscript, transcribeModel, DEEP_DIVE_VIDEO_MAX_BYTES } = await import("../src/lib/hunter/deep-dive/video");
 
   const termino = arg("termino");
   const adIdPedido = arg("ad-id");
@@ -57,6 +64,52 @@ async function main(): Promise<void> {
   const p = (s: string) => console.log(s);
   p(`\n──── SONDA DEEP DIVE · «${termino ?? adIdPedido ?? `page ${pageIdPedido}`}» · ${pais} ────\n`);
 
+  const anunciosCuenta: Array<Record<string, unknown>> = [];
+  // 6 · vídeo: encontrar un anuncio con vídeo, descargarlo y transcribirlo (OpenAI).
+  async function paso6(candidatos: Array<Record<string, unknown>>): Promise<void> {
+    const maxRender = Number.parseInt(arg("max-render") ?? "", 10) || 6;
+    const vistos = new Set<string>();
+    let renders = 0;
+    let encontrado: { adId: string; videoUrl: string; imagenes: number } | null = null;
+    for (const a of candidatos) {
+      const id = String(a.id ?? ""); if (!id || vistos.has(id)) continue; vistos.add(id);
+      if (renders >= maxRender) break;
+      renders++;
+      const rr = await fetch(renderAdUrl(id, token), { headers: { "user-agent": DEEP_DIVE_USER_AGENT, accept: "text/html" }, redirect: "follow", signal: AbortSignal.timeout(20_000) });
+      const pr = parseRenderAdHtml(await rr.text());
+      if (pr.videoUrls.length) { encontrado = { adId: id, videoUrl: pr.videoUrls[0], imagenes: pr.imageUrls.length }; break; }
+    }
+    if (!encontrado) { informe.paso6 = { renders, nota: `ninguno de los ${renders} anuncios probados tiene vídeo (prueba --ad-id con uno que sí lo tenga o sube --max-render)` }; p(`\n6 · vídeo: ninguno de los ${renders} anuncios probados (render_ad) trae vídeo`); return; }
+    p(`\n6 · vídeo: anuncio ${encontrado.adId} (${renders} render_ad probados) · imágenes en el mismo anuncio: ${encontrado.imagenes}`);
+    let descarga: Record<string, unknown> = {};
+    let bytes: Uint8Array | null = null; let mime = "video/mp4";
+    try {
+      const t0 = Date.now();
+      const rv = await fetch(encontrado.videoUrl, { headers: { "user-agent": DEEP_DIVE_USER_AGENT }, signal: AbortSignal.timeout(60_000) });
+      const buf = await rv.arrayBuffer();
+      mime = rv.headers.get("content-type")?.split(";")[0] || "video/mp4";
+      descarga = { http: rv.status, contentType: rv.headers.get("content-type"), bytes: buf.byteLength, ms: Date.now() - t0, host: new URL(encontrado.videoUrl).hostname };
+      if (rv.ok && buf.byteLength > 1000) bytes = new Uint8Array(buf);
+      p(`    descarga fbcdn sin sesión: HTTP ${rv.status} · ${rv.headers.get("content-type")} · ${buf.byteLength} bytes ${bytes ? "→ descargable" : "→ NO descargable"}`);
+    } catch (e) { descarga = { error: e instanceof Error ? e.message : String(e) }; p(`    descarga: error ${e instanceof Error ? e.message : String(e)}`); }
+    let transcripcion: Record<string, unknown> = { nota: "sin OPENAI_API_KEY: no se prueba la transcripción" };
+    const transcribe = makeOpenAiTranscribe();
+    if (bytes && transcribe) {
+      if (bytes.byteLength > DEEP_DIVE_VIDEO_MAX_BYTES) transcripcion = { nota: `${bytes.byteLength} bytes: supera los 25 MB de /audio/transcriptions` };
+      else {
+        try {
+          const t0 = Date.now();
+          const t = await transcribe({ bytes, mime });
+          const a = analyzeTranscript(t);
+          transcripcion = { modelo: transcribeModel(), ms: Date.now() - t0, aceptaElArchivoTalCual: true, idioma: a.language, duracionSeg: a.durationSec, palabrasPorMinuto: a.wordsPerMinute, gancho5s: a.hookFirstSeconds, guion: a.transcript.slice(0, 600), segmentos: t.segments.length };
+          p(`    transcripción OpenAI (${transcribeModel()}): OK en ${Date.now() - t0} ms · ${a.durationSec ?? "?"} s · ${a.wordsPerMinute ?? "?"} palabras/min · idioma ${a.language ?? "?"}`);
+          p(`    gancho (primeros 5 s): «${a.hookFirstSeconds ?? "—"}»`);
+          p(`    guion: «${a.transcript.slice(0, 300)}${a.transcript.length > 300 ? "…" : ""}»`);
+        } catch (e) { transcripcion = { modelo: transcribeModel(), aceptaElArchivoTalCual: false, error: e instanceof Error ? e.message : String(e) }; p(`    transcripción OpenAI: ERROR ${e instanceof Error ? e.message : String(e)}`); }
+      }
+    } else if (bytes) p("    transcripción: sin OPENAI_API_KEY en este entorno, no se prueba");
+    informe.paso6 = { adId: encontrado.adId, renders, imagenesEnElAnuncio: encontrado.imagenes, descarga, transcripcion, limite: "solo audio: la API no acepta vídeo; sin ffmpeg no hay frames (movimiento/planos no analizados)" };
+  }
   // 5 · radiografía de la cuenta (search_page_ids, activos e inactivos), UNA página.
   async function paso5(pageId: string): Promise<void> {
     const u = new URL(`https://graph.facebook.com/${version}/ads_archive`);
@@ -80,8 +133,9 @@ async function main(): Promise<void> {
     p(`    activos: ${ads5.length - conStop} · inactivos (con ad_delivery_stop_time): ${conStop} · más antiguo: ${masAntiguo ?? "?"} · más reciente: ${masReciente ?? "?"}`);
     p(`    ¿hay más páginas?: ${j5.paging?.next ? "SÍ (la cuenta tiene más de 100: cada 100 cuesta 1 petición más)" : "NO (toda la cuenta cabe en 1 petición)"}`);
     p(`    campos: ${ads5[0] ? Object.keys(ads5[0]).join(", ") : "—"}`);
+    anunciosCuenta.push(...ads5.filter((a) => !a.ad_delivery_stop_time));
   }
-  if (pageIdPedido && !termino && !adIdPedido) { await paso5(pageIdPedido); escribir(informe); return; }
+  if (pageIdPedido && !termino && !adIdPedido) { await paso5(pageIdPedido); await paso6(anunciosCuenta); escribir(informe); return; }
 
   // 1 · JSON crudo de /ads_archive.
   const url = new URL(`https://graph.facebook.com/${version}/ads_archive`);
@@ -150,6 +204,7 @@ async function main(): Promise<void> {
   const pageIdCuenta = pageIdPedido ?? (anuncio.page_id ? String(anuncio.page_id) : null);
   if (pageIdCuenta) await paso5(pageIdCuenta);
   else p("\n5 · cuenta: el anuncio no trae page_id; pásalo con --page-id");
+  await paso6([anuncio, ...anuncios, ...anunciosCuenta]);
   escribir(informe);
   p("\n  Sonda terminada. Pega este JSON (ya sin token) en el chat.\n");
 

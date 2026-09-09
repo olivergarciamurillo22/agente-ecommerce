@@ -6,12 +6,14 @@
 //   npm run hunter:deep-dive -- --min-score 60 --limite 5      (los N mejores cruces con match, aún sin deep dive)
 //   npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --coste 9.5
 //                                                             (modo manual: sin base del cruce; datos reales de la tienda)
-//   opciones: --sin-vision · --sin-cuenta · --page-id N (modo manual) · --json informe.json · --ver (lista lo persistido, sin red)
+//   opciones: --sin-vision · --sin-video · --sin-cuenta · --sin-busqueda · --page-id N (manual)
+//             --json informe.json · --ver (lista lo persistido, sin red) · --ver-id N (un informe entero, sin red)
 //
 // NUNCA recorre el catálogo entero: exige --ids, --min-score+--limite o
-// --dominio. Por candidato: paso 0 (radiografía de la cuenta) 1 petición a
-// /ads_archive por cada 100 anuncios de la página (tope 5), 2–4 a la tienda,
-// 0–1 a render_ad (solo con visión), 0–2 a OpenRouter. Respeta EMERGENCY_STOP.
+// --dominio. Por candidato: 1 petición de búsqueda por palabra (saturación),
+// 1 por cada 100 anuncios de la cuenta (tope 5), 2–4 a la tienda, 0–1 a
+// render_ad, 0–1 imagen, 0–1 vídeo (fbcdn), 0–2 a OpenRouter, 0–1 a OpenAI
+// (solo transcripción del vídeo). Respeta EMERGENCY_STOP.
 // ============================================================
 
 import "./env-loader";
@@ -34,6 +36,11 @@ function pintar(titulo: string, r: Informe): void {
   const p = (s: string) => console.log("  " + s);
   console.log(`\n═══ ${titulo} ═══`);
   p(`VEREDICTO: ${r.verdict.toUpperCase()} — ${r.reasoning}`);
+  p(`RECOMENDACIÓN: ${r.recommendation.action.toUpperCase()} — ${r.recommendation.reason}`);
+  if (r.adLink) p(`Anuncio (comprobar a mano): ${r.adLink}`);
+  p("");
+  p("EN CLARO: " + r.summary);
+  p("");
   if (r.incomplete.length) { p("No se pudo completar:"); for (const i of r.incomplete) p(`  ✗ ${i.part}: ${i.reason}`); }
   p(`Tienda: ${r.domain ?? "no localizable"}${r.domainSource ? ` (${r.domainSource})` : ""}${r.store ? ` · portada ${r.store.status} · ${r.store.isShopify ? "Shopify" : "no Shopify"}${r.store.brand ? ` · ${r.store.brand}` : ""}` : ""}`);
   p(`Catálogo: ${r.catalog ? `${r.catalog.status} · ${r.catalog.products} productos${r.catalog.truncated ? "+" : ""}` : "no leído"}`);
@@ -49,10 +56,29 @@ function pintar(titulo: string, r: Informe): void {
     else p("  · ángulos: ninguno clasificado por texto");
     p(`  · avatar consolidado${a.avatar.summarySource ? ` (${a.avatar.summarySource})` : ""}: ${a.avatar.summary ?? "sin señales de avatar en el texto"}`);
     for (const s of a.avatar.signals.slice(0, 3)) p(`      ${s.label}: ${s.ads} anuncios — «${s.evidence.quote}»`);
+    p(`  · ritmo de testeo de la cuenta: ${a.testing ? `${a.testing.level.toUpperCase()} · ${a.testing.newAds30d} anuncios nuevos en 30 días (${a.testing.perWeek30d}/semana), ${a.testing.newAds90d} en 90` : "sin fechas"}`);
+    p(`  · madurez del ángulo ganador: ${a.winner ? `${a.winner.label} · ${a.winner.daysActive} días activo sin cambios (desde ${a.winner.since}) · «${a.winner.quote}» · ${a.winner.adLink}` : "ningún ángulo activo clasificado"}`);
+    p(`  · productos distintos entre los activos (agrupación por texto): ${a.products.length}`);
+  }
+  if (r.competitors) {
+    p(`Competencia: ${r.competitors.count} tienda(s) más anunciando lo mismo ahora · ${r.competitors.basis}`);
+    for (const c of r.competitors.pages.slice(0, 5)) p(`  · ${c.pageName ?? c.pageId}: ${c.activeAds} activos, match ${c.verdict} (${Math.round(c.coverage * 100)} %)${c.adLink ? ` · ${c.adLink}` : ""}`);
+  }
+  p(`Coherencia de precio: ${r.priceCoherence.status.toUpperCase()} — ${r.priceCoherence.note}`);
+  if (r.otherProducts.length) {
+    p("Otros posibles ganadores detectados en esta misma tienda (activos, sin peticiones extra):");
+    for (const o of r.otherProducts) p(`  · «${o.label}» · ${o.ads} anuncio(s) · ${o.longestActiveDays ?? "?"} días el más antiguo · palabras: ${o.keywords.join(", ")} · Dropea: ${o.dropea.searched ? (o.dropea.matches.length ? o.dropea.matches.map((m) => `${m.name}${m.costEur !== null ? ` (${m.costEur.toFixed(2)} €)` : ""}`).join("; ") : "no encontrado") : "no buscado"} · ${o.adLink}`);
   }
   if (r.angles && r.angles.angles.length) { p("Ángulos del texto del anuncio (cita literal):"); for (const a of r.angles.angles.slice(0, 6)) p(`  · ${a.label}: «${a.evidence[0]?.quote ?? ""}»`); }
-  p(`Creatividad: ${r.creativeStatus}${r.creative ? ` (${r.creative.model})` : ""}`);
+  p(`Creatividad (imagen): ${r.creativeStatus}${r.creative ? ` (${r.creative.model})` : ""}`);
   if (r.creative) { for (const [k, v] of Object.entries({ gancho: r.creative.hook, angulo: r.creative.angle, dolor: r.creative.pain, deseo: r.creative.desire, avatar: r.creative.avatar, "precio visible": r.creative.visiblePrice })) if (v) p(`  · ${k}: ${v}`); }
+  p(`Vídeo: ${r.videoStatus}${r.video ? ` (${r.video.transcribeModel}${r.video.interpretModel ? ` + ${r.video.interpretModel}` : ""}) · ${r.video.durationSec ?? "?"} s · ${r.video.wordsPerMinute ?? "?"} palabras/min · idioma ${r.video.language ?? "?"}` : ""}`);
+  if (r.video) {
+    p(`  · gancho (primeros 5 s): «${r.video.hookFirstSeconds ?? "—"}»`);
+    if (r.video.interpretation) { for (const [k, v] of Object.entries({ angulo: r.video.interpretation.angle, dolor: r.video.interpretation.pain, deseo: r.video.interpretation.desire, avatar: r.video.interpretation.avatar, cta: r.video.interpretation.cta, ritmo: r.video.interpretation.rhythm })) if (v) p(`  · ${k}: ${v}`); }
+    p(`  · guion: «${r.video.transcript.slice(0, 400)}${r.video.transcript.length > 400 ? "…" : ""}»`);
+    p(`  · límite: ${r.video.limits}`);
+  }
   p(`Reglas: ${r.rules}`);
 }
 
@@ -64,14 +90,24 @@ async function main(): Promise<void> {
   const { productKeywords, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
   const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
   const { makeAccountSummarizer } = await import("../src/lib/hunter/deep-dive/account-summary");
+  const { makeVideoAnalysis, videoAvailable, videoDailyLimit, transcribeModel } = await import("../src/lib/hunter/deep-dive/video");
+  const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+  const { systemDbHandle } = await import("../src/lib/db");
   const repo = new DeepDiveRepository();
   const now = Math.floor(Date.now() / 1000);
 
+  if (arg("ver-id")) {
+    const fila = repo.byId(Number(arg("ver-id")));
+    if (!fila) { console.error("✗ no existe ese deep dive"); process.exit(2); }
+    if (fila.report) pintar(`deep dive #${fila.id} (persistido el ${new Date(fila.capturedAt * 1000).toISOString().slice(0, 16)})`, fila.report);
+    else console.log(`  deep dive #${fila.id}: ${fila.verdict} — ${fila.reasoning} (informe anterior al pipeline completo: sin report_json)`);
+    return;
+  }
   if (hasFlag("ver")) {
     const rows = repo.latest({ limit: Number.parseInt(arg("limite") ?? "", 10) || 50 });
     console.log(`\n──── DEEP DIVES PERSISTIDOS · ${rows.length} ────\n`);
     if (!rows.length) console.log("  (ninguno todavía)");
-    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—" })));
+    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—", recomendacion: r.recommendation ?? "—", competencia: r.competitors ?? "—", "otros prod.": r.otherProducts ?? "—", video: r.videoStatus ?? "—" })));
     return;
   }
   if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activo: el deep dive no sale a Internet.\n"); process.exit(2); }
@@ -83,7 +119,14 @@ async function main(): Promise<void> {
   const sinCuenta = hasFlag("sin-cuenta");
   const client = token && !sinCuenta ? new AdLibraryClient(token) : null;
   const accountSummarize = sinCuenta ? null : makeAccountSummarizer();
-  console.log(`\n──── DEEP DIVE · visión: ${sinVision ? "desactivada (--sin-vision)" : disp.ok ? `OpenRouter ${visionModel()}` : disp.reason} · cuenta: ${sinCuenta ? "omitida (--sin-cuenta)" : client ? `search_page_ids, activos+inactivos${accountSummarize ? ", avatar por Claude" : ", avatar heurístico"}` : "sin token de la Ad Library"} ────`);
+  const sinVideo = hasFlag("sin-video");
+  const dispVideo = videoAvailable();
+  const video = sinVideo ? null : makeVideoAnalysis();
+  const sinBusqueda = hasFlag("sin-busqueda");
+  const dropea = new DropeaCatalogRepository();
+  const dropeaLookup = (keywords: string[]) => { try { return dropea.search(keywords.join(" "), { pageSize: 5 }).rows.map((r) => ({ variantId: r.variantId, name: r.productName ?? r.name ?? `variante ${r.variantId}`, costEur: r.costEur })); } catch { return []; } };
+  const videosHoy = () => { try { return Number((systemDbHandle().prepare("SELECT COUNT(*) AS n FROM hunter_deep_dives WHERE video_status = 'analizada_audio' AND captured_at >= ?").get(now - 86400) as { n: number }).n); } catch { return 0; } };
+  console.log(`\n──── DEEP DIVE · visión: ${sinVision ? "desactivada (--sin-vision)" : disp.ok ? `OpenRouter ${visionModel()}` : disp.reason} · cuenta: ${sinCuenta ? "omitida (--sin-cuenta)" : client ? `search_page_ids, activos+inactivos${accountSummarize ? ", avatar por Claude" : ", avatar heurístico"}` : "sin token de la Ad Library"} · vídeo: ${sinVideo ? "desactivado (--sin-video)" : dispVideo.ok ? `OpenAI ${transcribeModel()} (solo audio), tope ${videoDailyLimit()}/día` : dispVideo.reason} · búsqueda por palabra: ${sinBusqueda ? "no (--sin-busqueda)" : client ? "sí (saturación cruzada)" : "sin token"} ────`);
 
   // Trabajos: manual, por ids o por score.
   type Trabajo = { titulo: string; cruceId: number | null; variantId: number | null; candidateKey: string | null; keywords: string[]; ads: import("../src/lib/hunter/discovery/types").AdLibraryAd[]; costEur: number | null; activeAds: number | null; oldestActiveAt: number | null; domainOverride: string | null; pageId: string | null; country: string };
@@ -104,14 +147,15 @@ async function main(): Promise<void> {
     } else { console.error("✗ Indica --ids 1,2,3 · --min-score N --limite M · o --dominio X --palabras \"…\". Nunca el catálogo entero."); process.exit(2); }
     if (!filas.length) { console.log("  Nada que analizar con ese filtro."); return; }
     for (const c of filas) trabajos.push({ titulo: `cruce #${c.id} · ${c.productName ?? "?"}`, cruceId: c.id, variantId: c.variantId, candidateKey: c.adlibCandidateKey, keywords: c.terms, ads: c.adlibCandidateKey ? repo.adsForCandidateKey(c.adlibCandidateKey) : [], costEur: c.costEur, activeAds: c.activeAds, oldestActiveAt: c.oldestActiveAt, domainOverride: null, pageId: null, country: c.country });
-    for (const t of trabajos) t.pageId = t.ads.find((a) => a.pageId)?.pageId ?? null;
+    // page_id: del snapshot si lo hay; si no, de la clave del candidato («ES:<page_id>:<huella>»); si no, lo trae la búsqueda por palabra.
+    for (const t of trabajos) t.pageId = t.ads.find((a) => a.pageId)?.pageId ?? (t.candidateKey?.split(":")[1] || null);
   }
 
   const informes: Array<{ id: number; titulo: string; report: Informe }> = [];
   for (const t of trabajos) {
     if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activado a mitad: se para aquí, lo hecho queda.\n"); break; }
-    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, domainOverride: t.domainOverride, client, pageId: t.pageId, country: t.country, accountSummarize, skipAccount: sinCuenta });
-    const id = repo.insert({ cruceId: t.cruceId, variantId: t.variantId, adlibCandidateKey: t.candidateKey, adId: t.ads[0]?.id ?? null, keywords: t.keywords, report, capturedAt: now });
+    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, video, skipVideo: sinVideo, videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), domainOverride: t.domainOverride, client, pageId: t.pageId, country: t.country, search: !sinBusqueda, accountSummarize, skipAccount: sinCuenta, dropeaLookup });
+    const id = repo.insert({ cruceId: t.cruceId, variantId: t.variantId, adlibCandidateKey: t.candidateKey, adId: report.adLink ? report.adLink.split("id=")[1] : (t.ads[0]?.id ?? null), keywords: t.keywords, report, capturedAt: now });
     pintar(`${t.titulo} → deep dive #${id}`, report);
     informes.push({ id, titulo: t.titulo, report });
   }

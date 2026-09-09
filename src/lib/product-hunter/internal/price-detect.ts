@@ -71,8 +71,16 @@ function parseAmount(raw: string): number | null {
   return Math.round(n * 100) / 100;
 }
 
-export function detectPriceInText(text: string | null | undefined): DetectedPriceHit | null {
-  if (!text) return null;
+type RawHit = { amount: number; quote: string; preferred: boolean; vat: DetectedPriceHit["vat"]; isFrom: boolean; unitAmbiguous: boolean };
+
+/** TODOS los importes del texto (distintos), en orden de aparición: para comparar con el precio real del catálogo. */
+export function detectPricesInText(text: string | null | undefined): Array<{ amount: number; quote: string }> {
+  if (!text) return [];
+  const vistos = new Set<number>();
+  return collectPriceHits(text).filter((h) => (vistos.has(h.amount) ? false : (vistos.add(h.amount), true))).map((h) => ({ amount: h.amount, quote: h.quote }));
+}
+
+function collectPriceHits(text: string): RawHit[] {
   const hits: Array<{ amount: number; quote: string; preferred: boolean; vat: DetectedPriceHit["vat"]; isFrom: boolean; unitAmbiguous: boolean }> = [];
   const seen = new Set<number>();
   const add = (m: RegExpExecArray, amountRaw: string) => {
@@ -100,6 +108,12 @@ export function detectPriceInText(text: string | null | undefined): DetectedPric
     let m: RegExpExecArray | null;
     while ((m = re.exec(text)) !== null) { if (!inMiddle(m.index)) add(m, m[1]); }
   }
+  return hits;
+}
+
+export function detectPriceInText(text: string | null | undefined): DetectedPriceHit | null {
+  if (!text) return null;
+  const hits = collectPriceHits(text);
   if (!hits.length) return null;
   const distinct = new Set(hits.map((h) => h.amount));
   const preferidos = hits.filter((h) => h.preferred);

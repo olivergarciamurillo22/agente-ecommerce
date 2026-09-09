@@ -424,6 +424,9 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     requiredFor: [],
     recommendedFor: ["nas-production"],
   },
+  { name: "DEEP_DIVE_VISION_MODEL", category: "PRODUCT_HUNTER", secret: false, description: "Nivel 2 (deep dive): modelo de OpenRouter con visión para la imagen del anuncio y la interpretación del guion. Vacío = anthropic/claude-haiku-4.5.", requiredFor: [] },
+  { name: "DEEP_DIVE_TRANSCRIBE_MODEL", category: "PRODUCT_HUNTER", secret: false, description: "Nivel 2: modelo de OpenAI para transcribir el AUDIO del vídeo del anuncio (usa OPENAI_API_KEY). whisper-1 (default) es el único que devuelve tiempos por segmento; gpt-4o-transcribe solo texto.", requiredFor: [], defaultValue: "whisper-1" },
+  { name: "DEEP_DIVE_VIDEO_DAILY_LIMIT", category: "PRODUCT_HUNTER", secret: false, description: "Nivel 2: tope diario de vídeos transcritos con OpenAI, contado sobre hunter_deep_dives. 0 = sin tope.", requiredFor: [], defaultValue: "50", validate: intPos },
   { name: "META_AD_LIBRARY_API_VERSION", category: "PRODUCT_HUNTER", secret: false, description: "Versión de la Graph API para la Ad Library. Vacío = cadena de respaldo (META_GRAPH_API_VERSION, META_ADS_API_VERSION y el default del repo).", requiredFor: [] },
 
   // ── META ADS (Marketing API) — solo lectura de insights ──
