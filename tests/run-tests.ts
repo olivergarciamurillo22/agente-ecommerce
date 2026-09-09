@@ -15514,7 +15514,7 @@ async function main(): Promise<void> {
 
     await test("DEEP DIVE · paso 0, radiografía de la cuenta: search_page_ids + ad_active_status=ALL, 1 petición por cada 100 anuncios; antigüedad real, activos/inactivos, ángulos con el activo más antiguo primero (con cita) y avatar; se persiste en account_json", async () => {
       limpiar();
-      const { xrayFromAds, readAccountXray, ACCOUNT_MAX_PAGES, ACCOUNT_SINCE, avatarSignals } = await import("../src/lib/hunter/deep-dive/account");
+      const { xrayFromAds, readAccountXray, ACCOUNT_MAX_PAGES, ACCOUNT_SINCE, avatarSignals, accountDateWindow } = await import("../src/lib/hunter/deep-dive/account");
       const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
       const { runDeepDive, accountSummary } = await import("../src/lib/hunter/deep-dive/deep-dive");
       const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
@@ -15559,7 +15559,7 @@ async function main(): Promise<void> {
         assert.equal(u.pathname.split("/").pop(), "ads_archive", "mismo endpoint que la búsqueda por palabra");
         assert.equal(u.searchParams.get("search_page_ids"), JSON.stringify(["555"])); assert.equal(u.searchParams.get("search_terms"), null, "por página, no por palabra");
         assert.equal(u.searchParams.get("ad_active_status"), "ALL", "activos E inactivos"); assert.equal(u.searchParams.get("limit"), "100");
-        assert.equal(u.searchParams.get("ad_delivery_date_min"), ACCOUNT_SINCE); assert.equal(u.searchParams.get("ad_delivery_date_max"), new Date(nowSec * 1000).toISOString().slice(0, 10));
+        assert.equal(u.searchParams.get("ad_delivery_date_min"), ACCOUNT_SINCE); assert.equal(u.searchParams.get("ad_delivery_date_max"), accountDateWindow(nowSec).until);
         assert.ok(u.searchParams.get("fields")!.includes("ad_delivery_stop_time"), "hace falta la fecha de apagado");
       }
       assert.equal(xr.totalAds, 4); assert.equal(xr.daysAdvertising, 400); assert.equal(xr.truncated, false);
@@ -15606,6 +15606,52 @@ async function main(): Promise<void> {
       for (const m of [db.migrateWorkspaceAuth, db.migrateProductCandidates, db.migrateHunterPredictive, db.migrateHunterDiscovery, db.migrateProductHunterInternal, db.migrateHunterDeepDive, db.migrateHunterDeepDive]) m(mem);
       assert.ok((mem.prepare("PRAGMA table_info(hunter_deep_dives)").all() as Array<{ name: string }>).some((c) => c.name === "account_json"));
       mem.close();
+    });
+
+    await test("DEEP DIVE · BUG 09-09 en producción: la ventana de fechas del paso 0 debe caer en [2018-05-07 – hoy] (Meta rechazó ad_delivery_date_min=2018-01-01 con code 100 / subcode 2334029); reproducido con page_id 1051601004698822 y fecha del sistema 2026-09-09", async () => {
+      const { readAccountXray, accountDateWindow, ACCOUNT_SINCE } = await import("../src/lib/hunter/deep-dive/account");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const PAGE = "1051601004698822";
+      const META_MIN = "2018-05-07";
+      // Validador que imita a Meta: «Today» en hora del Pacífico (UTC−7 en septiembre).
+      const hoyMeta = (nowSec: number) => new Date((nowSec - 7 * 3600) * 1000).toISOString().slice(0, 10);
+      const rechazo = (campo: string) => ({ error: { message: "Invalid parameter", type: "OAuthException", code: 100, error_subcode: 2334029, error_user_msg: `The ${campo} is invalid. It must in [${META_MIN} - Today].` } });
+      const meta = (nowSec: number) => { const vistas: Array<{ min: string; max: string }> = []; const f = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); const min = u.searchParams.get("ad_delivery_date_min")!; const max = u.searchParams.get("ad_delivery_date_max")!; vistas.push({ min, max });
+        assert.equal(u.searchParams.get("search_page_ids"), JSON.stringify([PAGE])); assert.equal(u.searchParams.get("ad_active_status"), "ALL");
+        if (min < META_MIN || min > hoyMeta(nowSec)) return new Response(JSON.stringify(rechazo("ad_delivery_date_min")), { status: 400, headers: { "content-type": "application/json" } });
+        if (max > hoyMeta(nowSec) || max < min) return new Response(JSON.stringify(rechazo("ad_delivery_date_max")), { status: 400, headers: { "content-type": "application/json" } });
+        return new Response(JSON.stringify({ data: [{ id: "77", page_id: PAGE, page_name: "Tienda", ad_creative_bodies: ["Alivia el dolor"], ad_delivery_start_time: "2024-03-01", ad_delivery_stop_time: "2024-06-01" }], paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch; return { f, vistas }; };
+
+      // El valor que se enviaba antes del fix (2018-01-01) es exactamente el que Meta rechaza: el validador lo reproduce.
+      const antes = meta(Date.UTC(2026, 8, 9, 10, 0, 0) / 1000);
+      const rAntes = await antes.f(`https://graph.facebook.com/v0/ads_archive?search_page_ids=${encodeURIComponent(JSON.stringify([PAGE]))}&ad_active_status=ALL&ad_delivery_date_min=2018-01-01&ad_delivery_date_max=2026-09-09`);
+      assert.equal(rAntes.status, 400); assert.match(((await rAntes.json()) as { error: { error_user_msg: string } }).error.error_user_msg, /ad_delivery_date_min is invalid/);
+      assert.ok(ACCOUNT_SINCE >= META_MIN, `ACCOUNT_SINCE (${ACCOUNT_SINCE}) no puede ser anterior al mínimo de Meta ${META_MIN}`);
+      assert.equal(ACCOUNT_SINCE, META_MIN, "se pide desde el primer día que Meta archiva, ni antes (rechazo) ni después (se perdería historia)");
+
+      // Con el fix: 09-09-2026 a distintas horas, incluidas las de desfase UTC/Madrid/Pacífico; nunca 400.
+      const instantes: Array<[string, number]> = [
+        ["2026-09-09 00:30 Madrid (08 22:30Z)", Date.UTC(2026, 8, 8, 22, 30, 0) / 1000],
+        ["2026-09-09 03:00 Madrid (09 01:00Z, en Meta aún 08)", Date.UTC(2026, 8, 9, 1, 0, 0) / 1000],
+        ["2026-09-09 12:00 Madrid (09 10:00Z)", Date.UTC(2026, 8, 9, 10, 0, 0) / 1000],
+        ["2026-09-10 01:59 Madrid (09 23:59Z)", Date.UTC(2026, 8, 9, 23, 59, 0) / 1000],
+      ];
+      for (const [etiqueta, nowSec] of instantes) {
+        const { f, vistas } = meta(nowSec);
+        const x = await readAccountXray({ client: new AdLibraryClient("TOKEN-test", f, async () => {}), pageId: PAGE, country: "ES", now: nowSec });
+        assert.equal(x.stopReason, "completado", `${etiqueta}: Meta no debe rechazar la ventana ${JSON.stringify(vistas)}`);
+        assert.equal(x.totalAds, 1, etiqueta); assert.equal(x.requests, 1, etiqueta);
+        const v = accountDateWindow(nowSec);
+        assert.deepEqual(vistas, [{ min: v.since, max: v.until }], `${etiqueta}: la sonda y el paso 0 usan la misma ventana`);
+        assert.equal(v.since, META_MIN, etiqueta);
+        assert.ok(v.until <= hoyMeta(nowSec), `${etiqueta}: el máximo (${v.until}) no puede ir por delante del «hoy» de Meta (${hoyMeta(nowSec)})`);
+        assert.ok(v.until >= new Date((nowSec - 86400) * 1000).toISOString().slice(0, 10), `${etiqueta}: el máximo (${v.until}) no puede quedarse más de un día atrás`);
+        assert.match(v.until, /^2026-09-0[89]$/, etiqueta);
+      }
+      // Antes del fix la petición del 09-09 llevaba min=2018-01-01 y max=2026-09-09 (UTC): queda constancia para el informe.
+      assert.deepEqual(accountDateWindow(Date.UTC(2026, 8, 9, 10, 0, 0) / 1000), { since: "2018-05-07", until: "2026-09-09" });
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

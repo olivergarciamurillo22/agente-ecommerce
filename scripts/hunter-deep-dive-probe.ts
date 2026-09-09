@@ -42,6 +42,7 @@ async function main(): Promise<void> {
   const { META_ADS_DEFAULT_API_VERSION } = await import("../src/lib/meta-ads/config");
   const { renderAdUrl, parseRenderAdHtml, redactToken, DEEP_DIVE_USER_AGENT } = await import("../src/lib/hunter/deep-dive/render-ad");
   const { readStoreProfile } = await import("../src/lib/hunter/audit/store");
+  const { accountDateWindow } = await import("../src/lib/hunter/deep-dive/account");
 
   const termino = arg("termino");
   const adIdPedido = arg("ad-id");
@@ -62,7 +63,8 @@ async function main(): Promise<void> {
     u.searchParams.set("search_page_ids", JSON.stringify([pageId]));
     u.searchParams.set("ad_reached_countries", JSON.stringify([pais]));
     u.searchParams.set("ad_type", "ALL"); u.searchParams.set("ad_active_status", "ALL");
-    u.searchParams.set("ad_delivery_date_min", "2018-01-01"); u.searchParams.set("ad_delivery_date_max", new Date().toISOString().slice(0, 10));
+    const ventana = accountDateWindow(Math.floor(Date.now() / 1000)); // la misma que usa el paso 0 del deep dive (min ≥ 2018-05-07, max = hoy para Meta)
+    u.searchParams.set("ad_delivery_date_min", ventana.since); u.searchParams.set("ad_delivery_date_max", ventana.until);
     u.searchParams.set("fields", ADLIB_FIELDS.join(",")); u.searchParams.set("limit", "100");
     const t0 = Date.now();
     const r5 = await fetch(u, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
@@ -72,7 +74,7 @@ async function main(): Promise<void> {
     const inicios = ads5.map((a) => Date.parse(String(a.ad_delivery_start_time ?? ""))).filter(Number.isFinite);
     const masAntiguo = inicios.length ? new Date(Math.min(...inicios)).toISOString().slice(0, 10) : null;
     const masReciente = inicios.length ? new Date(Math.max(...inicios)).toISOString().slice(0, 10) : null;
-    informe.paso5 = { pageId, http: r5.status, ms: Date.now() - t0, error: j5.error ?? null, anuncios: ads5.length, activos: ads5.length - conStop, inactivos: conStop, masAntiguo, masReciente, hayMasPaginas: Boolean(j5.paging?.next), camposDevueltos: ads5[0] ? Object.keys(ads5[0]) : [], peticiones: 1, estimacionPeticionesCuentaCompleta: j5.paging?.next ? "≥ 2 (1 por cada 100 anuncios; el pipeline para en 5 páginas)" : "1" };
+    informe.paso5 = { pageId, ventana, http: r5.status, ms: Date.now() - t0, error: j5.error ?? null, anuncios: ads5.length, activos: ads5.length - conStop, inactivos: conStop, masAntiguo, masReciente, hayMasPaginas: Boolean(j5.paging?.next), camposDevueltos: ads5[0] ? Object.keys(ads5[0]) : [], peticiones: 1, estimacionPeticionesCuentaCompleta: j5.paging?.next ? "≥ 2 (1 por cada 100 anuncios; el pipeline para en 5 páginas)" : "1" };
     p(`\n5 · cuenta page_id ${pageId}: /ads_archive?search_page_ids HTTP ${r5.status} · ${Date.now() - t0} ms · ${ads5.length} anuncio(s) en la primera página`);
     if (j5.error) p(`    error: ${JSON.stringify(j5.error)}`);
     p(`    activos: ${ads5.length - conStop} · inactivos (con ad_delivery_stop_time): ${conStop} · más antiguo: ${masAntiguo ?? "?"} · más reciente: ${masReciente ?? "?"}`);

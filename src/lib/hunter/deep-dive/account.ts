@@ -29,9 +29,28 @@ import { DiscoveryBudget, type StopReason } from "../discovery/budget";
 import { ANGLE_RULES, normalizeAngleText, sentences, type AngleId } from "../audit/angles";
 
 export const ACCOUNT_MAX_PAGES = 5;
-/** Ventana de fechas amplia: la Ad Library exige min/max; 2018 cubre toda cuenta comercial en España. */
-export const ACCOUNT_SINCE = "2018-01-01";
+/**
+ * Ventana de fechas: la Ad Library exige min/max y SOLO admite
+ * ad_delivery_date_min dentro de [2018-05-07 – hoy]. El 09-09-2026, en
+ * producción, «2018-01-01» devolvió HTTP 400 code 100 subcode 2334029
+ * («The ad_delivery_date_min is invalid. It must in [2018-05-07 - Today]»).
+ * 2018-05-07 es el día en que Meta empezó a archivar anuncios: cubre toda
+ * cuenta comercial en España.
+ */
+export const ACCOUNT_SINCE = "2018-05-07";
 const DAY = 86_400;
+
+/**
+ * Límite superior: «hoy» según Meta. Su «Today» se evalúa en hora del
+ * Pacífico, así que la fecha UTC del NAS (Madrid, UTC+2) iría un día por
+ * delante entre las 00:00 y las 09:00 hora peninsular. Se toma la fecha de
+ * (ahora − 8 h): nunca cae en el futuro para Meta y, como mucho, deja fuera
+ * los anuncios estrenados hoy, que para la radiografía histórica no cuentan.
+ */
+export function accountDateWindow(now: number): { since: string; until: string } {
+  const until = new Date((now - 8 * 3600) * 1000).toISOString().slice(0, 10);
+  return { since: ACCOUNT_SINCE, until: until < ACCOUNT_SINCE ? ACCOUNT_SINCE : until };
+}
 
 export interface AccountAngle {
   id: AngleId;
@@ -174,9 +193,9 @@ export interface AccountXrayInput {
 
 export async function readAccountXray(input: AccountXrayInput): Promise<AccountXray> {
   const budget = input.budget ?? new DiscoveryBudget({ deadlineAt: Date.now() + 2 * 60_000, maxRequests: (input.maxPages ?? ACCOUNT_MAX_PAGES) + 1 });
-  const until = new Date(input.now * 1000).toISOString().slice(0, 10);
+  const { since, until } = accountDateWindow(input.now);
   const antes = budget.requests;
-  const r = await input.client.search({ term: "", pageIds: [input.pageId], country: input.country, since: ACCOUNT_SINCE, until, activeStatus: "ALL", budget, maxPages: input.maxPages ?? ACCOUNT_MAX_PAGES });
+  const r = await input.client.search({ term: "", pageIds: [input.pageId], country: input.country, since, until, activeStatus: "ALL", budget, maxPages: input.maxPages ?? ACCOUNT_MAX_PAGES });
   const xray = xrayFromAds(input.pageId, r.ads, input.now, { requests: budget.requests - antes, pages: r.pages, truncated: r.pages >= (input.maxPages ?? ACCOUNT_MAX_PAGES) && r.stopReason === "completado", stopReason: r.stopReason });
   if (input.summarize && r.ads.length) {
     try {

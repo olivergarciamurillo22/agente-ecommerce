@@ -161,6 +161,20 @@ palabra» es lo que dice la documentación de Meta y lo que asume el cliente
 (`AdLibraryClient.search` ya lo usaba para el auditor de tiendas), no un dato
 observado con inactivos incluidos.
 
+**Bug real del 09-09 (corregido)**: con el token renovado, el paso 5 de la
+sonda devolvió HTTP 400, `code 100`, `error_subcode 2334029`: «The
+ad_delivery_date_min is invalid. It must in [2018-05-07 - Today]». La
+petición llevaba `ad_delivery_date_min=2018-01-01` (la constante
+`ACCOUNT_SINCE`, repetida a mano en la sonda) y `ad_delivery_date_max=2026-09-09`
+(fecha UTC del sistema). El máximo era correcto; el mínimo caía cuatro meses
+antes de lo que Meta admite. Fix: `ACCOUNT_SINCE = "2018-05-07"` y una única
+función `accountDateWindow(now)` que usan el paso 0 y la sonda; el máximo se
+calcula con 8 h de margen porque el «Today» de Meta se evalúa en hora del
+Pacífico (desde Madrid, entre las 00:00 y las 09:00 la fecha UTC va un día
+por delante). Test «DEEP DIVE · BUG 09-09» con un validador que imita a Meta,
+`page_id 1051601004698822` y el 09-09-2026 a cuatro horas distintas; el
+mismo test falla si `ACCOUNT_SINCE` vuelve a 2018-01-01 (comprobado).
+
 **En el informe**: sección «Cuenta completa» del CLI (antigüedad real,
 total/activos/apagados, ángulos con el activo más antiguo y su cita, avatar
 consolidado y su fuente), columna `account_json` en `hunter_deep_dives`

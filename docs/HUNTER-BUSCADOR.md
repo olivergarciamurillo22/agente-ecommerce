@@ -144,3 +144,18 @@ todo lo de aquí está probado con red inyectada, pero **no se ha ejecutado una
 búsqueda real**. Son dos bloqueos distintos y renovar el token solo resuelve el
 primero: (1) el token caducado, y (2) que la app tenga acceso concedido a
 `/ads_archive`. `npm run hunter:discovery:doctor` distingue uno de otro.
+
+### Qué token vale para `/ads_archive` (confirmado en producción el 09-09-2026)
+
+- **Solo sirve un token de persona física** (usuario de Facebook con identidad
+  verificada). El de **Usuario del Sistema NO funciona** para `/ads_archive`,
+  aunque tenga `ads_read` y no caduque nunca: Meta lo rechaza en este
+  endpoint.
+- Lo que hay hoy en el NAS: token de usuario personal verificado, canjeado
+  por uno de **larga duración (60 días)**. Caduca: hay que renovarlo (nuevo
+  token de usuario → canje por larga duración → `.env` del NAS → reiniciar el
+  contenedor). `npm run hunter:discovery:doctor` dice si sigue vivo.
+- Con ese token el paso 1 (búsqueda por palabra) da HTTP 200. El paso 0 del
+  deep dive (`search_page_ids`) exige además que `ad_delivery_date_min` esté
+  en **[2018-05-07 – hoy]**: ver `docs/HUNTER-DEEP-DIVE.md`, «Paso 0».
+
