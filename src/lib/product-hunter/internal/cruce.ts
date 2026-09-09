@@ -134,6 +134,10 @@ export function bestMatch(keywords: string[], groups: DiscoveryGroup[]): GroupMa
 export interface CruceBreakdown {
   formula: string;
   keywords: string[];
+  /** Búsqueda 2 (otros países): las palabras clave en español antes de traducirlas al idioma del mercado. */
+  keywordsOriginal?: string[];
+  /** Cómo se llegó a las palabras buscadas: «traducidas por Claude» o «en español (sin traducir)». */
+  keywordsNote?: string;
   match: MatchVerdict;
   coverage: number;
   validacion: { points: number; max: number; detail: string };
@@ -281,8 +285,12 @@ export class CruceRepository {
     return r ? rowOf(r) : null;
   }
   /** Cuántos productos del catálogo ya tienen cruce (para el offset por defecto del CLI). */
-  crossedVariantIds(): Set<number> {
-    return new Set((this.db.prepare("SELECT DISTINCT variant_id FROM hunter_cruces").all() as Array<{ variant_id: number }>).map((r) => r.variant_id));
+  /** Variantes ya cruzadas; por país si se indica (un cruce en ES no cuenta como hecho en IT). */
+  crossedVariantIds(country?: string): Set<number> {
+    const rows = country
+      ? (this.db.prepare("SELECT DISTINCT variant_id FROM hunter_cruces WHERE country = ?").all(country.toUpperCase()) as Array<{ variant_id: number }>)
+      : (this.db.prepare("SELECT DISTINCT variant_id FROM hunter_cruces").all() as Array<{ variant_id: number }>);
+    return new Set(rows.map((r) => r.variant_id));
   }
 }
 
@@ -304,6 +312,8 @@ export interface CruceBatchInput {
   catalog?: DropeaCatalogRepository;
   repo?: CruceRepository;
   onProduct?: (c: CruceRow, i: number, total: number) => void;
+  /** Búsqueda 2: traduce las palabras clave al idioma del país (Claude por OpenRouter). Null/ausente = se buscan en español. */
+  translate?: ((keywords: string[], country: string) => Promise<string[]>) | null;
 }
 
 export interface CruceBatchReport {
@@ -330,7 +340,7 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
   const until = new Date(now * 1000).toISOString().slice(0, 10);
   const since = new Date((now - days * DAY) * 1000).toISOString().slice(0, 10);
 
-  const yaCruzados = input.skipCrossed === false ? new Set<number>() : repo.crossedVariantIds();
+  const yaCruzados = input.skipCrossed === false ? new Set<number>() : repo.crossedVariantIds(country);
   const lote = catalog.batchForCross({ limit: input.limit + yaCruzados.size, offset: input.offset ?? 0, category: input.category ?? null }).filter((r) => !yaCruzados.has(r.variantId)).slice(0, input.limit);
   const runId = repo.startRun({ country, category: input.category ?? null, maxProducts: input.limit, now });
   const cruces: CruceRow[] = [];
@@ -343,7 +353,16 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     if (freno) { stopReason = freno; break; }
     if (!canRunDiscovery()) { repo.finishRun(runId, "parada_emergencia", now); throw new DiscoveryHaltedError(); }
     // El nombre del PRODUCTO (sin la variante «Negro XL») manda; el de la variante solo si no hay otro.
-    const keywords = productKeywords(producto.productName ?? producto.name ?? "");
+    const keywordsEs = productKeywords(producto.productName ?? producto.name ?? "");
+    // Búsqueda 2: en otro idioma se buscan las palabras traducidas; el original se guarda para la comprobación de España.
+    let keywords = keywordsEs;
+    let keywordsNote: string | undefined;
+    if (country !== "ES" && keywordsEs.length) {
+      if (input.translate) {
+        try { const t = await input.translate(keywordsEs, country); if (t.length && t.join(" ") !== keywordsEs.join(" ")) { keywords = t; keywordsNote = `traducidas por Claude al idioma de ${country}: «${t.join(" ")}» (original «${keywordsEs.join(" ")}»)`; } else keywordsNote = `en español (sin traducir): un «no» en ${country} no significa que no se anuncie`; }
+        catch (err) { keywordsNote = `en español: la traducción falló (${err instanceof Error ? err.message.slice(0, 80) : String(err)})`; }
+      } else keywordsNote = `en español (sin OPENROUTER_API_KEY no se traduce): un «no» en ${country} no significa que no se anuncie`;
+    }
     let match: GroupMatch | null = null;
     let busquedaError: string | null = null;
     if (keywords.length) {
@@ -372,7 +391,8 @@ export async function runCruceBatch(input: CruceBatchInput): Promise<CruceBatchR
     if (price?.isFrom) priceNotes.push("«desde»: puede ser la variante más barata");
     if (price?.unitAmbiguous) priceNotes.push("precio de lote («N por X €»), no unitario");
     if (price && price.candidates > 1) priceNotes.push(`${price.candidates} importes distintos en el texto: se eligió el marcado como precio o el más bajo`);
-    const breakdown: CruceBreakdown = { ...s.breakdown, keywords, priceQuote: price?.quote ?? null, priceNotes, snapshotUrl: g?.ads.map((a) => a.snapshotUrl).find(Boolean) ?? null };
+    const breakdown: CruceBreakdown = { ...s.breakdown, keywords, ...(keywords !== keywordsEs ? { keywordsOriginal: keywordsEs } : {}), ...(keywordsNote ? { keywordsNote } : {}), priceQuote: price?.quote ?? null, priceNotes, snapshotUrl: g?.ads.map((a) => a.snapshotUrl).find(Boolean) ?? null };
+    if (keywordsNote) breakdown.confianza.detail += ` · palabras ${keywordsNote}`;
     if (priceNotes.length && breakdown.margen.calculable) breakdown.margen.detail += ` · ${priceNotes.join("; ")}`;
     if (busquedaError) breakdown.validacion.detail += ` · la consulta a la Ad Library falló (${busquedaError}): sin validar no significa que no anuncien`;
     if (!keywords.length) breakdown.validacion.detail = "el nombre del producto no deja palabras clave útiles: no se buscó";

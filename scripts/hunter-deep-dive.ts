@@ -6,6 +6,10 @@
 //   npm run hunter:deep-dive -- --min-score 60 --limite 5      (los N mejores cruces con match, aún sin deep dive)
 //   npm run hunter:deep-dive -- --dominio cloudcore.es --palabras "cojin gel silla" --coste 9.5
 //                                                             (modo manual: sin base del cruce; datos reales de la tienda)
+//   BÚSQUEDA 2 (otros países): los cruces hechos con --pais IT llevan su país; el deep dive busca en ese país
+//   y COMPRUEBA ESPAÑA obligatoriamente (misma búsqueda por palabra en español con ad_reached_countries=ES).
+//   npm run hunter:deep-dive -- --ids 301,302                  (cruce en IT → informe con «competencia en España»)
+//   npm run hunter:deep-dive -- --dominio x.it --palabras "cuscino gel sedia" --palabras-es "cojin gel silla" --pais IT --page-id N
 //   opciones: --sin-vision · --sin-video · --sin-cuenta · --sin-busqueda · --page-id N (manual)
 //             --json informe.json · --ver (lista lo persistido, sin red) · --ver-id N (un informe entero, sin red)
 //
@@ -38,6 +42,9 @@ function pintar(titulo: string, r: Informe): void {
   p(`VEREDICTO: ${r.verdict.toUpperCase()} — ${r.reasoning}`);
   p(`RECOMENDACIÓN: ${r.recommendation.action.toUpperCase()} — ${r.recommendation.reason}`);
   if (r.adLink) p(`Anuncio (comprobar a mano): ${r.adLink}`);
+  if (r.spainCheck) p(`COMPETENCIA EN ESPAÑA: ${r.spainCheck.verified ? `${r.spainCheck.activeAds} anuncios activos (verificado)` : "NO VERIFICADA"} · oportunidad: ${r.opportunity.toUpperCase()} · ${r.spainCheck.basis}${r.spainCheck.reason ? ` · ${r.spainCheck.reason}` : ""}`);
+  for (const c of r.spainCheck?.pages.slice(0, 5) ?? []) p(`  · ES · ${c.pageName ?? c.pageId}: ${c.activeAds} activos, match ${c.verdict} (${Math.round(c.coverage * 100)} %)${c.adLink ? ` · ${c.adLink}` : ""}`);
+  if (r.country !== "ES") p(`País de la búsqueda: ${r.country}`);
   p("");
   p("EN CLARO: " + r.summary);
   p("");
@@ -107,7 +114,7 @@ async function main(): Promise<void> {
     const rows = repo.latest({ limit: Number.parseInt(arg("limite") ?? "", 10) || 50 });
     console.log(`\n──── DEEP DIVES PERSISTIDOS · ${rows.length} ────\n`);
     if (!rows.length) console.log("  (ninguno todavía)");
-    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—", recomendacion: r.recommendation ?? "—", competencia: r.competitors ?? "—", "otros prod.": r.otherProducts ?? "—", video: r.videoStatus ?? "—" })));
+    console.table(rows.map((r) => ({ id: r.id, veredicto: r.verdict, tienda: r.domain ?? "—", producto: (r.matchedTitle ?? "—").slice(0, 36), precio: eur(r.priceEur), coste: eur(r.costEur), "margen real": pct(r.marginPct), activos: r.activeAds ?? "—", dias: r.daysActive ?? "—", creatividad: r.creativeStatus, "cuenta desde": r.account?.firstAdStart ?? "—", "cuenta activos": r.account ? `${r.account.activeAds}/${r.account.totalAds}` : "—", recomendacion: r.recommendation ?? "—", competencia: r.competitors ?? "—", "otros prod.": r.otherProducts ?? "—", video: r.videoStatus ?? "—", pais: r.country ?? "ES", "ES activos": r.spainActiveAds ?? (r.country && r.country !== "ES" ? "no verif." : "—"), oportunidad: r.opportunity ?? "—" })));
     return;
   }
   if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activo: el deep dive no sale a Internet.\n"); process.exit(2); }
@@ -129,13 +136,13 @@ async function main(): Promise<void> {
   console.log(`\n──── DEEP DIVE · visión: ${sinVision ? "desactivada (--sin-vision)" : disp.ok ? `OpenRouter ${visionModel()}` : disp.reason} · cuenta: ${sinCuenta ? "omitida (--sin-cuenta)" : client ? `search_page_ids, activos+inactivos${accountSummarize ? ", avatar por Claude" : ", avatar heurístico"}` : "sin token de la Ad Library"} · vídeo: ${sinVideo ? "desactivado (--sin-video)" : dispVideo.ok ? `OpenAI ${transcribeModel()} (solo audio), tope ${videoDailyLimit()}/día` : dispVideo.reason} · búsqueda por palabra: ${sinBusqueda ? "no (--sin-busqueda)" : client ? "sí (saturación cruzada)" : "sin token"} ────`);
 
   // Trabajos: manual, por ids o por score.
-  type Trabajo = { titulo: string; cruceId: number | null; variantId: number | null; candidateKey: string | null; keywords: string[]; ads: import("../src/lib/hunter/discovery/types").AdLibraryAd[]; costEur: number | null; activeAds: number | null; oldestActiveAt: number | null; domainOverride: string | null; pageId: string | null; country: string };
+  type Trabajo = { titulo: string; cruceId: number | null; variantId: number | null; candidateKey: string | null; keywords: string[]; ads: import("../src/lib/hunter/discovery/types").AdLibraryAd[]; costEur: number | null; activeAds: number | null; oldestActiveAt: number | null; domainOverride: string | null; pageId: string | null; country: string; spainKeywords: string[] };
   const trabajos: Trabajo[] = [];
   if (arg("dominio")) {
     const palabras = arg("palabras");
     if (!palabras) { console.error("✗ --dominio exige --palabras \"…\""); process.exit(2); }
     const coste = arg("coste") !== undefined ? Number(String(arg("coste")).replace(",", ".")) : null;
-    trabajos.push({ titulo: `manual · ${arg("dominio")} · «${palabras}»`, cruceId: null, variantId: null, candidateKey: null, keywords: productKeywords(palabras), ads: [], costEur: Number.isFinite(coste as number) ? coste : null, activeAds: Number.parseInt(arg("activos") ?? "", 10) || null, oldestActiveAt: null, domainOverride: arg("dominio")!, pageId: arg("page-id") ?? null, country: (arg("pais") ?? "ES").toUpperCase() });
+    trabajos.push({ titulo: `manual · ${arg("dominio")} · «${palabras}»`, cruceId: null, variantId: null, candidateKey: null, keywords: productKeywords(palabras), ads: [], costEur: Number.isFinite(coste as number) ? coste : null, activeAds: Number.parseInt(arg("activos") ?? "", 10) || null, oldestActiveAt: null, domainOverride: arg("dominio")!, pageId: arg("page-id") ?? null, country: (arg("pais") ?? "ES").toUpperCase(), spainKeywords: arg("palabras-es") ? productKeywords(arg("palabras-es")!) : [] });
   } else {
     const cruces = new CruceRepository();
     let filas: Array<import("../src/lib/product-hunter/internal/cruce").CruceRow> = [];
@@ -146,7 +153,7 @@ async function main(): Promise<void> {
       filas = cruces.latest({ limit: 5000 }).filter((c) => c.match !== "no" && (c.score ?? 0) >= min && !hechos.has(c.variantId)).slice(0, limite);
     } else { console.error("✗ Indica --ids 1,2,3 · --min-score N --limite M · o --dominio X --palabras \"…\". Nunca el catálogo entero."); process.exit(2); }
     if (!filas.length) { console.log("  Nada que analizar con ese filtro."); return; }
-    for (const c of filas) trabajos.push({ titulo: `cruce #${c.id} · ${c.productName ?? "?"}`, cruceId: c.id, variantId: c.variantId, candidateKey: c.adlibCandidateKey, keywords: c.terms, ads: c.adlibCandidateKey ? repo.adsForCandidateKey(c.adlibCandidateKey) : [], costEur: c.costEur, activeAds: c.activeAds, oldestActiveAt: c.oldestActiveAt, domainOverride: null, pageId: null, country: c.country });
+    for (const c of filas) trabajos.push({ titulo: `cruce #${c.id} · ${c.productName ?? "?"}`, cruceId: c.id, variantId: c.variantId, candidateKey: c.adlibCandidateKey, keywords: c.terms, ads: c.adlibCandidateKey ? repo.adsForCandidateKey(c.adlibCandidateKey) : [], costEur: c.costEur, activeAds: c.activeAds, oldestActiveAt: c.oldestActiveAt, domainOverride: null, pageId: null, country: (arg("pais") ?? c.country).toUpperCase(), spainKeywords: c.breakdown.keywordsOriginal ?? (c.productName ? productKeywords(c.productName) : c.terms) });
     // page_id: del snapshot si lo hay; si no, de la clave del candidato («ES:<page_id>:<huella>»); si no, lo trae la búsqueda por palabra.
     for (const t of trabajos) t.pageId = t.ads.find((a) => a.pageId)?.pageId ?? (t.candidateKey?.split(":")[1] || null);
   }
@@ -154,7 +161,7 @@ async function main(): Promise<void> {
   const informes: Array<{ id: number; titulo: string; report: Informe }> = [];
   for (const t of trabajos) {
     if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activado a mitad: se para aquí, lo hecho queda.\n"); break; }
-    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, video, skipVideo: sinVideo, videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), domainOverride: t.domainOverride, client, pageId: t.pageId, country: t.country, search: !sinBusqueda, accountSummarize, skipAccount: sinCuenta, dropeaLookup });
+    const report = await runDeepDive({ keywords: t.keywords, ads: t.ads, costEur: t.costEur, activeAds: t.activeAds, oldestActiveAt: t.oldestActiveAt, now, token, vision, video, skipVideo: sinVideo, videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), domainOverride: t.domainOverride, client, pageId: t.pageId, country: t.country, search: !sinBusqueda, accountSummarize, skipAccount: sinCuenta, dropeaLookup, spainKeywords: t.spainKeywords });
     const id = repo.insert({ cruceId: t.cruceId, variantId: t.variantId, adlibCandidateKey: t.candidateKey, adId: report.adLink ? report.adLink.split("id=")[1] : (t.ads[0]?.id ?? null), keywords: t.keywords, report, capturedAt: now });
     pintar(`${t.titulo} → deep dive #${id}`, report);
     informes.push({ id, titulo: t.titulo, report });

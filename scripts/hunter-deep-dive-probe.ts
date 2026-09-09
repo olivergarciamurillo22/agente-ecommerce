@@ -6,6 +6,8 @@
 //   npm run hunter:deep-dive:probe -- --termino "cojin gel silla" --ad-id 1234567890123456
 //   npm run hunter:deep-dive:probe -- ... --json /app/data/deep-dive-probe.json
 //   npm run hunter:deep-dive:probe -- --page-id 123456789 (solo el paso 5, sin buscar por palabra)
+//   npm run hunter:deep-dive:probe -- --termino "cuscino gel sedia" --comparar-paises ES,IT,PT,FR,DE
+//       (búsqueda 2: la MISMA búsqueda por país, lado a lado: HTTP, nº de anuncios, campos, error; 1 petición por país)
 //
 // Cuatro comprobaciones con UN anuncio real, 4–5 peticiones en total, sin
 // persistir nada:
@@ -54,6 +56,7 @@ async function main(): Promise<void> {
   const termino = arg("termino");
   const adIdPedido = arg("ad-id");
   const pageIdPedido = arg("page-id");
+  const compararPaises = (arg("comparar-paises") ?? "").toUpperCase().split(",").map((x) => x.trim()).filter((x) => /^[A-Z]{2}$/.test(x));
   if (!termino && !adIdPedido && !pageIdPedido) { console.error('Uso: npm run hunter:deep-dive:probe -- --termino "cojin gel silla" [--ad-id N] [--pais ES] [--json informe.json]'); process.exit(2); }
   if (!canRunDiscovery()) { console.error("✗ EMERGENCY_STOP activo: la sonda no sale a Internet."); process.exit(2); }
   const token = (process.env.META_AD_LIBRARY_ACCESS_TOKEN ?? process.env.META_ADS_ACCESS_TOKEN ?? "").trim();
@@ -136,6 +139,30 @@ async function main(): Promise<void> {
     anunciosCuenta.push(...ads5.filter((a) => !a.ad_delivery_stop_time));
   }
   if (pageIdPedido && !termino && !adIdPedido) { await paso5(pageIdPedido); await paso6(anunciosCuenta); escribir(informe); return; }
+
+  // 0 · búsqueda 2: la misma búsqueda por palabra en varios países, lado a lado.
+  if (compararPaises.length) {
+    const filas: Array<Record<string, unknown>> = [];
+    for (const c of compararPaises) {
+      const u = new URL(`https://graph.facebook.com/${version}/ads_archive`);
+      u.searchParams.set("search_terms", termino ?? ""); u.searchParams.set("ad_reached_countries", JSON.stringify([c]));
+      u.searchParams.set("ad_type", "ALL"); u.searchParams.set("ad_active_status", "ACTIVE");
+      u.searchParams.set("fields", ADLIB_FIELDS.join(",")); u.searchParams.set("limit", "25");
+      const t0 = Date.now();
+      const rc = await fetch(u, { headers: { authorization: `Bearer ${token}`, accept: "application/json" }, signal: AbortSignal.timeout(30_000) });
+      const jc = await rc.json() as { data?: Array<Record<string, unknown>>; paging?: { next?: string }; error?: { message?: string; code?: number; error_subcode?: number } };
+      const ads = jc.data ?? [];
+      const campos = ads[0] ? Object.keys(ads[0]).sort() : [];
+      filas.push({ pais: c, http: rc.status, ms: Date.now() - t0, anuncios: ads.length, hayMas: Boolean(jc.paging?.next), campos, error: jc.error ?? null, paginas: [...new Set(ads.map((a) => String(a.page_name ?? a.page_id)))].slice(0, 5), primerTexto: ads[0] ? String((ads[0].ad_creative_bodies as string[] | undefined)?.[0] ?? "").slice(0, 120) : null });
+      p(`0 · ${c}: HTTP ${rc.status} · ${Date.now() - t0} ms · ${ads.length} anuncio(s)${jc.paging?.next ? " (+)" : ""}${jc.error ? ` · ERROR ${JSON.stringify(jc.error)}` : ""} · campos: ${campos.length}`);
+    }
+    const ref = filas.find((f) => f.pais === "ES") ?? filas[0];
+    const mismosCampos = filas.every((f) => (f.anuncios as number) === 0 || JSON.stringify(f.campos) === JSON.stringify(ref.campos));
+    informe.paso0 = { termino, paises: filas, mismosCamposQueReferencia: mismosCampos, referencia: ref.pais };
+    p(`    ¿mismos campos que ${ref.pais} en todos los países con datos?: ${mismosCampos ? "SÍ" : "NO (ver el JSON)"}`);
+    p("    Nota: fuera de la UE (p. ej. MX, US) la Ad Library solo archiva anuncios políticos/sociales con ad_type=ALL: 0 anuncios ahí no significa que no se anuncie.");
+    if (!adIdPedido && !pageIdPedido) { escribir(informe); return; }
+  }
 
   // 1 · JSON crudo de /ads_archive.
   const url = new URL(`https://graph.facebook.com/${version}/ads_archive`);

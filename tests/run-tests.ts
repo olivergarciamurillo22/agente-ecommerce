@@ -15257,7 +15257,7 @@ async function main(): Promise<void> {
       assert.deepEqual(intrusos.map((f) => path.relative(process.cwd(), f)), [], "ningún fichero del bot, del scheduler, de WhatsApp, pedidos o Shopify nombra las tablas nuevas");
       // El módulo interno solo lo importa el selector de fuente del Cazador, y nada del proceso del bot.
       const importadores = ficheros.filter((f) => !f.includes(path.join("product-hunter", "internal")) && (fs.readFileSync(f, "utf8").includes("product-hunter/internal/") || fs.readFileSync(f, "utf8").includes('from "./internal/')));
-      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
+      assert.deepEqual(importadores.map((f) => path.relative(process.cwd(), f).split(path.sep).join("/")).sort(), ["scripts/hunter-cruce-dropea.ts", "scripts/hunter-deep-dive.ts", "scripts/hunter-dropea-sync.ts", "src/lib/hunter/deep-dive/deep-dive.ts", "src/lib/hunter/deep-dive/translate.ts", "src/lib/product-hunter/adapter.ts"], "solo el selector de fuente del Cazador, el nivel 2 (deep dive) y sus CLIs");
       const bot = fs.readFileSync(path.join(process.cwd(), "scripts/start-bot.ts"), "utf8");
       assert.ok(!/product-hunter/.test(bot), "el proceso del bot no carga el Cazador");
 
@@ -15793,6 +15793,110 @@ async function main(): Promise<void> {
       assert.equal(tope.videoStatus, "tope_diario");
       // Texto claro también sin cuenta ni competencia.
       assert.match(summarize({ ...tope, account: null, competitors: null }, ["cojin"]), /Competencia: no medida/);
+    });
+
+    await test("BÚSQUEDA 2 · otros países: el cruce busca con ad_reached_countries=<país> y palabras traducidas (original guardado); el deep dive COMPRUEBA ESPAÑA obligatoriamente: 1+ activos con match = descartar, 0 = oportunidad verificada, fallo = no verificado (nunca «contactar»); país ES no comprueba nada", async () => {
+      limpiar();
+      const { runDeepDive, recommend } = await import("../src/lib/hunter/deep-dive/deep-dive");
+      const { runCruceBatch, CruceRepository } = await import("../src/lib/product-hunter/internal/cruce");
+      const { DropeaCatalogRepository } = await import("../src/lib/product-hunter/internal/dropea-catalog");
+      const { parseTranslatedKeywords, needsTranslation, makeKeywordTranslator, LANGUAGE_BY_COUNTRY } = await import("../src/lib/hunter/deep-dive/translate");
+      const { AdLibraryClient } = await import("../src/lib/hunter/discovery/client");
+      const { DeepDiveRepository } = await import("../src/lib/hunter/deep-dive/repository");
+      const dia = (n: number) => new Date((nowSec - n * 86400) * 1000).toISOString().slice(0, 10);
+      const crudo = (id: string, page: [string, string], body: string, start: string, caption: string) => ({ id, page_id: page[0], page_name: page[1], ad_creative_bodies: [body], ad_creative_link_captions: [caption], ad_delivery_start_time: start });
+      // Traducción pura.
+      assert.deepEqual(parseTranslatedKeywords('["cuscino", "gel", "sedia"]'), ["cuscino", "gel", "sedia"]);
+      assert.deepEqual(parseTranslatedKeywords("cuscino, gel, sedia, ergonomico, extra"), ["cuscino", "gel", "sedia", "ergonomico"], "máximo 4");
+      assert.equal(needsTranslation("IT"), true); assert.equal(needsTranslation("ES"), false); assert.equal(needsTranslation("MX"), false, "México se busca en español"); assert.equal(needsTranslation("XX"), false, "país desconocido: no se traduce y se dice");
+      assert.equal(makeKeywordTranslator({}), null); assert.equal(LANGUAGE_BY_COUNTRY.PT, "portugués");
+
+      // Cruce en IT con traductor inyectado: la URL lleva ad_reached_countries=["IT"] y search_terms traducidos; se guarda el original.
+      const urls: URL[] = [];
+      const fetcherCruce = (async (input: string | URL | Request) => {
+        const u = new URL(String(input)); urls.push(u);
+        const pais = JSON.parse(u.searchParams.get("ad_reached_countries")!)[0];
+        const data = pais === "IT" ? [crudo("it1", ["7001", "CasaBella"], "Cuscino in gel per sedia: addio al dolore. Solo 29,90 €", dia(90), "casabella.it")] : [];
+        return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const catalogo = new DropeaCatalogRepository(raw);
+      catalogo.upsertProducts([{ id: 50, name: "Cojín de gel para silla", variants: [{ variant_id: 501, sku: "CJ-1", name: "Cojín de gel para silla", price: 9.5 }] }], nowSec);
+      const cruces = new CruceRepository(raw);
+      const traducidas: string[][] = [];
+      const r = await runCruceBatch({ token: "T", country: "IT", limit: 1, now: nowSec, client: new AdLibraryClient("T", fetcherCruce, async () => {}), catalog: catalogo, repo: cruces, skipCrossed: false, translate: async (k, c) => { assert.equal(c, "IT"); traducidas.push(k); return ["cuscino", "gel", "sedia"]; } });
+      assert.equal(r.processed, 1); assert.deepEqual(traducidas, [["cojin", "gel", "silla"]]);
+      const fila = r.cruces[0];
+      assert.equal(fila.country, "IT"); assert.deepEqual(fila.terms, ["cuscino", "gel", "sedia"]); assert.deepEqual(fila.breakdown.keywordsOriginal, ["cojin", "gel", "silla"]); assert.match(fila.breakdown.keywordsNote!, /traducidas por Claude/);
+      assert.equal(fila.match, "si"); assert.equal(fila.pageName, "CasaBella");
+      assert.equal(urls.length, 1); assert.equal(urls[0].searchParams.get("ad_reached_countries"), JSON.stringify(["IT"])); assert.equal(urls[0].searchParams.get("search_terms"), "cuscino gel sedia");
+      assert.equal(cruces.crossedVariantIds("ES").has(501), false, "cruzado en IT no cuenta como cruzado en ES"); assert.equal(cruces.crossedVariantIds("IT").has(501), true); assert.equal(cruces.crossedVariantIds().has(501), true);
+      // Sin traductor: se busca en español y se dice.
+      const sinTrad = await runCruceBatch({ token: "T", country: "PT", limit: 1, now: nowSec, client: new AdLibraryClient("T", fetcherCruce, async () => {}), catalog: catalogo, repo: cruces, skipCrossed: false });
+      assert.deepEqual(sinTrad.cruces[0].terms, ["cojin", "gel", "silla"]); assert.match(sinTrad.cruces[0].breakdown.keywordsNote!, /sin OPENROUTER_API_KEY/); assert.equal(sinTrad.cruces[0].breakdown.keywordsOriginal, undefined);
+
+      // Deep dive en IT: búsqueda en IT, cuenta en IT, y comprobación de España con las palabras EN ESPAÑOL.
+      const paisesVistos: Array<{ pais: string; terms: string | null; pageIds: string | null }> = [];
+      const cuentaIt = [crudo("it1", ["7001", "CasaBella"], "Cuscino in gel per sedia: addio al dolore. Solo 29,90 €", dia(90), "casabella.it"), crudo("it2", ["7001", "CasaBella"], "Cuscino gel sedia ufficio, spedizione gratis", dia(30), "casabella.it")];
+      const mkFetcher = (spain: "vacio" | "con_anuncios" | "error") => (async (input: string | URL | Request) => {
+        const u = new URL(String(input));
+        if (u.host === "graph.facebook.com") {
+          const pais = JSON.parse(u.searchParams.get("ad_reached_countries")!)[0];
+          paisesVistos.push({ pais, terms: u.searchParams.get("search_terms"), pageIds: u.searchParams.get("search_page_ids") });
+          if (pais === "ES") {
+            if (spain === "error") return new Response(JSON.stringify({ error: { message: "boom", code: 1 } }), { status: 500, headers: { "content-type": "application/json" } });
+            const data = spain === "con_anuncios" ? [crudo("es1", ["9001", "SillaConfort"], "Cojín de gel para silla, pago contra reembolso", dia(20), "sillaconfort.es"), crudo("es2", ["9001", "SillaConfort"], "Cojín gel silla oferta", dia(5), "sillaconfort.es"), crudo("es3", ["9002", "MascotasYa"], "Cama para perros", dia(3), "mascotasya.es")] : [crudo("es3", ["9002", "MascotasYa"], "Cama para perros", dia(3), "mascotasya.es")];
+            return new Response(JSON.stringify({ data, paging: {} }), { headers: { "content-type": "application/json" } });
+          }
+          return new Response(JSON.stringify({ data: cuentaIt, paging: {} }), { headers: { "content-type": "application/json" } });
+        }
+        if (u.host === "casabella.it") {
+          if (u.pathname === "/") return new Response(`<html><head><title>CasaBella</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
+          if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "Cuscino in Gel per Sedia", handle: "cuscino-gel-sedia", product_type: "", vendor: "CasaBella", variants: [{ price: "29.90", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
+          return new Response("", { status: 404 });
+        }
+        throw new Error(`red no permitida en test: ${u.host}`);
+      }) as typeof fetch;
+      const base = { keywords: ["cuscino", "gel", "sedia"], spainKeywords: ["cojin", "gel", "silla"], ads: [], costEur: 9.5, activeAds: 2, oldestActiveAt: nowSec - 90 * 86400, now: nowSec, token: null, vision: null, country: "IT", accountSummarize: null as null };
+
+      // a) España vacía → oportunidad verificada, contactar.
+      const f1 = mkFetcher("vacio");
+      const a = await runDeepDive({ ...base, fetcher: f1, client: new AdLibraryClient("T", f1, async () => {}) });
+      assert.equal(a.country, "IT"); assert.equal(a.domain, "casabella.it"); assert.equal(a.priceEur, 29.9); assert.equal(a.verdict, "ganador_probable");
+      assert.equal(a.spainCheck?.verified, true); assert.equal(a.spainCheck?.activeAds, 0); assert.deepEqual(a.spainCheck?.keywords, ["cojin", "gel", "silla"]); assert.equal(a.opportunity, "sin_competencia_es");
+      assert.equal(a.recommendation.action, "contactar_dropea_muestra"); assert.match(a.recommendation.reason, /0 anuncios activos en España \(verificado\)/);
+      assert.match(a.summary, /Competencia en España: 0 anuncios activos \(verificado con «cojin gel silla» en ES\)/); assert.match(a.summary, /Competencia en IT: 0 tiendas/);
+      const es = paisesVistos.filter((x) => x.pais === "ES"); assert.equal(es.length, 1, "exactamente una búsqueda en España por candidato"); assert.equal(es[0].terms, "cojin gel silla", "la comprobación de España va con las palabras EN ESPAÑOL"); assert.equal(es[0].pageIds, null);
+      const it = paisesVistos.filter((x) => x.pais === "IT"); assert.equal(it.length, 2, "búsqueda por palabra + cuenta, las dos en IT"); assert.equal(it[0].terms, "cuscino gel sedia"); assert.equal(it[1].pageIds, JSON.stringify(["7001"]));
+      assert.equal(a.account?.pageId, "7001", "la radiografía es de la cuenta extranjera");
+      assert.equal(a.requests, 1 + 1 + 1 + 2, "búsqueda IT + España + cuenta + portada + catálogo");
+
+      // b) España con 2 anuncios activos con match → descartado automáticamente, aunque el veredicto sea ganador.
+      paisesVistos.length = 0;
+      const f2 = mkFetcher("con_anuncios");
+      const b = await runDeepDive({ ...base, fetcher: f2, client: new AdLibraryClient("T", f2, async () => {}) });
+      assert.equal(b.verdict, "ganador_probable", "la evidencia fuera no cambia"); assert.equal(b.spainCheck?.activeAds, 2, "MascotasYa no casa; SillaConfort sí con 2 activos"); assert.equal(b.opportunity, "ya_en_espana");
+      assert.equal(b.recommendation.action, "descartar"); assert.match(b.recommendation.reason, /ya se anuncia en España: 2 anuncio/);
+      assert.ok(b.incomplete.some((i) => i.part === "oportunidad" && /SillaConfort/.test(i.reason))); assert.match(b.summary, /YA SE VENDE AQUÍ/);
+      // c) La búsqueda de España falla → no verificado: nunca «contactar».
+      const f3 = mkFetcher("error");
+      const c = await runDeepDive({ ...base, fetcher: f3, client: new AdLibraryClient("T", f3, async () => {}) });
+      assert.equal(c.opportunity, "no_verificado"); assert.equal(c.spainCheck?.verified, false); assert.equal(c.recommendation.action, "verificar_manual"); assert.match(c.recommendation.reason, /no se pudo comprobar/); assert.match(c.summary, /NO VERIFICADA/);
+      // d) Sin cliente (modo manual sin token): no verificado, declarado.
+      const d = await runDeepDive({ ...base, fetcher: f1, client: null, domainOverride: "casabella.it" });
+      assert.equal(d.opportunity, "no_verificado"); assert.ok(d.incomplete.some((i) => i.part === "competencia España"));
+      // e) País ES: no hay comprobación (no aplica) y nada cambia.
+      paisesVistos.length = 0;
+      const e = await runDeepDive({ ...base, country: "ES", keywords: ["cojin", "gel", "silla"], fetcher: f2, client: new AdLibraryClient("T", f2, async () => {}), domainOverride: "casabella.it" });
+      assert.equal(e.spainCheck, null); assert.equal(e.opportunity, "no_aplica"); assert.ok(paisesVistos.every((x) => x.pais === "ES"));
+      // Regla dura también en la función pura.
+      assert.equal(recommend({ verdict: "ganador_probable", reasoning: "x", coherence: "coincide", competitors: 0, marginPct: 0.7, winnerDays: 90, incomplete: [], opportunity: "ya_en_espana", spainActiveAds: 1, country: "IT" }).action, "descartar");
+      assert.equal(recommend({ verdict: "ganador_probable", reasoning: "x", coherence: "coincide", competitors: 0, marginPct: 0.7, winnerDays: 90, incomplete: [], opportunity: "no_verificado", spainActiveAds: null, country: "IT" }).action, "verificar_manual");
+      // Persistencia: país, activos en España y oportunidad, y el informe entero.
+      const repo = new DeepDiveRepository(raw);
+      const idA = repo.insert({ cruceId: fila.id, variantId: 501, adlibCandidateKey: "IT:7001:f", adId: "it1", keywords: base.keywords, report: a, capturedAt: nowSec });
+      const fa = repo.byId(idA)!; assert.equal(fa.country, "IT"); assert.equal(fa.spainActiveAds, 0); assert.equal(fa.opportunity, "sin_competencia_es"); assert.equal(fa.report?.spainCheck?.verified, true);
+      const idC = repo.insert({ cruceId: null, variantId: 502, adlibCandidateKey: null, adId: null, keywords: base.keywords, report: c, capturedAt: nowSec });
+      assert.equal(repo.byId(idC)!.spainActiveAds, null, "sin verificar no se persiste un 0 que parezca comprobado");
     });
 
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {

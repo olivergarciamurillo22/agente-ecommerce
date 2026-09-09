@@ -17,6 +17,10 @@
 //   0a · búsqueda por palabra clave (1 petición, como el nivel 1): anuncios
 //        frescos del candidato + las OTRAS páginas que anuncian lo mismo
 //        (saturación cruzada);
+//   0c · BÚSQUEDA 2 (país ≠ ES): comprobación OBLIGATORIA de España con la
+//        misma búsqueda por palabra (en español) y ad_reached_countries=ES.
+//        1+ anuncios activos con match si/dudoso = ya se vende aquí = descartado
+//        de esta búsqueda; sin comprobar no se puede afirmar «sin competencia»;
 //   0b · radiografía de la CUENTA (account.ts): antigüedad real, volumen,
 //        ritmo de testeo vs. madurez del ángulo ganador, avatar, y los otros
 //        productos que vende esa tienda (minería) con búsqueda en Dropea;
@@ -101,6 +105,20 @@ export interface DeepDiveInput {
   accountMaxPages?: number;
   skipAccount?: boolean;
   dropeaLookup?: DropeaLookupFn | null;
+  /** Búsqueda 2: palabras clave EN ESPAÑOL para la comprobación de España (si el país no es ES). Por defecto, las mismas. */
+  spainKeywords?: string[];
+}
+
+export type Opportunity = "no_aplica" | "sin_competencia_es" | "ya_en_espana" | "no_verificado";
+
+export interface SpainCheck {
+  /** Anuncios ACTIVOS en España cuyo texto casa con las palabras clave (match si o dudoso). */
+  activeAds: number;
+  pages: Competitor[];
+  verified: boolean;
+  keywords: string[];
+  basis: string;
+  reason: string | null;
 }
 
 export interface CatalogMatch {
@@ -127,8 +145,13 @@ export interface DeepDiveReport {
   /** Enlace público del anuncio principal, para comprobarlo a mano con un clic. */
   adLink: string | null;
   adLinks: string[];
+  /** País de la búsqueda (ES por defecto). */
+  country: string;
   /** Paso 0a · otras páginas que anuncian el mismo producto ahora (últimos 30 días, 1 página de búsqueda). */
   competitors: { count: number; pages: Competitor[]; basis: string } | null;
+  /** Búsqueda 2 · competencia en España, comprobada explícitamente (null si el país ya es ES). */
+  spainCheck: SpainCheck | null;
+  opportunity: Opportunity;
   /** Paso 0b · la cuenta entera (null si no se pudo, con motivo en incomplete). */
   account: AccountXray | null;
   /** Otros productos de la misma tienda (minería), con su búsqueda en Dropea. */
@@ -169,6 +192,7 @@ export const DEEP_DIVE_RULES =
   "no_verificable = sin dominio, catálogo no accesible, producto no encontrado o sin coste (no se estima nada)";
 
 export const RECOMMENDATION_RULES =
+  "búsqueda 2 (país ≠ ES): 1+ anuncios activos en España con match = descartar (ya se vende aquí); España sin comprobar = nunca contactar, verificar_manual · " +
   "contactar_dropea_muestra = ganador_probable ∧ precio del anuncio coherente con el catálogo ∧ ≤ 2 tiendas compitiendo · " +
   "verificar_manual = ganador_probable con precio incoherente o ≥ 3 competidores; senal_debil con margen ≥ 50 % y ángulo ganador ≥ 30 días (o cuenta no leída); no_verificable · " +
   "descartar = descartar, o senal_debil sin margen ≥ 50 % o sin ángulo maduro";
@@ -206,7 +230,16 @@ export function priceCoherence(ads: AdLibraryAd[], catalogMin: number | null, ca
 }
 
 /** Recomendación explícita con motivo en una frase. Puro, testeable. */
-export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }> }): { action: Recommendation; reason: string } {
+export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; opportunity?: Opportunity; spainActiveAds?: number | null; country?: string }): { action: Recommendation; reason: string } {
+  // Búsqueda 2: la regla dura va antes que todo lo demás.
+  if (x.opportunity === "ya_en_espana") return { action: "descartar", reason: `ya se anuncia en España: ${x.spainActiveAds ?? "1+"} anuncio(s) activo(s) con match; no es una oportunidad «aún no vendida aquí» aunque esté validado en ${x.country ?? "el otro país"}` };
+  const base = recommendBase(x);
+  if (x.opportunity === "no_verificado" && base.action === "contactar_dropea_muestra") return { action: "verificar_manual", reason: `${base.reason}; PERO la competencia en España no se pudo comprobar: no se recomienda contactar sin esa comprobación` };
+  if (x.opportunity === "sin_competencia_es" && base.action === "contactar_dropea_muestra") return { action: base.action, reason: `${base.reason}; 0 anuncios activos en España (verificado)` };
+  return base;
+}
+
+function recommendBase(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }> }): { action: Recommendation; reason: string } {
   const comp = x.competitors === null ? "competencia no medida" : `${x.competitors} tienda${x.competitors === 1 ? "" : "s"} más anunciando lo mismo`;
   if (x.verdict === "ganador_probable") {
     if (x.coherence === "difiere") return { action: "verificar_manual", reason: `cumple las reglas, pero el precio del anuncio no cuadra con el del catálogo: comprobar a mano qué se vende de verdad antes de pedir muestra (${comp})` };
@@ -263,6 +296,45 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
     }
   } else if (!input.client) incomplete.push({ part: "competencia", reason: "sin cliente de la Ad Library no se mide cuántas tiendas anuncian lo mismo" });
   else if (input.search === false) incomplete.push({ part: "competencia", reason: "búsqueda por palabra desactivada: sin saturación cruzada" });
+
+  // 0c · búsqueda 2: comprobación OBLIGATORIA de España cuando el país no es ES.
+  let spainCheck: SpainCheck | null = null;
+  let opportunity: Opportunity = "no_aplica";
+  if (country !== "ES") {
+    const kwEs = (input.spainKeywords && input.spainKeywords.length ? input.spainKeywords : input.keywords);
+    if (!input.client || !kwEs.length) {
+      opportunity = "no_verificado";
+      spainCheck = { activeAds: 0, pages: [], verified: false, keywords: kwEs, basis: "no ejecutada", reason: !input.client ? "sin cliente de la Ad Library no se puede comprobar España" : "sin palabras clave en español" };
+      incomplete.push({ part: "competencia España", reason: spainCheck.reason! });
+    } else {
+      try {
+        const budget = new DiscoveryBudget({ deadlineAt: Date.now() + 60_000, maxRequests: 2 });
+        const { until } = accountDateWindow(now);
+        const since = new Date((now - SEARCH_DAYS * DAY) * 1000).toISOString().slice(0, 10);
+        const r = await input.client.search({ term: kwEs.join(" "), country: "ES", since, until, budget, maxPages: 1 });
+        requests += budget.requests;
+        const groups = mergeGroupsByPage(groupAds(r.ads, now, "ES"));
+        const pages: Competitor[] = [];
+        let activos = 0;
+        for (const g of groups) {
+          const m = bestMatch(kwEs, [g]);
+          if (!m || m.verdict === "no") continue;
+          activos += g.activeAds;
+          pages.push({ pageId: g.pageId, pageName: g.pageName, activeAds: g.activeAds, coverage: m.coverage, verdict: m.verdict, adLink: g.ads[0] ? adLibraryLink(g.ads[0].id) : null });
+        }
+        pages.sort((a, b) => b.activeAds - a.activeAds || b.coverage - a.coverage);
+        const verified = !r.error;
+        spainCheck = { activeAds: activos, pages: pages.slice(0, 10), verified, keywords: kwEs, basis: `búsqueda «${kwEs.join(" ")}» con ad_reached_countries=ES, últimos ${SEARCH_DAYS} días, 1 página (${r.ads.length} anuncios, ${groups.length} páginas); cuenta = anuncios activos de páginas cuyo texto casa (si o dudoso)`, reason: r.error ? `la búsqueda en España devolvió un error (${r.error}): no se puede afirmar «sin competencia»` : null };
+        opportunity = !verified ? "no_verificado" : activos >= 1 ? "ya_en_espana" : "sin_competencia_es";
+        if (!verified) incomplete.push({ part: "competencia España", reason: spainCheck.reason! });
+        if (opportunity === "ya_en_espana") incomplete.push({ part: "oportunidad", reason: `ya se anuncia en España: ${activos} anuncio(s) activo(s) con match (${pages.slice(0, 3).map((c) => c.pageName ?? c.pageId).join(", ")})` });
+      } catch (err) {
+        opportunity = "no_verificado";
+        spainCheck = { activeAds: 0, pages: [], verified: false, keywords: kwEs, basis: "fallida", reason: `fallo en la búsqueda de España: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` };
+        incomplete.push({ part: "competencia España", reason: spainCheck.reason! });
+      }
+    }
+  }
 
   // 0b · radiografía de la cuenta (todos los anuncios de la página, activos e inactivos)
   let account: AccountXray | null = null;
@@ -397,11 +469,11 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   // 7 · veredicto, recomendación y texto claro
   const { verdict, reasoning: base } = decide({ catalogOk: catalog?.status === "ok", match, marginPct, activeAds: input.activeAds, daysActive, costEur: input.costEur, domain, priceEur });
   const reasoning = account ? `${base} · cuenta: ${accountSummary(account)}` : base;
-  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete });
+  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete, opportunity, spainActiveAds: spainCheck?.activeAds ?? null, country });
   const adLink = adId ? adLibraryLink(adId) : null;
   const adLinks = [...new Set(ads.map((a) => adLibraryLink(a.id)))].slice(0, 10);
 
-  const report: DeepDiveReport = { adLink, adLinks, competitors, account, otherProducts, domain, domainSource, store, catalog, match, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, priceCoherence: coherence, angles, creative, creativeStatus, video, videoStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, recommendation, summary: "", incomplete, requests, rules: `${DEEP_DIVE_RULES} · recomendación: ${RECOMMENDATION_RULES}` };
+  const report: DeepDiveReport = { adLink, adLinks, country, competitors, spainCheck, opportunity, account, otherProducts, domain, domainSource, store, catalog, match, priceEur, priceMaxEur, costEur: input.costEur, marginEur, marginPct, priceCoherence: coherence, angles, creative, creativeStatus, video, videoStatus, activeAds: input.activeAds, daysActive, verdict, reasoning, recommendation, summary: "", incomplete, requests, rules: `${DEEP_DIVE_RULES} · recomendación: ${RECOMMENDATION_RULES}` };
   report.summary = summarize(report, input.keywords);
   return report;
 }
@@ -425,7 +497,8 @@ export function summarize(r: DeepDiveReport, keywords: string[]): string {
   p.push(avatar);
   if (r.account) p.push(`La tienda anuncia desde ${r.account.firstAdStart ?? "?"} (${r.account.daysAdvertising ?? "?"} días): ${r.account.totalAds} anuncios, ${r.account.activeAds} activos. Ritmo de testeo ${r.account.testing?.level ?? "?"} (${r.account.testing?.newAds30d ?? "?"} nuevos en 30 días, ${r.account.testing?.perWeek30d ?? "?"}/semana); madurez del ángulo ganador: ${r.account.winner ? `${r.account.winner.daysActive} días` : "sin ángulo activo"}.`);
   p.push(`Precio real ${r.priceEur !== null ? `${r.priceEur} €` : "no verificable"}${r.costEur !== null ? `, coste Dropea ${r.costEur} €` : ""}${r.marginPct !== null ? `, margen real ${Math.round(r.marginPct * 100)} %` : ", margen no calculable"}. ${r.priceCoherence.status === "difiere" ? r.priceCoherence.note : `Precio del anuncio: ${r.priceCoherence.status.replace(/_/g, " ")}.`}`);
-  p.push(r.competitors ? `Competencia: ${r.competitors.count} tienda${r.competitors.count === 1 ? "" : "s"} más anunciando lo mismo ahora${r.competitors.pages.length ? ` (${r.competitors.pages.slice(0, 3).map((c) => c.pageName ?? c.pageId).join(", ")})` : ""}.` : "Competencia: no medida.");
+  if (r.spainCheck) p.push(r.spainCheck.verified ? `Competencia en España: ${r.spainCheck.activeAds} anuncios activos (verificado con «${r.spainCheck.keywords.join(" ")}» en ES)${r.spainCheck.pages.length ? `: ${r.spainCheck.pages.slice(0, 3).map((c) => c.pageName ?? c.pageId).join(", ")}` : ""}. ${r.opportunity === "ya_en_espana" ? "YA SE VENDE AQUÍ: no es oportunidad de esta búsqueda." : "Sin competencia visible en España ahora mismo."}` : `Competencia en España: NO VERIFICADA (${r.spainCheck.reason ?? "sin motivo"}).`);
+  p.push(r.competitors ? `Competencia${r.country !== "ES" ? ` en ${r.country}` : ""}: ${r.competitors.count} tienda${r.competitors.count === 1 ? "" : "s"} más anunciando lo mismo ahora${r.competitors.pages.length ? ` (${r.competitors.pages.slice(0, 3).map((c) => c.pageName ?? c.pageId).join(", ")})` : ""}.` : "Competencia: no medida.");
   if (r.video) p.push(`Vídeo: gancho hablado «${r.video.hookFirstSeconds ?? "—"}», ${r.video.durationSec ?? "?"} s, ${r.video.wordsPerMinute ?? "?"} palabras/min${r.video.interpretation?.cta ? `, CTA «${r.video.interpretation.cta}»` : ""}. ${r.video.limits}.`);
   else if (r.videoStatus !== "sin_video") p.push(`Vídeo detectado, análisis de audio/movimiento no disponible (${r.videoStatus.replace(/_/g, " ")}).`);
   if (r.otherProducts.length) p.push(`Otros productos activos en la misma tienda: ${r.otherProducts.slice(0, 4).map((o) => `«${o.label}» (${o.longestActiveDays ?? "?"} días${o.dropea.matches.length ? `, en Dropea: ${o.dropea.matches[0].name}` : o.dropea.searched ? ", no en Dropea" : ""})`).join("; ")}.`);

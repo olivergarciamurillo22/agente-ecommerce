@@ -265,6 +265,74 @@ npm run hunter:deep-dive:probe -- --termino "cojin gel silla" --max-render 6
   primera vez que el modo `--ids` corre con datos: el cruce no guarda anuncios,
   así que el dominio y el `page_id` salen de la búsqueda del paso 0a.
 
+## Búsqueda 2 · validados fuera de España, sin competencia en España (09-09)
+
+Objetivo de Pedro: productos de Dropea con evidencia fuerte en OTRO país
+(mismo veredicto de siempre) que **no tengan competencia activa en España
+ahora mismo**, con buen margen real. La pieza que da valor es la
+comprobación de España, y es obligatoria: sin ella no se puede afirmar
+«sin competencia».
+
+```
+npm run hunter:cruce-dropea -- --limite 20 --pais IT          # una corrida por país; también --pais IT,PT,FR,DE
+npm run hunter:cruce-dropea -- --limite 20 --pais IT --sin-traducir
+npm run hunter:deep-dive -- --ids <ids de esos cruces>       # el país viene del cruce; comprueba España solo
+npm run hunter:deep-dive -- --dominio x.it --palabras "cuscino gel sedia" --palabras-es "cojin gel silla" --pais IT --page-id N
+```
+
+Qué cambia respecto al pipeline de arriba (todo lo demás, igual):
+
+| Pieza | Cómo | Constancia en el informe |
+|---|---|---|
+| País en el cruce | `ad_reached_countries=[<ISO>]` (ya existía `--pais`; ahora admite lista y una corrida por país). «Ya cruzado» se cuenta **por país**: un cruce en ES no tapa el de IT | `hunter_cruces.country` |
+| Palabras en el idioma del mercado | Las palabras salen del nombre en Dropea (español). Con `OPENROUTER_API_KEY`, Claude las traduce (`translate.ts`, mapa país→idioma: IT, PT, FR, DE, NL, GB…; MX/AR/CO/CL/PE no se traducen). Sin clave o con `--sin-traducir`, se buscan en español y el cruce lo dice: un «no» así no significa que no se anuncie | `breakdown.keywords` (buscadas), `breakdown.keywordsOriginal` (español), `breakdown.keywordsNote` |
+| **Comprobación de España (obligatoria, paso 0c)** | Con país ≠ ES, el deep dive repite la misma búsqueda por palabra, **en español** y con `ad_reached_countries=["ES"]` (1 petición más por candidato; la función de búsqueda no se toca). Cuenta los anuncios ACTIVOS de las páginas cuyo texto casa (match si o dudoso) | `spainCheck` (activos, páginas con enlace, palabras, base, verificado sí/no), `opportunity`, columnas `country`, `spain_active_ads` (solo si se verificó), `opportunity` |
+| Regla dura | `1+` activos con match en España → `opportunity = ya_en_espana` y **recomendación `descartar`** aunque el veredicto sea ganador. España no comprobada (sin token, error de Meta) → `no_verificado`: nunca «contactar», como mucho `verificar_manual`. `0` verificado → `sin_competencia_es` | Línea «COMPETENCIA EN ESPAÑA: N anuncios activos (verificado)» y en el texto claro |
+| Radiografía y minería | Sobre el `page_id` de la cuenta extranjera; los «otros productos» se buscan en Dropea por sus palabras (en el idioma del anuncio: a veces no casan) | igual |
+
+Límites conocidos, dichos aquí para no descubrirlos tarde:
+
+- **Cobertura de la Ad Library por país**: con `ad_type=ALL` Meta archiva
+  todos los anuncios solo en la UE (y algún país más); fuera (México, EE. UU.)
+  solo los políticos/sociales. Un «0 anuncios» en MX no significa nada. Por
+  eso la lista sugerida empieza por **IT, PT, FR, DE**; México queda como
+  país abierto en el flag, pero no como fuente fiable hasta que la sonda diga
+  lo contrario.
+- **Ángulos y avatar** (`ANGLE_RULES`, `AVATAR_RULES`) son reglas en español:
+  en italiano o francés clasifican menos. La cita literal sigue siendo válida;
+  la etiqueta puede faltar.
+- **Coste por candidato**: +1 petición (España). Nunca sobre el catálogo
+  entero: `--limite` en el cruce, `--ids`/`--min-score --limite` en el deep dive.
+
+### Verificación de `ad_reached_countries` ≠ ES (pendiente del NAS)
+
+No se asume que otro país se comporte igual: la sonda tiene un modo que hace
+la MISMA búsqueda en varios países, lado a lado, y compara HTTP, número de
+anuncios, campos devueltos y error (1 petición por país):
+
+```
+npm run hunter:deep-dive:probe -- --termino "cuscino gel sedia" --comparar-paises ES,IT,PT,FR,DE,MX
+```
+
+Acepta si IT/PT/FR/DE dan HTTP 200 con los mismos campos que ES y anuncios
+> 0 para un término del idioma. Si algún país devuelve error de permiso o
+campos distintos, se anota y ese país se saca de la lista. Hasta esa salida,
+lo de arriba está probado con red inyectada (test «BÚSQUEDA 2»), no en vivo.
+
+### Ejemplo (red inyectada, misma forma que el informe real)
+
+```
+VEREDICTO: GANADOR_PROBABLE — «Cuscino in Gel per Sedia» a 29.9 € en casabella.it (match si, cobertura 100 %) · coste 9.5 € · margen real 68 % · 2 activos · 140 días → cumple las cuatro condiciones · cuenta: anuncia desde 2025-11-13 (300 días) · 5 anuncios, 4 activos · ángulos más longevos: precio y oferta 140 días
+RECOMENDACIÓN: CONTACTAR_DROPEA_MUESTRA — … pedir muestra a Dropea; 0 anuncios activos en España (verificado)
+COMPETENCIA EN ESPAÑA: 0 anuncios activos (verificado) · oportunidad: SIN_COMPETENCIA_ES · búsqueda «cojin gel silla» con ad_reached_countries=ES, últimos 30 días, 1 página (1 anuncios, 1 páginas)
+País de la búsqueda: IT
+Competencia en IT: 1 (ErgoItalia) · Coherencia de precio: COINCIDE · Otros productos: «Cuscino cervicale…» 80 días → en Dropea: Almohada cervical viscoelástica
+```
+
+Con 2 anuncios activos de «SillaConfort» en España, el mismo candidato sale
+`ya_en_espana` y `DESCARTAR — ya se anuncia en España: 2 anuncio(s) activo(s)
+con match; no es una oportunidad «aún no vendida aquí» aunque esté validado en IT`.
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

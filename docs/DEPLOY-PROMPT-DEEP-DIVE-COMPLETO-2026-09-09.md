@@ -124,6 +124,26 @@ sudo docker exec casamable-agent npm run hunter:deep-dive -- --ver-id <DD_ID>
 ```
 
 ==================================================
+8b · BÚSQUEDA 2 (otros países) — solo si el SHA desplegado incluye «búsqueda 2»
+==================================================
+Verificación de ad_reached_countries ≠ ES (1 petición por país):
+```
+sudo docker exec casamable-agent npm run hunter:deep-dive:probe -- --termino "cuscino gel sedia" --comparar-paises ES,IT,PT,FR,DE,MX --json /app/data/probe-paises.json
+```
+Anota por país: PAIS= HTTP= ANUNCIOS= MISMOS_CAMPOS=sí/no ERROR=
+No sigas con un país que dé error de permiso o campos distintos.
+Cruce pequeño en el primer país que pase (10 productos = 10 peticiones + traducción por Claude):
+```
+sudo docker exec casamable-agent npm run hunter:cruce-dropea -- --limite 10 --pais IT
+```
+Anota: B2_PAIS= B2_PROCESADOS= B2_CON_MATCH= B2_IDS_CON_MATCH=
+Deep dive de 1–2 de esos ids (comprueba España solo, +1 petición por candidato):
+```
+sudo docker exec casamable-agent npm run hunter:deep-dive -- --ids <id>
+```
+Anota: B2_DD_ID= B2_VEREDICTO= B2_COMPETENCIA_ESPANA=<N anuncios activos (verificado) | NO VERIFICADA> B2_OPORTUNIDAD= B2_RECOMENDACION=
+
+==================================================
 9 · VALIDAR QUE EL NÚCLEO COD SIGUE IGUAL
 ==================================================
 ```
@@ -168,5 +188,6 @@ READINESS=
 TEMPLATES=
 ERRORES_LOG=
 ROLLBACK_REQUIRED=
+B2: PAISES_OK= B2_PAIS= B2_PROCESADOS= B2_CON_MATCH= B2_DD_ID= B2_COMPETENCIA_ESPANA= B2_OPORTUNIDAD= B2_RECOMENDACION=
 FINAL_VERDICT=
 ```
