@@ -146,10 +146,17 @@ Anota: B2_DD_ID= B2_VEREDICTO= B2_COMPETENCIA_ESPANA=<N anuncios activos (verifi
 ==================================================
 8c · BÚSQUEDA 3 (caza directa COD) — solo si el SHA desplegado la incluye
 ==================================================
-Fase 1 (≤ 12 peticiones, no audita nada):
+Fase 1 ampliada (13 frases × 3 páginas = ≤ 39 peticiones, no audita nada; dice cuántas tiendas son nuevas respecto al barrido anterior):
 ```
-sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --paginas 3 --json /app/data/barrido-cod.json
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --paginas 3 --json /app/data/barrido-cod-2.json
 ```
+Anota: B3_TIENDAS_NUEVAS=
+Informe consolidado (0 peticiones) y tanda grande con autoexclusión:
+```
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --informe --min-dias 20 --max-dias 90 --json /app/data/informe-cod.json
+sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --auditar --top 20 --json /app/data/auditoria-cod-2.json
+```
+Anota: B3_INFORME_FILAS= B3_TOP_SALTADAS= B3_TOP_TANDA= B3_CON_VIDEO=<n productos con tiene_video sí>
 Anota: B3_PETICIONES= B3_ANUNCIOS_UNICOS= B3_TIENDAS_CON_FRASE= B3_PAGINAS_SIN_FRASE= B3_TOP3=<page_id · tienda · activos · días · prioridad>
 Pega la tabla entera en el chat (es la calibración de frases).
 Fase 2 solo sobre 2 tiendas (≤ 5 peticiones de cuenta + deep dive por producto en Dropea):

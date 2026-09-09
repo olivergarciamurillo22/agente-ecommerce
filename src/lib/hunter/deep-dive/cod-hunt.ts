@@ -31,14 +31,23 @@ import { sentences, normalizeAngleText } from "../audit/angles";
 import { productKeywords } from "../../product-hunter/internal/cruce";
 import { readAccountXray, adLibraryLink, accountDateWindow, type AccountXray, type AccountProduct, type AccountXrayInput } from "./account";
 import { productGate, type ProductGate } from "./product-gate";
+import { parseRenderAdHtml, renderAdUrl, DEEP_DIVE_USER_AGENT } from "./render-ad";
 import { runDeepDive, type DeepDiveReport, type DeepDiveInput } from "./deep-dive";
 
 const DAY = 86_400;
 
-/** Frases por defecto: la jerga estándar del COD español. Se pueden cambiar con --frases. */
-export const COD_PHRASES_DEFAULT = ["pago contra reembolso", "paga al recibir", "pago en efectivo al recibir", "contrareembolso"];
+/**
+ * Frases por defecto (ampliadas el 10-09 tras 15 auditorías reales): la jerga
+ * del COD español. Cada frase = hasta --paginas peticiones; una tienda que
+ * sale en varias frases cuenta una sola vez. Se cambian con --frases.
+ */
+export const COD_PHRASES_DEFAULT = [
+  "pago contra reembolso", "contrareembolso", "envío contra reembolso",
+  "paga al recibir", "pago en efectivo al recibir", "pago cuando recibas", "paga cuando lo recibas", "paga cuando llegue",
+  "paga en casa", "paga en tu domicilio", "pago en la puerta", "pago al momento de la entrega", "sin pago por adelantado",
+];
 /** Evidencia: el texto del anuncio tiene que decirlo de verdad (Meta busca «parecido»; esto exige la frase). */
-export const COD_EVIDENCE = /\b(contra ?reembolso|contrarrembolso|pag[ao] (en efectivo )?al (recibir|recibirlo|entregar)|paga(s)? (en casa|cuando (lo )?recibas|al repartidor)|pago en (la )?entrega|efectivo al recibir)\b/;
+export const COD_EVIDENCE = /\b(contra ?reembolso|contrarrembolso|pag[ao] (en efectivo )?al (recibir|recibirlo|entregar|momento de la entrega)|paga(s)? (en (tu )?(casa|domicilio)|cuando (lo )?(recibas|llegue|te llegue)|al (repartidor|mensajero)|a la entrega)|pago (en (la )?(entrega|puerta|casa|domicilio)|cuando (lo )?recibas|a la entrega)|efectivo al recibir|sin pago por adelantado|sin pagar (nada )?por adelantado)\b/;
 export const SWEEP_MAX_PAGES_DEFAULT = 5;
 export const SWEEP_DAYS_DEFAULT = 180;
 export const SWEEP_FORMULA = "prioridad (0–100, NO veredicto) = min(anuncios activos, 10) × 5 + min(días del activo más antiguo, 180) / 180 × 50; solo tiendas con al menos un anuncio que diga la frase COD";
@@ -150,9 +159,13 @@ export const SIGNAL_RULES = "senal_fuerte_sin_proveedor = anuncio activo más an
 export interface DropeaCandidate { variantId: number; name: string; costEur: number | null }
 export type DropeaSearchFn = (term: string) => DropeaCandidate[];
 
+/** Presencia de vídeo entre los anuncios activos del producto (render_ad, 1 petición por anuncio comprobado). */
+export interface ProductVideo { status: "si" | "no" | "no_comprobado"; checked: number; withVideo: number; videoAdIds: string[]; reason: string | null }
+
 export interface StoreProductAudit {
   product: AccountProduct;
   keywords: string[];
+  video: ProductVideo;
   dropea: { searched: boolean; candidates: DropeaCandidate[]; match: DropeaCandidate | null; gate: ProductGate | null };
   /** Camino con Dropea: el deep dive completo. */
   deepDive: DeepDiveReport | null;
@@ -223,6 +236,32 @@ export interface StoreAuditInput {
   accountMaxPages?: number;
   /** Lo que el deep dive normal necesita (visión, vídeo, token, fetcher…) para los productos que SÍ están en Dropea. */
   deepDive?: Partial<Pick<DeepDiveInput, "fetcher" | "token" | "vision" | "video" | "skipVideo" | "videoBudgetExhausted" | "dropeaLookup" | "search">>;
+  /** Comprobar vídeo por producto (render_ad de hasta N anuncios activos; usa deepDive.token/fetcher). false = no gastar. */
+  probeVideo?: boolean;
+  maxVideoProbesPerProduct?: number;
+}
+
+/** ¿Alguno de los anuncios activos del producto es vídeo? Solo presencia (sin descargar ni analizar). */
+export async function probeProductVideo(p: AccountProduct, ads: AdLibraryAd[], opts: { token: string | null; fetcher: typeof fetch; max?: number }): Promise<ProductVideo> {
+  if (!opts.token) return { status: "no_comprobado", checked: 0, withVideo: 0, videoAdIds: [], reason: "sin token de la Ad Library no se puede pedir render_ad" };
+  const activos = ads.filter((a) => p.adIds.includes(a.id) && !a.stopTime).slice(0, opts.max ?? 3);
+  if (!activos.length) return { status: "no_comprobado", checked: 0, withVideo: 0, videoAdIds: [], reason: "sin anuncios activos del producto entre los bajados" };
+  const videoAdIds: string[] = [];
+  let checked = 0;
+  for (const a of activos) {
+    try {
+      const r = await opts.fetcher(renderAdUrl(a.id, opts.token), { headers: { "user-agent": DEEP_DIVE_USER_AGENT, accept: "text/html" }, redirect: "follow", signal: AbortSignal.timeout(20_000) });
+      checked++;
+      if (parseRenderAdHtml(await r.text()).videoUrls.length) videoAdIds.push(a.id);
+    } catch { /* un render_ad caído no tumba la auditoría */ }
+  }
+  if (!checked) return { status: "no_comprobado", checked: 0, withVideo: 0, videoAdIds: [], reason: "render_ad no respondió" };
+  return { status: videoAdIds.length ? "si" : "no", checked, withVideo: videoAdIds.length, videoAdIds, reason: null };
+}
+
+/** Elige el siguiente lote: los N primeros del barrido que aún no están auditados. Puro. */
+export function pickNextBatch(stores: SweepStore[], audited: Set<string>, n: number): SweepStore[] {
+  return stores.filter((s) => !audited.has(s.pageId)).slice(0, Math.max(0, n));
 }
 
 export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit> {
@@ -243,14 +282,24 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
   const products: StoreProductAudit[] = [];
   if (account) {
     if (!input.dropeaSearch) incomplete.push({ part: "dropea", reason: "sin catálogo local de Dropea: ningún producto se puede casar (hunter:dropea:sync)" });
-    for (const p of account.products.slice(0, input.maxProducts ?? 4)) {
+    for (let p of account.products.slice(0, input.maxProducts ?? 4)) {
       const keywords = productSearchKeywords(p);
       let candidates: DropeaCandidate[] = [];
       let searched = false;
       if (input.dropeaSearch && keywords.length) { try { candidates = input.dropeaSearch(keywords.slice(0, 3).join(" ")).slice(0, 8); searched = true; } catch { candidates = []; } }
       const { match, gate } = matchDropea(keywords, candidates);
-      const adsProducto = ads.filter((a) => p.adIds.includes(a.id));
+      let adsProducto = ads.filter((a) => p.adIds.includes(a.id));
       const oldest = p.oldestActiveStart ? Math.floor(Date.parse(p.oldestActiveStart) / 1000) : null;
+      // Vídeo: presencia entre los activos del producto; el anuncio con vídeo pasa a ser el enlace principal y el primero del deep dive.
+      let video: ProductVideo = { status: "no_comprobado", checked: 0, withVideo: 0, videoAdIds: [], reason: "comprobación de vídeo desactivada" };
+      if (input.probeVideo !== false) {
+        video = await probeProductVideo(p, ads, { token: input.deepDive?.token ?? null, fetcher: input.deepDive?.fetcher ?? fetch, max: input.maxVideoProbesPerProduct ?? 3 });
+        requests += video.checked;
+        if (video.videoAdIds.length) {
+          p = { ...p, adLink: adLibraryLink(video.videoAdIds[0]) };
+          adsProducto = [...adsProducto.filter((a) => video.videoAdIds.includes(a.id)), ...adsProducto.filter((a) => !video.videoAdIds.includes(a.id))];
+        }
+      }
       if (match) {
         const kw = productKeywords(match.name);
         const dd = await runDeepDive({ keywords: kw.length ? kw : keywords, ads: adsProducto, costEur: match.costEur, activeAds: p.ads, oldestActiveAt: oldest, now, client: input.client, pageId: input.pageId, country, accountPrecomputed: account, accountSummarize: null, ...(input.deepDive ?? {}) });
@@ -258,13 +307,13 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
         const rec: StoreProductAudit["recommendation"] = dd.recommendation.action === "contactar_dropea_muestra" ? { action: "contactar_dropea_muestra", reason: dd.recommendation.reason, sourcing: "dropea" }
           : dd.recommendation.action === "verificar_manual" ? { action: "verificar_manual", reason: dd.recommendation.reason, sourcing: "dropea" }
           : { action: "descartar", reason: dd.recommendation.reason, sourcing: "dropea" };
-        products.push({ product: p, keywords, dropea: { searched, candidates, match, gate }, deepDive: dd, signal: null, recommendation: rec });
+        products.push({ product: p, keywords, video, dropea: { searched, candidates, match, gate }, deepDive: dd, signal: null, recommendation: rec });
       } else {
         const signal = signalVerdict(p, account);
         const rec: StoreProductAudit["recommendation"] = signal.verdict === "senal_fuerte_sin_proveedor"
           ? { action: "testear", reason: `señal fuerte en la cuenta, pero NO está en Dropea: la decisión de sourcing (AliExpress u otro) es de Pedro; sin margen calculable`, sourcing: "alternativo" }
           : { action: "no_testear", reason: `señal débil y sin proveedor: no compensa buscar sourcing alternativo`, sourcing: "alternativo" };
-        products.push({ product: p, keywords, dropea: { searched, candidates, match: null, gate }, deepDive: null, signal, recommendation: rec });
+        products.push({ product: p, keywords, video, dropea: { searched, candidates, match: null, gate }, deepDive: null, signal, recommendation: rec });
       }
     }
   }
@@ -284,8 +333,53 @@ export function summarizeStore(a: StoreAudit): string {
   if (!a.products.length) p.push("Sin productos minados entre los activos.");
   for (const x of a.products) {
     const dias = x.product.longestActiveDays ?? "?";
-    if (x.deepDive) p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días) → EN DROPEA como «${x.dropea.match!.name}»: ${x.deepDive.verdict.replace(/_/g, " ")}${x.deepDive.marginPct !== null ? `, margen real ${Math.round(x.deepDive.marginPct * 100)} %` : ""} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.recommendation.reason}.`);
-    else p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días) → NO en Dropea: ${x.signal!.verdict.replace(/_/g, " ")} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.signal!.reason}.`);
+    const vid = x.video.status === "si" ? `, vídeo en ${x.video.withVideo}` : x.video.status === "no" ? ", sin vídeo" : "";
+    if (x.deepDive) p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días${vid}) → EN DROPEA como «${x.dropea.match!.name}»: ${x.deepDive.verdict.replace(/_/g, " ")}${x.deepDive.marginPct !== null ? `, margen real ${Math.round(x.deepDive.marginPct * 100)} %` : ""} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.recommendation.reason}.`);
+    else p.push(`· «${x.product.label}» (${x.product.ads} activos, ${dias} días${vid}) → NO en Dropea: ${x.signal!.verdict.replace(/_/g, " ")} → ${x.recommendation.action.replace(/_/g, " ")}: ${x.signal!.reason}.`);
   }
   return p.join(" ");
+}
+
+// ------------------------------------------------------------
+// Informe consolidado por rango de madurez (solo lectura, sin red)
+// ------------------------------------------------------------
+
+export interface ConsolidatedRow {
+  auditId: number;
+  pageId: string;
+  store: string;
+  domain: string | null;
+  product: string;
+  adLink: string;
+  hasVideo: ProductVideo["status"];
+  maturityDays: number;
+  activeAds: number;
+  inDropea: boolean;
+  marginPct: number | null;
+  verdict: string;
+  diversity: string;
+  auditedAt: string;
+}
+
+export const CONSOLIDATED_RULE = "entran: senal_fuerte_sin_proveedor, o en Dropea con veredicto ganador_probable; madurez = días del anuncio activo más antiguo del producto sin cambios, dentro de [--min-dias, --max-dias]; orden: más maduro primero";
+
+/** Aplana las auditorías persistidas a una fila por producto que cumpla el filtro. Puro, testeable. */
+export function consolidatedReport(audits: Array<{ id: number; capturedAt: number; audit: StoreAudit }>, opts: { minDays: number; maxDays: number }): ConsolidatedRow[] {
+  const rows: ConsolidatedRow[] = [];
+  for (const { id, capturedAt, audit } of audits) {
+    for (const x of audit.products) {
+      const fuerte = x.signal?.verdict === "senal_fuerte_sin_proveedor";
+      const ganadorDropea = Boolean(x.deepDive && x.dropea.match && x.deepDive.verdict === "ganador_probable");
+      if (!fuerte && !ganadorDropea) continue;
+      const dias = x.product.longestActiveDays;
+      if (dias === null || dias < opts.minDays || dias > opts.maxDays) continue;
+      rows.push({
+        auditId: id, pageId: audit.pageId, store: audit.pageName ?? audit.pageId, domain: x.deepDive?.domain ?? audit.sweep?.domains[0] ?? null,
+        product: x.product.label, adLink: x.product.adLink, hasVideo: x.video?.status ?? "no_comprobado", maturityDays: dias, activeAds: x.product.ads,
+        inDropea: ganadorDropea, marginPct: x.deepDive?.marginPct ?? null, verdict: ganadorDropea ? "ganador_probable (Dropea)" : "senal_fuerte_sin_proveedor",
+        diversity: audit.account?.diversity.level ?? "insuficiente", auditedAt: new Date(capturedAt * 1000).toISOString().slice(0, 10),
+      });
+    }
+  }
+  return rows.sort((a, b) => b.maturityDays - a.maturityDays || b.activeAds - a.activeAds);
 }

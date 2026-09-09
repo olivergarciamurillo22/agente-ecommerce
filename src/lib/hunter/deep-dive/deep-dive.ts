@@ -239,7 +239,7 @@ export function priceCoherence(ads: AdLibraryAd[], catalogMin: number | null, ca
 }
 
 /** Recomendación explícita con motivo en una frase. Puro, testeable. */
-export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; opportunity?: Opportunity; spainActiveAds?: number | null; country?: string; catalogConcentrated?: boolean; diversityNote?: string | null }): { action: Recommendation; reason: string } {
+export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; opportunity?: Opportunity; spainActiveAds?: number | null; country?: string; catalogConcentrated?: boolean; diversityNote?: string | null; accountRead?: boolean }): { action: Recommendation; reason: string } {
   // Búsqueda 2: la regla dura va antes que todo lo demás.
   if (x.opportunity === "ya_en_espana") return { action: "descartar", reason: `ya se anuncia en España: ${x.spainActiveAds ?? "1+"} anuncio(s) activo(s) con match; no es una oportunidad «aún no vendida aquí» aunque esté validado en ${x.country ?? "el otro país"}` };
   const base = recommendBase(x);
@@ -250,7 +250,7 @@ export function recommend(x: { verdict: DeepDiveVerdict; reasoning: string; cohe
   return conEs;
 }
 
-function recommendBase(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }> }): { action: Recommendation; reason: string } {
+function recommendBase(x: { verdict: DeepDiveVerdict; reasoning: string; coherence: PriceCoherence["status"]; competitors: number | null; marginPct: number | null; winnerDays: number | null; incomplete: Array<{ part: string; reason: string }>; accountRead?: boolean }): { action: Recommendation; reason: string } {
   const comp = x.competitors === null ? "competencia no medida" : `${x.competitors} tienda${x.competitors === 1 ? "" : "s"} más anunciando lo mismo`;
   if (x.verdict === "ganador_probable") {
     if (x.coherence === "difiere") return { action: "verificar_manual", reason: `cumple las reglas, pero el precio del anuncio no cuadra con el del catálogo: comprobar a mano qué se vende de verdad antes de pedir muestra (${comp})` };
@@ -260,7 +260,7 @@ function recommendBase(x: { verdict: DeepDiveVerdict; reasoning: string; coheren
   if (x.verdict === "descartar") return { action: "descartar", reason: x.reasoning };
   if (x.verdict === "senal_debil") {
     if ((x.marginPct ?? 0) >= 0.5 && (x.winnerDays ?? 0) >= 30) return { action: "verificar_manual", reason: `margen real ${Math.round((x.marginPct ?? 0) * 100)} % y un ángulo ganador con ${x.winnerDays} días activo, pero falla alguna regla (${x.reasoning.split("→").pop()?.trim() ?? "ver razonamiento"}): mirar el anuncio a mano` };
-    if ((x.marginPct ?? 0) >= 0.5 && x.winnerDays === null) return { action: "verificar_manual", reason: `margen real ${Math.round((x.marginPct ?? 0) * 100)} % pero sin radiografía de la cuenta (no se pudo medir la madurez del ángulo) y falla alguna regla (${x.reasoning.split("→").pop()?.trim() ?? "ver razonamiento"}): mirar el anuncio a mano` };
+    if ((x.marginPct ?? 0) >= 0.5 && x.winnerDays === null) return { action: "verificar_manual", reason: `margen real ${Math.round((x.marginPct ?? 0) * 100)} % pero ${x.accountRead ? "la cuenta no tiene ningún ángulo clasificable en su texto (madurez del ángulo no medible)" : "sin radiografía de la cuenta (no se pudo medir la madurez del ángulo)"} y falla alguna regla (${x.reasoning.split("→").pop()?.trim() ?? "ver razonamiento"}): mirar el anuncio a mano` };
     return { action: "descartar", reason: `señal débil ${(x.marginPct ?? 0) >= 0.5 ? "con ángulo ganador inmaduro (< 30 días)" : "sin margen ≥ 50 %"}: ${x.reasoning.split("→").pop()?.trim() ?? x.reasoning}` };
   }
   const faltan = x.incomplete.filter((i) => ["tienda", "catálogo", "producto", "margen"].includes(i.part)).map((i) => i.part);
@@ -503,7 +503,7 @@ export async function runDeepDive(input: DeepDiveInput): Promise<DeepDiveReport>
   // 7 · veredicto, recomendación y texto claro
   const { verdict, reasoning: base } = decide({ catalogOk: catalog?.status === "ok", match, marginPct, activeAds: input.activeAds, daysActive, costEur: input.costEur, domain, priceEur });
   const reasoning = account ? `${base} · cuenta: ${accountSummary(account)}` : base;
-  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete, opportunity, spainActiveAds: spainCheck?.activeAds ?? null, country, catalogConcentrated: account?.diversity.level === "concentrado", diversityNote: account?.diversity.note ?? null });
+  const recommendation = recommend({ verdict, reasoning: base, coherence: coherence.status, competitors: competitors?.count ?? null, marginPct, winnerDays: account?.winner?.daysActive ?? null, incomplete, opportunity, spainActiveAds: spainCheck?.activeAds ?? null, country, catalogConcentrated: account?.diversity.level === "concentrado", diversityNote: account?.diversity.note ?? null, accountRead: Boolean(account) });
   const adLink = adId ? adLibraryLink(adId) : null;
   const adLinks = [...new Set(ads.map((a) => adLibraryLink(a.id)))].slice(0, 10);
 

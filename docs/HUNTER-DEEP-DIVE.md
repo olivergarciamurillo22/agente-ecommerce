@@ -453,6 +453,52 @@ FASE 1 · 4 peticiones · 4 anuncios únicos · 2 tiendas con la frase
   NO EN DROPEA (mejor «Báscula de cocina digital 5 kg»: faltan palabras específicas: «bano») · SENAL_DEBIL_SIN_PROVEEDOR → NO_TESTEAR
 ```
 
+### Ampliación (10-09, tras 15 auditorías reales): frases, vídeo, informe consolidado, tandas
+
+- **Frases**: la lista por defecto pasa de 4 a 13 («pago contra reembolso»,
+  «contrareembolso», «envío contra reembolso», «paga al recibir», «pago en
+  efectivo al recibir», «pago cuando recibas», «paga cuando lo recibas», «paga
+  cuando llegue», «paga en casa», «paga en tu domicilio», «pago en la puerta»,
+  «pago al momento de la entrega», «sin pago por adelantado»). La evidencia
+  (`COD_EVIDENCE`) reconoce todas. Coste de la fase 1: ≤ 13 × `--paginas`
+  peticiones (65 con las 5 por defecto; 39 con `--paginas 3`). Una tienda que
+  sale en varias frases cuenta una vez (dedupe por id de anuncio y por
+  `page_id`). Al terminar, la fase 1 dice cuántas tiendas son **nuevas**
+  respecto al barrido anterior persistido.
+- **Vídeo en la fase 2**: por producto minado se pide `render_ad` de hasta 3
+  de sus anuncios activos (1 petición cada uno; `--sin-probar-video` para no
+  gastar) y se anota `tiene_video: sí (N de M comprobados) / no / no
+  comprobado (motivo)`. Si hay vídeo, ese anuncio pasa a ser el enlace
+  principal del producto y el primero que mira el deep dive (así la
+  transcripción, si hay clave de OpenAI, cae sobre él). Solo presencia: no se
+  descarga ni se analiza aquí.
+- **Informe consolidado** (`--informe --min-dias 20 --max-dias 90`, 0
+  peticiones): lee todas las auditorías persistidas (la última por tienda) y
+  saca una fila por producto con `senal_fuerte_sin_proveedor` o en Dropea con
+  `ganador_probable` (con su margen), cuya madurez (días del anuncio activo
+  más antiguo del producto) esté en el rango; ordenado de más maduro a menos.
+  Columnas: tienda, dominio, producto, vídeo, días, activos, en Dropea (sí con
+  margen / no), catálogo, fecha de auditoría, id; debajo, un enlace por fila
+  (el del vídeo si lo hay). `--json` para guardarlo. Regla literal en
+  `CONSOLIDATED_RULE`.
+- **Tandas**: `--auditar --top N` admite hasta 30 por tanda y salta
+  automáticamente las tiendas ya persistidas (`pickNextBatch`); imprime
+  «X tiendas en el barrido, Y ya auditadas (se saltan), Z en esta tanda». Una
+  cuenta que no se pudo leer (token, permisos, error) **no se persiste** y
+  vuelve a entrar en la siguiente tanda; si el motivo es token/permisos, la
+  tanda se para.
+
+Ejemplo del informe consolidado (base local sembrada con red inyectada):
+
+```
+──── INFORME CONSOLIDADO · 2 tienda(s) auditada(s) · madurez del ángulo entre 20 y 90 días · 2 producto(s) · 0 peticiones ────
+ tienda   dominio     producto                   video  dias  activos  en Dropea          catalogo   auditoria    #
+ Takuyi   takuyi.es   Cepillo de vapor           no     70    2        no                 disperso   2026-09-09   1
+ Takuyi   takuyi.es   Gafas de sol polarizadas   no     60    2        sí (margen 82 %)   disperso   2026-09-09   1
+  Takuyi · «Cepillo de vapor» · 70 días · https://www.facebook.com/ads/library/?id=t5
+  Takuyi · «Gafas de sol polarizadas» · 60 días · https://www.facebook.com/ads/library/?id=t4
+```
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

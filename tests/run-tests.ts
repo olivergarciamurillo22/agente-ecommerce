@@ -16042,6 +16042,10 @@ async function main(): Promise<void> {
           if (porFrase[term]) assert.equal(u.searchParams.get("ad_active_status"), "ALL", "el barrido pide activos E inactivos");
           return new Response(JSON.stringify({ data: porFrase[term] ?? [], paging: {} }), { headers: { "content-type": "application/json" } });
         }
+        if (u.host === "www.facebook.com" && u.pathname.startsWith("/ads/archive/render_ad/")) {
+          const id = u.searchParams.get("id");
+          return new Response(id === "t1b" ? `<html><body><video src="https://video.xx.fbcdn.net/v/t42/clip.mp4?oh=1"></video></body></html>` : `<html><body><img src="https://scontent.xx.fbcdn.net/v/t45/x_n.jpg"></body></html>`, { headers: { "content-type": "text/html" } });
+        }
         if (u.host === "takuyi.es") {
           if (u.pathname === "/") return new Response(`<html><head><title>Takuyi</title><script src="https://cdn.shopify.com/x.js"></script></head></html>`, { headers: { "content-type": "text/html" } });
           if (u.pathname === "/products.json") return new Response(JSON.stringify({ products: [{ id: 1, title: "Purificador de aire con ozono Takuyi", handle: "purificador-aire-ozono", product_type: "", vendor: "Takuyi", variants: [{ price: "39.99", available: true }], images: [] }, { id: 2, title: "Gafas de sol polarizadas", handle: "gafas-sol", product_type: "", vendor: "Takuyi", variants: [{ price: "19.99", available: true }], images: [] }] }), { headers: { "content-type": "application/json" } });
@@ -16054,7 +16058,8 @@ async function main(): Promise<void> {
       assert.equal(sweep.requests, 2, "1 página por frase (sin paging.next)"); assert.equal(sweep.adsTotal, 6); assert.equal(sweep.adsUnique, 5, "t2 salió en las dos frases: cuenta una vez");
       assert.deepEqual(sweep.stores.map((s) => s.pageName), ["ghd", "Takuyi"], "prioridad barata por fórmula: ghd 1×5 + 50 (400 días, topado a 180) = 55 > Takuyi 2×5 + 33,3 (120 días) = 43,3; es prioridad, no veredicto"); assert.equal(sweep.storesWithoutEvidence, 1, "SinFrase no dice la frase: fuera de la tabla");
       const tk = sweep.stores[1]; assert.equal(tk.activeAds, 2); assert.equal(tk.adsFound, 3); assert.equal(tk.codAds, 3); assert.equal(tk.oldestActiveDays, 120); assert.deepEqual(tk.domains, ["takuyi.es"]); assert.match(tk.evidence!.quote, /Pago contra reembolso/); assert.equal(tk.priority, sweepPriority(2, 120)); assert.equal(tk.adLink, "https://www.facebook.com/ads/library/?id=t1");
-      assert.equal(sweepPriority(2, 120), 43.3); assert.equal(sweep.stores[0].priority, 55); assert.equal(sweepPriority(10, 180), 100); assert.equal(sweepPriority(0, null), 0); assert.equal(sweep.formula, SWEEP_FORMULA); assert.equal(COD_PHRASES_DEFAULT.length, 4);
+      assert.equal(sweepPriority(2, 120), 43.3); assert.equal(sweep.stores[0].priority, 55); assert.equal(sweepPriority(10, 180), 100); assert.equal(sweepPriority(0, null), 0); assert.equal(sweep.formula, SWEEP_FORMULA); assert.ok(COD_PHRASES_DEFAULT.length >= 13 && ["paga en tu domicilio", "pago en la puerta", "envío contra reembolso", "paga cuando llegue", "sin pago por adelantado"].every((f) => COD_PHRASES_DEFAULT.includes(f)), "lista ampliada del 10-09");
+      for (const frase of ["Paga en tu domicilio, sin compromiso.", "Pago en la puerta de tu casa.", "Envío contra reembolso a toda España", "Pagas cuando llegue el paquete", "Sin pago por adelantado", "Pago al momento de la entrega"]) assert.ok(codQuote({ id: "x", pageId: "1", pageName: null, snapshotUrl: null, bodies: [frase], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }), `la evidencia reconoce «${frase}»`);
       assert.equal(codQuote({ id: "x", pageId: "1", pageName: null, snapshotUrl: null, bodies: ["Envío gratis. Pagas cuando lo recibas en casa."], captions: [], titles: [], platforms: [], languages: [], creationTime: null, startTime: null, stopTime: null, impressions: null, audience: null }), "Pagas cuando lo recibas en casa.");
       assert.deepEqual(groupSweep([], nowSec), { stores: [], adsUnique: 0, storesWithoutEvidence: 0 });
       const repo = new CodHuntRepository(raw);
@@ -16073,12 +16078,16 @@ async function main(): Promise<void> {
       assert.equal(mb.match, null, "báscula de cocina ≠ báscula de baño: 67 % en total, pero de las específicas (bascula, bano) solo casa la mitad y «digital» es genérica"); assert.equal(mb.gate?.passed, false);
       assert.deepEqual(matchDropea(["x"], []), { match: null, gate: null });
       urls.length = 0;
-      const a = await auditCodStore({ client, pageId: "8001", pageName: "Takuyi", country: "ES", now: nowSec, sweep: tk, dropeaSearch: dropea, maxProducts: 4, deepDive: { fetcher, token: null, vision: null, video: null, dropeaLookup: null } });
+      const a = await auditCodStore({ client, pageId: "8001", pageName: "Takuyi", country: "ES", now: nowSec, sweep: tk, dropeaSearch: dropea, maxProducts: 4, deepDive: { fetcher, token: "TOKEN-cod", vision: null, video: null, dropeaLookup: null }, probeVideo: true, maxVideoProbesPerProduct: 3 });
       assert.equal(a.account?.totalAds, 6); assert.equal(a.account?.activeAds, 5); assert.equal(a.account?.diversity.level, "disperso", "Takuyi: purificador, gafas, báscula, luces → disperso (dropshipper)");
       assert.equal(a.products.length, 3, "purificador, gafas y báscula: las luces LED están apagadas y la minería solo agrupa activos");
       const purif = a.products.find((p) => /Purificador/.test(p.product.label))!; const gafas = a.products.find((p) => /Gafas/.test(p.product.label))!; const basc = a.products.find((p) => /Báscula/.test(p.product.label))!;
       assert.deepEqual(productSearchKeywords(purif.product), ["purificador", "aire", "ozono", "adios"], "título + una palabra del grupo"); assert.deepEqual(productSearchKeywords(basc.product), ["bascula", "digital", "bano"]);
       // Camino con Dropea: deep dive normal, con la radiografía ya hecha (no se vuelve a pedir la cuenta).
+      // Vídeo: t1b tiene vídeo → tiene_video sí, el enlace principal pasa a t1b y el deep dive mira ese anuncio primero.
+      assert.equal(purif.video.status, "si"); assert.equal(purif.video.checked, 2); assert.deepEqual(purif.video.videoAdIds, ["t1b"]); assert.equal(purif.product.adLink, "https://www.facebook.com/ads/library/?id=t1b", "el anuncio con vídeo es el enlace principal");
+      assert.equal(purif.deepDive!.adLink, "https://www.facebook.com/ads/library/?id=t1b", "y el primero del deep dive"); assert.equal(purif.deepDive!.videoStatus, "sin_openai_key", "vídeo detectado también por el deep dive; sin clave no se transcribe");
+      assert.equal(gafas.video.status, "no"); assert.equal(gafas.video.checked, 2); assert.equal(gafas.product.adLink, "https://www.facebook.com/ads/library/?id=t4"); assert.equal(basc.video.status, "no");
       assert.equal(purif.dropea.match?.variantId, 901); assert.ok(purif.deepDive); assert.equal(purif.deepDive!.account, a.account); assert.equal(purif.deepDive!.domain, "takuyi.es"); assert.equal(purif.deepDive!.priceEur, 39.99); assert.equal(purif.deepDive!.costEur, 14.2); assert.equal(purif.deepDive!.marginPct, 0.64);
       assert.equal(purif.deepDive!.verdict, "ganador_probable", "2 activos, 120 días, 64 %, cobertura 100 %"); assert.equal(purif.recommendation.sourcing, "dropea"); assert.equal(purif.recommendation.action, "contactar_dropea_muestra"); assert.equal(purif.signal, null);
       assert.equal(gafas.dropea.match?.variantId, 903); assert.equal(gafas.deepDive!.verdict, "ganador_probable"); assert.equal(gafas.deepDive!.marginPct, 0.82);
@@ -16093,18 +16102,30 @@ async function main(): Promise<void> {
       assert.equal(marca.verdict, "senal_debil_sin_proveedor", "marca propia: nunca fuerte");
       assert.match(a.summary, /«Takuyi» \(ES\): anuncia desde/); assert.match(a.summary, /EN DROPEA como «Purificador de aire ozono portátil»: ganador probable, margen real 64 %/); assert.match(a.summary, /NO en Dropea: senal debil sin proveedor/);
       const cuentas = urls.filter((u) => u.host === "graph.facebook.com" && u.searchParams.get("search_page_ids")); assert.equal(cuentas.length, 1, "la cuenta se lee UNA vez por tienda, aunque haya 2 deep dives");
-      assert.equal(a.requests, 1 + 2 * (1 + 2), "cuenta + por producto en Dropea: búsqueda por palabra + portada + catálogo");
+      assert.equal(a.requests, 1 + 5 + 2 * (1 + 2 + 1), "cuenta + 5 render_ad de sondeo (2+2+1) + por producto en Dropea: búsqueda, portada, catálogo y el render_ad del propio deep dive");
+      assert.match(a.summary, /«Purificador de aire ozono» \(2 activos, 120 días, vídeo en 1\)/);
       // Persistencia por tienda + reimpresión.
       const sid = repo.insertStore(a, sweepId);
       const fila = repo.storeById(sid)!; assert.equal(fila.inDropea, 2); assert.equal(fila.strongWithoutSupplier, 0); assert.equal(fila.diversity, "disperso"); assert.equal(fila.audit?.products.length, 3); assert.equal(repo.stores()[0].id, sid); assert.ok(repo.auditedPageIds().has("8001"));
       const dd = new DeepDiveRepository(raw);
       const ddId = dd.insert({ cruceId: null, variantId: 901, adlibCandidateKey: "ES:8001:cod", adId: "t1", keywords: ["purificador", "aire", "ozono"], report: purif.deepDive!, capturedAt: nowSec });
       assert.equal(dd.byId(ddId)!.verdict, "ganador_probable");
+      // --top N: el siguiente lote salta las ya auditadas (Takuyi), sin llevar la cuenta a mano.
+      const { pickNextBatch, consolidatedReport, CONSOLIDATED_RULE } = await import("../src/lib/hunter/deep-dive/cod-hunt");
+      assert.deepEqual(pickNextBatch(sweep.stores, repo.auditedPageIds(), 5).map((s) => s.pageName), ["ghd"], "Takuyi ya está auditada: la tanda solo trae ghd");
+      assert.deepEqual(pickNextBatch(sweep.stores, new Set(), 1).map((s) => s.pageName), ["ghd"]); assert.deepEqual(pickNextBatch(sweep.stores, new Set(["8001", "8002"]), 5), []);
+      // Informe consolidado por rango de madurez, solo lectura: entran señal fuerte sin proveedor y ganador_probable en Dropea; orden por madurez.
+      const filas = consolidatedReport(repo.stores({ limit: 100 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! })), { minDays: 20, maxDays: 90 });
+      assert.deepEqual(filas.map((f) => [f.product, f.maturityDays, f.inDropea]), [["Gafas de sol polarizadas", 90, true]], "purificador (120 días) fuera del rango; báscula débil fuera; gafas ganador_probable en Dropea dentro");
+      assert.equal(filas[0].marginPct, 0.82); assert.equal(filas[0].diversity, "disperso"); assert.equal(filas[0].hasVideo, "no"); assert.equal(filas[0].store, "Takuyi"); assert.equal(filas[0].domain, "takuyi.es"); assert.match(CONSOLIDATED_RULE, /min-dias/);
+      const amplio = consolidatedReport(repo.stores({ limit: 100 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! })), { minDays: 0, maxDays: 365 });
+      assert.deepEqual(amplio.map((f) => f.maturityDays), [120, 90], "de más maduro a menos"); assert.equal(amplio[0].adLink, "https://www.facebook.com/ads/library/?id=t1b", "el enlace prioriza el anuncio con vídeo");
       // Sin catálogo local: todo queda «no en Dropea» y se declara.
-      const sinCat = await auditCodStore({ client, pageId: "8001", country: "ES", now: nowSec, dropeaSearch: null, maxProducts: 2, deepDive: { fetcher } });
+      const sinCat = await auditCodStore({ client, pageId: "8001", country: "ES", now: nowSec, dropeaSearch: null, maxProducts: 2, deepDive: { fetcher }, probeVideo: false });
+      assert.ok(sinCat.products.every((p) => p.video.status === "no_comprobado"));
       assert.ok(sinCat.incomplete.some((i) => i.part === "dropea")); assert.ok(sinCat.products.every((p) => !p.dropea.searched && p.signal));
       // Cuenta vacía / fallo: se dice.
-      const vacia = await auditCodStore({ client, pageId: "8002", country: "ES", now: nowSec, dropeaSearch: dropea, deepDive: { fetcher } });
+      const vacia = await auditCodStore({ client, pageId: "8002", country: "ES", now: nowSec, dropeaSearch: dropea, deepDive: { fetcher }, probeVideo: false });
       assert.equal(vacia.products.length, 0); assert.match(vacia.summary, /Sin productos minados/);
     });
 

@@ -3,15 +3,19 @@
 // docs/HUNTER-DEEP-DIVE.md §Búsqueda 3
 //
 // FASE 1 (barata: ≤ frases × páginas peticiones, agrupa por tienda, NO audita):
-//   npm run hunter:busqueda-cod                                  (4 frases COD × 5 páginas, ES, 180 días)
+//   npm run hunter:busqueda-cod                                  (13 frases COD × 5 páginas, ES, 180 días: ≤ 65 peticiones)
 //   npm run hunter:busqueda-cod -- --frases "pago contra reembolso|paga al recibir" --paginas 3 --dias 90 --pais ES
 //   npm run hunter:busqueda-cod -- --json barrido.json
 //   npm run hunter:busqueda-cod -- --ver                         (último barrido persistido, sin red)
 //
 // FASE 2 (cara: radiografía ≤ 5 peticiones + deep dive por producto en Dropea; SIEMPRE lote explícito):
 //   npm run hunter:busqueda-cod -- --auditar --ids <page_id1,page_id2>
-//   npm run hunter:busqueda-cod -- --auditar --top 3               (los 3 primeros del último barrido, saltando los ya auditados)
-//   opciones: --max-productos 4 · --sin-vision · --sin-video · --json informe.json
+//   npm run hunter:busqueda-cod -- --auditar --top 20              (los 20 primeros del último barrido AÚN NO auditados; máx. 30 por tanda)
+//   opciones: --max-productos 4 · --sin-vision · --sin-video · --sin-probar-video · --json informe.json
+//
+// INFORME CONSOLIDADO (solo lectura, 0 peticiones): todas las tiendas auditadas, una fila por producto con
+// señal fuerte sin proveedor o ganador_probable en Dropea, madurez del ángulo entre --min-dias y --max-dias:
+//   npm run hunter:busqueda-cod -- --informe --min-dias 20 --max-dias 90 [--json informe.json]
 //   npm run hunter:busqueda-cod -- --ver-tiendas                 (auditorías persistidas, sin red)
 //   npm run hunter:busqueda-cod -- --ver-tienda <id>             (una auditoría entera, sin red)
 //
@@ -56,7 +60,7 @@ function pintarTienda(titulo: string, a: Audit): void {
   p(`Productos ganadores detectados (${a.products.length}):`);
   for (const x of a.products) {
     const pr = x.product;
-    p(`  ■ «${pr.label}» · ${pr.ads} activos · ${pr.longestActiveDays ?? "?"} días el más antiguo · palabras: ${x.keywords.join(", ")} · ${pr.adLink}`);
+    p(`  ■ «${pr.label}» · ${pr.ads} activos · ${pr.longestActiveDays ?? "?"} días el más antiguo · tiene_video: ${x.video.status === "si" ? `sí (${x.video.withVideo} de ${x.video.checked} comprobados)` : x.video.status === "no" ? `no (${x.video.checked} comprobados)` : `no comprobado (${x.video.reason ?? "—"})`} · palabras: ${x.keywords.join(", ")} · ${pr.adLink}${x.video.status === "si" ? " ← con vídeo" : ""}`);
     if (x.deepDive) {
       const d = x.deepDive;
       p(`    EN DROPEA: «${x.dropea.match!.name}» (${x.dropea.match!.costEur !== null ? `${x.dropea.match!.costEur.toFixed(2)} €` : "sin coste"}) · gate: ${x.dropea.gate?.reason ?? "—"}`);
@@ -93,6 +97,20 @@ async function main(): Promise<void> {
     console.table(rows.map((r) => ({ id: r.id, page_id: r.pageId, tienda: (r.pageName ?? "—").slice(0, 28), prioridad: r.priority ?? "—", productos: r.products, "en Dropea": r.inDropea, "fuerte sin prov.": r.strongWithoutSupplier, catalogo: r.diversity ?? "—", fecha: new Date(r.capturedAt * 1000).toISOString().slice(0, 10) })));
     return;
   }
+  if (hasFlag("informe")) {
+    const { consolidatedReport, CONSOLIDATED_RULE } = await import("../src/lib/hunter/deep-dive/cod-hunt");
+    const minDays = Number.parseInt(arg("min-dias") ?? "20", 10); const maxDays = Number.parseInt(arg("max-dias") ?? "90", 10);
+    if (!Number.isFinite(minDays) || !Number.isFinite(maxDays) || minDays < 0 || maxDays < minDays) { console.error("✗ --min-dias y --max-dias deben ser enteros con min ≤ max"); process.exit(2); }
+    const rows = repo.stores({ limit: 5000 }).filter((r) => r.audit).map((r) => ({ id: r.id, capturedAt: r.capturedAt, audit: r.audit! }));
+    const filas = consolidatedReport(rows, { minDays, maxDays });
+    console.log(`\n──── INFORME CONSOLIDADO · ${rows.length} tienda(s) auditada(s) · madurez del ángulo entre ${minDays} y ${maxDays} días · ${filas.length} producto(s) · 0 peticiones ────\n`);
+    if (!filas.length) console.log("  (ningún producto cumple el filtro)");
+    console.table(filas.map((f) => ({ tienda: f.store.slice(0, 24), dominio: f.domain ?? "—", producto: f.product.slice(0, 36), video: f.hasVideo, dias: f.maturityDays, activos: f.activeAds, "en Dropea": f.inDropea ? `sí${f.marginPct !== null ? ` (margen ${Math.round(f.marginPct * 100)} %)` : ""}` : "no", catalogo: f.diversity, auditoria: f.auditedAt, "#": f.auditId })));
+    for (const f of filas) console.log(`  ${f.store} · «${f.product}» · ${f.maturityDays} días · ${f.adLink}${f.hasVideo === "si" ? " ← vídeo" : ""}`);
+    console.log(`\n  ${CONSOLIDATED_RULE}\n`);
+    if (arg("json")) fs.writeFileSync(path.resolve(arg("json")!), JSON.stringify(filas, null, 2));
+    return;
+  }
   if (arg("ver-tienda")) {
     const r = repo.storeById(Number(arg("ver-tienda")));
     if (!r?.audit) { console.error("✗ no existe esa auditoría"); process.exit(2); }
@@ -110,10 +128,12 @@ async function main(): Promise<void> {
   if (!hasFlag("auditar")) {
     const { sweepCodStores, COD_PHRASES_DEFAULT } = await import("../src/lib/hunter/deep-dive/cod-hunt");
     const frases = arg("frases") ? arg("frases")!.split("|").map((f) => f.trim()).filter(Boolean) : COD_PHRASES_DEFAULT;
-    console.log(`\n──── FASE 1 · barrido COD · ${pais} · frases: ${frases.map((f) => `«${f}»`).join(", ")} ────`);
+    console.log(`\n──── FASE 1 · barrido COD · ${pais} · ${frases.length} frases (≤ ${frases.length * (Number.parseInt(arg("paginas") ?? "", 10) || 5)} peticiones): ${frases.map((f) => `«${f}»`).join(", ")} ────`);
+    const anterior = repo.sweep({ country: pais });
     const r = await sweepCodStores({ client, country: pais, phrases: frases, days: Number.parseInt(arg("dias") ?? "", 10) || undefined, maxPages: Number.parseInt(arg("paginas") ?? "", 10) || undefined, now, onPhrase: (f, ads, pages, stop) => console.log(`  «${f}»: ${ads} anuncios en ${pages} página(s) · ${stop}`) });
     const id = repo.insertSweep(r);
     tablaBarrido(r);
+    if (anterior?.result) { const antes = new Set(anterior.result.stores.map((s) => s.pageId)); const nuevas = r.stores.filter((s) => !antes.has(s.pageId)); console.log(`  Respecto al barrido anterior #${anterior.id} (${anterior.result.stores.length} tiendas): ${nuevas.length} tienda(s) nueva(s)${nuevas.length ? `: ${nuevas.slice(0, 15).map((s) => s.pageName ?? s.pageId).join(", ")}${nuevas.length > 15 ? "…" : ""}` : ""}`); }
     console.log(`  Barrido persistido como #${id} (hunter_cod_sweeps). Ver: npm run hunter:busqueda-cod -- --ver\n`);
     if (arg("json")) fs.writeFileSync(path.resolve(arg("json")!), JSON.stringify(r, null, 2));
     return;
@@ -131,10 +151,13 @@ async function main(): Promise<void> {
   if (arg("ids")) pageIds = arg("ids")!.split(",").map((s) => s.trim()).filter(Boolean);
   else if (arg("top")) {
     const n = Number.parseInt(arg("top")!, 10);
-    if (!Number.isFinite(n) || n < 1 || n > 10) { console.error("✗ --top admite de 1 a 10 (lote pequeño; el resto por --ids)"); process.exit(2); }
+    if (!Number.isFinite(n) || n < 1 || n > 30) { console.error("✗ --top admite de 1 a 30 por tanda (nunca todas las tiendas del barrido de golpe)"); process.exit(2); }
     if (!sweep?.result) { console.error("✗ no hay barrido persistido para --top: ejecuta antes la fase 1"); process.exit(2); }
+    const { pickNextBatch } = await import("../src/lib/hunter/deep-dive/cod-hunt");
     const hechas = repo.auditedPageIds();
-    pageIds = sweep.result.stores.filter((s) => !hechas.has(s.pageId)).slice(0, n).map((s) => s.pageId);
+    const lote = pickNextBatch(sweep.result.stores, hechas, n);
+    console.log(`  --top ${n}: ${sweep.result.stores.length} tiendas en el barrido #${sweep.id}, ${sweep.result.stores.filter((s) => hechas.has(s.pageId)).length} ya auditadas (se saltan), ${lote.length} en esta tanda`);
+    pageIds = lote.map((s) => s.pageId);
   } else { console.error("✗ --auditar exige --ids <page_id,…> o --top N (≤ 10). Nunca todas las tiendas del barrido."); process.exit(2); }
   if (!pageIds.length) { console.log("  Nada que auditar con ese filtro."); return; }
   const dropea = new DropeaCatalogRepository();
@@ -151,7 +174,12 @@ async function main(): Promise<void> {
   for (const pageId of pageIds) {
     if (!canRunDiscovery()) { console.error("\n✗ EMERGENCY_STOP activado a mitad: se para aquí, lo hecho queda.\n"); break; }
     const sw = sweep?.result?.stores.find((s) => s.pageId === pageId) ?? null;
-    const a = await auditCodStore({ client, pageId, pageName: sw?.pageName ?? null, country: pais, now, sweep: sw, dropeaSearch, maxProducts: Number.parseInt(arg("max-productos") ?? "", 10) || 4, accountSummarize: makeAccountSummarizer(), deepDive: { token, vision, video, skipVideo: hasFlag("sin-video"), videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), dropeaLookup } });
+    const a = await auditCodStore({ client, pageId, pageName: sw?.pageName ?? null, country: pais, now, sweep: sw, dropeaSearch, maxProducts: Number.parseInt(arg("max-productos") ?? "", 10) || 4, accountSummarize: makeAccountSummarizer(), deepDive: { token, vision, video, skipVideo: hasFlag("sin-video"), videoBudgetExhausted: videoDailyLimit() > 0 && videosHoy() >= videoDailyLimit(), dropeaLookup }, probeVideo: !hasFlag("sin-probar-video"), maxVideoProbesPerProduct: Number.parseInt(arg("max-render") ?? "", 10) || 3 });
+    if (!a.account) {
+      console.log(`\n  ✗ ${sw?.pageName ?? pageId}: cuenta no leída (${a.incomplete.map((i) => i.reason).join("; ")}). NO se persiste: volverá a entrar en la siguiente tanda.`);
+      if (/token|OAuth|permis/i.test(a.incomplete.map((i) => i.reason).join(" "))) { console.error("\n✗ Token o permisos: se para la tanda.\n"); break; }
+      continue;
+    }
     const id = repo.insertStore(a, sweep?.id ?? null);
     // Los productos que SÍ están en Dropea se guardan también como deep dives normales (misma tabla que las búsquedas 1 y 2).
     for (const x of a.products) if (x.deepDive && x.dropea.match) ddRepo.insert({ cruceId: null, variantId: x.dropea.match.variantId, adlibCandidateKey: `${pais}:${pageId}:cod`, adId: x.deepDive.adLink?.split("id=")[1] ?? null, keywords: x.deepDive.gate?.searched.split(" ") ?? x.keywords, report: x.deepDive, capturedAt: now });
