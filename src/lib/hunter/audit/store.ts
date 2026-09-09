@@ -68,6 +68,15 @@ export interface StoreProfile {
   /** Si la web no se pudo leer: por qué. */
   homepageStatus: "ok" | "no_accesible";
   homepageReason: string | null;
+  /** Texto visible de la portada (sin etiquetas, scripts ni estilos), recortado. Para señales de «empresa real» (búsqueda 3). */
+  homepageText?: string;
+}
+
+export function visibleText(html: string, max = 8000): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<noscript[\s\S]*?<\/noscript>/gi, " ")
+    .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#?\w+;/g, " ")
+    .replace(/\s+/g, " ").trim().slice(0, max);
 }
 
 export interface StoreRead {
@@ -202,6 +211,7 @@ export async function readStoreProfile(input: string, fetcher: typeof fetch = fe
       isShopify: hints.length > 0,
       homepageStatus: "ok",
       homepageReason: null,
+      homepageText: visibleText(html),
     },
     requests: 1,
   };

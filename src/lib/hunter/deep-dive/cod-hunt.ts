@@ -156,7 +156,7 @@ export async function sweepCodStores(input: SweepInput): Promise<SweepResult> {
 // ------------------------------------------------------------
 
 export type SignalVerdict = "senal_fuerte_sin_proveedor" | "senal_debil_sin_proveedor";
-export const SIGNAL_RULES = "senal_fuerte_sin_proveedor = anuncio activo más antiguo del producto ≥ 30 días ∧ ≥ 2 anuncios activos del producto ∧ catálogo de la cuenta no concentrado (no marca propia) · si no, senal_debil_sin_proveedor · sin margen ni «contactar a Dropea»: requiere sourcing alternativo";
+export const SIGNAL_RULES = "senal_fuerte_sin_proveedor = anuncio activo más antiguo del producto ≥ 30 días ∧ ≥ 2 anuncios activos del producto ∧ catálogo de la cuenta no concentrado ni empresa_estructurada · si no, senal_debil_sin_proveedor · sin margen ni «contactar a Dropea»: requiere sourcing alternativo";
 
 export interface DropeaCandidate { variantId: number; name: string; costEur: number | null }
 export type DropeaSearchFn = (term: string) => DropeaCandidate[];
@@ -166,6 +166,8 @@ export interface ProductVideo { status: "si" | "no" | "no_comprobado"; checked: 
 
 /** Catálogo REAL del sitio (fase 2, 2–4 peticiones HTTP por tienda; nunca en fase 1). */
 export interface SiteCatalog {
+  /** Texto visible de la portada (para señales de empresa real); vacío si no se leyó. */
+  homepageText: string;
   domain: string | null;
   status: "ok" | "no_accesible" | "no_shopify" | "sin_dominio" | "desactivado";
   reason: string | null;
@@ -184,19 +186,62 @@ export interface SiteCatalog {
  * reembolso como gancho. Es señal de valor A NIVEL DE TIENDA aunque ningún
  * producto llegue por separado al umbral de señal fuerte.
  */
+/**
+ * Diversidad SOLO para la búsqueda 3: a los tres estados compartidos se añade
+ * «empresa_estructurada» = catálogo disperso PERO ≥ 2 señales de empresa real
+ * (equipo/fundadores, sede, año de fundación, fábrica propia, premios/prensa,
+ * marca paraguas…). Las búsquedas 1 y 2 no lo usan: allí el punto de partida
+ * es un producto de Dropea y «concentrado» ya cubre el caso ghd.
+ */
+export type CodDiversity = CatalogDiversity["level"] | "empresa_estructurada";
+
+export interface CompanySignal { label: string; quote: string; source: "anuncio" | "sitio" }
+export interface StructuredCompany { structured: boolean; signals: CompanySignal[]; rule: string }
+export const COMPANY_MIN_SIGNALS = 2;
+export const COMPANY_RULE = "empresa_estructurada = catálogo disperso ∧ ≥ 2 señales distintas de empresa real en anuncios o portada (equipo/fundadores, sede con dirección, año de fundación, empleados, fábrica/almacén propio, certificaciones/premios/prensa, marca paraguas «fabricado por X desde»); NO cuentan el pie legal, «empresa española» a secas, la antigüedad ni los testimonios/UGC («me llamo…, tengo N años»)";
+
+/** Señales de empresa real/estructurada. Una por etiqueta (varias frases de la misma etiqueta cuentan una vez). Puro, testeable. */
+export const COMPANY_RULES: Array<{ label: string; patterns: RegExp[] }> = [
+  { label: "equipo / fundadores", patterns: [/\b(somos (un )?(equipo|grupo) de|nuestro equipo|equipo de (emprendedores|profesionales|expertos)|fundad[oa]s? (en|por)|fundador(es|a)?\b|nuestros? fundador|co-?fundador|somos [a-záéíóúñ]+ y [a-záéíóúñ]+,)/] },
+  // Una dirección suelta (calle X, CIF) es el pie legal de cualquier tienda: NO cuenta. Cuenta la sede reivindicada como argumento.
+  { label: "sede con dirección", patterns: [/\b(nuestra (sede|tienda f[ií]sica|oficina|nave)|nuestras (oficinas|instalaciones)|sede (social|central) en|vis[ií]tanos en (nuestra|la) (tienda|sede|oficina)|nos encontrar[aá]s en (nuestra|la) (tienda|sede|oficina))\b/] },
+  { label: "año de fundación / trayectoria", patterns: [/\b(desde (el a[ñn]o )?(19[6-9]\d|20[01]\d)\b|fundad[oa] en (19|20)\d\d|(m[aá]s de |llevamos )\d{1,2} a[ñn]os (de experiencia|en el sector|fabricando|a tu servicio))/] },
+  { label: "empleados / plantilla", patterns: [/\b(\d{2,4} (empleados|trabajadores|personas en (el|nuestro) equipo)|nuestra plantilla)\b/] },
+  { label: "fábrica / almacén / producción propia", patterns: [/\b((f[aá]brica|almac[eé]n|taller|obrador|producci[oó]n|laboratorio) (propi[oa]|en [a-záéíóúñ]+)|fabricamos (nosotros|en nuestra)|hecho a mano en nuestro)\b/] },
+  { label: "certificaciones / premios / prensa", patterns: [/\b(certificad[oa]s? (por|iso)|iso 9001|premio (a la|nacional|europeo)|galardonad[oa]|hemos salido en|nos han mencionado|(aparecemos|salimos) en (prensa|televisi[oó]n|la tele)|medios de comunicaci[oó]n)\b/] },
+  { label: "marca paraguas", patterns: [/\b(fabricado por [a-z0-9]+ desde|dise[ñn]ado y fabricado por [a-z0-9]+|marca registrada [a-z0-9]+|[a-z0-9]+®)\b/] },
+];
+/** Lo que NO cuenta: relleno («empresa española» a secas) y testimonios/UGC. */
+const COMPANY_NOISE = /\b(me llamo|tengo \d{2} a[ñn]os|mi (marido|mujer|madre|hijo|hija)|os cuento|mi experiencia)\b/;
+
+export function structuredCompanySignals(texts: Array<{ text: string; source: CompanySignal["source"] }>): StructuredCompany {
+  const porEtiqueta = new Map<string, CompanySignal>();
+  for (const { text, source } of texts) {
+    for (const frase of sentences(text)) {
+      const plano = normalizeAngleText(frase);
+      if (COMPANY_NOISE.test(plano)) continue; // testimonial/UGC de venta: es justo lo que queremos, no una empresa
+      for (const rule of COMPANY_RULES) if (!porEtiqueta.has(rule.label) && rule.patterns.some((re) => re.test(plano))) porEtiqueta.set(rule.label, { label: rule.label, quote: frase.trim().slice(0, 160), source });
+    }
+  }
+  const signals = [...porEtiqueta.values()];
+  return { structured: signals.length >= COMPANY_MIN_SIGNALS, signals, rule: COMPANY_RULE };
+}
+
 export interface StoreProfile {
   codGenerica: boolean;
   distinctProducts: number;
   /** De dónde sale el recuento: los anuncios minados, el catálogo real del sitio, o el mayor de los dos. */
   productsSource: "anuncios" | "sitio" | "anuncios+sitio";
   daysAdvertising: number | null;
-  diversity: CatalogDiversity["level"];
+  /** Diversidad efectiva de la búsqueda 3 (incluye «empresa_estructurada»). */
+  diversity: CodDiversity;
+  company: StructuredCompany;
   reason: string;
   rule: string;
 }
 export const PROFILE_MIN_PRODUCTS = 3;
 export const PROFILE_MIN_DAYS = 14;
-export const PROFILE_RULE = "perfil_tienda_cod_generica = catálogo NO concentrado (por anuncios o, si se leyó, por el sitio) ∧ ≥ 3 productos distintos (activos minados o del catálogo real del sitio, el mayor) ∧ la cuenta anuncia desde hace ≥ 14 días; ningún producto necesita 30 días por separado";
+export const PROFILE_RULE = "perfil_tienda_cod_generica = catálogo NO concentrado NI empresa_estructurada (por anuncios o, si se leyó, por el sitio) ∧ ≥ 3 productos distintos (activos minados o del catálogo real del sitio, el mayor) ∧ la cuenta anuncia desde hace ≥ 14 días; ningún producto necesita 30 días por separado";
 
 export interface StoreProductAudit {
   product: AccountProduct;
@@ -255,12 +300,13 @@ export function matchDropea(keywords: string[], candidates: DropeaCandidate[]): 
   return { match: best.gate.passed ? best.c : null, gate: best.gate };
 }
 
-export function signalVerdict(p: AccountProduct, account: AccountXray): { verdict: SignalVerdict; reason: string } {
+export function signalVerdict(p: AccountProduct, account: AccountXray, diversity: CodDiversity = account.diversity.level): { verdict: SignalVerdict; reason: string } {
   const dias = p.longestActiveDays ?? 0;
-  const concentrado = account.diversity.level === "concentrado";
-  const fuerte = dias >= 30 && p.ads >= 2 && !concentrado;
-  const partes = [`${p.ads} anuncio(s) activo(s) del producto`, `el más antiguo ${dias} días`, concentrado ? "catálogo de la cuenta concentrado (posible marca propia)" : `catálogo ${account.diversity.level}`, account.testing ? `ritmo de testeo ${account.testing.level}` : "ritmo de testeo desconocido"];
-  return { verdict: fuerte ? "senal_fuerte_sin_proveedor" : "senal_debil_sin_proveedor", reason: `${partes.join(" · ")} → ${fuerte ? "la tienda lo mantiene encendido con recorrido" : "falta recorrido, volumen o es marca propia"}; no disponible en Dropea, requiere sourcing alternativo (AliExpress u otro proveedor) si se quiere testear` };
+  const concentrado = diversity === "concentrado";
+  const estructurada = diversity === "empresa_estructurada";
+  const fuerte = dias >= 30 && p.ads >= 2 && !concentrado && !estructurada;
+  const partes = [`${p.ads} anuncio(s) activo(s) del producto`, `el más antiguo ${dias} días`, concentrado ? "catálogo de la cuenta concentrado (posible marca propia)" : estructurada ? "empresa real/estructurada (no replicable)" : `catálogo ${diversity}`, account.testing ? `ritmo de testeo ${account.testing.level}` : "ritmo de testeo desconocido"];
+  return { verdict: fuerte ? "senal_fuerte_sin_proveedor" : "senal_debil_sin_proveedor", reason: `${partes.join(" · ")} → ${fuerte ? "la tienda lo mantiene encendido con recorrido" : "falta recorrido, volumen, o es marca propia / empresa estructurada"}; no disponible en Dropea, requiere sourcing alternativo (AliExpress u otro proveedor) si se quiere testear` };
 }
 
 export interface StoreAuditInput {
@@ -309,36 +355,40 @@ export function pickNextBatch(stores: SweepStore[], audited: Set<string>, n: num
 
 /** Lee el catálogo real del sitio con readStore (portada + /products.json). Degrada con gracia. */
 export async function readSiteCatalog(domain: string | null, fetcher: typeof fetch, brandTokens: string[] = []): Promise<SiteCatalog> {
-  if (!domain) return { domain: null, status: "sin_dominio", reason: "el anuncio no declara dominio: catálogo del sitio no accesible, usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
+  if (!domain) return { homepageText: "", domain: null, status: "sin_dominio", reason: "el anuncio no declara dominio: catálogo del sitio no accesible, usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
   try {
     const r = await readStore(domain, fetcher);
     const items = r.catalog.products.map((p) => ({ title: p.title, price: p.priceMin, compareAt: p.compareAtMax ?? null, discountPct: p.compareAtMax && p.priceMin !== null && p.compareAtMax > p.priceMin ? Math.round(((p.compareAtMax - p.priceMin) / p.compareAtMax) * 100) : null, url: p.url }));
-    if (r.catalog.status !== "ok") return { domain, status: r.catalog.status === "no_shopify" ? "no_shopify" : "no_accesible", reason: `catálogo del sitio no accesible (${r.catalog.reason ?? r.catalog.status}): usando texto minado del anuncio`, products: 0, truncated: false, brand: r.profile.brandName, items: [], diversity: null, requests: r.requests };
+    if (r.catalog.status !== "ok") return { homepageText: r.profile.homepageText ?? "", domain, status: r.catalog.status === "no_shopify" ? "no_shopify" : "no_accesible", reason: `catálogo del sitio no accesible (${r.catalog.reason ?? r.catalog.status}): usando texto minado del anuncio`, products: 0, truncated: false, brand: r.profile.brandName, items: [], diversity: null, requests: r.requests };
     const pseudo: AccountProduct[] = r.catalog.products.map((p) => ({ label: p.title, keywords: productKeywords(p.title), ads: 0, adIds: [], oldestActiveStart: null, longestActiveDays: null, sample: "", adLink: p.url, isOriginal: false }));
-    return { domain, status: "ok", reason: null, products: items.length, truncated: r.catalog.truncated, brand: r.profile.brandName, items, diversity: catalogDiversity(pseudo, [...brandTokens, ...(r.profile.brandName ?? "").split(/\s+/), domain.split(".")[0]]), requests: r.requests };
+    return { homepageText: r.profile.homepageText ?? "", domain, status: "ok", reason: null, products: items.length, truncated: r.catalog.truncated, brand: r.profile.brandName, items, diversity: catalogDiversity(pseudo, [...brandTokens, ...(r.profile.brandName ?? "").split(/\s+/), domain.split(".")[0]]), requests: r.requests };
   } catch (err) {
-    return { domain, status: "no_accesible", reason: `catálogo del sitio no accesible (${err instanceof Error ? err.message.slice(0, 100) : String(err)}): usando texto minado del anuncio`, products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 1 };
+    return { homepageText: "", domain, status: "no_accesible", reason: `catálogo del sitio no accesible (${err instanceof Error ? err.message.slice(0, 100) : String(err)}): usando texto minado del anuncio`, products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 1 };
   }
 }
 
-/** Perfil de tienda COD genérica. Puro, testeable. */
-export function storeProfile(account: AccountXray | null, site: SiteCatalog): StoreProfile {
-  if (!account) return { codGenerica: false, distinctProducts: 0, productsSource: "anuncios", daysAdvertising: null, diversity: "insuficiente", reason: "cuenta no leída", rule: PROFILE_RULE };
+/** Perfil de tienda COD genérica. Puro, testeable. `adTexts` = textos de los anuncios de la cuenta (para las señales de empresa). */
+export function storeProfile(account: AccountXray | null, site: SiteCatalog, adTexts: string[] = []): StoreProfile {
+  const company = structuredCompanySignals([...adTexts.map((t) => ({ text: t, source: "anuncio" as const })), ...(site.homepageText ? [{ text: site.homepageText, source: "sitio" as const }] : [])]);
+  if (!account) return { codGenerica: false, distinctProducts: 0, productsSource: "anuncios", daysAdvertising: null, diversity: "insuficiente", company, reason: "cuenta no leída", rule: PROFILE_RULE };
   const minados = account.products.length;
   const sitio = site.status === "ok" ? site.products : 0;
   const distinct = Math.max(minados, sitio);
   const source: StoreProfile["productsSource"] = sitio && minados ? "anuncios+sitio" : sitio ? "sitio" : "anuncios";
   // Diversidad efectiva: la del sitio manda si se leyó y es concluyente; si no, la de los anuncios.
   const div = site.diversity && site.diversity.level !== "insuficiente" ? site.diversity : account.diversity;
-  const noConcentrado = div.level !== "concentrado";
+  // Tercer estado (solo búsqueda 3): disperso pero con ≥ 2 señales de empresa real → empresa_estructurada, misma penalización que concentrado.
+  const level: CodDiversity = div.level === "disperso" && company.structured ? "empresa_estructurada" : div.level;
+  const noConcentrado = level !== "concentrado" && level !== "empresa_estructurada";
   const dias = account.daysAdvertising;
   const ok = noConcentrado && distinct >= PROFILE_MIN_PRODUCTS && (dias ?? 0) >= PROFILE_MIN_DAYS;
-  const partes = [`catálogo ${div.level}${site.diversity && site.diversity.level !== "insuficiente" ? " (por el sitio)" : " (por los anuncios)"}`, `${distinct} productos distintos (${source === "anuncios+sitio" ? `${minados} minados, ${sitio} en el sitio` : source === "sitio" ? `${sitio} en el sitio` : `${minados} minados`})`, `anuncia desde hace ${dias ?? "?"} días`];
+  const partes = [`catálogo ${level}${site.diversity && site.diversity.level !== "insuficiente" ? " (por el sitio)" : " (por los anuncios)"}${company.signals.length ? ` · señales de empresa: ${company.signals.map((s) => `${s.label} («${s.quote.slice(0, 60)}», ${s.source})`).join("; ")}` : ""}`, `${distinct} productos distintos (${source === "anuncios+sitio" ? `${minados} minados, ${sitio} en el sitio` : source === "sitio" ? `${sitio} en el sitio` : `${minados} minados`})`, `anuncia desde hace ${dias ?? "?"} días`];
   const fallos: string[] = [];
-  if (!noConcentrado) fallos.push("catálogo concentrado (posible marca propia)");
+  if (level === "concentrado") fallos.push("catálogo concentrado (posible marca propia)");
+  if (level === "empresa_estructurada") fallos.push("empresa real/estructurada: competidor con estructura propia, no replicable comprando en Dropea o AliExpress");
   if (distinct < PROFILE_MIN_PRODUCTS) fallos.push(`menos de ${PROFILE_MIN_PRODUCTS} productos distintos`);
   if ((dias ?? 0) < PROFILE_MIN_DAYS) fallos.push(`menos de ${PROFILE_MIN_DAYS} días anunciando`);
-  return { codGenerica: ok, distinctProducts: distinct, productsSource: source, daysAdvertising: dias, diversity: div.level, reason: ok ? `SÍ: ${partes.join(" · ")} → agregador COD genérico y disperso, señal de valor a nivel de tienda` : `NO: ${partes.join(" · ")} → ${fallos.join("; ")}`, rule: PROFILE_RULE };
+  return { codGenerica: ok, distinctProducts: distinct, productsSource: source, daysAdvertising: dias, diversity: level, company, reason: ok ? `SÍ: ${partes.join(" · ")} → agregador COD genérico y disperso, señal de valor a nivel de tienda` : `NO: ${partes.join(" · ")} → ${fallos.join("; ")}`, rule: PROFILE_RULE };
 }
 
 export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit> {
@@ -359,9 +409,11 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
   // Catálogo REAL del sitio (fase 2): dominio del barrido o de los captions de la cuenta.
   const domain = input.sweep?.domains[0] ?? declaredDomains(ads).filter((d) => !/(^|\.)(facebook|instagram|whatsapp|fb|messenger)\.(com|me)$/i.test(d))[0] ?? null;
   let site: SiteCatalog;
-  if (input.siteCatalog === false) site = { domain, status: "desactivado", reason: "lectura del catálogo del sitio desactivada: usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
+  if (input.siteCatalog === false) site = { homepageText: "", domain, status: "desactivado", reason: "lectura del catálogo del sitio desactivada: usando texto minado del anuncio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 };
   else { site = await readSiteCatalog(domain, input.deepDive?.fetcher ?? fetch, brand); requests += site.requests; }
   if (site.status !== "ok" && site.status !== "desactivado") incomplete.push({ part: "catálogo del sitio", reason: site.reason ?? site.status });
+  const adTexts = ads.flatMap((a) => [...a.bodies, ...a.titles, ...(a.descriptions ?? [])]);
+  const profile = storeProfile(account, site, adTexts);
   const siteProducts: CatalogProduct[] = site.status === "ok" ? site.items.map((i) => ({ title: i.title, handle: i.url.split("/").pop() ?? "", vendor: null, productType: null, priceMin: i.price, priceMax: i.price, compareAtMax: i.compareAt, variants: 1, images: 0, available: null, createdAt: null, url: i.url })) : [];
   const products: StoreProductAudit[] = [];
   if (account) {
@@ -403,7 +455,7 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
           : { action: "descartar", reason: dd.recommendation.reason, sourcing: "dropea" };
         products.push({ product: p, keywords, video, realName, siteMatch, dropea: { searched, candidates, match, gate }, deepDive: dd, signal: null, recommendation: rec });
       } else {
-        const signal = signalVerdict(p, account);
+        const signal = signalVerdict(p, account, profile.diversity);
         const rec: StoreProductAudit["recommendation"] = signal.verdict === "senal_fuerte_sin_proveedor"
           ? { action: "testear", reason: `señal fuerte en la cuenta, pero NO está en Dropea: la decisión de sourcing (AliExpress u otro) es de Pedro; sin margen calculable`, sourcing: "alternativo" }
           : { action: "no_testear", reason: `señal débil y sin proveedor: no compensa buscar sourcing alternativo`, sourcing: "alternativo" };
@@ -411,8 +463,7 @@ export async function auditCodStore(input: StoreAuditInput): Promise<StoreAudit>
       }
     }
   }
-  const profile = storeProfile(account, site);
-  const audit: StoreAudit = { pageId: input.pageId, pageName: account?.pageName ?? input.pageName ?? input.sweep?.pageName ?? null, country, sweep: input.sweep ?? null, account, products, siteCatalog: site, profile, summary: "", requests, incomplete, rules: `${PROFILE_RULE} · ${SIGNAL_RULES} · deep dive: reglas del informe de cada producto`, capturedAt: now };
+  const audit: StoreAudit = { pageId: input.pageId, pageName: account?.pageName ?? input.pageName ?? input.sweep?.pageName ?? null, country, sweep: input.sweep ?? null, account, products, siteCatalog: site, profile, summary: "", requests, incomplete, rules: `${PROFILE_RULE} · ${COMPANY_RULE} · ${SIGNAL_RULES} · deep dive: reglas del informe de cada producto`, capturedAt: now };
   audit.summary = summarizeStore(audit);
   return audit;
 }
@@ -424,6 +475,7 @@ export function summarizeStore(a: StoreAudit): string {
   const acc = a.account;
   p.push(`${nombre} (${a.country}): anuncia desde ${acc.firstAdStart ?? "?"} (${acc.daysAdvertising ?? "?"} días), ${acc.totalAds} anuncios, ${acc.activeAds} activos, ritmo de testeo ${acc.testing?.level ?? "?"}, catálogo ${acc.diversity.level}${acc.diversity.level === "concentrado" ? " (posible marca propia: baja prioridad)" : ""}.`);
   p.push(`Perfil de tienda COD genérica: ${a.profile.reason}.`);
+  if (a.profile.diversity === "empresa_estructurada") p.push(`EMPRESA REAL/ESTRUCTURADA (baja prioridad, como marca propia): ${a.profile.company.signals.map((s) => `${s.label}: «${s.quote}» (${s.source})`).join(" · ")}.`);
   p.push(a.siteCatalog.status === "ok" ? `Catálogo real del sitio ${a.siteCatalog.domain}: ${a.siteCatalog.products} productos${a.siteCatalog.truncated ? "+" : ""}${a.siteCatalog.diversity ? `, ${a.siteCatalog.diversity.level}` : ""}.` : `Catálogo del sitio: ${a.siteCatalog.reason ?? a.siteCatalog.status}.`);
   if (acc.winner) p.push(`Ángulo ganador de la cuenta: ${acc.winner.label.toLowerCase()}, «${acc.winner.quote}», ${acc.winner.daysActive} días activo.`);
   if (acc.avatar.summary) p.push(`Avatar: ${acc.avatar.summary}.`);
@@ -468,7 +520,7 @@ export function consolidatedReport(audits: Array<{ id: number; capturedAt: numbe
   const rows: ConsolidatedRow[] = [];
   for (const { id, capturedAt, audit } of audits) {
     // Auditorías anteriores a este criterio: el perfil se calcula al vuelo con lo persistido (sin catálogo del sitio).
-    const profile = audit.profile ?? storeProfile(audit.account, { domain: audit.sweep?.domains[0] ?? null, status: "desactivado", reason: "auditoría anterior al catálogo del sitio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 });
+    const profile = audit.profile ?? storeProfile(audit.account, { homepageText: "", domain: audit.sweep?.domains[0] ?? null, status: "desactivado", reason: "auditoría anterior al catálogo del sitio", products: 0, truncated: false, brand: null, items: [], diversity: null, requests: 0 }, audit.products.map((x) => x.product.sample));
     const perfil = profile.codGenerica;
     let filasTienda = 0;
     for (const x of audit.products) {

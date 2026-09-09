@@ -544,6 +544,41 @@ lacesta.es: no_accesible — catálogo del sitio no accesible (fetch failed): us
    PERFIL COD GENÉRICA: NO — 2 productos minados, sin sitio: menos de 3 productos distintos
 ```
 
+### Tercer estado, solo búsqueda 3: `empresa_estructurada` (10-09)
+
+La diversidad compartida (`catalogDiversity`, búsquedas 1, 2 y 3) sigue
+teniendo tres estados: concentrado / disperso / insuficiente. **Solo la
+búsqueda 3** añade un cuarto, calculado en `storeProfile` sin tocar la
+función compartida: `empresa_estructurada` = catálogo disperso PERO ≥ 2
+señales distintas de empresa real (`structuredCompanySignals`, regla literal
+`COMPANY_RULE`), en el texto de los anuncios o en la portada del sitio
+(`homepageText`, nuevo campo opcional del lector de tiendas). Mismo motivo de
+fondo que «concentrado»: un competidor con estructura propia no se replica
+comprando en Dropea o AliExpress. Efecto: sin perfil de tienda, ningún
+producto en señal fuerte, y baja en el ranking.
+
+Señales (una por etiqueta): equipo/fundadores («somos un equipo de», «fundado
+por», «nuestro equipo»), sede reivindicada («nuestra sede/oficina/tienda
+física», «visítanos en nuestra tienda»), año de fundación/trayectoria («desde
+2015», «fundada en 2019», «más de 10 años en el sector»), empleados/plantilla,
+fábrica/almacén/producción propia, certificaciones/premios/prensa, marca
+paraguas («fabricado por X desde», «®»).
+
+NO cuentan: el pie legal (CIF, una dirección suelta, términos), «empresa
+española» a secas, la antigüedad de la cuenta, y los testimonios/UGC de venta
+(«me llamo…, tengo N años, os cuento mi experiencia»: se descartan antes de
+mirar las reglas; eso es justo el copy que queremos).
+
+Comprobado (10-09):
+
+```
+A · LaCesta-like («Somos un equipo de emprendedores de Granada. Fundada en 2019, hoy somos 12 personas en nuestro equipo.»)
+    → EMPRESA_ESTRUCTURADA · perfil COD: NO · señales: equipo/fundadores, año de fundación, empleados (portada)
+B · LuzMar-like (anuncio «Me llamo María García, tengo 42 años y vivo en Valencia. Os cuento mi experiencia…» + portada «Empresa española. CIF … Calle Mayor 3»)
+    → DISPERSO · perfil COD: SÍ · señales de empresa: 0 (testimonial y pie legal no cuentan)
+C · venygo.com REAL (portada leída, 1.345 caracteres) → DISPERSO · perfil COD: SÍ · 1 señal («Somos una tienda online fundada en Andalucía»), no llega a 2: sigue siendo objetivo
+```
+
 ## Diseño original previsto (superado por la sonda)
 
 - Tabla `hunter_deep_dives` (migración 32, aditiva): candidato (`variant_id`

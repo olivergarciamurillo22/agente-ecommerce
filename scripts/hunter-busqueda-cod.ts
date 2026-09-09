@@ -60,6 +60,8 @@ function pintarTienda(titulo: string, a: Audit): void {
     p(`  · avatar: ${x.avatar.summary ?? "sin señales"}`);
   }
   p(`PERFIL DE TIENDA COD GENÉRICA: ${a.profile?.codGenerica ? "SÍ" : "NO"} — ${a.profile?.reason ?? "no calculado (auditoría anterior)"}`);
+  if (a.profile?.diversity === "empresa_estructurada") p(`EMPRESA REAL/ESTRUCTURADA (baja prioridad, como marca propia) · señales: ${a.profile.company.signals.map((x) => `${x.label}: «${x.quote}» (${x.source})`).join(" · ")}`);
+  else if (a.profile?.company.signals.length) p(`Señales de empresa (${a.profile.company.signals.length}, no llegan a 2 distintas o el catálogo no es disperso): ${a.profile.company.signals.map((x) => `${x.label}: «${x.quote.slice(0, 60)}»`).join(" · ")}`);
   if (a.siteCatalog) {
     p(`Catálogo real del sitio: ${a.siteCatalog.status === "ok" ? `${a.siteCatalog.domain} · ${a.siteCatalog.products} productos${a.siteCatalog.truncated ? "+" : ""}${a.siteCatalog.brand ? ` · marca ${a.siteCatalog.brand}` : ""}${a.siteCatalog.diversity ? ` · ${a.siteCatalog.diversity.level}` : ""} · ${a.siteCatalog.requests} peticiones` : (a.siteCatalog.reason ?? a.siteCatalog.status)}`);
     for (const it of a.siteCatalog.items.slice(0, 12)) p(`    · ${it.title.slice(0, 70)} · ${it.price !== null ? `${it.price} €` : "—"}${it.discountPct ? ` (antes ${it.compareAt} €, −${it.discountPct} %)` : ""}`);

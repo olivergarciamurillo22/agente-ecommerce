@@ -162,7 +162,7 @@ Perfil de tienda y catálogo real (el informe dice cuántas tiendas entran SOLO 
 sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --informe --min-dias 20 --max-dias 90
 sudo docker exec casamable-agent npm run hunter:busqueda-cod -- --auditar --top 3
 ```
-Anota: B3_PERFIL_SOLO=<tiendas que entran solo por el perfil> B3_CATALOGO_OK=<tiendas con catálogo del sitio ok / total de la tanda> B3_EJEMPLO_CATALOGO=<tienda · N productos · 2 títulos> B3_EJEMPLO_FALLBACK=<tienda · motivo>
+Anota: B3_PERFIL_SOLO=<tiendas que entran solo por el perfil> B3_CATALOGO_OK=<tiendas con catálogo del sitio ok / total de la tanda> B3_EJEMPLO_CATALOGO=<tienda · N productos · 2 títulos> B3_EJEMPLO_FALLBACK=<tienda · motivo> B3_EMPRESA_ESTRUCTURADA=<tiendas marcadas así en la tanda · señales de una de ellas> B3_DISPERSO_CON_UGC=<una tienda con testimonial que siga en disperso>
 Anota: B3_PETICIONES= B3_ANUNCIOS_UNICOS= B3_TIENDAS_CON_FRASE= B3_PAGINAS_SIN_FRASE= B3_TOP3=<page_id · tienda · activos · días · prioridad>
 Pega la tabla entera en el chat (es la calibración de frases).
 Fase 2 solo sobre 2 tiendas (≤ 5 peticiones de cuenta + deep dive por producto en Dropea):
