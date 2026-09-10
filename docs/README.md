@@ -9,6 +9,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 | Documento | Qué es |
 |---|---|
 | [ESTADO-PRODUCCION.md](ESTADO-PRODUCCION.md) | Lo que corre DE VERDAD en el NAS, hoy |
+| [RESUMEN-PARA-AUDITOR-2026-09-10.md](RESUMEN-PARA-AUDITOR-2026-09-10.md) | **Punto de entrada para alguien de fuera**: qué se ha construido en 21 días, qué está verificado, qué no, y qué falta. Cada afirmación marcada [V]erificado / [T]est / [D]eclarado / [P]endiente |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | El sistema entero en 2 páginas |
 | [GOLDEN-PATH.md](GOLDEN-PATH.md) + [ACCEPTANCE-CRITERIA.md](ACCEPTANCE-CRITERIA.md) | El contrato operativo del flujo COD |
 | [MODELO-ESTADOS.md](MODELO-ESTADOS.md) | Los 4 ejes de estado del pedido |
