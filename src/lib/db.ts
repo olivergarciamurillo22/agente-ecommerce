@@ -1753,6 +1753,7 @@ function build() {
   migrateDiscoveryJobKinds(db);
   migrateProductHunterInternal(db);
   migrateHunterDeepDive(db);
+  migrateAppSecrets(db);
   // Pase de datos, una sola vez por base (ver purgeAccessTokensFromAdlibRows).
   if (!db.prepare("SELECT 1 FROM settings WHERE key = ?").get(ADLIB_TOKEN_PURGE_SETTING)) {
     const purged = purgeAccessTokensFromAdlibRows(db);
@@ -2267,7 +2268,29 @@ export function migrateHunterDeepDive(db: Database.Database): void {
   }
 }
 
-export const SCHEMA_VERSION = 32;
+/**
+ * Claves gestionadas desde el panel (esquema 33, 10-09-2026). El valor va
+ * CIFRADO (AES-256-GCM con SECRETS_MASTER_KEY, que vive solo en el .env): la
+ * copia de seguridad de esta base viaja entre máquinas y no puede llevar
+ * credenciales en claro. Aditiva: sin filas, todo sigue saliendo del .env.
+ * Ver src/lib/config/secrets.ts.
+ */
+export function migrateAppSecrets(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_secrets (
+      name TEXT PRIMARY KEY,
+      value_enc TEXT NOT NULL,
+      last4 TEXT,
+      updated_at INTEGER NOT NULL,
+      updated_by TEXT,
+      verify_status TEXT,
+      verify_message TEXT,
+      verified_at INTEGER
+    );
+  `);
+}
+
+export const SCHEMA_VERSION = 33;
 
 export class NewerSchemaError extends Error {
   constructor(public readonly userVersion: number, public readonly file: string) {

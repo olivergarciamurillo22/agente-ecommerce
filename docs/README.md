@@ -14,6 +14,7 @@ esa lista chocan, manda `ESTADO-PRODUCCION.md` y hay que corregir el otro.
 | [GOLDEN-PATH.md](GOLDEN-PATH.md) + [ACCEPTANCE-CRITERIA.md](ACCEPTANCE-CRITERIA.md) | El contrato operativo del flujo COD |
 | [MODELO-ESTADOS.md](MODELO-ESTADOS.md) | Los 4 ejes de estado del pedido |
 | [ENV-REFERENCE.md](ENV-REFERENCE.md) | Variables de entorno (fuente en código: `env-schema.ts`) |
+| [CLAVES-DESDE-EL-PANEL.md](CLAVES-DESDE-EL-PANEL.md) | Cómo el dueño de cada instalación pone y renueva sus claves sin SSH (esquema 33) |
 | [PEDRO-RUNBOOK.md](PEDRO-RUNBOOK.md) / [OLIVER-RUNBOOK.md](OLIVER-RUNBOOK.md) | Qué hace cada uno en el día a día |
 | [CONTROL-CENTER-V3.md](CONTROL-CENTER-V3.md) | Informe del cierre operativo+visual vigente |
 

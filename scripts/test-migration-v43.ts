@@ -93,6 +93,8 @@ export async function runMigrationV43Test(): Promise<MigrationV43Report> {
     fixture.pragma("user_version = 31");
     migrations.migrateHunterDeepDive(fixture);
     fixture.pragma("user_version = 32");
+    migrations.migrateAppSecrets(fixture);
+    fixture.pragma("user_version = 33");
     // Segunda pasada: las catorce migraciones deben ser idempotentes.
     migrations.migrateWorkspaceAuth(fixture);
     migrations.migrateProductCandidates(fixture);

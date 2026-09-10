@@ -89,7 +89,13 @@ empieza.
 npm install
 npm run check
 npm run env:init
+npm run secrets:key
 ```
+
+`secrets:key` imprime la llave maestra que cifra las claves que el cliente
+pondrá luego él mismo desde el panel. Pégala en el `.env` como
+`SECRETS_MASTER_KEY` y guárdala también fuera del servidor: si se pierde, el
+cliente tiene que volver a pegar sus claves. Ver `docs/CLAVES-DESDE-EL-PANEL.md`.
 
 `env:init` crea el `.env.local` a partir de la plantilla. A partir de aquí,
 **tú** escribes los valores en ese fichero; el cliente no lo abre.
@@ -101,7 +107,7 @@ npm test
 
 Acepta si: `check` sin errores bloqueantes, typecheck limpio, tests en verde.
 
-Anota: `PROYECTO_OK=sí/no · TESTS=<n> OK`
+Anota: `PROYECTO_OK=sí/no · TESTS=<n> OK · LLAVE_MAESTRA=guardada sí/no`
 
 ---
 
@@ -513,6 +519,16 @@ PROXIMA_REVISION=
 VEREDICTO_FINAL=
 ```
 
+### El cliente se gestiona sus propias claves
+
+Enséñale **Ajustes → Integraciones → Claves de conexión** antes de irte. Ahí
+pone y renueva las suyas sin llamarte: se guardan cifradas, se prueban contra
+el proveedor antes de aceptarlas, y «Borrar la del panel» devuelve el mando a
+la que dejaste tú en el servidor si se equivoca.
+
+La que va a usar de verdad es el token de la biblioteca de anuncios, que
+caduca cada 60 días. Esa es la razón principal de que exista esta pantalla.
+
 ### Lo que hay que decirle al cliente por escrito al entregar
 
 1. **El token de WhatsApp no caduca**, pero si alguien lo regenera en Meta,
@@ -526,6 +542,9 @@ VEREDICTO_FINAL=
 5. **Hay copia de seguridad de la base de datos antes de cada actualización.**
    Dónde está y cómo se restaura.
 6. Qué módulos ha contratado y cuáles están apagados a propósito.
+7. **Dónde cambia sus claves él mismo** (Ajustes → Integraciones → Claves de
+   conexión) y que las marcadas como críticas tumban los pedidos si las pega
+   mal: ahí es donde debe llamarte antes de tocar.
 
 ---
 

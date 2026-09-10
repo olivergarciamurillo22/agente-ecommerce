@@ -55,6 +55,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Claves que el cliente haya puesto desde el panel: se vuelcan a
+  // process.env ANTES de que nada las lea. Y se revisan cada poco, porque el
+  // panel corre en otro proceso: así un cambio entra en vigor sin reiniciar.
+  const { hydrateSecretsIntoEnv } = await import("../src/lib/config/secrets");
+  const inicial = hydrateSecretsIntoEnv();
+  if (inicial.applied > 0) logger.info(`[secrets] ${inicial.applied} clave(s) del panel cargadas`);
+  setInterval(() => {
+    try {
+      const r = hydrateSecretsIntoEnv();
+      if (r.changed && r.applied > 0) logger.info(`[secrets] ${r.applied} clave(s) recargadas tras un cambio en el panel`);
+    } catch { /* la recarga jamás tumba el bot */ }
+  }, 20_000).unref();
+
   // Estado de seguridad SIEMPRE visible al arrancar: imposible no saber en
   // qué modo estamos antes de que ocurra nada.
   printSafetyStatus();

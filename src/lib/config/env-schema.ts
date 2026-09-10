@@ -370,6 +370,7 @@ export const ENV_SCHEMA: EnvVarSpec[] = [
     defaultValue: "0",
     validate: bool01,
   },
+  { name: "SECRETS_MASTER_KEY", category: "SAFETY", secret: true, description: "Llave maestra (32 bytes: 64 hex o base64) que cifra las claves que el dueño guarda desde el panel (Ajustes → Integraciones → Claves de conexión). Se genera una vez con «npm run secrets:key» y vive SOLO aquí, nunca en la base: así una copia de seguridad robada no lleva credenciales usables. Si se pierde, hay que volver a pegar las claves desde el panel. Sin ella el módulo se apaga y el panel lo dice; el .env sigue mandando.", requiredFor: [] },
   { name: "OPENAI_API_KEY", category: "ADDRESS_AI", secret: true, description: "Clave de OpenAI para la capa 2. Sin ella la capa 2 no se ejecuta aunque el interruptor esté a 1. Cuenta propia de Casamable (nada que ver con OPENROUTER_API_KEY del kit).", requiredFor: [] },
   { name: "ADDRESS_AI_MODEL", category: "ADDRESS_AI", secret: false, description: "Modelo de OpenAI para la capa 2. gpt-4o-mini: ~0,0001 € por pedido.", requiredFor: [], defaultValue: "gpt-4o-mini" },
   { name: "ADDRESS_AI_TIMEOUT_MS", category: "ADDRESS_AI", secret: false, description: "Timeout de la llamada (1000–60000). Al vencer, el veredicto es 'dudosa' (fail-closed), nunca 'correcta'.", requiredFor: [], defaultValue: "8000", validate: intPos },

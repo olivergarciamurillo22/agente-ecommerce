@@ -166,7 +166,7 @@ const TABLES_AFTER_17 = [
   "ai_cancellations",
   "ai_call_log",
   "discovery_jobs",
-  "dropea_catalog", "hunter_pipeline", "hunter_cruce_runs", "hunter_cruces", "hunter_deep_dives", "hunter_cod_sweeps", "hunter_cod_stores",
+  "dropea_catalog", "hunter_pipeline", "hunter_cruce_runs", "hunter_cruces", "hunter_deep_dives", "hunter_cod_sweeps", "hunter_cod_stores", "app_secrets",
 ];
 
 /**

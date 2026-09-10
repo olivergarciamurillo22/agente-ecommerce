@@ -62,6 +62,7 @@
     "deploy:guard": "tsx scripts/deploy-guard.ts",
     "retell:reconcile-call": "tsx scripts/retell-reconcile-call.ts",
     "users:create": "tsx scripts/users-create.ts",
+    "secrets:key": "tsx scripts/secrets-key.ts",
     "hunter:add": "tsx scripts/hunter-add.ts",
     "hunter:score": "tsx scripts/hunter-score.ts",
     "hunter:predictivo": "tsx scripts/hunter-predictivo.ts",

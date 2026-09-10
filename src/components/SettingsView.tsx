@@ -6,7 +6,8 @@
 //   General       → SettingsPanel (los ajustes del bot, sin tocar)
 //   WhatsApp      → proveedor + semáforo de automatización + rampa (§9/§57)
 //   Llamadas      → Lucía: estado, preflight, contadores y config (§28)
-//   Integraciones → IntegrationsPanel
+//   Integraciones → IntegrationsPanel + SecretsPanel (las claves de conexión,
+//                   que el dueño pone y renueva él mismo)
 //   Costes        → CostsPanel
 //   Sistema       → SystemPanel (el Control Center existente, sin tocar)
 // ============================================================
@@ -26,6 +27,7 @@ import {
   StatusDot,
 } from "./ui";
 import IntegrationsPanel from "./IntegrationsPanel";
+import SecretsPanel from "./SecretsPanel";
 import SystemPanel from "./SystemPanel";
 import SettingsPanel from "./SettingsPanel";
 import CostsPanel from "./CostsPanel";
@@ -797,6 +799,9 @@ export default function SettingsView() {
         ) : section === "integrations" ? (
           <ScrollPane wide>
             <IntegrationsPanel />
+            <div className="mt-8">
+              <SecretsPanel />
+            </div>
           </ScrollPane>
         ) : section === "costs" ? (
           <CostsPanel />

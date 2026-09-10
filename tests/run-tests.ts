@@ -14403,7 +14403,7 @@ async function main(): Promise<void> {
 
     await test("V4.2 Landing Studio sigue local aunque Discovery usa schema 21", () => {
       const db = src("src/lib/db.ts");
-      assert.match(db, /export const SCHEMA_VERSION = 32;/, "deep dive 32 · predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30, Cazador interno 31");
+      assert.match(db, /export const SCHEMA_VERSION = 33;/, "claves del panel 33 · deep dive 32 · predictivo 20, Discovery 21, direcciones 22, auto-despacho 23, canal de despacho 24, auto-cancelación IA 25, aviso de despacho 26, tope diario de IA 27, estado de corrida de discovery 28, cola de búsquedas 29, tipos de trabajo 30, Cazador interno 31");
       for (const tabla of ["landing_projects", "landing_versions", "landing_exports"]) {
         assert.ok(!db.includes(tabla), `sin tabla ${tabla}: el experimento se descartó`);
       }
@@ -16183,6 +16183,182 @@ async function main(): Promise<void> {
       assert.equal(vacia.products.length, 0); assert.match(vacia.summary, /Sin productos minados/);
     });
 
+    await test("CLAVES DEL PANEL · cifrado AES-256-GCM: ida y vuelta, llave equivocada y dato manipulado devuelven null; la llave maestra acepta hex y base64 y rechaza cualquier otra cosa; sin llave el módulo se apaga y lo dice", async () => {
+      const { encryptSecret, decryptSecret, parseMasterKey, secretsAvailable, generateMasterKey, last4 } = await import("../src/lib/config/secrets");
+      const k1 = parseMasterKey(generateMasterKey())!;
+      const k2 = parseMasterKey(generateMasterKey())!;
+      assert.ok(k1 && k1.length === 32);
+      const blob = encryptSecret("shpat_secreto_de_verdad_1234", k1);
+      assert.equal(decryptSecret(blob, k1), "shpat_secreto_de_verdad_1234");
+      assert.ok(!blob.includes("shpat_"), "el cifrado no deja ver el valor");
+      assert.match(blob, /^v1:/);
+      assert.equal(decryptSecret(blob, k2), null, "con otra llave no se abre");
+      const partes = blob.split(":");
+      const manipulado = [partes[0], partes[1], partes[2], Buffer.from("otracosa").toString("base64")].join(":");
+      assert.equal(decryptSecret(manipulado, k1), null, "GCM detecta el cambio del cifrado");
+      const tagMalo = [partes[0], partes[1], Buffer.alloc(16).toString("base64"), partes[3]].join(":");
+      assert.equal(decryptSecret(tagMalo, k1), null, "GCM detecta el cambio de la etiqueta");
+      assert.equal(decryptSecret("cualquier cosa", k1), null);
+      // Formatos de llave.
+      assert.ok(parseMasterKey("a".repeat(64)), "64 hex vale");
+      assert.ok(parseMasterKey(Buffer.alloc(32, 7).toString("base64")), "32 bytes en base64 valen");
+      assert.equal(parseMasterKey("corta"), null);
+      assert.equal(parseMasterKey(Buffer.alloc(16).toString("base64")), null, "16 bytes no valen");
+      assert.equal(parseMasterKey(""), null);
+      assert.equal(parseMasterKey(undefined), null);
+      assert.equal(secretsAvailable({}).ok, false);
+      assert.match(secretsAvailable({}).reason!, /SECRETS_MASTER_KEY/);
+      assert.equal(secretsAvailable({ SECRETS_MASTER_KEY: "novale" }).ok, false);
+      assert.equal(secretsAvailable({ SECRETS_MASTER_KEY: generateMasterKey() }).ok, true);
+      assert.equal(last4("abcdefgh"), "efgh"); assert.equal(last4("ab"), "••");
+    });
+
+    await test("CLAVES DEL PANEL · el almacén guarda cifrado, la base manda sobre el .env, el valor NUNCA sale en los metadatos, borrar devuelve el mando al .env y cada cambio sube la versión para que el otro proceso recargue", async () => {
+      limpiar();
+      const { SecretStore, generateMasterKey, hydrateSecretsIntoEnv, resetHydrationCache, resetEnvOriginals, MANAGED_SECRETS } = await import("../src/lib/config/secrets");
+      resetEnvOriginals(); resetHydrationCache();
+      const MASTER = generateMasterKey();
+      const SECRETO = "sk-de-prueba-9876";
+      // Entorno simulado: lo que hoy tendría el .env del servidor.
+      const env: Record<string, string | undefined> = { SECRETS_MASTER_KEY: MASTER, OPENAI_API_KEY: "clave-vieja-del-env" };
+      const store = new SecretStore(raw, env);
+      assert.equal(store.available, true);
+
+      // Antes de tocar nada: OpenAI viene del .env, OpenRouter no está en ninguna parte.
+      const antes = store.meta();
+      assert.equal(antes.length, MANAGED_SECRETS.length);
+      assert.equal(antes.find((m) => m.name === "OPENAI_API_KEY")!.source, "env");
+      assert.equal(antes.find((m) => m.name === "OPENROUTER_API_KEY")!.source, "ninguna");
+      assert.equal(antes.find((m) => m.name === "SHOPIFY_WEBHOOK_SECRET")!.risk, "critico");
+
+      // Guardar: cifrado en la base, en vigor en el entorno, y versión arriba.
+      const v0 = store.version();
+      store.set("OPENROUTER_API_KEY", SECRETO, "pedro@casamable.es", { status: "ok", message: "OpenRouter acepta la clave" });
+      assert.equal(env.OPENROUTER_API_KEY, SECRETO, "en vigor sin reiniciar en el proceso que la guarda");
+      assert.equal(store.version(), v0 + 1, "la versión sube: el otro proceso se enterará");
+      assert.equal(store.get("OPENROUTER_API_KEY"), SECRETO);
+      const fila = raw.prepare("SELECT value_enc, last4 FROM app_secrets WHERE name='OPENROUTER_API_KEY'").get() as { value_enc: string; last4: string };
+      assert.ok(!fila.value_enc.includes(SECRETO), "en la base va cifrado, no en claro");
+      assert.equal(fila.last4, "9876");
+
+      // Metadatos: nunca el valor.
+      const meta = store.meta();
+      assert.ok(!JSON.stringify(meta).includes(SECRETO), "el valor no viaja en los metadatos que ve el navegador");
+      const or = meta.find((m) => m.name === "OPENROUTER_API_KEY")!;
+      assert.equal(or.source, "panel"); assert.equal(or.stored, true); assert.equal(or.last4, "9876");
+      assert.equal(or.updatedBy, "pedro@casamable.es"); assert.equal(or.verifyStatus, "ok"); assert.ok(or.verifiedAt);
+
+      // La base MANDA sobre el .env.
+      store.set("OPENAI_API_KEY", "clave-nueva-del-panel", "pedro@casamable.es");
+      assert.equal(env.OPENAI_API_KEY, "clave-nueva-del-panel");
+      const oa = store.meta().find((m) => m.name === "OPENAI_API_KEY")!;
+      assert.equal(oa.source, "panel"); assert.equal(oa.inEnv, true, "sigue habiendo una en el .env por debajo");
+
+      // Borrar: vuelve la del .env.
+      assert.equal(store.clear("OPENAI_API_KEY"), true);
+      assert.equal(env.OPENAI_API_KEY, "clave-vieja-del-env", "al borrar vuelve a mandar la del servidor");
+      assert.equal(store.meta().find((m) => m.name === "OPENAI_API_KEY")!.source, "env");
+      // Borrar una que no tenía nada por debajo la deja sin configurar.
+      assert.equal(store.clear("OPENROUTER_API_KEY"), true);
+      assert.equal(env.OPENROUTER_API_KEY, undefined);
+      assert.equal(store.meta().find((m) => m.name === "OPENROUTER_API_KEY")!.source, "ninguna");
+      assert.equal(store.clear("OPENROUTER_API_KEY"), false, "borrar dos veces no rompe");
+
+      // Nombres no gestionables: se rechazan.
+      assert.throws(() => store.set("EMERGENCY_STOP", "0", null), /no es una clave gestionable/);
+      assert.throws(() => store.set("OPENAI_API_KEY", "   ", null), /vacío/);
+      // Sin llave maestra no se guarda nada, y no hay modo degradado en claro.
+      const sinLlave = new SecretStore(raw, {});
+      assert.equal(sinLlave.available, false);
+      assert.throws(() => sinLlave.set("OPENAI_API_KEY", "x", null), /sin llave maestra/);
+      assert.equal(sinLlave.get("OPENAI_API_KEY"), null);
+      assert.equal(sinLlave.hydrate({}), 0);
+
+      // Volcado a un proceso nuevo (el bot): lee de la base y pisa el .env.
+      store.set("META_AD_LIBRARY_ACCESS_TOKEN", "EAAtoken-del-cazador", "pedro@casamable.es");
+      const envBot: Record<string, string | undefined> = { SECRETS_MASTER_KEY: MASTER, META_AD_LIBRARY_ACCESS_TOKEN: "token-antiguo" };
+      resetHydrationCache();
+      const r1 = hydrateSecretsIntoEnv(raw, envBot);
+      assert.equal(r1.changed, true); assert.equal(r1.applied, 1);
+      assert.equal(envBot.META_AD_LIBRARY_ACCESS_TOKEN, "EAAtoken-del-cazador");
+      // Sin cambios, el segundo volcado no hace nada (el bot lo llama cada 20 s).
+      assert.deepEqual(hydrateSecretsIntoEnv(raw, envBot), { applied: 0, changed: false });
+      // Con la llave cambiada, lo guardado no se puede abrir: se deja lo del .env en vez de romper.
+      resetHydrationCache();
+      const envOtro: Record<string, string | undefined> = { SECRETS_MASTER_KEY: generateMasterKey(), META_AD_LIBRARY_ACCESS_TOKEN: "token-antiguo" };
+      hydrateSecretsIntoEnv(raw, envOtro);
+      assert.equal(envOtro.META_AD_LIBRARY_ACCESS_TOKEN, "token-antiguo", "llave perdida: no se pisa el .env con basura");
+      resetEnvOriginals(); resetHydrationCache();
+    });
+
+    await test("CLAVES DEL PANEL · verificación contra el proveedor con red inyectada: acepta la buena, rechaza la mala con el motivo, y los secretos de FIRMA se declaran no verificables en vez de fingir un ok", async () => {
+      const { verifySecret } = await import("../src/lib/config/secrets-verify");
+      const vistas: Array<{ url: string; auth: string | null }> = [];
+      const mk = (status: number, body: unknown = {}) => (async (input: string | URL | Request, init?: RequestInit) => {
+        const h = new Headers(init?.headers);
+        vistas.push({ url: String(input), auth: h.get("authorization") ?? h.get("x-shopify-access-token") });
+        return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+
+      // Shopify: se prueba contra la tienda real del entorno, con la cabecera propia de Shopify.
+      const ok = await verifySecret("SHOPIFY_ADMIN_ACCESS_TOKEN", "shpat_bueno", { SHOPIFY_STORE_DOMAIN: "mitienda.myshopify.com", SHOPIFY_API_VERSION: "2025-01" }, mk(200, { shop: { name: "Mi tienda" } }));
+      assert.equal(ok.status, "ok"); assert.match(ok.message, /mitienda\.myshopify\.com/);
+      assert.equal(vistas[0].url, "https://mitienda.myshopify.com/admin/api/2025-01/shop.json");
+      assert.equal(vistas[0].auth, "shpat_bueno", "va en la cabecera de Shopify, no como Bearer");
+      const mal = await verifySecret("SHOPIFY_ADMIN_ACCESS_TOKEN", "shpat_malo", { SHOPIFY_STORE_DOMAIN: "mitienda.myshopify.com" }, mk(401));
+      assert.equal(mal.status, "fallo"); assert.match(mal.message, /shpat_/, "el mensaje orienta sobre qué token es el bueno");
+      assert.ok(!mal.message.includes("shpat_malo"), "el mensaje no repite el valor probado");
+      const sinDominio = await verifySecret("SHOPIFY_ADMIN_ACCESS_TOKEN", "x", {}, mk(200));
+      assert.equal(sinDominio.status, "no_verificable"); assert.match(sinDominio.message, /SHOPIFY_STORE_DOMAIN/);
+
+      // WhatsApp: token caducado (código 190 de Meta) con el aviso del token de 24 h.
+      vistas.length = 0;
+      const wa = await verifySecret("META_WHATSAPP_ACCESS_TOKEN", "EAAviejo", { META_WHATSAPP_PHONE_NUMBER_ID: "123", META_WHATSAPP_API_VERSION: "v23.0" }, mk(401, { error: { code: 190, message: "expired" } }));
+      assert.equal(wa.status, "fallo"); assert.match(wa.message, /24 h/);
+      assert.equal(vistas[0].auth, "Bearer EAAviejo");
+      assert.match(vistas[0].url, /graph\.facebook\.com\/v23\.0\/123/);
+      const waOk = await verifySecret("META_WHATSAPP_ACCESS_TOKEN", "EAAbueno", { META_WHATSAPP_PHONE_NUMBER_ID: "123" }, mk(200, { display_phone_number: "+34 641 308 254" }));
+      assert.equal(waOk.status, "ok"); assert.match(waOk.message, /641/);
+
+      // Biblioteca de anuncios: contra /me, NUNCA contra /ads_archive (gasta cuota y está bajo EMERGENCY_STOP).
+      vistas.length = 0;
+      const adlib = await verifySecret("META_AD_LIBRARY_ACCESS_TOKEN", "EAAx", {}, mk(200, { name: "Pedro" }));
+      assert.equal(adlib.status, "ok"); assert.match(adlib.message, /PERSONA FÍSICA/); assert.match(adlib.message, /60 días/);
+      assert.match(vistas[0].url, /\/me\?/); assert.ok(!vistas[0].url.includes("ads_archive"), "verificar no gasta cuota del archivo de anuncios");
+
+      // OpenRouter: contra /api/v1/key, que es el único que valida de verdad.
+      vistas.length = 0;
+      assert.equal((await verifySecret("OPENROUTER_API_KEY", "sk-or-bueno", {}, mk(200))).status, "ok");
+      assert.equal(vistas[0].url, "https://openrouter.ai/api/v1/key");
+      assert.equal((await verifySecret("OPENROUTER_API_KEY", "sk-or-malo", {}, mk(401))).status, "fallo");
+      assert.equal((await verifySecret("OPENAI_API_KEY", "sk-malo", {}, mk(401))).status, "fallo");
+      assert.equal((await verifySecret("RETELL_API_KEY", "k", {}, mk(200))).status, "ok");
+
+      // Secretos de firma: no hay a quién preguntar. Se dice, no se inventa.
+      for (const n of ["SHOPIFY_WEBHOOK_SECRET", "META_WHATSAPP_APP_SECRET", "META_WHATSAPP_VERIFY_TOKEN", "DROPEA_WEBHOOK_SECRET"]) {
+        const r = await verifySecret(n, "loquesea", {}, mk(200));
+        assert.equal(r.status, "no_verificable", n);
+        assert.ok(r.message.length > 20, `${n}: explica por qué no se puede`);
+      }
+      assert.match((await verifySecret("META_WHATSAPP_VERIFY_TOKEN", "x", {}, mk(200))).message, /volver a verificar el webhook/);
+
+      // La red caída no revienta: se devuelve fallo con motivo legible.
+      const caida = await verifySecret("OPENAI_API_KEY", "sk", {}, (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch);
+      assert.equal(caida.status, "fallo"); assert.match(caida.message, /ECONNREFUSED/);
+    });
+
+    await test("CLAVES DEL PANEL · migración 33 aditiva e idempotente; sin filas, todo sigue saliendo del .env", async () => {
+      const Database = (await import("better-sqlite3")).default;
+      const mem = new Database(":memory:");
+      for (const m of [db.migrateWorkspaceAuth, db.migrateAppSecrets, db.migrateAppSecrets]) m(mem);
+      assert.ok(mem.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_secrets'").get());
+      const cols = (mem.prepare("PRAGMA table_info(app_secrets)").all() as Array<{ name: string }>).map((c) => c.name);
+      for (const c of ["name", "value_enc", "last4", "updated_at", "updated_by", "verify_status", "verify_message", "verified_at"]) assert.ok(cols.includes(c), c);
+      assert.equal((mem.prepare("SELECT COUNT(*) n FROM app_secrets").get() as { n: number }).n, 0, "sin filas: el .env manda, como hasta ahora");
+      mem.close();
+      assert.equal(db.SCHEMA_VERSION, 33);
+    });
+
     await test("INTERNO · hunter:add acepta hechos manuales (CLI): sin URL crea un candidato manual, el dato manual gana al scrapeado con constancia, y hunter:score puntúa o dice qué falta", async () => {
       const { spawnSync } = await import("node:child_process");
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hunter-add-"));
@@ -16603,6 +16779,10 @@ async function main(): Promise<void> {
     fixture.pragma("user_version = 31");
     db.migrateHunterDeepDive(fixture);
     fixture.pragma("user_version = 32");
+    db.migrateAppSecrets(fixture);
+    fixture.pragma("user_version = 33");
+    db.migrateAppSecrets(fixture);
+    fixture.pragma("user_version = 33");
     db.migrateWorkspaceAuth(fixture);
     db.migrateProductCandidates(fixture);
     db.migrateHunterPredictive(fixture);
